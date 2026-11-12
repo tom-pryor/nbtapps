@@ -1,0 +1,36 @@
+version = 1
+
+# Licensing of this repo in the REUSE form (https://reuse.software); `reuse lint` checks it.
+#
+# Every source file that takes a comment starts with its own two lines, SPDX-License-Identifier and Required
+# Notice. The first annotation covers the files that cannot or must not carry them, under the same terms:
+#   - documents, ignore files and the root licence files
+#   - JSON and text that programs read as they are: package manifests and their templates, spec/, the HMI's
+#     plugin manifest
+#   - test data that is hashed, signed or copied byte for byte: headunit/tests/packages/, headunit/tests/keys/
+#     (test keys whose private halves are public on purpose), android/app/src/test/resources/agent/ (copies of
+#     the head unit's, made by android/tools/sync_agent_vectors.sh) and the debug build's signed sample catalogue
+#   - images, and headunit/stubs/*.syms (the HU Framework's export names, from which link stubs are made)
+#   - files that a tool writes, such as android/gradle/gradle-daemon-jvm.properties
+# A header in a file wins over this annotation.
+[[annotations]]
+path = "**"
+precedence = "closest"
+SPDX-FileCopyrightText = "Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)"
+SPDX-License-Identifier = "LicenseRef-PolyForm-Strict-1.0.0"
+
+# Third party, under their own terms.
+
+# TweetNaCl, unchanged: see headunit/agent/vendor/tweetnacl/README.
+[[annotations]]
+path = ["headunit/agent/vendor/tweetnacl/tweetnacl.c", "headunit/agent/vendor/tweetnacl/tweetnacl.h"]
+precedence = "override"
+SPDX-FileCopyrightText = "2014 Daniel J. Bernstein, Bernard van Gastel, Wesley Janssen, Tanja Lange, Peter Schwabe, Sjaak Smetsers"
+SPDX-License-Identifier = "LicenseRef-TweetNaCl-PublicDomain"
+
+# The Gradle wrapper. gradlew and gradlew.bat say so themselves; the jar and its properties do not.
+[[annotations]]
+path = ["android/gradle/wrapper/gradle-wrapper.jar", "android/gradle/wrapper/gradle-wrapper.properties"]
+precedence = "override"
+SPDX-FileCopyrightText = "2015 the original author or authors (Gradle)"
+SPDX-License-Identifier = "Apache-2.0"

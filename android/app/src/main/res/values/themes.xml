@@ -1,0 +1,12 @@
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<resources>
+    <!--
+        Dark on every phone, like the Compose theme. The launch screen and the window behind Compose take the
+        theme's background, so nothing flashes a different colour while the first frame is held.
+    -->
+    <style name="Theme.NBTApps" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/nbt_background</item>
+        <item name="android:windowSplashScreenBackground">@color/nbt_background</item>
+    </style>
+</resources>

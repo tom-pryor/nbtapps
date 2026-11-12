@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.radio",
+  "name": "Radio",
+  "version": "1.0.0",
+  "install": {
+    "files": [
+      { "src": "payload/bin/radiod", "dest": "${app}/bin/radiod", "mode": "0755" }
+    ],
+    "serialServices": [
+      { "name": "TestRadio", "program": "radiod" },
+      { "name": "TestRadio-2", "program": "radiod" }
+    ]
+  }
+}

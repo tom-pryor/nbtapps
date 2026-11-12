@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<!--
+    The NBTApps mark: an N whose diagonal is an amber road, widening towards the viewer, and whose right
+    upright is an arrow down into the car. Drawn on the 108dp adaptive-icon grid, then scaled to 82% about
+    its own centre (57, 54) and moved onto the icon's (54, 54), which leaves room inside the 66dp safe zone.
+    nbtapps.com's favicon.svg and Logo.astro carry the same paths.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="57"
+        android:pivotY="54"
+        android:scaleX="0.82"
+        android:scaleY="0.82"
+        android:translateX="-3">
+        <!-- The road. -->
+        <path
+            android:fillColor="#FFC14D"
+            android:pathData="M32.54 31.09Q30 28 34 28L34 28Q38 28 40.86 30.79L75.14 64.21Q78 67 74 67L66 67Q62 67 59.46 63.91Z" />
+        <!-- Its centre line: dashes that grow as the road comes closer. -->
+        <path
+            android:strokeColor="#0A111E"
+            android:strokeWidth="1.4"
+            android:strokeLineCap="round"
+            android:pathData="M39.04 33.46L41.92 36.58" />
+        <path
+            android:strokeColor="#0A111E"
+            android:strokeWidth="2.2"
+            android:strokeLineCap="round"
+            android:pathData="M47.68 42.82L52 47.5" />
+        <path
+            android:strokeColor="#0A111E"
+            android:strokeWidth="3.2"
+            android:strokeLineCap="round"
+            android:pathData="M57.4 53.35L63.52 59.98" />
+        <!-- The left upright, and the right one ending in the arrow. -->
+        <path
+            android:fillColor="#E6ECF5"
+            android:pathData="M30 32Q30 28 34 28L36 28Q40 28 40 32L40 76Q40 80 36 80L34 80Q30 80 30 76Z" />
+        <path
+            android:fillColor="#E6ECF5"
+            android:pathData="M68 32Q68 28 72 28L74 28Q78 28 78 32L78 63Q78 67 81 67L81 67Q84 67 81.42 70.05L75.58 76.95Q73 80 70.42 76.95L64.58 70.05Q62 67 65 67L65 67Q68 67 68 63Z" />
+    </group>
+</vector>

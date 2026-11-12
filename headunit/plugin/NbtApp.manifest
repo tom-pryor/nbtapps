@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<plugin>
+	<name>NbtApp</name>
+	<type>App</type>
+	<file>{pluginDir}/NbtApp</file>
+	<config>
+		<autoStart>yes</autoStart>
+		<dependencies>
+			<pluginAppConnector>
+				<type>Etch</type>
+				<id>211</id>
+				<asyncCallbacks>yes</asyncCallbacks>
+			</pluginAppConnector>
+		</dependencies>
+		<parameters>
+			<DescFile>{pluginDir}/NbtApp.xml</DescFile>
+			<TextDBFile>{pluginDir}/NbtApp_ALL_Texts.zip</TextDBFile>
+			<ImageDBFile>{pluginDir}/NbtApp_ALL_Images.zip</ImageDBFile>
+		</parameters>
+	</config>
+</plugin>

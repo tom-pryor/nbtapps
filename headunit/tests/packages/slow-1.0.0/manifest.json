@@ -1,0 +1,21 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.slow",
+  "name": "Slow hook",
+  "version": "1.0.0",
+  "install": {
+    "files": [
+      {
+        "src": "payload/file.txt",
+        "dest": "${app}/file.txt",
+        "mode": "0644"
+      }
+    ],
+    "hooks": {
+      "postInstall": {
+        "script": "scripts/post-install.sh",
+        "timeout": 1
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+# Text is stored and checked out with LF: the scripts run under sh, and the XML is copied to the head unit as is.
+* text=auto eol=lf
+
+*.png    binary
+*.zip    binary
+*.so     binary
+*.jar    binary
+*.nbtpkg binary
+*.sig    binary

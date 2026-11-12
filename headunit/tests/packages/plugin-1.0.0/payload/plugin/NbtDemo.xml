@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A stand-in UI description: entryButtonFocusID="1" in a comment does not count. -->
+<pluginApps>
+  <pluginApp applicationType="Custom" applicationWeight="197" entryButtonFocusID="32760" insertAfterFocusID="2270" insertStateID="20" text="Demo">
+    <entryButton action="5" id="1" model="3"/>
+  </pluginApp>
+</pluginApps>

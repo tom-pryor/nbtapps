@@ -1,0 +1,321 @@
+{
+  "schema": 1,
+  "source": {
+    "id": "official",
+    "name": "NBTApp sample catalogue (test keys)"
+  },
+  "serial": 5,
+  "generated": "2026-11-12T12:00:00Z",
+  "packages": [
+    {
+      "id": "org.nbtapp.agent",
+      "name": "NBTApp agent",
+      "summary": "The agent on the head unit that installs packages",
+      "author": "NBTApp",
+      "category": "system",
+      "details": "details/org.nbtapp.agent.json",
+      "versions": [
+        {
+          "version": "2.0.0",
+          "released": "2026-11-08",
+          "url": "https://example.invalid/packages/org.nbtapp.agent-2.0.0.nbtpkg",
+          "size": 1482,
+          "sha256": "2f3682bd735dd3e2a85f432183202b1780a08ccee3212b182452696fd0860a43",
+          "manifestSha256": "557fbef74c6b2582943e59a2e8159a23dd271ff1e6987e3369babf67bb729aa8",
+          "requires": {
+            "agent": ">=1.1.0"
+          },
+          "depends": [],
+          "flags": []
+        }
+      ]
+    },
+    {
+      "id": "org.nbtapp.btterm",
+      "name": "Bluetooth Terminal",
+      "summary": "Shell on the head unit over Bluetooth serial",
+      "author": "Sample Author",
+      "category": "utilities",
+      "details": "details/org.nbtapp.btterm.json",
+      "versions": [
+        {
+          "version": "0.4.0",
+          "released": "2026-10-25",
+          "url": "https://example.invalid/packages/org.nbtapp.btterm-0.4.0.nbtpkg",
+          "size": 1526,
+          "sha256": "1007fb480a63df4565f4a18045ac21be74f202ed53e34b2539258ed112c4bebb",
+          "manifestSha256": "b9c06dc8a57af33f51a7a7d43350140414cb67066c496831b512b0c51454a294",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [
+            {
+              "id": "org.nbtapp.runtime",
+              "version": ">=2.0.0 <3.0.0"
+            }
+          ],
+          "flags": [
+            "runs-scripts"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "name": "Hello NBT",
+      "summary": "Example status daemon",
+      "author": "NBTApp",
+      "category": "utilities",
+      "details": "details/org.nbtapp.hello.json",
+      "versions": [
+        {
+          "version": "1.2.0",
+          "released": "2026-11-01",
+          "url": "https://example.invalid/packages/org.nbtapp.hello-1.2.0.nbtpkg",
+          "size": 1759,
+          "sha256": "6685382c38409e582c03e2d3a4fd83a54f28f7e404e860f6f1f964e5c6765258",
+          "manifestSha256": "6117ef431373992037d7a6de009fb48da5e2ea0b8c49ae2795559b1547a026d6",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [
+            {
+              "id": "org.nbtapp.runtime",
+              "version": ">=2.0.0 <3.0.0"
+            }
+          ],
+          "flags": [
+            "runs-scripts"
+          ]
+        },
+        {
+          "version": "1.1.0",
+          "released": "2026-09-20",
+          "url": "https://example.invalid/packages/org.nbtapp.hello-1.1.0.nbtpkg",
+          "size": 1528,
+          "sha256": "7a91cbbd5d3f7a6abdb889a690ece9f441aa8c78ef41c1c4817b758b8cde8aa3",
+          "manifestSha256": "acd74dc2fd4af90d72bb55e870c36ee6751e777b1adbeaa41bd0e56bc43db926",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [
+            {
+              "id": "org.nbtapp.runtime",
+              "version": ">=2.0.0 <3.0.0"
+            }
+          ],
+          "flags": [
+            "runs-scripts"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "org.nbtapp.launcher",
+      "name": "App Launcher",
+      "summary": "Adds an Apps entry to the iDrive main menu",
+      "author": "NBTApp",
+      "category": "hmi",
+      "details": "details/org.nbtapp.launcher.json",
+      "versions": [
+        {
+          "version": "0.3.0",
+          "released": "2026-11-05",
+          "url": "https://example.invalid/packages/org.nbtapp.launcher-0.3.0.nbtpkg",
+          "size": 1619,
+          "sha256": "6ee90e892f3ccdf4c39daa7ce5c64840d222dbc1385cb823d211973956741d91",
+          "manifestSha256": "89d9c49e69b543540885596466a9d482d0bdb1579e79c400d6f69ae0c76981f6",
+          "requires": {
+            "agent": ">=2.0.0"
+          },
+          "depends": [
+            {
+              "id": "org.nbtapp.runtime",
+              "version": ">=2.0.0 <3.0.0"
+            }
+          ],
+          "flags": [
+            "needs-reboot"
+          ]
+        },
+        {
+          "version": "0.2.1",
+          "released": "2026-10-02",
+          "url": "https://example.invalid/packages/org.nbtapp.launcher-0.2.1.nbtpkg",
+          "size": 1623,
+          "sha256": "f8708d33fe033f559b4a80ae1734134d3283aa7411b11c0d73a23aad1d32e92e",
+          "manifestSha256": "0109de39d48ba926d82e563ef6c17ddb3b553b8681581f3482c3bc83b9f17c39",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [
+            {
+              "id": "org.nbtapp.runtime",
+              "version": ">=2.0.0 <3.0.0"
+            }
+          ],
+          "flags": [
+            "needs-reboot"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "org.nbtapp.logview",
+      "name": "Log Viewer",
+      "summary": "Browse head-unit logs on the iDrive screen",
+      "author": "NBTApp",
+      "category": "hmi",
+      "details": "details/org.nbtapp.logview.json",
+      "versions": [
+        {
+          "version": "0.8.0",
+          "released": "2026-10-12",
+          "url": "https://example.invalid/packages/org.nbtapp.logview-0.8.0.nbtpkg",
+          "size": 1636,
+          "sha256": "d3b584946b0ff2adf4417d439df6c3d68ac8e863ccc04f4bb35d1023bbdac283",
+          "manifestSha256": "e0f5c9247450a9c8a6acc0e1831f77c4e3a66edaa57cb4a5a6364140d7d1c0e3",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [
+            {
+              "id": "org.nbtapp.runtime",
+              "version": ">=2.0.0 <3.0.0"
+            },
+            {
+              "id": "org.nbtapp.launcher",
+              "version": ">=0.2.0"
+            }
+          ],
+          "flags": [
+            "needs-reboot"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "org.nbtapp.menutweaks",
+      "name": "Menu Tweaks",
+      "summary": "A main-menu order file outside the package's own folders",
+      "author": "Sample Author",
+      "category": "tweaks",
+      "details": "details/org.nbtapp.menutweaks.json",
+      "versions": [
+        {
+          "version": "1.0.1",
+          "released": "2026-10-30",
+          "url": "https://example.invalid/packages/org.nbtapp.menutweaks-1.0.1.nbtpkg",
+          "size": 734,
+          "sha256": "37d05a881ec8701dd277431b57230bab2b0cb574335b806600c9aaba56f9b1c3",
+          "manifestSha256": "4fe01148cb2996381c8ff94fc842cc6e4875812fa4223e84024b709120f4b5b1",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [],
+          "flags": [
+            "modifies-system",
+            "needs-reboot"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "org.nbtapp.plugin",
+      "name": "NBTApp iDrive plugin",
+      "summary": "The NBTApp entry in iDrive, which also starts the agent with the car",
+      "author": "NBTApp",
+      "category": "system",
+      "details": "details/org.nbtapp.plugin.json",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "released": "2026-11-12",
+          "url": "https://example.invalid/packages/org.nbtapp.plugin-1.0.0.nbtpkg",
+          "size": 1569,
+          "sha256": "6406ee287384b203b6585de17dab4ede074dbd08effd676f0de2bf5c874fd30b",
+          "manifestSha256": "eb274b874c2043c6c03a1f2fcae8840f31422a62fd07517d839a35568330ab9c",
+          "requires": {
+            "agent": ">=1.1.0"
+          },
+          "depends": [],
+          "flags": [
+            "needs-reboot"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "org.nbtapp.runtime",
+      "name": "NBT Runtime",
+      "summary": "Shared libraries for native apps",
+      "author": "NBTApp",
+      "category": "libraries",
+      "details": "details/org.nbtapp.runtime.json",
+      "versions": [
+        {
+          "version": "2.1.0",
+          "released": "2026-10-28",
+          "url": "https://example.invalid/packages/org.nbtapp.runtime-2.1.0.nbtpkg",
+          "size": 958,
+          "sha256": "61fd2141707ef244bded7e856bd56f58a49587d93a0941516e2affb00811c4f9",
+          "manifestSha256": "acf572bafb1f308c2bcdc5f0893a529abb14fe8fd7d864335611b81a0df04bff",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [],
+          "flags": []
+        },
+        {
+          "version": "2.0.0",
+          "released": "2026-09-15",
+          "url": "https://example.invalid/packages/org.nbtapp.runtime-2.0.0.nbtpkg",
+          "size": 955,
+          "sha256": "b0abccc70089a7898482bf2eb79c63db6324dd48f9c3cee30af2a33f9c10ddf0",
+          "manifestSha256": "b5e908ed38b30e0e42a5dccdd13718ce70ab50967a1f569b6d6a91e77227f70a",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [],
+          "flags": []
+        }
+      ]
+    },
+    {
+      "id": "org.nbtapp.tzdata",
+      "name": "Time Zone Data",
+      "summary": "Updated time zone rules",
+      "author": "NBTApp",
+      "category": "data",
+      "details": "details/org.nbtapp.tzdata.json",
+      "versions": [
+        {
+          "version": "2026.2.0",
+          "released": "2026-10-18",
+          "url": "https://example.invalid/packages/org.nbtapp.tzdata-2026.2.0.nbtpkg",
+          "size": 1158,
+          "sha256": "f6af14dc744bef64db74417ed6afa002880d663b5bac21e61a55e4a81add6f02",
+          "manifestSha256": "428e787dc1181074c1e53b1caadaa7cb028c9e076c67ce18fe8e59a75f3057c1",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [],
+          "flags": []
+        },
+        {
+          "version": "2026.1.0",
+          "released": "2026-04-11",
+          "url": "https://example.invalid/packages/org.nbtapp.tzdata-2026.1.0.nbtpkg",
+          "size": 1159,
+          "sha256": "65678538decb954f827cf5abf2845126b4ebcbaf8b135a386f109e21408d6fd7",
+          "manifestSha256": "4b987cdb0451a619f514ddfef4448c876d9225f05b2b288b27c8a2c2d51ab485",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [],
+          "flags": []
+        }
+      ]
+    }
+  ]
+}

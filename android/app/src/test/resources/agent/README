@@ -1,0 +1,12 @@
+Copied from the agent repo by tools/sync_agent_vectors.sh. Do not edit here: change the agent repo and copy again.
+
+  json-profile.vectors      cases for the strict JSON profile (spec/json-profile.vectors)
+  protocol/frames.vectors   good and bad frames (spec/protocol/frames.vectors)
+  protocol/session.vectors  one conversation between a phone and the agent (spec/protocol/session.vectors)
+  protocol/constants.txt    the names and numbers both sides must hold alike (spec/protocol/constants.txt)
+  packages/                 good and deliberately broken .nbtpkg files, with vectors.json saying what each is
+                            (tests/make_packages.py)
+  keys/                     the public halves of the test keys that sign those packages (tests/keys)
+
+Test keys only. Their private halves are public, so nothing signed with them is trustworthy: they are for
+tests and for the debug build's sample catalogue, never for a build that leaves the test bench.

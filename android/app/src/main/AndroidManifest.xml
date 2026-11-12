@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The debug build's TCP link to the test bench, and later the catalogue download. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The link to a head unit's agent over Bluetooth serial (RFCOMM), and the serial test: both open a link to a paired car. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!--
+        A job on a head unit runs under a foreground service, so a long transfer survives the screen turning
+        off. The connected-device type needs one of a list of permissions; CHANGE_NETWORK_STATE is the one in
+        it that is granted without asking. The notification shows where the job stands, and the wake lock
+        keeps the phone answering the head unit's fetches.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
+        The app is in no app store, so it updates itself: from the release the official catalogue names, it
+        downloads its own APK and hands it to Android to install. The first permission lets it ask Android to;
+        the user still has to allow this app as a source of apps, once, in Android's own settings. The second
+        lets Android install a later update of the app by itself without asking again, when it chooses to.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+
+    <application
+        android:name=".NbtApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.NBTApps">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- Android's answer to an update the app handed it. Only the system reaches it, through a pending intent. -->
+        <receiver
+            android:name=".data.update.InstallResultReceiver"
+            android:exported="false" />
+        <service
+            android:name=".service.JobService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
+
+</manifest>

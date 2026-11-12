@@ -1,0 +1,830 @@
+{
+  "keys": {
+    "package": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+    "other": "e114797b0ae9d3741e295ab5168d083d996c63ffcb19ebd3a84d199302956da9"
+  },
+  "good": [
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.2.0",
+      "name": "Hello NBT",
+      "sha256": "f4f2715de8c777b5f6e219b3b1ffe2d138cce8b747544b91d2ba222e8485b852",
+      "size": 3208,
+      "manifestSha256": "2a93a7dc6bf0dc9a0898208c6c0cf31d7042011ea536e7a2f68218f5dbcc2429",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "aa2280e795c1408fdb5ab93dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f86320d",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/all-stored.nbtpkg",
+      "what": "every payload file stored instead of deflated"
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.2.0",
+      "name": "Hello NBT",
+      "sha256": "9319a66c61ec474046dd1198f842efd36399333b145c84c60608e680b8d245da",
+      "size": 2480,
+      "manifestSha256": "2a93a7dc6bf0dc9a0898208c6c0cf31d7042011ea536e7a2f68218f5dbcc2429",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "aa2280e795c1408fdb5ab93dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f86320d",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/folder-entries.nbtpkg",
+      "what": "folder entries are ignored"
+    },
+    {
+      "id": "org.nbtapp.agent",
+      "version": "1.1.0",
+      "name": "NBTApp agent",
+      "sha256": "f10eef186f8845853993075fc9a5dd6e437110052b39894d9e04dfca94dd00d9",
+      "size": 1502,
+      "manifestSha256": "26abdce2e746c635bffc80da7c8605e683ce0481a84edc5afccf8d70f2de01fe",
+      "flags": [],
+      "signature": "acf808ba6395c3dbe814b555ac425c6c7fbcc6a1cad0649af7e29d5ac1ae1b12bd7adbca69e6b26e616404713d6d7a8717261d7653ddd8b1e0c15ff4da79900d",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.agent-1.1.0.nbtpkg",
+      "what": "built from tests/packages/agent-1.1.0"
+    },
+    {
+      "id": "org.nbtapp.agent",
+      "version": "1.2.0",
+      "name": "NBTApp agent",
+      "sha256": "e589e54809f14a2d6098de6c2f0b10f931a626a4c7338bfa4ce422d952892d7b",
+      "size": 1570,
+      "manifestSha256": "242cd9d71f33611b217cad08986ee2338a9c22fff6425875920e29d130a03ae1",
+      "flags": [],
+      "signature": "c441bd1d373036b7e4047ba87aa5a00c0028e862cf4877e6b829f23ac6d6cbe9cc02f85c24b340b298f1c78cb34f3083a5792b5357fa30f4082da70a154e3f0e",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.agent-1.2.0.nbtpkg",
+      "what": "built from tests/packages/agent-1.2.0"
+    },
+    {
+      "id": "org.nbtapp.agent",
+      "version": "2.0.0",
+      "name": "NBTApp agent",
+      "sha256": "fe9625e41ae3eec2e6cd95c37ee1a041a12a3a54f19fef3fa6cd7f4638d5e34a",
+      "size": 1092,
+      "manifestSha256": "6a884346a50c5cb602675510641ba3517405c70dab10616e54bc3524adee434b",
+      "flags": [],
+      "signature": "8eb8124a2bf8584d0fa904573b26eba50556c6f54e6214cdd55058f4423ed8fbd965cbf5279ae204742d026ce397d4fca28930f0d388c24499144e5a8721b50a",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.agent-2.0.0.nbtpkg",
+      "what": "built from tests/packages/agent-2.0.0-misnamed"
+    },
+    {
+      "id": "org.nbtapp.agent",
+      "version": "2.1.0",
+      "name": "NBTApp agent",
+      "sha256": "bfc58f172088e5eb4d98b578ed2776d3c3d9724905a77a54a425f21b2bd68a48",
+      "size": 1075,
+      "manifestSha256": "eaa0af64b64510fe630510d9b32644f9148059f6781872ada71a5109ce3df91b",
+      "flags": [],
+      "signature": "04624f5f2557813043d48a69c8b45082ed63bf1b883c486766b1e36fb1bfe32ddf1d3e462e621b1d0b45e4bbaceffc3b8e9379df4783d974992fdc41b944fd0d",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.agent-2.1.0.nbtpkg",
+      "what": "built from tests/packages/agent-2.1.0-broken"
+    },
+    {
+      "id": "org.nbtapp.agent",
+      "version": "2.2.0",
+      "name": "NBTApp agent",
+      "sha256": "8d5900d4bcc71106fa25b5d9b86b070d99f25f18be6b3d281685b7a457dae8fe",
+      "size": 936,
+      "manifestSha256": "db67934776193ee40425238230cf522c2fd87393f8527f5ea77a032300c6392a",
+      "flags": [],
+      "signature": "553056e24ac8993bc4617a0f784ae08282db629fd05b4fde025a30566c8845ff6425302371647b4a24ccb883e71aa4b00a1cd0e0f6c8a5fb7107b30944df9304",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.agent-2.2.0.nbtpkg",
+      "what": "built from tests/packages/agent-2.2.0-noprogram"
+    },
+    {
+      "id": "org.nbtapp.agent",
+      "version": "2.3.0",
+      "name": "NBTApp agent",
+      "sha256": "0f3ff808d4dbbed9823d75f2ade70e28ce86f8b4143349f6744f43ce530faefe",
+      "size": 960,
+      "manifestSha256": "e8cf8618709e58a8e133fa6091dae7c7c0c208dd553f572660f297cb7e6edb28",
+      "flags": [
+        "modifies-system"
+      ],
+      "signature": "a5cca3902930bb712edcd1f93130c6051f0f7ca9b6c4fd6d5f20c6ee57f67f34a25211f8c50f145d864ac080b6270b194cf722e2dadc42aaced8db07848ab102",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.agent-2.3.0.nbtpkg",
+      "what": "built from tests/packages/agent-2.3.0-outside"
+    },
+    {
+      "id": "org.nbtapp.agent",
+      "version": "2.4.0",
+      "name": "NBTApp agent",
+      "sha256": "73b1b2aea1f76e1597220872962fbfe84d7a92b7dc960bb50189720fe0df416e",
+      "size": 779,
+      "manifestSha256": "8024cd0283f5674e163dc45d94b80d69e471bb382c77839658cb95506c2c1d81",
+      "flags": [],
+      "signature": "043e3fe261518e13a80ff45f68445ad76e39a4408e54209947a19c920ebb3e4f70b86aabb2786cdba1e857ae8a39a397784093a8785b111bf64e6667a05fd901",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.agent-2.4.0.nbtpkg",
+      "what": "built from tests/packages/agent-2.4.0-nolauncher"
+    },
+    {
+      "id": "org.nbtapp.agent",
+      "version": "2.5.0",
+      "name": "NBTApp agent",
+      "sha256": "ac8d7e5fbe55dd84aac100597aa233d89a88625e7e35adbef22a4e86a107ab37",
+      "size": 1082,
+      "manifestSha256": "5e4da488156d544d85b61f12b6cc4c765ce02e170200b5b35c9a118bae41773d",
+      "flags": [],
+      "signature": "9901ca82782d7dafc3869eea75763db5b8c98ba09a1696dafbd9bf99d8b7cb5446a90abae4be45df0f584f62f3f54cae364db5f9a8a125b1df6d8a49c5616c07",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.agent-2.5.0.nbtpkg",
+      "what": "built from tests/packages/agent-2.5.0-badlauncher"
+    },
+    {
+      "id": "org.nbtapp.demoplugin",
+      "version": "1.0.0",
+      "name": "Demo plugin",
+      "sha256": "b50bd848fc4071a2bf8bdf4265b017c07b4cd2b2c798aad051f6e9fedf536b0c",
+      "size": 1555,
+      "manifestSha256": "5a7261e087e3a7d935c25cf9e709e0d9b17f50556bb53a46966a4b73af1719f2",
+      "flags": [
+        "needs-reboot"
+      ],
+      "signature": "f4ea14694e19d016c8adc6b90367a2c070a66b45d7ada92541f94b5b6ca068c0e0846ae13e51192f8bbf96c88563b8a37437d32ae8527b8c8037463d34913d00",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.demoplugin-1.0.0.nbtpkg",
+      "what": "built from tests/packages/plugin-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.1.0",
+      "name": "Hello NBT",
+      "sha256": "f632a6a2e3071af4a23163ea164898d3558ae3ceb442df5ae0ecf5b9d667ebd4",
+      "size": 2130,
+      "manifestSha256": "7e594211bff627aa4dcc1c373217017d7e1c4cd50bb7f11613c50cca000e45f6",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "73e0fd053cfbdc2ed610f0c337a98349aff0c26139f456b6f8866b0bef36ef3560a45c950c14ab9c6c0898e5e87fd93f2b9a0a45dd61912736d133f14740a30d",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.hello-1.1.0.nbtpkg",
+      "what": "built from tests/packages/hello-1.1.0"
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.2.0",
+      "name": "Hello NBT",
+      "sha256": "f3fe7d742f953618a9bda71c6bb65f81b088a98cf2f869b0abfca08fd3c31b0c",
+      "size": 2388,
+      "manifestSha256": "2a93a7dc6bf0dc9a0898208c6c0cf31d7042011ea536e7a2f68218f5dbcc2429",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "aa2280e795c1408fdb5ab93dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f86320d",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.hello-1.2.0.nbtpkg",
+      "what": "built from tests/packages/hello-1.2.0"
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.3.0",
+      "name": "Hello NBT",
+      "sha256": "3056d6145be3a596508bef6077ef7cffb58e44cb93e2546d579426ceb0134049",
+      "size": 1824,
+      "manifestSha256": "0f2181af6fa6da82ecc1c091d653b2288498562d72a307c46c24ebd17dcf9bef",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "165b26831043239f7b4917ae0e2c6b76588adde5e3c48e97de93ede8e7f03328d6b2583627a4c4577f8349a650b67bad5dfce9d88718e78db3f4f1b635de5b0a",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.hello-1.3.0.nbtpkg",
+      "what": "built from tests/packages/hello-1.3.0-failing"
+    },
+    {
+      "id": "org.nbtapp.longname",
+      "version": "1.0.0",
+      "name": "Ein sehr langer Name \u2713 mit Umlauten \u00e4\u00f6\u00fc und \u65e5\u672c\u8a9e, genau 64 Zeiche",
+      "sha256": "78c15b73c46ee4305b9b9a8c6672fafb0b107b8fee57b14dfa4fbb60662e6a13",
+      "size": 756,
+      "manifestSha256": "4cc765be658a511a54a8dfd9a92928ef8bf0a8c5d7814f320f808e1472d2c71d",
+      "flags": [],
+      "signature": "8ea94e624b5c8c802e604d3df2d21f840215c3cc22252724c4524b3f853ce69529d804cc2c2339f20e81180eb0f34d361a44682c89e415fbb2ac6a0d7158f408",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.longname-1.0.0.nbtpkg",
+      "what": "built from tests/packages/longname-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.menupatch",
+      "version": "1.0.0",
+      "name": "Menu patch",
+      "sha256": "6a8dfdd6acb6fe884d54270df92bac7a05c9e765cb22137ee50038f1a9344d86",
+      "size": 1035,
+      "manifestSha256": "bfce6bf3d5f0d1dc139cf227b734f2d0c413c685e44c988ec3358bba5286caf7",
+      "flags": [
+        "modifies-system",
+        "needs-reboot"
+      ],
+      "signature": "0ea71625db235caeb4a8f61219beae1d9af84649be8ea1a6461f666a6644a4b000f9f52322ca98ed62cfdf06db65170d87172fd9183d4b01c24ad810e0b9e50c",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.menupatch-1.0.0.nbtpkg",
+      "what": "built from tests/packages/patch-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.menupatch",
+      "version": "1.1.0",
+      "name": "Menu patch",
+      "sha256": "2bcc1e0749518bb2bc9a27940d297c9d914c956c703b53c2c587cee3ffc748dd",
+      "size": 1037,
+      "manifestSha256": "931556d6dded7da5549ebe3cd0a147c58de10b97620c3826535ef6a4afef929c",
+      "flags": [
+        "modifies-system",
+        "needs-reboot"
+      ],
+      "signature": "78434ed5a1adf90c092535c10cf0ae1c1662ee2b60b0e44fc1e1cf811f6a4fc74f993334889dfa2b8465c4176a0121817e57e192665a3e7068a42edd033d9208",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.menupatch-1.1.0.nbtpkg",
+      "what": "built from tests/packages/patch-1.1.0"
+    },
+    {
+      "id": "org.nbtapp.menupatch",
+      "version": "2.0.0",
+      "name": "Menu patch",
+      "sha256": "d6a101d917002e1b588a31756d62ca3701a1920126781d2ac89543576b08ab56",
+      "size": 720,
+      "manifestSha256": "be1cf9d7a979dd9f7667ccdd86d15abd3c28b80455f0fc447e5dcf39d7431b8b",
+      "flags": [
+        "needs-reboot"
+      ],
+      "signature": "84f5f5b97288365f2a1979cdb925784eca02ad5f3bdf7d81944f9eea959d3948d03804008ab4aa77b5c68b1f3d8767fc1984eddcf4091cd5971598f731b2ce08",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.menupatch-2.0.0.nbtpkg",
+      "what": "built from tests/packages/patch-2.0.0"
+    },
+    {
+      "id": "org.nbtapp.noisy",
+      "version": "1.0.0",
+      "name": "Noisy",
+      "sha256": "9342453b35cee36c7cce82480730228c3891964ae860daf6ba32f855816ed265",
+      "size": 1151,
+      "manifestSha256": "8993d0c0f360e68493493b402fc757c8e026deddb5f4d32b818c4d089e39a265",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "f985bcc67699aa9f0c68ddea3201710d16b95d4878c4b935a36cf9776575744e71dbeae344beb1ac11f1980313cab68fbe4e611812288d947a683830291c920e",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.noisy-1.0.0.nbtpkg",
+      "what": "built from tests/packages/noisy-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.plugin",
+      "version": "0.9.0",
+      "name": "NBTApp iDrive plugin",
+      "sha256": "aaa2debd11efec9b55ebc58e51799102d1b38ed2a61dab9c5c90bae5b1b264f4",
+      "size": 3677,
+      "manifestSha256": "da1064285a89debc8d07abdb420ec796d6de0b9275a91bc4760b448fb890c9b3",
+      "flags": [
+        "needs-reboot"
+      ],
+      "signature": "74680e665fda7ccb0eaa83f3287568a4368846b2f5a74ada1034f0f6f5047559a38e037db16a0cf8508218754ff05a1a3a6ffb7ef1f028c4bae8c613870d090b",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.plugin-0.9.0.nbtpkg",
+      "what": "made by tools/plugin_pkg.py of plugin/'s manifest and UI description, with stand-ins for the library and the DBs"
+    },
+    {
+      "id": "org.nbtapp.plugin",
+      "version": "1.0.0",
+      "name": "NBTApp iDrive plugin",
+      "sha256": "ad55d73d68aa55827b251a17206db5a58986cc7b1025c487f790e060a900e29e",
+      "size": 3673,
+      "manifestSha256": "54263cbc6ac510b49224bc1f122a8bed9f5dff60675ee13b133bd40c5867ad33",
+      "flags": [
+        "needs-reboot"
+      ],
+      "signature": "4cbbfa97a3f4fd9cf890857f8cdb00ff0922c98530b552ccbf1e3cef3ed88519f423065718777f17c6abf31502c2aad80f8127115f5e47e2a268cc4bc018520a",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.plugin-1.0.0.nbtpkg",
+      "what": "made by tools/plugin_pkg.py of plugin/'s manifest and UI description, with stand-ins for the library and the DBs"
+    },
+    {
+      "id": "org.nbtapp.plugin",
+      "version": "1.1.0",
+      "name": "NBTApp iDrive plugin",
+      "sha256": "b38b7a7eaab2cd88458a38c25bfd7c707a8b33834be0cc19f791e1851c5bc643",
+      "size": 3673,
+      "manifestSha256": "f5e9f14705bc02a086146440703c81b62ff7efbbad29ffad49a6f27f0093f052",
+      "flags": [
+        "needs-reboot"
+      ],
+      "signature": "292bf9c90892c54cd11dc429cc338c4bbe7b3d4dcd17e2baddf82b31fd00069e16e15cec529a1edd439fd2c82e3a9bf63b1ca8e40c4e4103c48d750da5c1de0b",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.plugin-1.1.0.nbtpkg",
+      "what": "made by tools/plugin_pkg.py of plugin/'s manifest and UI description, with stand-ins for the library and the DBs"
+    },
+    {
+      "id": "org.nbtapp.prefail",
+      "version": "1.0.0",
+      "name": "Refusing hook",
+      "sha256": "765a71271766cc150cadd7b1cb01981b9752c4abe1158fd5891bd4aaea9a3590",
+      "size": 926,
+      "manifestSha256": "d93430cca4d7d3724c90e0cbe7512e154ee1d087749771cbbfbd3700bb381b81",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "dae9d48a159a6fdee46cd31595435d0a6b9338023c9d6d33f0d800972cf8ba3133035b741c499c1514f9e7ae16999c0a81605bec2c38591292c5c7598dd12c01",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.prefail-1.0.0.nbtpkg",
+      "what": "built from tests/packages/prefail-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.radio",
+      "version": "1.0.0",
+      "name": "Radio",
+      "sha256": "22f855a85e990e8abfe0f9f98cdee80ed4d8128cd54689dce5eaa01ab93a2805",
+      "size": 789,
+      "manifestSha256": "f0bbf8a3d2448e505b1483d00ad9654b0a987d8f5dbec782a3879965395eb33a",
+      "flags": [],
+      "signature": "dd50a158c5c2bf18ebf79cd7d53a06716b5a5f634df073c3b45bf96ca5d34b3485eacd87a7183fba7abe5fd89a54d7698f4b221500d34a4a170f0a0eac069205",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.radio-1.0.0.nbtpkg",
+      "what": "built from tests/packages/radio-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.radio2",
+      "version": "1.0.0",
+      "name": "Radio Two",
+      "sha256": "d1379137e50835f02e555e39644ecb53d4916d4169ddeaabc316a31925b8b3b7",
+      "size": 795,
+      "manifestSha256": "6c7c531004fe03f23c4df703b0294c206b0245ac6a4a065b3b780e51eb0b2278",
+      "flags": [],
+      "signature": "6af41be81b6b8508c1654d2e5ea9358d6158d65342d5f245b7ce2e19b889ec34f08814f54ffd33773b47208cd59a7d83b333adeb27b7c9e0e788ffbf54ce9e0e",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.radio2-1.0.0.nbtpkg",
+      "what": "built from tests/packages/radio2-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.rival",
+      "version": "1.0.0",
+      "name": "Rival",
+      "sha256": "7e1e0ca1e4e6d0be039beda698e2a232d7c50583c372ae447c0cdf703dc06573",
+      "size": 1216,
+      "manifestSha256": "93cb7e7894cad18bb5e0d64dda6045bba6508231d6da37e217b8d573caceb8ee",
+      "flags": [
+        "runs-scripts",
+        "modifies-system"
+      ],
+      "signature": "8540eeccbb2a49f87c42cc0e95d982660aa2e74095c4e4cbe41951f8d117f1b2d67c39e4f897edf2a6e61dbd9d622133212b43a6d88cf85a0ef53ca6aa2e950b",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.rival-1.0.0.nbtpkg",
+      "what": "built from tests/packages/rival-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.rival2",
+      "version": "1.0.0",
+      "name": "Rival two",
+      "sha256": "14c965733cd209d86f7f5b980eea30cc940326a8c95aa25a231789f810f32e73",
+      "size": 677,
+      "manifestSha256": "0a74e1d0e400ad75f7c73c99ee856fadbc746060ad6b876f03f3faef4d8fdca1",
+      "flags": [
+        "modifies-system"
+      ],
+      "signature": "712cf8127b63283b4037bc9fc471521f1b4e0ca3886c95abebac0c1ea8b9c65fed7be983e88fb5390c3c0e7595f44cfcfcee9035ec0e4f5114605aa95165cd0f",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.rival2-1.0.0.nbtpkg",
+      "what": "built from tests/packages/rival2-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.runtime",
+      "version": "2.1.0",
+      "name": "NBT Runtime",
+      "sha256": "c36532d056756ef0482cd8a88aefa54b28adcb225c919434144428b97ae17c9d",
+      "size": 956,
+      "manifestSha256": "81c341ed2d713bd48e785b4befc42ac9e43540b2f653b929af3069b224418a8c",
+      "flags": [],
+      "signature": "f3469570a57da0963ccefce904c63d8775ef1bb6aa780aa4a9595c2feb5beb2d12dbe5ae18b07bb4507ea0972b93d5f30a71ef922139ccb674a5d1f7fbe9e208",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.runtime-2.1.0.nbtpkg",
+      "what": "built from tests/packages/runtime-2.1.0"
+    },
+    {
+      "id": "org.nbtapp.runtime",
+      "version": "3.0.0",
+      "name": "NBT Runtime",
+      "sha256": "c95a3636d7dda86a366ad5a200932fbbaf89b110b4d0d8a09533479f694859c5",
+      "size": 955,
+      "manifestSha256": "65b672a965266f0a69486e13f86da0ba518be3f7dd45dec3d12f97bd01404e01",
+      "flags": [],
+      "signature": "44142caca6a76f92c04a21711118d97a7b55214e5152bb89bdcec5d8eae84ff3033ea025531f49af0eb7744adeb5497fc5dd6418fc4071f7bf80cf6996b8bb08",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.runtime-3.0.0.nbtpkg",
+      "what": "built from tests/packages/runtime-3.0.0"
+    },
+    {
+      "id": "org.nbtapp.slow",
+      "version": "1.0.0",
+      "name": "Slow hook",
+      "sha256": "adee412041acbaa8af9182df99141e5278b901bc8cb4b922ae087dc72be2778c",
+      "size": 985,
+      "manifestSha256": "dabfa4cb55de1d62646d9104a8ea1c7d728b7ccc2890da729c23d8b40fdc9828",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "4a4d55f47e24524ed81bd7ecaab39490c3e04dd42a42279ce881acb106bbe513670dc7df67166dd5a79d4b4e150824275dcbb343dff8868c864d1c422c476e05",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.slow-1.0.0.nbtpkg",
+      "what": "built from tests/packages/slow-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.syshook",
+      "version": "1.0.0",
+      "name": "System file with hooks",
+      "sha256": "95a02a3c532e8cc9e2d627e8b9faca23382c8db9dfd00a10bbdd5946f71dfd28",
+      "size": 1632,
+      "manifestSha256": "2c8ec41b4f91af39ac2101108c0dffdb76d7e858c2890f270e638aed70cf8530",
+      "flags": [
+        "runs-scripts",
+        "modifies-system"
+      ],
+      "signature": "eede27d11eae245413c11dfcbfe34e06740193ece6dabb331cc9753043b748d20016b577096609820e6841dd5d4b3422fcf31dafd9d5df092e47c13679e18901",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.syshook-1.0.0.nbtpkg",
+      "what": "built from tests/packages/syshook-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.2.0",
+      "name": "Hello NBT",
+      "sha256": "f72ba8d89ebe80fe51581b687b88d13c4d49a9b694973078e6e06e42557f392e",
+      "size": 2429,
+      "manifestSha256": "a75b428fa31f949023996c685a245699a4facf1bc84fbf3ba73565df42b2563b",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "7508a870d053bb2b0348e2f6851e0713baee0b50bfd597c7a031a211e841e30473c5ebf9c4627573d0332863e41f5bf79162a40dd9731533f114a2d627989b00",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/unknown-keys.nbtpkg",
+      "what": "unknown keys outside requires and install are ignored"
+    }
+  ],
+  "bad": [
+    {
+      "file": "bad/agent-other-key.nbtpkg",
+      "code": "bad-signature",
+      "what": "the agent's own package, signed with a key the reader does not trust"
+    },
+    {
+      "file": "bad/archive-comment.nbtpkg",
+      "code": "bad-archive",
+      "what": "an archive comment"
+    },
+    {
+      "file": "bad/bytes-after-end.nbtpkg",
+      "code": "bad-archive",
+      "what": "one byte after the end record"
+    },
+    {
+      "file": "bad/bytes-before-start.nbtpkg",
+      "code": "bad-archive",
+      "what": "four bytes in front of the manifest"
+    },
+    {
+      "file": "bad/contents-hash-uppercase.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a hash in capitals"
+    },
+    {
+      "file": "bad/contents-lists-manifest.nbtpkg",
+      "code": "bad-manifest",
+      "what": "contents lists manifest.json"
+    },
+    {
+      "file": "bad/contents-size-wrong.nbtpkg",
+      "code": "bad-archive",
+      "what": "contents gives a file's size wrongly; its hash is right"
+    },
+    {
+      "file": "bad/crc-wrong.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry whose zip CRC is wrong"
+    },
+    {
+      "file": "bad/cut-short.nbtpkg",
+      "code": "bad-archive",
+      "what": "the last ten bytes are missing"
+    },
+    {
+      "file": "bad/data-descriptor.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry with a data descriptor and no sizes in its local header"
+    },
+    {
+      "file": "bad/deflate-trailing-byte.nbtpkg",
+      "code": "bad-archive",
+      "what": "a byte after the end of an entry's deflate stream"
+    },
+    {
+      "file": "bad/dest-dotdot.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a destination with `..`"
+    },
+    {
+      "file": "bad/dest-folder-for-file.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a file mapped to a folder"
+    },
+    {
+      "file": "bad/dest-relative.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a destination that is not absolute"
+    },
+    {
+      "file": "bad/dest-twice.nbtpkg",
+      "code": "bad-manifest",
+      "what": "two files placed at one destination"
+    },
+    {
+      "file": "bad/dest-unknown-variable.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an unknown path variable"
+    },
+    {
+      "file": "bad/directory-order.nbtpkg",
+      "code": "bad-archive",
+      "what": "the directory lists two entries in the other order than the file holds them"
+    },
+    {
+      "file": "bad/encrypted.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry flagged as encrypted"
+    },
+    {
+      "file": "bad/file-changed.nbtpkg",
+      "code": "bad-archive",
+      "what": "a file differs from its hash in the manifest; its zip CRC is right"
+    },
+    {
+      "file": "bad/file-missing.nbtpkg",
+      "code": "bad-archive",
+      "what": "a file the manifest lists is absent"
+    },
+    {
+      "file": "bad/file-unlisted.nbtpkg",
+      "code": "bad-archive",
+      "what": "a file the manifest does not list"
+    },
+    {
+      "file": "bad/folder-with-data.nbtpkg",
+      "code": "bad-archive",
+      "what": "a folder entry that holds data"
+    },
+    {
+      "file": "bad/gap-between-entries.nbtpkg",
+      "code": "bad-archive",
+      "what": "bytes between two entries that belong to no file"
+    },
+    {
+      "file": "bad/hook-script-unlisted.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a hook script that contents does not list"
+    },
+    {
+      "file": "bad/hook-timeout-zero.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a hook timeout of 0"
+    },
+    {
+      "file": "bad/id-one-label.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an id with a single label"
+    },
+    {
+      "file": "bad/id-uppercase.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an id with capitals"
+    },
+    {
+      "file": "bad/install-unknown-key.nbtpkg",
+      "code": "unsupported-manifest",
+      "what": "a key in install.files that this version does not know"
+    },
+    {
+      "file": "bad/json-byte-order-mark.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the manifest starts with a byte-order mark"
+    },
+    {
+      "file": "bad/json-duplicate-key.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the manifest has a key twice"
+    },
+    {
+      "file": "bad/json-fraction.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a number with a fraction"
+    },
+    {
+      "file": "bad/json-not-utf8.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the manifest is not UTF-8"
+    },
+    {
+      "file": "bad/json-too-deep.nbtpkg",
+      "code": "bad-manifest",
+      "what": "nested more than 16 levels, in an unknown key"
+    },
+    {
+      "file": "bad/link-over-file.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a link at a file's destination"
+    },
+    {
+      "file": "bad/local-name-differs.nbtpkg",
+      "code": "bad-archive",
+      "what": "local header and directory give different names"
+    },
+    {
+      "file": "bad/local-size-differs.nbtpkg",
+      "code": "bad-archive",
+      "what": "local header and directory give different sizes"
+    },
+    {
+      "file": "bad/manifest-changed-after-signing.nbtpkg",
+      "code": "bad-signature",
+      "what": "one character of the manifest changed after it was signed"
+    },
+    {
+      "file": "bad/manifest-second.nbtpkg",
+      "code": "bad-archive",
+      "what": "manifest.sig comes before manifest.json"
+    },
+    {
+      "file": "bad/manifest-too-large.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the manifest is larger than 1 MiB"
+    },
+    {
+      "file": "bad/manifest-version-2.nbtpkg",
+      "code": "unsupported-manifest",
+      "what": "manifestVersion 2"
+    },
+    {
+      "file": "bad/method-bzip2.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry with a compression method other than deflate"
+    },
+    {
+      "file": "bad/mode-three-digits.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a mode without the leading 0"
+    },
+    {
+      "file": "bad/name-absolute.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry name with an absolute path"
+    },
+    {
+      "file": "bad/name-backslash.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry name with a backslash"
+    },
+    {
+      "file": "bad/name-dotdot.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry name with a `..` segment"
+    },
+    {
+      "file": "bad/name-empty.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an empty name"
+    },
+    {
+      "file": "bad/name-empty-segment.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry name with an empty segment"
+    },
+    {
+      "file": "bad/name-not-utf8.nbtpkg",
+      "code": "bad-archive",
+      "what": "an entry name with a byte that is not UTF-8"
+    },
+    {
+      "file": "bad/name-too-long.nbtpkg",
+      "code": "bad-archive",
+      "what": "a folder entry whose name is 256 bytes"
+    },
+    {
+      "file": "bad/name-twice.nbtpkg",
+      "code": "bad-archive",
+      "what": "the same name twice"
+    },
+    {
+      "file": "bad/range-bad.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a range that is not a list of comparators"
+    },
+    {
+      "file": "bad/reboot-unknown.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an unknown reboot value"
+    },
+    {
+      "file": "bad/requires-unknown-key.nbtpkg",
+      "code": "unsupported-manifest",
+      "what": "a requirement this version cannot check"
+    },
+    {
+      "file": "bad/serial-service-agents-name.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a serial service under the agent's own name"
+    },
+    {
+      "file": "bad/serial-service-cars-name.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a serial service under the name of the car's own"
+    },
+    {
+      "file": "bad/serial-service-name-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a serial service name of 33 characters"
+    },
+    {
+      "file": "bad/serial-service-name-space.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a serial service name with a space"
+    },
+    {
+      "file": "bad/serial-service-no-program.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a serial service with no program"
+    },
+    {
+      "file": "bad/serial-service-not-a-list.nbtpkg",
+      "code": "bad-manifest",
+      "what": "serialServices is one service, not a list"
+    },
+    {
+      "file": "bad/serial-service-program-folder.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a serial service's program given with its folder"
+    },
+    {
+      "file": "bad/serial-service-twice.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the same serial service declared twice"
+    },
+    {
+      "file": "bad/serial-service-unknown-key.nbtpkg",
+      "code": "unsupported-manifest",
+      "what": "a key in a serial service that this version does not know"
+    },
+    {
+      "file": "bad/signature-flipped.nbtpkg",
+      "code": "bad-signature",
+      "what": "one bit of manifest.sig is changed"
+    },
+    {
+      "file": "bad/signature-last.nbtpkg",
+      "code": "bad-archive",
+      "what": "manifest.sig is the last entry, not the second"
+    },
+    {
+      "file": "bad/signature-other-key.nbtpkg",
+      "code": "bad-signature",
+      "what": "signed with a key the reader does not trust"
+    },
+    {
+      "file": "bad/signature-short.nbtpkg",
+      "code": "bad-signature",
+      "what": "manifest.sig is 63 bytes"
+    },
+    {
+      "file": "bad/src-unlisted.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a src that contents does not list"
+    },
+    {
+      "file": "bad/unsigned.nbtpkg",
+      "code": "bad-signature",
+      "what": "there is no manifest.sig"
+    },
+    {
+      "file": "bad/version-leading-zero.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a version with a leading zero"
+    },
+    {
+      "file": "bad/version-two-parts.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a version that is not semver"
+    },
+    {
+      "file": "bad/zip64-count.nbtpkg",
+      "code": "bad-archive",
+      "what": "the entry count holds the zip64 marker"
+    },
+    {
+      "file": "bad/zip64-sizes.nbtpkg",
+      "code": "bad-archive",
+      "what": "directory sizes hold the zip64 marker"
+    }
+  ]
+}

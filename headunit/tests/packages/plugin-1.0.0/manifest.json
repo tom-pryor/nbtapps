@@ -1,0 +1,16 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.demoplugin",
+  "name": "Demo plugin",
+  "version": "1.0.0",
+  "install": {
+    "files": [
+      {
+        "src": "payload/plugin/",
+        "dest": "${plugins}/NbtDemo/",
+        "mode": "0644"
+      }
+    ],
+    "reboot": "hmi-restart"
+  }
+}

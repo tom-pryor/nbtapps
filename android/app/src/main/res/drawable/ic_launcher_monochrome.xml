@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<!--
+    The mark in one colour, for themed icons: Android tints it and uses only its shape. The centre line's
+    dashes are cut out of the road (even-odd fill) instead of drawn over it, so they still show.
+    Same geometry and transform as ic_launcher_foreground.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="57"
+        android:pivotY="54"
+        android:scaleX="0.82"
+        android:scaleY="0.82"
+        android:translateX="-3">
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M32.54 31.09Q30 28 34 28L34 28Q38 28 40.86 30.79L75.14 64.21Q78 67 74 67L66 67Q62 67 59.46 63.91Z M38.53 33.93L41.41 37.05A0.7 0.7 0 0 0 42.43 36.11L39.55 32.99A0.7 0.7 0 0 0 38.53 33.93ZM46.87 43.57L51.19 48.25A1.1 1.1 0 0 0 52.81 46.75L48.49 42.07A1.1 1.1 0 0 0 46.87 43.57ZM56.22 54.44L62.34 61.07A1.6 1.6 0 0 0 64.7 58.89L58.58 52.26A1.6 1.6 0 0 0 56.22 54.44Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M30 32Q30 28 34 28L36 28Q40 28 40 32L40 76Q40 80 36 80L34 80Q30 80 30 76Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M68 32Q68 28 72 28L74 28Q78 28 78 32L78 63Q78 67 81 67L81 67Q84 67 81.42 70.05L75.58 76.95Q73 80 70.42 76.95L64.58 70.05Q62 67 65 67L65 67Q68 67 68 63Z" />
+    </group>
+</vector>

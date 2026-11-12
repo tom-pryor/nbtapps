@@ -1,0 +1,9 @@
+#!/bin/sh
+# Test package: stands in for version 1.1.0 of the agent. It answers --version, which is all that an install asks
+# of it, and nothing more. The launcher's test, which has to start the new version, makes its own package of the
+# test bench's second build of the agent (tests/e2e/run_launcher.py).
+if [ "$1" = --version ]; then
+    echo "nbtagent 1.1.0 (build stand-in)"
+    exit 0
+fi
+exit 1

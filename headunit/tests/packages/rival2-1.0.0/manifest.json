@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.rival2",
+  "name": "Rival two",
+  "version": "1.0.0",
+  "install": {
+    "files": [
+      {
+        "src": "payload/extra.txt",
+        "dest": "/opt/demo/sub/extra.txt",
+        "mode": "0644"
+      }
+    ]
+  }
+}

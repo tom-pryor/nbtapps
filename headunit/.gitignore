@@ -1,0 +1,9 @@
+# Build products: build/ = link stubs and intermediates, release/ = the folder for the head unit.
+build/
+release/
+*.o
+*.d
+__pycache__/
+.idea
+.vscode
+.DS_Store

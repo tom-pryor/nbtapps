@@ -1,0 +1,61 @@
+# The names and numbers that the agent and a phone app must both have, and have the same (see the plan document,
+# "Phone and agent protocol" and "Bluetooth serial on the car"). Each side holds them in its own code and has a
+# test that reads this file and fails when the two differ: the agent's is tests/agent/test_constants.cpp, against
+# agent/protocol_constants.hpp.
+#
+# One to a line: a name, a space, the value. A line that starts with # is a comment.
+
+# The one version of the protocol there is: what `hello` offers and answers.
+protocol.version 1
+
+# A frame's payload in bytes: the most there is, and the least `hello` may ask for.
+frame.maxPayload 65536
+frame.minPayload 1024
+
+# Bluetooth serial. The service the agent registers with the car's Bluetooth stack: the name its registration is
+# filed under on the car, and the UUID a phone app connects to.
+serial.serviceName NBTApp
+serial.serviceUuid 58876F35-7F3F-4592-B65D-9912589A4F51
+
+# On a serial link each side gives this, at most, as its maxFrame in `hello`.
+serial.maxFrame 4096
+
+# On a serial link, each side: when it has heard nothing for the first of these, in milliseconds, it sends `ping`,
+# and again each time as long has passed with nothing heard; when it has heard nothing for the second, and has
+# sent those pings, it ends the link. Anything that arrives counts as heard. The agent also ends a serial link on
+# which no `hello` has been done when the second has passed since the link opened.
+serial.pingAfterMs 10000
+serial.silenceMs 30000
+
+# The car gives every link a phone opens to whichever program reads it first, so what the phone says first decides
+# whose link it is. A phone app sends the magic bytes as soon as its link is open. The agent waits this long for
+# them, in milliseconds from when it opened the link, and lets a link go on which they have not come by then, or
+# on which anything else came first: it writes nothing into such a link and reads no more of it.
+serial.decideMs 500
+
+# The phone made the link, and the phone ends it. When the agent ends a link on purpose it sends the event
+# `link.closing` first, and a phone app closes its side of the link as soon as that event arrives, sending nothing
+# more. The agent keeps the link's node open and reads it, dropping what comes, until the phone has done so, for
+# this long at most, in milliseconds from when the agent closed its own end; then it closes the node under the
+# phone. A car's Bluetooth has been seen to give no later link any bytes, until the head unit was restarted,
+# after a phone held a link for 30 seconds whose node the agent had closed.
+serial.lingerMs 5000
+
+# Pairing a phone (the plan document, "Enrolment on the car's screen"). The car's screen shows a code of this many
+# digits, which the user types into the phone app; `pairing.issue` carries it.
+pairing.codeDigits 6
+
+# The code is good for the first of these, in seconds, from when the screen asked for it; that is the `expiresIn`
+# of `pairing.open`. The agent takes this many wrong codes, the last of which closes the window, and for the last
+# of the three values, in seconds, it then opens no new one.
+pairing.windowSeconds 120
+pairing.tries 3
+pairing.pauseSeconds 30
+
+# `auth`: each side's nonce, in bytes. It travels as twice as many hex characters.
+auth.nonceBytes 16
+
+# Capabilities: what a side has beyond the protocol's first version, by the names it lists in `hello`. An agent
+# that lists this one has the methods autostart.get and autostart.set, which say and set whether the agent is
+# started with the head unit; one that does not list it answers them with `unsupported`.
+capability.autostart autostart

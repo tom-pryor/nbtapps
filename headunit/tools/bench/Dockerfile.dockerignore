@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
+# Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
+# Only what the agent's programs are built from goes to Docker.
+*
+!Makefile
+!agent
+!tests/agent
+!src

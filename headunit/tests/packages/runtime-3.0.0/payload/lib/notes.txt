@@ -1,0 +1,1 @@
+second file, so the folder rule copies more than one

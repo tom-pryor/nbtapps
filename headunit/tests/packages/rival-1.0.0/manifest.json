@@ -1,0 +1,31 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.rival",
+  "name": "Rival",
+  "version": "1.0.0",
+  "conflicts": [
+    {
+      "id": "org.nbtapp.hello",
+      "version": "<2.0.0"
+    }
+  ],
+  "install": {
+    "files": [
+      {
+        "src": "payload/extra.txt",
+        "dest": "/opt/demo/sub/extra.txt",
+        "mode": "0644"
+      }
+    ],
+    "hooks": {
+      "preRemove": {
+        "script": "scripts/pre-remove.sh",
+        "timeout": 10
+      },
+      "postRemove": {
+        "script": "scripts/post-remove.sh",
+        "timeout": 10
+      }
+    }
+  }
+}

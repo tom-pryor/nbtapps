@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.longname",
+  "name": "Ein sehr langer Name ✓ mit Umlauten äöü und 日本語, genau 64 Zeiche",
+  "version": "1.0.0",
+  "install": {
+    "files": [
+      {
+        "src": "payload/note.txt",
+        "dest": "${app}/note.txt",
+        "mode": "0644"
+      }
+    ]
+  }
+}

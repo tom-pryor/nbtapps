@@ -1,0 +1,3 @@
+#!/bin/sh
+# Test package: stands in for version 2.3.0 of the agent.
+echo "nbtagent 2.3.0 (build stand-in)"

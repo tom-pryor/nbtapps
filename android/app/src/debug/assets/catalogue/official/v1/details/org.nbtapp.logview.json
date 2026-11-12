@@ -1,0 +1,15 @@
+{
+  "id": "org.nbtapp.logview",
+  "description": "Shows the agent's install log and the system log on the iDrive screen, newest entries first. Useful when an install fails and there is no laptop to hand.",
+  "homepage": "https://example.invalid/org.nbtapp.logview",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "0.8.0",
+      "notes": [
+        "Adds the system log",
+        "Opens from App Launcher"
+      ]
+    }
+  ]
+}

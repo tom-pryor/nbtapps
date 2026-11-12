@@ -1,0 +1,42 @@
+Package sources for the host tests. tests/make_packages.py builds them with tools/nbtpkg.py, signs them with the
+test key, and derives the deliberately broken packages from hello-1.2.0. Nothing here runs on a car: the programs
+are shell scripts that stand in for binaries.
+
+  runtime-2.1.0          a folder entry; hello depends on it
+  runtime-3.0.0          the same, one major version on: outside the range hello asks for, so a plan that
+                         upgrades to it while hello is installed must be refused
+  hello-1.1.0, -1.2.0    files, a config file, a link and all four hooks; 1.2.0 adds a file
+  hello-1.3.0-failing    an upgrade whose postInstall exits with 3, so it must be undone
+  slow-1.0.0             a postInstall that outlives its timeout
+  prefail-1.0.0          a preInstall that exits with 7
+  plugin-1.0.0           an HMI plugin folder with a connector id (250) and a focus id (32760)
+  patch-1.0.0, -1.1.0    replaces the stock file /opt/demo/menu.xml (the tests create it: "stock menu, firmware A"
+                         or "... B" and a newline), with a config file in ${data}; patch-2.0.0 lets go of it again
+  syshook-1.0.0          a file and a link on the system partition and all four hooks, each of which prints its
+                         name: the tests look at the partition while a hook runs. Its postInstall exits with 3
+                         if ${data}/fail exists, for an install that is undone after the hook
+  rival-1.0.0            conflicts with hello below 2.0.0, and its preRemove fails
+  rival2-1.0.0           wants the path rival owns
+  noisy-1.0.0            a postInstall that prints 15 KiB, with characters of several bytes and one byte that is
+                         not UTF-8: what job.log has to cut into pieces and repair
+  longname-1.0.0         a name of 64 characters, some of them outside ASCII: the longest a list entry gets
+  (no folder here)       org.nbtapp.plugin 0.9.0, 1.0.0 and 1.1.0, the iDrive plugin's own package: tests/make_packages.py
+                         has tools/plugin_pkg.py make them, as it makes the one for a head unit, of the manifest
+                         and UI description in plugin/ and stand-ins for the library and the two DBs
+  radio-1.0.0            declares two Bluetooth serial services, both registered by its program radiod (a script
+                         that registers nothing): what the agent removes when that program is not running
+  radio2-1.0.0           declares the first of radio's two services for a program of its own, so the two cannot
+                         both be installed
+  agent-1.1.0            the agent's own package, org.nbtapp.agent: ${app}/nbtagent, ${app}/nbtctl and the
+                         version's launcher, ${app}/nbtlaunch.sh. Its nbtagent answers --version only, and its
+                         launcher is read by the shell and never run. The launcher's test, which has to start
+                         the new version, makes its own package of the test bench's second build of the agent
+  agent-1.2.0            the same one version on, with a file more; its nbtagent answers --version only
+  agent-2.0.0-misnamed   its nbtagent says it is 2.0.1                    } what an install of the agent's own
+  agent-2.1.0-broken     its nbtagent exits with 3                        } package refuses: these three once
+  agent-2.5.0-badlauncher  its launcher is an if with no fi               } they are placed, when the program
+                                                                            is asked for its version and the
+                                                                            shell reads the launcher,
+  agent-2.2.0-noprogram  places nbtagent with mode 0644                   } and these three by the manifest
+  agent-2.3.0-outside    places a file outside ${app} and ${data}         }
+  agent-2.4.0-nolauncher places no ${app}/nbtlaunch.sh                    }

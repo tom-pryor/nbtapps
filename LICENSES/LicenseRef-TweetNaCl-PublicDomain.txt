@@ -1,0 +1,4 @@
+TweetNaCl, version 20140427, by Daniel J. Bernstein, Bernard van Gastel, Wesley Janssen, Tanja Lange, Peter Schwabe
+and Sjaak Smetsers, is in the public domain.
+
+https://tweetnacl.cr.yp.to/

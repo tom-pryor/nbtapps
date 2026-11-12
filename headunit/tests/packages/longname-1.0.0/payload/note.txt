@@ -1,0 +1,1 @@
+A package whose name is as long as a name may be.

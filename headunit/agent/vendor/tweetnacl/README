@@ -1,0 +1,10 @@
+TweetNaCl, version 20140427, by Daniel J. Bernstein, Bernard van Gastel, Wesley Janssen, Tanja Lange, Peter Schwabe
+and Sjaak Smetsers. Public domain (https://tweetnacl.cr.yp.to/).
+
+The two files are unchanged from https://tweetnacl.cr.yp.to/20140427/ :
+
+  02e65bc3013ff2168983365e55906bc783c4c7e0a60d8100f17bb303a17175c4  tweetnacl.c
+  43f29ad721d9927b747b0100ab4160c119e7bb180c7c98a66e4bf79d31244287  tweetnacl.h
+
+The agent uses one function of it, crypto_sign_open, to verify Ed25519 signatures (agent/ed25519.cpp). It never
+signs and never makes keys, so the randombytes() that TweetNaCl expects from its user is a stub that aborts.

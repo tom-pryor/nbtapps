@@ -1,0 +1,15 @@
+{
+  "id": "org.nbtapp.btterm",
+  "description": "Opens a shell on the head unit over the Bluetooth serial link, for a paired phone with Bluetooth audio connected. Meant for development: it is off until its config file enables it.",
+  "homepage": "https://example.invalid/org.nbtapp.btterm",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "0.4.0",
+      "notes": [
+        "Off by default",
+        "Closes the session when the phone disconnects"
+      ]
+    }
+  ]
+}

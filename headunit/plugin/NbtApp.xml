@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<!-- Entry "NBTApp" in Media/Radio (insertStateID 20 = ST_Ent_Selection), after the Bluetooth audio row (focus 2270).
+     entryButtonFocusID must be unique in the whole HMI: 32752 and 32753 are known to be taken by another add-on
+     app, so this is 32754.
+     Text ids are NbtApp_ALL_Texts.zip, image ids NbtApp_ALL_Images.zip (tools/make_db.py); model, action, component
+     and state ids are local to this file. -->
+<pluginApps>
+  <pluginApp applicationType="Custom" applicationWeight="198" entryButtonFocusID="32754" insertAfterFocusID="2270" insertStateID="20" text="NBTApp">
+    <comment/>
+    <entryButton action="5" id="1" model="3" imageModel="4" previewModel="13">
+      <properties/>
+    </entryButton>
+    <actions>
+      <hmiAction id="5" target="10"/>
+      <hmiAction id="25" target="12"/>
+      <hmiAction id="26" target="14"/>
+      <hmiAction id="27" target="15"/>
+      <hmiAction id="29" target="16"/>
+      <!-- Handled by libNbtApp.so: tells the agent to forget every paired phone. -->
+      <raAction id="28"/>
+      <!-- Handled by libNbtApp.so: starts the agent's launcher. -->
+      <raAction id="30"/>
+    </actions>
+    <models>
+      <textIdModel id="3" textId="1">
+        <synonyms/>
+      </textIdModel>
+      <imageIdModel id="4" imageId="55001"/>
+      <imageIdModel id="12" imageId="55002"/>
+      <raPreviewModel id="13" modelType="StatePreview" previewState="11"/>
+      <textIdModel id="36" textId="2">
+        <synonyms/>
+      </textIdModel>
+      <raListModel id="37" modelType="Richtext"/>
+      <textIdModel id="38" textId="4">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="39" textId="5">
+        <synonyms/>
+      </textIdModel>
+      <!-- Pair a phone: libNbtApp.so points these three at the texts to show. -->
+      <textIdModel id="40" textId="10">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="41" textId="20">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="42" textId="20">
+        <synonyms/>
+      </textIdModel>
+      <!-- Forget all phones: 43 stays as it is, and libNbtApp.so points 44 at how it went. -->
+      <textIdModel id="43" textId="30">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="44" textId="31">
+        <synonyms/>
+      </textIdModel>
+      <!-- Start the agent: 45 is the menu row and the title; libNbtApp.so points 46 and 47 at how things stand. -->
+      <textIdModel id="45" textId="6">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="46" textId="50">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="47" textId="20">
+        <synonyms/>
+      </textIdModel>
+    </models>
+    <hmiStates>
+      <!-- The menu. -->
+      <hmiState id="10" text="NBTApp" textModel="3">
+        <components>
+          <button action="29" id="68" model="45" text="Start the agent"/>
+          <button action="26" id="66" model="38" text="Pair a phone"/>
+          <button action="27" id="67" model="39" text="Forget all phones"/>
+          <button action="25" id="65" model="36" text="About"/>
+        </components>
+      </hmiState>
+      <!-- Pair a phone: what is going on, and the code's two halves. The rows do nothing when pressed. The agent
+           has a pairing window open for as long as this state is shown (src/phone_screens.hpp). -->
+      <hmiState id="14" parentId="10" text="Pair a phone" textModel="38">
+        <components>
+          <button id="80" model="40" text="Asking the agent..."/>
+          <button id="81" model="41" text="---"/>
+          <button id="82" model="42" text="---"/>
+        </components>
+      </hmiState>
+      <!-- Forget all phones: the first row says what it costs, the second does it. -->
+      <hmiState id="15" parentId="10" text="Forget all phones" textModel="39">
+        <components>
+          <button id="85" model="43" text="Every phone must pair again"/>
+          <button action="28" id="86" model="44" text="Forget them now"/>
+        </components>
+      </hmiState>
+      <!-- Start the agent: the first row says whether the agent is running, the second starts it where it is not.
+           The rows are what src/phone_screens.hpp (StartScreen) says. -->
+      <hmiState id="16" parentId="10" text="Start the agent" textModel="45">
+        <components>
+          <button id="87" model="46" text="Looking for the agent..."/>
+          <button action="30" id="88" model="47" text="---"/>
+        </components>
+      </hmiState>
+      <!-- About: a non-selectable Richtext list; libNbtApp.so puts text 3 into model 37 in onInit. -->
+      <hmiState id="12" parentId="10" text="About" textModel="36">
+        <properties>
+          <property id="24" value="3"/>
+        </properties>
+        <components>
+          <list id="75" model="37">
+            <properties>
+              <property id="2" value="false"/>
+            </properties>
+          </list>
+        </components>
+      </hmiState>
+      <!-- Preview shown beside the Media/Radio list while the entry is highlighted (previewModel 13). -->
+      <hmiState id="11" text="NBTApp" textModel="3">
+        <components>
+          <image id="70" model="12">
+            <properties>
+              <property id="3" value="true"/>
+              <property id="9" value="549"/>
+              <property id="10" value="484"/>
+              <property id="20" value="0"/>
+              <property id="21" value="0"/>
+            </properties>
+          </image>
+        </components>
+      </hmiState>
+    </hmiStates>
+  </pluginApp>
+</pluginApps>

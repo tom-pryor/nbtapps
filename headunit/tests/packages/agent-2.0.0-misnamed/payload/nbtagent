@@ -1,0 +1,3 @@
+#!/bin/sh
+# Test package: a program that takes itself for another version than its package says.
+echo "nbtagent 2.0.1 (build stand-in)"

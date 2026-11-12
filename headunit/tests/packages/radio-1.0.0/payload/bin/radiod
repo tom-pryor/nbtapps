@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stands in for a program that registers the serial services the manifest declares. It registers nothing.
+echo "radiod: nothing to do"

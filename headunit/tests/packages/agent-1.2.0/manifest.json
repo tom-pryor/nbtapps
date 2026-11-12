@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.agent",
+  "name": "NBTApp agent",
+  "version": "1.2.0",
+  "requires": { "agent": ">=1.0.0" },
+  "install": {
+    "files": [
+      { "src": "payload/nbtagent", "dest": "${app}/nbtagent", "mode": "0755" },
+      { "src": "payload/nbtctl", "dest": "${app}/nbtctl", "mode": "0755" },
+      { "src": "payload/notes.txt", "dest": "${app}/share/notes.txt", "mode": "0644" },
+      { "src": "payload/nbtlaunch.sh", "dest": "${app}/nbtlaunch.sh", "mode": "0755" }
+    ]
+  }
+}

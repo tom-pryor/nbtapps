@@ -1,0 +1,12 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.runtime",
+  "name": "NBT Runtime",
+  "version": "3.0.0",
+  "requires": { "agent": ">=1.0.0" },
+  "install": {
+    "files": [
+      { "src": "payload/lib/", "dest": "${app}/lib/", "mode": "0644" }
+    ]
+  }
+}

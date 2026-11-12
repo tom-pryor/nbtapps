@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<resources>
+    <!-- Midnight: NbtDarkColors' background, so the launch screen and the window match the first frame. -->
+    <color name="nbt_background">#0A111E</color>
+</resources>

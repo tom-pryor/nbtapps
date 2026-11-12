@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NBTApp package manifest, manifestVersion 1",
+  "description": "manifest.json of a .nbtpkg. The file must also follow the strict JSON profile (UTF-8, no duplicate keys, integers only, at most 16 levels) and the cross-field rules that tools/nbtpkg.py checks: unique paths, every src and hook script listed in contents, a folder src with a folder dest, no destination placed twice, no serial service declared twice. Unknown keys are refused inside requires and install, and ignored elsewhere.",
+  "type": "object",
+  "required": [
+    "manifestVersion",
+    "id",
+    "name",
+    "version",
+    "contents"
+  ],
+  "properties": {
+    "manifestVersion": {
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/packageId"
+    },
+    "name": {
+      "$ref": "#/$defs/name"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/range"
+        }
+      }
+    },
+    "depends": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dependency"
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dependency"
+      }
+    },
+    "contents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/content"
+      }
+    },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file"
+          }
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/link"
+          }
+        },
+        "hooks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "preInstall": {
+              "$ref": "#/$defs/hook"
+            },
+            "postInstall": {
+              "$ref": "#/$defs/hook"
+            },
+            "preRemove": {
+              "$ref": "#/$defs/hook"
+            },
+            "postRemove": {
+              "$ref": "#/$defs/hook"
+            }
+          }
+        },
+        "reboot": {
+          "enum": [
+            "none",
+            "hmi-restart",
+            "required"
+          ]
+        },
+        "serialServices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/serialService"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "packageId": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+    },
+    "version": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "range": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^(>=|<=|>|<|=)?(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?( (>=|<=|>|<|=)?(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?)*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "path": {
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)*$"
+    },
+    "dependency": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/packageId"
+        },
+        "version": {
+          "$ref": "#/$defs/range"
+        }
+      }
+    },
+    "content": {
+      "type": "object",
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967294
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "src",
+        "dest",
+        "mode"
+      ],
+      "properties": {
+        "src": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)*/?$"
+        },
+        "dest": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^(\\$\\{(app|data|plugins)\\}/((?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)*/?)?|(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)+/?)$"
+        },
+        "mode": {
+          "type": "string",
+          "pattern": "^0[0-7]{3}$"
+        },
+        "config": {
+          "type": "boolean"
+        },
+        "replaces": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sha256"
+          ],
+          "properties": {
+            "sha256": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "target"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^(\\$\\{(app|data|plugins)\\})?(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)+$"
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+        }
+      }
+    },
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "script",
+        "timeout"
+      ],
+      "properties": {
+        "script": {
+          "$ref": "#/$defs/path"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        }
+      }
+    },
+    "serialService": {
+      "description": "A Bluetooth serial service that a program of the package registers with the car's Bluetooth stack while it runs: the name the registration is filed under, and the file name of the program. The agent removes the registration when that program is not running. The agent's own service name and the car's are not for a package.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "program"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^(?!(NBTApp|SPP)$)[A-Za-z0-9_-]{1,32}$"
+        },
+        "program": {
+          "type": "string",
+          "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._+-]{1,64}$"
+        }
+      }
+    }
+  }
+}

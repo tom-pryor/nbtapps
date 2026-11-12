@@ -1,0 +1,12 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.agent",
+  "name": "NBTApp agent",
+  "version": "2.4.0",
+  "requires": { "agent": ">=1.0.0" },
+  "install": {
+    "files": [
+      { "src": "payload/nbtagent", "dest": "${app}/nbtagent", "mode": "0755" }
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Test package: a program that would start, in a package that places no launcher for the starter to run.
+echo "nbtagent 2.4.0 (build stand-in)"

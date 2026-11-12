@@ -1,0 +1,10 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.noisy",
+  "name": "Noisy",
+  "version": "1.0.0",
+  "install": {
+    "files": [{ "src": "payload/note.txt", "dest": "${app}/note.txt", "mode": "0644" }],
+    "hooks": { "postInstall": { "script": "scripts/post-install.sh", "timeout": 30 } }
+  }
+}

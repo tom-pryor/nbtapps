@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stands in for a second program that wants the serial service name radio's program has. It registers nothing.
+echo "radio2d: nothing to do"

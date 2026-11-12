@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test package: a program that does not start here.
+echo "cannot run on this machine" >&2
+exit 3

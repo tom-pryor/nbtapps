@@ -1,0 +1,10 @@
+# Each project keeps its own .gitignore (headunit/, android/); this one holds what is ignored everywhere.
+
+# Claude Code: worktrees and local settings stay out of the repo
+.claude/
+
+# Editors and OS
+.idea/
+.vscode/
+*.iml
+.DS_Store

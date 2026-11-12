@@ -1,0 +1,21 @@
+{
+  "id": "org.nbtapp.runtime",
+  "description": "Shared libraries that native packages link against, built for QNX Neutrino 6.5.0 on ARMv7. Other packages pull this in as a dependency; there is nothing to open on the head unit.",
+  "homepage": "https://example.invalid/org.nbtapp.runtime",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "2.1.0",
+      "notes": [
+        "Smaller libraries",
+        "Adds a logging helper"
+      ]
+    },
+    {
+      "version": "2.0.0",
+      "notes": [
+        "Reworked library layout; packages built for 1.x need rebuilding"
+      ]
+    }
+  ]
+}

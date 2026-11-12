@@ -1,0 +1,7 @@
+Test keys only. They sign the sample packages that the host tests build (tests/make_packages.py).
+The private halves are public, so nothing signed with them is trustworthy: never build test-*.pub into an agent or
+an app that leaves the test bench.
+
+  test-package   stands in for a source's package key
+  test-other     a second package key, for "signed by another key" cases
+  test-index     stands in for a source's index key

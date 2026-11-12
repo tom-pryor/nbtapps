@@ -1,0 +1,21 @@
+{
+  "id": "org.nbtapp.launcher",
+  "description": "An HMI plugin that adds an Apps entry to the iDrive main menu and lists the installed packages that have something to show on screen.\n\nThe plugin is loaded into the head unit's HMI process, so the HMI restarts to finish the install.",
+  "homepage": "https://example.invalid/org.nbtapp.launcher",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "0.3.0",
+      "notes": [
+        "List scrolls with the iDrive controller",
+        "Needs agent 2.0.0 for the safer plugin update"
+      ]
+    },
+    {
+      "version": "0.2.1",
+      "notes": [
+        "Fixes the menu entry disappearing after a language change"
+      ]
+    }
+  ]
+}

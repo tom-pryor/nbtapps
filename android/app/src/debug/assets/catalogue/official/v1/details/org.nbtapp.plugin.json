@@ -1,0 +1,14 @@
+{
+  "id": "org.nbtapp.plugin",
+  "description": "The NBTApp entry in the car's iDrive menu. It shows the code a phone is paired with, and it is what starts the agent when the head unit starts.\n\nIn the sample catalogue its library is a stand-in that does nothing.",
+  "homepage": "https://example.invalid/org.nbtapp.plugin",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "1.0.0",
+      "notes": [
+        "First version as a package"
+      ]
+    }
+  ]
+}

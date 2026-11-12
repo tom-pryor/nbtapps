@@ -1,0 +1,19 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.syshook",
+  "name": "System file with hooks",
+  "version": "1.0.0",
+  "install": {
+    "files": [
+      { "src": "payload/extra.conf", "dest": "/opt/demo/extra.conf", "mode": "0644" }
+    ],
+    "links": [{ "path": "/opt/demo/extra-link", "target": "extra.conf" }],
+    "hooks": {
+      "preInstall":  { "script": "scripts/pre-install.sh",  "timeout": 30 },
+      "postInstall": { "script": "scripts/post-install.sh", "timeout": 30 },
+      "preRemove":   { "script": "scripts/pre-remove.sh",   "timeout": 30 },
+      "postRemove":  { "script": "scripts/post-remove.sh",  "timeout": 30 }
+    },
+    "reboot": "none"
+  }
+}

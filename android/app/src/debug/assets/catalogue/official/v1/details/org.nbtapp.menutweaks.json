@@ -1,0 +1,14 @@
+{
+  "id": "org.nbtapp.menutweaks",
+  "description": "Places a menu-order file under /opt/nbtapp-sample, outside the folders a package owns, and asks for a reboot. It is here to show how a package that writes to the system partition is flagged before it is installed. It replaces no stock file.",
+  "homepage": "https://example.invalid/org.nbtapp.menutweaks",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "1.0.1",
+      "notes": [
+        "Navigation and Media first"
+      ]
+    }
+  ]
+}

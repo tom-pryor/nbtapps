@@ -1,0 +1,14 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.radio2",
+  "name": "Radio Two",
+  "version": "1.0.0",
+  "install": {
+    "files": [
+      { "src": "payload/bin/radio2d", "dest": "${app}/bin/radio2d", "mode": "0755" }
+    ],
+    "serialServices": [
+      { "name": "TestRadio", "program": "radio2d" }
+    ]
+  }
+}

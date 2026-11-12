@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.plugin",
+  "name": "NBTApp iDrive plugin",
+  "version": "@VERSION@",
+  "requires": { "agent": ">=1.1.0" },
+  "install": {
+    "files": [
+      { "src": "payload/NbtApp/", "dest": "${plugins}/NbtApp/", "mode": "0644" }
+    ],
+    "reboot": "hmi-restart"
+  }
+}

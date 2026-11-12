@@ -1,0 +1,14 @@
+{
+  "id": "org.nbtapp.agent",
+  "description": "The program on the head unit that the app talks to. It installs, updates and removes packages, and checks that each one is signed before anything is placed on the car.\n\nThis package is how an agent that is already on the car is updated. In the sample catalogue its programs are stand-ins that do nothing.",
+  "homepage": "https://example.invalid/org.nbtapp.agent",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "2.0.0",
+      "notes": [
+        "Safer update of HMI plugins"
+      ]
+    }
+  ]
+}

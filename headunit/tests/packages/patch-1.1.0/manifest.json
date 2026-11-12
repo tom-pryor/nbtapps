@@ -1,0 +1,34 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.menupatch",
+  "name": "Menu patch",
+  "version": "1.1.0",
+  "install": {
+    "files": [
+      {
+        "src": "payload/menu.xml",
+        "dest": "/opt/demo/menu.xml",
+        "mode": "0644",
+        "replaces": {
+          "sha256": [
+            "f5ed03e7699d294872df8626a9013a7453c53fc9aa45dab5a6abf0e93ca2a807",
+            "d5becc83d30c0a0e6e78a504520d7720213479af45793510d968e37680644bd2"
+          ]
+        }
+      },
+      {
+        "src": "payload/settings.conf",
+        "dest": "${data}/settings.conf",
+        "mode": "0600",
+        "config": true
+      }
+    ],
+    "links": [
+      {
+        "path": "/opt/demo/menu-link",
+        "target": "menu.xml"
+      }
+    ],
+    "reboot": "required"
+  }
+}

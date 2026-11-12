@@ -1,0 +1,20 @@
+{
+  "id": "org.nbtapp.tzdata",
+  "description": "Time zone rules newer than the ones the head unit shipped with. Data only: no programs, no scripts and no restart.",
+  "homepage": "https://example.invalid/org.nbtapp.tzdata",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "2026.2.0",
+      "notes": [
+        "2026b rules"
+      ]
+    },
+    {
+      "version": "2026.1.0",
+      "notes": [
+        "2026a rules"
+      ]
+    }
+  ]
+}

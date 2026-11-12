@@ -1,0 +1,53 @@
+# Frames of the phone and agent protocol (see the plan document, "Framing"). Every implementation must agree
+# with every line: the agent's agent/frame.cpp (tests/agent/test_frame.cpp, which writes this file) and the
+# Android app's codec. tests/test_protocol_vectors.py checks the file with a third, independent reading.
+#
+#   magic HEX                                the bytes the side that dialled sends before its first frame
+#   frame TYPE FLAGS STREAM PAYLOAD FRAME    a good frame: its fields in decimal, its payload and the whole
+#                                            frame in hex; a payload of no bytes is written -
+#   bad BYTES                                bytes a decoder must refuse, and close the link over
+#
+# A line that starts with # says what the next line is. Cut off anywhere, a good frame is not an error: the
+# decoder waits for more.
+
+magic 4e42544c
+
+# a request
+frame 1 0 0 7b226964223a312c226d6574686f64223a22696e666f2e676574222c22706172616d73223a7b7d7d 01000000280000007b226964223a312c226d6574686f64223a22696e666f2e676574222c22706172616d73223a7b7d7de8bb9ec8
+# a response with text outside ASCII
+frame 1 0 0 7b226964223a312c22726573756c74223a7b226e616d65223a224772c3bcc39f6520e29c93227d7d 01000000280000007b226964223a312c22726573756c74223a7b226e616d65223a224772c3bcc39f6520e29c93227d7d1633dfa9
+# a MSG frame with an empty payload: a good frame, though not a message
+frame 1 0 0 - 0100000000000000f7df88a9
+# a DATA frame in the middle of stream 5
+frame 2 0 5 000102fffe 0200050005000000000102fffea68bf126
+# the last DATA frame of stream 5
+frame 2 2 5 656e64 0202050003000000656e64616ddcb3
+# a last DATA frame with no bytes, on the highest stream number
+frame 2 2 65535 - 0202ffff000000007da5389e
+# a DATA frame of 300 bytes, so the length needs its second byte
+frame 2 0 258 00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d 020002012c01000000070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d6bfb389b
+
+# frame type 0
+bad 00000000020000007b7dc1643d4c
+# frame type 3
+bad 03000000020000007b7dc2df0aa7
+# a MSG frame with the reserved compression flag
+bad 01010000020000007b7dbc1b84b4
+# a MSG frame with the last-frame flag
+bad 01020000020000007b7d7927098d
+# a MSG frame with a stream number
+bad 01000100020000007b7d610f556f
+# a DATA frame on stream 0
+bad 02000000010000007896ec41ab
+# a DATA frame with the reserved compression flag
+bad 020307000100000078fbd569e0
+# a DATA frame with an unknown flag
+bad 020407000100000078e2dcacea
+# a wrong check value
+bad 01000000020000007b7dfe0fffa3
+# one payload byte changed after the check value was made
+bad 0200070004000000615863647e5fbe3d
+# a length of 65,537: refused from the header alone, with no payload behind it
+bad 0100000001000100
+# a length of 4 GiB less one
+bad 02000100ffffffff
