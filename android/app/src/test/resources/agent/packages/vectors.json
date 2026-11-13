@@ -216,6 +216,21 @@
       "what": "built from tests/packages/hello-1.3.0-failing"
     },
     {
+      "id": "org.nbtapp.logger",
+      "version": "1.0.0",
+      "name": "Logger",
+      "sha256": "25412c6d8a21ddfa99736c44f66f7667e199869990ce262f251c6d6679ed60c3",
+      "size": 1332,
+      "manifestSha256": "46c79cb1979086437e4dd5bc54ab6b6277de9a5d680a2256ac90e929306283df",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "326dad16ff9cd356905420415bb140c1c650ea040bb121e096439d5d9a1c2f87426156dca44b18674475a67a96b930088d94b58b4771b558cc5237836dacd30e",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.logger-1.0.0.nbtpkg",
+      "what": "built from tests/packages/logger-1.0.0"
+    },
+    {
       "id": "org.nbtapp.longname",
       "version": "1.0.0",
       "name": "Ein sehr langer Name \u2713 mit Umlauten \u00e4\u00f6\u00fc und \u65e5\u672c\u8a9e, genau 64 Zeiche",

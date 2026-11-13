@@ -10,7 +10,9 @@ spec/protocol/constants.txt, which each side's own test compares with its code. 
   2. session.vectors: every line is one whole frame; every message is inside the strict JSON profile and is a
      request, a response or an event; each side numbers its requests from 1; every request has exactly one answer;
      the events of a job are numbered from 1 with no gap; and the DATA frames of each stream add up to the size its
-     blob.fetch reply gave, ending on the frame that has the last-frame flag; the session has a pairing.issue
+     blob.fetch reply gave, ending on the frame that has the last-frame flag; those of a files.fetch, from the
+     agent, are the size its reply gave once inflated (zlib's own inflate, when they are deflated), end on the
+     frame with that flag, and come before the answer to a files.cancel of the stream; the session has a pairing.issue
      that gives a key and an `auth` whose two proofs are the ones that key gives, worked out here from the bytes
      of the two hello payloads; until that `auth` is done the agent answers nothing but hello, ping, auth and
      pairing.issue with a result; and the session ends with the agent's link.closing, with a reason that is one
@@ -122,6 +124,9 @@ def check_session():
     next_id = {">": 1, "<": 1}          # the next request id of each side
     waiting = {">": {}, "<": {}}        # requests of each side with no answer yet: id -> method
     streams = {}                        # open streams, phone to agent: number -> bytes still due
+    files = {}                          # open files streams, agent to phone: number -> [size, inflater or None, bytes]
+    fetching = {}                       # files.fetch requests of the phone with no answer yet: id -> compress
+    cancelling = {}                     # files.cancel requests of the phone with no answer yet: id -> stream
     job_seq = {}                        # planId -> last seq seen
     frames = 0
     versions = set()                    # (protocolMin, protocolMax) of every hello and of every answer to one
@@ -155,8 +160,20 @@ def check_session():
             fail("%s: a frame after link.closing, which is the last thing said on a link" % where)
         frames += 1
         other = "<" if direction == ">" else ">"
+        if kind == DATA and direction == "<":
+            # A files stream: the bytes it holds are those of the file once inflated.
+            if stream not in files:
+                fail("%s: a DATA frame for a files stream that is not open" % where)
+            size, inflater, got = files[stream]
+            got += inflater.decompress(payload) if inflater else payload
+            files[stream][2] = got
+            if len(got) > size or (flags & LAST and (len(got) != size or (inflater and (not inflater.eof or inflater.unused_data)))):
+                fail("%s: the files stream is not as long as its reply said, or does not end with its last frame" % where)
+            if flags & LAST:
+                del files[stream]
+            continue
         if kind == DATA:
-            if direction != ">" or stream not in streams:
+            if stream not in streams:
                 fail("%s: a DATA frame for a stream that is not open" % where)
             streams[stream] -= len(payload)
             if streams[stream] < 0 or (flags & LAST) != (LAST if streams[stream] == 0 else 0):
@@ -176,6 +193,10 @@ def check_session():
             if message["method"] == "hello":
                 versions.add((message["params"].get("protocolMin"), message["params"].get("protocolMax")))
                 hello[direction] = payload
+            if message["method"] == "files.fetch" and direction == ">":
+                fetching[message["id"]] = message["params"].get("compress")
+            if message["method"] == "files.cancel" and direction == ">":
+                cancelling[message["id"]] = message["params"].get("stream")
             if message["method"] == "auth" and direction == ">":
                 if "nonce" in message["params"]:
                     nonces[">"] = bytes.fromhex(message["params"]["nonce"])
@@ -221,12 +242,24 @@ def check_session():
                 trusted = True
             elif method == "blob.fetch":
                 streams[message["result"]["stream"]] = message["result"]["size"]
+            elif method == "files.fetch" and direction == "<":
+                compress = fetching.pop(message["id"])
+                if message["result"].get("compress") != compress or compress not in ("deflate", "none"):
+                    fail("%s: a files.fetch reply with another compress than was asked for" % where)
+                if message["result"]["size"] > 0:
+                    files[message["result"]["stream"]] = [message["result"]["size"],
+                                                          zlib.decompressobj(-15) if compress == "deflate" else None, b""]
+                elif "stream" in message["result"]:
+                    fail("%s: a files.fetch reply of size 0 with a stream" % where)
+            elif method == "files.cancel" and direction == "<":
+                # Nothing more comes on the stream after this answer.
+                files.pop(cancelling.pop(message["id"]), None)
             elif method == "hello":
                 versions.add((message["result"].get("protocolMin"), message["result"].get("protocolMax")))
                 hello[direction] = payload
         else:
             fail("%s: not a request, a response or an event" % where)
-    if not saw_magic or waiting[">"] or waiting["<"] or streams:
+    if not saw_magic or waiting[">"] or waiting["<"] or streams or files:
         fail("session.vectors ends with a request unanswered or a stream open")
     if frames < 40 or len(job_seq) < 2 or not trusted or not closing:
         fail("session.vectors holds less than expected")

@@ -11,15 +11,16 @@ is handed the head unit's folder, the socket's folder and the key, and nothing e
 runs here, and reaches the agent through the socket. It plays the phone: it offers
 the packages of a folder (the "stick") and serves them when the agent asks. The script drives a plan, an install
 with a dependency, an upgrade, an upgrade that fails and is undone, a fetch that the controller cancels, a fetch
-whose link drops and is resumed, removals, and a restart of the agent, and after each looks at what the agent says
-and at what is on disk. It also is a phone on the agent's debug TCP link, which the phone app on an emulator uses:
+whose link drops and is resumed, removals, the logs of a package pulled (`nbtctl logs` and `nbtctl pull`, and once
+read off the local socket here, with Python's own inflate), and a restart of the agent, and after each looks at what
+the agent says and at what is on disk. It also is a phone on the agent's debug TCP link, which the phone app on an emulator uses:
 refused until it is paired, paired by the code `nbtctl pair` prints, let in by `auth`, and forgotten again, and
 told with link.closing why its link closes when it is forgotten and when the agent stops.
 
 One package is made here: 2.5 MiB that do not compress, so that its archive takes three ranges of the 1 MiB the
 agent asks for at a time and many frames. The others come from tests/make_packages.py.
 """
-import hashlib, hmac, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time
+import hashlib, hmac, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time, zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
@@ -292,6 +293,54 @@ def make_bulk():
     return sha256_of(os.path.join(source, "payload", "bulk.bin"))
 
 
+def pull_here(package, path):
+    """files.fetch over the local socket, read with a frame codec and an inflate that are not the agent's, in frames
+    of 4,096 bytes: returns (the reply's result, the bytes the stream inflates to, the number of DATA frames)."""
+    link = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    link.settimeout(10)
+    link.connect(SOCKET)
+    link.sendall(wire.MAGIC)
+    buffered = [b""]
+
+    def send(number, method, params):
+        text = json.dumps({"id": number, "method": method, "params": params}, separators=(",", ":")).encode()
+        link.sendall(wire.encode(wire.MSG, 0, 0, text))
+
+    def frame():
+        while True:
+            got = wire.decode(buffered[0])
+            if got[0] == "more":
+                chunk = link.recv(65536)
+                check(chunk, "the agent closed the local link during files.fetch")
+                buffered[0] += chunk
+                continue
+            check(got[0] == "frame", "the agent sent a bad frame: %s" % (got[1:],))
+            buffered[0] = buffered[0][got[5]:]
+            return got[1:5]
+
+    try:
+        send(1, "hello", {"protocolMin": 1, "protocolMax": 1, "role": "cli", "maxFrame": 4096, "capabilities": []})
+        kind, _, _, payload = frame()
+        check(kind == wire.MSG and json.loads(payload).get("id") == 1, "hello on the local socket")
+        send(2, "files.fetch", {"package": package, "area": "logs", "path": path, "compress": "deflate"})
+        kind, _, _, payload = frame()
+        reply = json.loads(payload)
+        check(kind == wire.MSG and reply.get("id") == 2 and "result" in reply, "files.fetch %s" % path, repr(reply))
+        result = reply["result"]
+        inflater, data, frames = zlib.decompressobj(-15), b"", 0
+        while True:
+            kind, flags, stream, payload = frame()
+            check(kind == wire.DATA and stream == result["stream"] and len(payload) <= 4096, "a frame of the stream")
+            data += inflater.decompress(payload)
+            frames += 1
+            if flags & wire.LAST:
+                break
+        check(inflater.eof and not inflater.unused_data, "the stream is not one whole deflate stream")
+        return result, data, frames
+    finally:
+        link.close()
+
+
 def run():
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(STICK)
@@ -392,15 +441,57 @@ def run():
         check(os.listdir(os.path.join(HU, "staging", "blobs")) == [], "archives were left in staging",
               str(os.listdir(os.path.join(HU, "staging", "blobs"))))
 
+        # ---- a package's logs: listed, and pulled. Its hook wrote two into ${data} and one into ${tmp}, which
+        # the agent made for it; the test puts the one in a fixed place, which is outside the package's folders.
+        shutil.copy(os.path.join(DATA, "good", "org.nbtapp.logger-1.0.0.nbtpkg"), STICK)
+        out = ok("install", "--from", STICK, "org.nbtapp.logger")
+        check("job succeeded" in out, "install the logger", out)
+        logger_data, logger_tmp = os.path.join(HU, "data", "org.nbtapp.logger"), os.path.join(HU, "tmp", "org.nbtapp.logger")
+        os.makedirs(os.path.join(HU, "system", "tmp"), exist_ok=True)
+        with open(os.path.join(HU, "system", "tmp", "logger.log"), "wb") as f:
+            f.write(b"a log in a fixed place\n")
+        where = {"${data}/log/logger.log": os.path.join(logger_data, "log", "logger.log"),
+                 "${data}/log/older.log": os.path.join(logger_data, "log", "older.log"),
+                 "${tmp}/crash.txt": os.path.join(logger_tmp, "crash.txt"),
+                 "/tmp/logger.log": os.path.join(HU, "system", "tmp", "logger.log")}
+        listing = ok("logs", "org.nbtapp.logger")
+        listed = [line.split(" ", 2)[2] for line in listing.splitlines()]
+        check(sorted(listed) == sorted(where), "nbtctl logs", listing)
+        for line in listing.splitlines():
+            size, _, path = line.split(" ", 2)
+            check(int(size) == os.path.getsize(where[path]), "the size nbtctl logs gives for " + path, listing)
+        pulled = os.path.join(WORK, "pulled")
+        for path, real in sorted(where.items()):
+            with open(real, "rb") as f:
+                expected = f.read()
+            for extra in ([], ["--none"]):
+                out = ok("pull", "org.nbtapp.logger", path, "--out", pulled, *extra)
+                with open(pulled, "rb") as f:
+                    check(f.read() == expected, "nbtctl pull %s %s" % (path, " ".join(extra)), out)
+                check(out.startswith("pulled %d bytes, " % len(expected)), "what nbtctl pull says", out)
+        with open(where["${data}/log/logger.log"], "rb") as f:
+            log_bytes = f.read()
+        ok("pull", "org.nbtapp.logger", "${data}/log/logger.log", "--out", pulled, "--offset", "1000", "--length", "500")
+        with open(pulled, "rb") as f:
+            check(f.read() == log_bytes[1000:1500], "a range of a log")
+        code, out = ctl("pull", "org.nbtapp.logger", "${data}/log/notes.txt", "--out", pulled)
+        check(code == 1 and "not-found" in out, "a file no entry names", out)
+        # The same log, read off the link here: zlib's raw deflate as Python's own inflate reads it.
+        result, data, frames = pull_here("org.nbtapp.logger", "${data}/log/logger.log")
+        check(data == log_bytes and result["size"] == len(log_bytes) and frames >= 2, "the log, read here", repr(result))
+        check(ok("logs", "org.nbtapp.agent") == "", "the agent's own logs, where no launcher named one")
+
         # ---- removal
         code, out = ctl("remove", "org.nbtapp.runtime")
         check(code == 1 and "required-by" in out, "removing a package that is depended on", out)
         code, out = ctl("remove", "org.nbtapp.nothere")
         check(code == 1 and "not-installed" in out, "removing a package that is not there", out)
-        out = ok("remove", "--delete-data", "org.nbtapp.runtime", "org.nbtapp.hello", "org.nbtapp.bulk")
+        out = ok("remove", "--delete-data", "org.nbtapp.runtime", "org.nbtapp.hello", "org.nbtapp.bulk", "org.nbtapp.logger")
         check("job succeeded" in out and "postRemove|" in out, "removal", out)
         check(installed() == [], "after removal", "\n".join(installed()))
         check(not os.path.exists(hello) and not os.path.exists(os.path.join(HU, "data", "org.nbtapp.hello")), "files were left behind")
+        check(not os.path.exists(logger_tmp), "${tmp} was left behind")
+
 
         # ---- other requests
         code, out = ctl("call", "ping")
@@ -437,6 +528,8 @@ def run():
         log = f.read().decode("utf-8", "replace")
     check("TEST KEY" in log, "the agent did not say that it trusts a test key")
     check("DEBUG TCP" in log and "paired in the clear" in log, "the agent did not say what its TCP link is")
+    check("files.fetch org.nbtapp.logger ${data}/log/logger.log: stream" in log and " bytes as " in log,
+          "the agent's log has no line for a files stream")
     shutil.rmtree(WORK, ignore_errors=True)
 
 

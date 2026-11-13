@@ -2,7 +2,8 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 // Host test for agent/inflate.cpp: raw deflate streams made with zlib itself come back intact however the input and
 // the output are cut up; a stream that ends early, is damaged, or has bytes after its end is told apart; CRC32
-// matches the standard check value.
+// matches the standard check value. And the Deflater, which files.fetch sends a file with: what it makes in pieces
+// zlib inflates whole, and an Inflater too.
 
 #include "../../agent/inflate.hpp"
 
@@ -139,6 +140,48 @@ int main() {
     in = (const uint8_t*)tiny.data();
     n = tiny.size();
     assert(inflater.inflate(&in, &n, out, sizeof out, &produced) == Inflater::kError && produced == 0);
+
+    // 7. The Deflater: fed in pieces of any size, with the end given with the last piece or after it, its output is
+    //    one raw stream that zlib's own inflate reads back whole, with nothing after it.
+    const size_t deflatePieces[] = {1, 1000, 16384, 1u << 20};
+    for (size_t s = 0; s < samples.size(); ++s) {
+        for (size_t i = 0; i < 4; ++i) {
+            if (samples[s].size() > 10000 && deflatePieces[i] == 1) continue;
+            for (int endApart = 0; endApart < 2; ++endApart) {
+                Deflater deflater;
+                std::string made;
+                size_t at = 0;
+                do {
+                    size_t take = samples[s].size() - at < deflatePieces[i] ? samples[s].size() - at : deflatePieces[i];
+                    bool last = at + take == samples[s].size();
+                    assert(deflater.deflate(samples[s].data() + at, take, last && !endApart, &made));
+                    at += take;
+                } while (at < samples[s].size());
+                if (endApart) assert(deflater.deflate("", 0, true, &made));
+                // Finished: nothing more goes in.
+                assert(!deflater.deflate("x", 1, true, &made));
+                z_stream z;
+                memset(&z, 0, sizeof z);
+                assert(inflateInit2(&z, -MAX_WBITS) == Z_OK);
+                std::vector<unsigned char> back(samples[s].size() + 16);
+                z.next_in = (Bytef*)made.data();
+                z.avail_in = (uInt)made.size();
+                z.next_out = &back[0];
+                z.avail_out = (uInt)back.size();
+                assert(inflate(&z, Z_FINISH) == Z_STREAM_END && z.avail_in == 0);
+                assert(std::string((const char*)&back[0], back.size() - z.avail_out) == samples[s]);
+                inflateEnd(&z);
+                std::string again;
+                assert(run(made, 4096, 4096, &again, &leftover) == Inflater::kDone && again == samples[s] && leftover == 0);
+            }
+        }
+    }
+    // Text, as logs are, shrinks several times.
+    {
+        Deflater deflater;
+        std::string made;
+        assert(deflater.deflate(repetitive.data(), repetitive.size(), true, &made) && made.size() * 10 < repetitive.size());
+    }
 
     printf("test_inflate: ok\n");
     return 0;

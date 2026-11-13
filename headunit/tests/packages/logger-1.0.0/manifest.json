@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.logger",
+  "name": "Logger",
+  "version": "1.0.0",
+  "logs": [
+    { "path": "${data}/log/*.log" },
+    { "path": "${tmp}/crash.txt" },
+    { "path": "/tmp/logger.log" }
+  ],
+  "install": {
+    "files": [{ "src": "payload/note.txt", "dest": "${app}/note.txt", "mode": "0644" }],
+    "hooks": { "postInstall": { "script": "scripts/post-install.sh", "timeout": 30 } }
+  }
+}

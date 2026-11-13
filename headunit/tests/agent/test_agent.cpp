@@ -23,11 +23,13 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <zlib.h>
 
 #include <map>
+#include <set>
 #include <vector>
 
 #include "../../agent/ed25519.hpp"
@@ -178,7 +180,7 @@ class Phone {
 public:
     explicit Phone(int fd)
         : closed(false), maxFrame(65536), dataFrame(65536), serve(true), stallAt(-1), errorAt(-1), lieAboutSize(0),
-          streamed(0), record(false), answerPings(true), pings(0), deaf(false), fd_(fd), nextId_(1), nextStream_(1),
+          streamed(0), record(false), answerPings(true), pings(0), deaf(false), frames(0), fd_(fd), nextId_(1), nextStream_(1),
           streaming_(false), stream_(0), sent_(0) {
         fcntl(fd_, F_SETFL, fcntl(fd_, F_GETFL, 0) | O_NONBLOCK);
         out_ = "NBTL";
@@ -253,9 +255,22 @@ public:
             unsigned long crc = ::crc32(0L, p, (uInt)(8 + length));
             unsigned long theirs = p[8 + length] | (p[9 + length] << 8) | (p[10 + length] << 16) | ((unsigned long)p[11 + length] << 24);
             CHECK(crc == theirs);
-            CHECK(p[0] == 1 && p[1] == 0 && p[2] == 0 && p[3] == 0);   // the agent sends messages only
             std::string payload = in_.substr(8, length);
-            note('<', 1, payload, in_.substr(0, 12 + length));
+            note('<', p[0], payload, in_.substr(0, 12 + length));
+            if (p[0] == 2) {
+                // DATA of a files stream: bit 1 of the flags marks the last frame, and bit 0 stays reserved.
+                CHECK((p[1] & ~2) == 0);
+                unsigned stream = p[2] | (p[3] << 8);
+                bool last = (p[1] & 2) != 0;
+                CHECK_IN(num(stream), stream != 0 && ended.count(stream) == 0);
+                received[stream] += payload;
+                ++frames;
+                if (last) ended.insert(stream);
+                heard.push_back("D" + num(stream) + (last ? " last" : ""));
+                in_.erase(0, 12 + length);
+                continue;
+            }
+            CHECK(p[0] == 1 && p[1] == 0 && p[2] == 0 && p[3] == 0);   // a message
             in_.erase(0, 12 + length);
             handle(payload);
         }
@@ -303,6 +318,10 @@ public:
     std::string lastHeard;                       // the payload of the last message that came, of whatever form
     std::string lastSent;                        // the payload of the last message it sent
     std::string helloSent, helloReply;           // the payloads of its hello and of the answer: what `auth` covers
+    std::map<unsigned, std::string> received;    // the DATA the agent sent, by stream
+    std::set<unsigned> ended;                    // the streams whose last frame has come
+    unsigned frames;                             // DATA frames from the agent in all
+    std::vector<std::string> heard;              // what came, in order: "D<stream>[ last]", "R<id>", "E<event>"
 
 private:
     void note(char direction, unsigned type, const std::string& payload, const std::string& frame) {
@@ -330,9 +349,11 @@ private:
             fetch(m.root.find("id").integer(), m.params);
         } else if (m.root.find("event").isString()) {
             events.push_back(text);
+            heard.push_back("E" + m.root.find("event").string());
         } else {
             CHECK_IN(text, m.root.find("id").isInteger());
             replies[m.root.find("id").integer()] = text;
+            heard.push_back("R" + num(m.root.find("id").integer()));
         }
     }
 
@@ -697,9 +718,10 @@ static void testHello() {
     Parsed r(b.call(p, "hello", "{\"protocolMin\":1,\"protocolMax\":7,\"role\":\"cli\",\"maxFrame\":4096,\"capabilities\":[\"zstd\"],\"extra\":{\"a\":[1]}}"));
     CHECK(integer(r.result, "protocolMin") == 1 && integer(r.result, "protocolMax") == 1 && str(r.result, "role") == "agent");
     CHECK(str(r.result, "headUnitId") == kHeadUnitId && str(r.result, "agentVersion") == "1.0.0");
-    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 2 &&
+    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 3 &&
           r.result.find("capabilities").at(0).string() == kCapabilityAutostart &&
-          r.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature);
+          r.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature &&
+          r.result.find("capabilities").at(2).string() == kCapabilityFiles);
     CHECK(Parsed(b.call(p, "hello", kGoodHello)).code() == "bad-state");
     // Methods that are not there.
     const char* missing[] = {"job.frobnicate", "pairing.frobnicate", ""};
@@ -2778,6 +2800,21 @@ static void testAgentUpdate() {
 
 // ---- the session that is written down -----------------------------------------------------------------------------
 
+static void touch(const std::string& path, long seconds) {
+    struct timeval times[2];
+    times[0].tv_sec = times[1].tv_sec = seconds;
+    times[0].tv_usec = times[1].tv_usec = 0;
+    CHECK_IN(path, utimes(path.c_str(), times) == 0);
+}
+
+static std::string listParams(const std::string& package) { return "{\"package\":\"" + package + "\",\"area\":\"logs\"}"; }
+
+// files.fetch of one path; `more` is the rest of the params, after the path.
+static std::string fetchParams(const std::string& package, const std::string& path, const std::string& more = ",\"compress\":\"deflate\"") {
+    return "{\"package\":\"" + package + "\",\"area\":\"logs\",\"path\":\"" + path + "\"" + more + "}";
+}
+
+
 static std::string sessionText() {
     Bench b("session");
     b.platform.fakeFree = 500000000;
@@ -2824,6 +2861,17 @@ static std::string sessionText() {
     // And out again.
     Parsed removal(b.call(p, "job.plan", planParams("", "org.nbtapp.runtime!", "")));
     startJob(b, p, str(removal.result, "planId"));
+    // The agent's own log: listed, and sent deflated; and a files.cancel of that stream, which has ended by then.
+    {
+        std::string own = b.root + "/run/log/agent.log", text;
+        for (int i = 0; i < 40; ++i) text += "a line of the agent's log, " + num(i) + " of 40, as such a line might read\n";
+        put(own, text);
+        touch(own, 1794400000);
+        b.agent.setOwnLog(own);
+        b.call(p, "files.list", listParams(kAgentId));
+        Parsed fetched(b.call(p, "files.fetch", fetchParams(kAgentId, "agent.log")));
+        b.call(p, "files.cancel", "{\"stream\":" + num(integer(fetched.result, "stream")) + "}");
+    }
     b.call(p, "system.restart", "{\"kind\":\"hmi\"}");
     // The phone's pairing is ended on the car's screen: the agent says that it closes the link, and why, and
     // closes it.
@@ -2853,7 +2901,9 @@ static std::string sessionText() {
            "# test key as its only package key, 500,000,000 bytes free everywhere, the head-unit id, plan ids, pairing\n"
            "# code, pairing key and nonce that the test's counter gives, and a clock that stands still, so\n"
            "# job.progress comes only when something changes and no ping is due. The package is\n"
-           "# tests/packages/runtime-2.1.0 as tests/make_packages.py builds it.\n\n"
+           "# tests/packages/runtime-2.1.0 as tests/make_packages.py builds it. Near the end the phone pulls the\n"
+           "# agent's own log, a file of 40 lines the test writes, with files.list and files.fetch: the DATA frames\n"
+           "# from the agent are one raw deflate stream (RFC 1951), as the zlib of the test bench's image makes it.\n\n"
            "magic 4e42544c\n\n" +
            p->transcript;
 }
@@ -2876,7 +2926,7 @@ static void testDetachedSignature() {
         Bench b("detached");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 2 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 3 &&
                                     hello.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature);
         // First the version before it, signed in the usual way: one key then verifies both, so the upgrade's key
         // matches the installed one.
@@ -2945,7 +2995,7 @@ static void testAutostart() {
         Bench b("autostart-nowhere", false, false, "1.1.0");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 2 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 3 &&
                                     hello.result.find("capabilities").at(0).string() == kCapabilityAutostart);
         Parsed state(b.call(p, "autostart.get", "{}"));
         CHECK(state.result.size() == 4 && !flag(state.result, "on") && !flag(state.result, "available"));
@@ -3043,6 +3093,270 @@ static void testAutostart() {
     }
 }
 
+// ---- files: a package's logs, pulled ------------------------------------------------------------------------------
+
+static const char kLogger[] = "org.nbtapp.logger-1.0.0";
+static const char kLoggerId[] = "org.nbtapp.logger";
+
+// A raw deflate stream inflated with zlib itself. The test fails if it is not one whole stream and nothing more.
+static std::string inflated(const std::string& packed) {
+    z_stream z;
+    memset(&z, 0, sizeof z);
+    CHECK(inflateInit2(&z, -MAX_WBITS) == Z_OK);
+    std::string out;
+    z.next_in = (Bytef*)packed.data();
+    z.avail_in = (uInt)packed.size();
+    int rc = Z_OK;
+    while (rc == Z_OK) {
+        unsigned char buffer[65536];
+        z.next_out = buffer;
+        z.avail_out = sizeof buffer;
+        rc = inflate(&z, Z_NO_FLUSH);
+        out.append((const char*)buffer, sizeof buffer - z.avail_out);
+        if (rc == Z_BUF_ERROR && z.avail_in == 0) break;
+    }
+    CHECK_IN("inflate: " + num(rc), rc == Z_STREAM_END && z.avail_in == 0);
+    inflateEnd(&z);
+    return out;
+}
+
+// files.fetch, served to its end. Returns the reply; *bytes is the file as the stream gave it.
+static std::string fetched(Bench& b, Phone* p, const std::string& params, std::string* bytes) {
+    std::string text = b.call(p, "files.fetch", params);
+    Parsed r(text);
+    bytes->clear();
+    if (!r.result.isObject()) return text;
+    if (!r.result.find("stream").present()) {
+        CHECK_IN(text, integer(r.result, "size") == 0);
+        return text;
+    }
+    unsigned stream = (unsigned)integer(r.result, "stream");
+    CHECK_IN(text, p->ended.count(stream) == 1);
+    *bytes = str(r.result, "compress") == "deflate" ? inflated(p->received[stream]) : p->received[stream];
+    CHECK_IN(text, (long long)bytes->size() == integer(r.result, "size"));
+    return text;
+}
+
+// Where in what a phone heard an entry is, or -1.
+static long position(const Phone* p, const std::string& what) {
+    for (size_t i = 0; i < p->heard.size(); ++i) {
+        if (p->heard[i] == what) return (long)i;
+    }
+    return -1;
+}
+
+// Turns of the agent while the phone only writes.
+static void turns(Bench& b, Phone* p, int count) {
+    for (int i = 0; i < count; ++i) {
+        p->pump();
+        b.agent.turn(0);
+    }
+}
+
+static void testFiles() {
+    Bench b("files");
+    Phone* p = b.phone();
+    // Nothing installed, and requests that are no use.
+    CHECK(Parsed(b.call(p, "files.list", listParams(kLoggerId))).code() == "not-found");
+    CHECK(Parsed(b.call(p, "files.list", "{\"package\":\"org.nbtapp.logger\",\"area\":\"data\"}")).code() == "unsupported");
+    CHECK(Parsed(b.call(p, "files.list", "{\"package\":\"org.nbtapp.logger\"}")).code() == "bad-request");
+    CHECK(Parsed(b.call(p, "files.list", "{\"package\":\"../state\",\"area\":\"logs\"}")).code() == "bad-request");
+    const char* badFetch[] = {"", ",\"compress\":\"zstd\"", ",\"compress\":\"none\",\"offset\":-1", ",\"compress\":\"none\",\"length\":0",
+                              ",\"compress\":\"none\",\"offset\":\"0\""};
+    for (size_t i = 0; i < sizeof badFetch / sizeof badFetch[0]; ++i) {
+        CHECK_IN(badFetch[i], Parsed(b.call(p, "files.fetch", fetchParams(kLoggerId, "${data}/log/logger.log", badFetch[i]))).code() == "bad-request");
+    }
+
+    install(b, p, kLogger, kLogger);
+    std::string data = b.platform.dataDir(kLoggerId), tmp = b.platform.tmpDir(kLoggerId), fixed = b.root + "/system/tmp/logger.log";
+    // ${tmp} was made for the package, and its hook found it in NBT_TMP_DIR.
+    CHECK(fs::kindOf(tmp + "/crash.txt") == fs::kFile);
+    // The third entry is outside the package's folders: the test puts a file there, and the times in order.
+    put(fixed, "a log in a fixed place\n");
+    touch(data + "/log/logger.log", 1794400300);
+    touch(tmp + "/crash.txt", 1794400200);
+    touch(data + "/log/older.log", 1794400100);
+    touch(fixed, 1794400000);
+    // A link among the logs, to the pairing keys: not listed, and not served.
+    CHECK(fs::makeLink(b.platform.stateDir() + "/phones.json", data + "/log/keys.log", 0));
+
+    {
+        Parsed r(b.call(p, "files.list", listParams(kLoggerId)));
+        json::Value files = r.result.find("files");
+        std::string listed;
+        for (size_t i = 0; i < files.size(); ++i) listed += str(files.at(i), "path") + " " + num(integer(files.at(i), "modified")) + "; ";
+        CHECK_IN(listed, listed == "${data}/log/logger.log 1794400300; ${tmp}/crash.txt 1794400200; ${data}/log/older.log 1794400100; "
+                                   "/tmp/logger.log 1794400000; ");
+        CHECK(integer(files.at(1), "size") == 13 && integer(files.at(3), "size") == 23 && r.result.find("more").isBool() &&
+              !r.result.find("more").boolean());
+        // packages.list says which packages have logs to list.
+        Parsed list(b.call(p, "packages.list", "{}"));
+        CHECK(list.result.find("packages").size() == 1 && flag(list.result.find("packages").at(0), "logs"));
+    }
+
+    // Each file comes back as it is on disk: deflated, much smaller, and as it is.
+    std::string log = testutil::readFile(data + "/log/logger.log"), bytes;
+    {
+        Parsed r(fetched(b, p, fetchParams(kLoggerId, "${data}/log/logger.log"), &bytes));
+        CHECK(bytes == log && str(r.result, "compress") == "deflate" && log.size() > 200000);
+        CHECK(p->received[(unsigned)integer(r.result, "stream")].size() * 5 < log.size());
+        Parsed none(fetched(b, p, fetchParams(kLoggerId, "${data}/log/logger.log", ",\"compress\":\"none\""), &bytes));
+        CHECK(bytes == log && str(none.result, "compress") == "none" && integer(none.result, "stream") == integer(r.result, "stream") + 1);
+        fetched(b, p, fetchParams(kLoggerId, "/tmp/logger.log"), &bytes);
+        CHECK(bytes == "a log in a fixed place\n");
+        fetched(b, p, fetchParams(kLoggerId, "${tmp}/crash.txt", ",\"compress\":\"none\""), &bytes);
+        CHECK(bytes == "crash report\n");
+    }
+    // A range; a length past the end stops at the end; an offset at the end has nothing to send and no stream; one
+    // past it is out of range.
+    fetched(b, p, fetchParams(kLoggerId, "${data}/log/logger.log", ",\"offset\":100,\"length\":50,\"compress\":\"deflate\""), &bytes);
+    CHECK(bytes == log.substr(100, 50));
+    fetched(b, p, fetchParams(kLoggerId, "${data}/log/logger.log", ",\"offset\":" + num((long long)log.size() - 10) + ",\"length\":1000,\"compress\":\"none\""), &bytes);
+    CHECK(bytes == log.substr(log.size() - 10));
+    unsigned framesBefore = p->frames;
+    Parsed empty(fetched(b, p, fetchParams(kLoggerId, "${data}/log/logger.log", ",\"offset\":" + num((long long)log.size()) + ",\"compress\":\"deflate\""), &bytes));
+    CHECK(empty.result.isObject() && integer(empty.result, "size") == 0 && !empty.result.find("stream").present() && p->frames == framesBefore);
+    CHECK(Parsed(b.call(p, "files.fetch", fetchParams(kLoggerId, "${data}/log/logger.log", ",\"offset\":" + num((long long)log.size() + 1) + ",\"compress\":\"none\""))).code() == "out-of-range");
+    // Only what files.list gives: not a file no entry names, not another way of writing a listed one, not the link,
+    // and nothing of a package that is not installed.
+    const char* unlisted[] = {"${data}/log/notes.txt", "${data}/log/../log/older.log", "${data}/log/keys.log", "${data}/log/", "/tmp/nbtapp/agent.log"};
+    for (size_t i = 0; i < sizeof unlisted / sizeof unlisted[0]; ++i) {
+        CHECK_IN(unlisted[i], Parsed(b.call(p, "files.fetch", fetchParams(kLoggerId, unlisted[i]))).code() == "not-found");
+    }
+    CHECK(Parsed(b.call(p, "files.fetch", fetchParams("org.nbtapp.runtime", "${data}/log/logger.log"))).code() == "not-found");
+
+    // The agent's own logs, by their bare names.
+    {
+        std::string own = b.root + "/run/log/agent.log";
+        b.agent.setOwnLog(own);
+        put(own, "the agent's log\n");
+        put(own + ".1", "the one before\n");
+        touch(own, 1794400500);
+        touch(own + ".1", 1794400400);
+        Parsed r(b.call(p, "files.list", listParams(kAgentId)));
+        json::Value files = r.result.find("files");
+        CHECK(files.size() == 2 && str(files.at(0), "path") == "agent.log" && str(files.at(1), "path") == "agent.log.1");
+        fetched(b, p, fetchParams(kAgentId, "agent.log.1"), &bytes);
+        CHECK(bytes == "the one before\n");
+        CHECK(Parsed(b.call(p, "files.fetch", fetchParams(kAgentId, "trial.log"))).code() == "not-found");
+    }
+
+    // A file that does not compress, of 2 MB, for the streams that follow.
+    std::string big;
+    unsigned state = 12345;
+    for (int i = 0; i < 2000000; ++i) {
+        state = state * 1103515245u + 12345u;
+        big += (char)(state >> 16);
+    }
+    put(data + "/log/big.log", big);
+
+    // On a slow link: frames of 4,096 bytes at most, and the link's other messages get through while the stream
+    // runs. The phone reads nothing for a while, so the agent has to stop sending: its answer to ping and to a
+    // second files.fetch are behind two frames at most, not behind the rest of the file.
+    {
+        Phone* slow = b.phone("2", 4096, "serial");
+        slow->deaf = true;
+        int64_t fetch = slow->request("files.fetch", fetchParams(kLoggerId, "${data}/log/big.log", ",\"compress\":\"none\""));
+        turns(b, slow, 50);
+        int64_t ping = slow->request("ping", "{}");
+        int64_t second = slow->request("files.fetch", fetchParams(kLoggerId, "${data}/log/older.log"));
+        turns(b, slow, 50);
+        slow->deaf = false;
+        b.settle();
+        Parsed r(slow->reply(fetch));
+        unsigned stream = (unsigned)integer(r.result, "stream");
+        CHECK(Parsed(slow->reply(ping)).result.isObject() && Parsed(slow->reply(second)).code() == "busy");
+        CHECK(slow->received[stream] == big && slow->frames >= big.size() / 4096);
+        long pong = position(slow, "R" + num(ping)), end = position(slow, "D" + num(stream) + " last");
+        CHECK_IN(num(pong) + " " + num(end), pong >= 0 && end > pong + 100);
+    }
+
+    // files.cancel: answered after the frames the agent had sent, and nothing of the stream after that answer.
+    {
+        p->deaf = true;
+        int64_t fetch = p->request("files.fetch", fetchParams(kLoggerId, "${data}/log/big.log", ",\"compress\":\"none\""));
+        turns(b, p, 20);
+        p->deaf = false;
+        p->pump();
+        p->deaf = true;
+        unsigned stream = (unsigned)integer(Parsed(p->reply(fetch)).result, "stream");
+        int64_t cancel = p->request("files.cancel", "{\"stream\":" + num(stream) + "}");
+        turns(b, p, 20);
+        p->deaf = false;
+        b.settle();
+        CHECK(Parsed(p->reply(cancel)).result.isObject() && p->ended.count(stream) == 0);
+        long answered = position(p, "R" + num(cancel));
+        for (size_t i = 0; i < p->heard.size(); ++i) CHECK_IN(p->heard[i], p->heard[i] != "D" + num(stream) || (long)i < answered);
+        CHECK(!p->received[stream].empty() && p->received[stream].size() < big.size() && big.compare(0, p->received[stream].size(), p->received[stream]) == 0);
+        // The link takes another stream at once; a stream that has ended is cancelled with no more ado.
+        fetched(b, p, fetchParams(kLoggerId, "${data}/log/older.log"), &bytes);
+        CHECK(bytes == "an older log\n");
+        CHECK(Parsed(b.call(p, "files.cancel", "{\"stream\":" + num(stream) + "}")).result.isObject());
+        CHECK(Parsed(b.call(p, "files.cancel", "{\"stream\":0}")).code() == "bad-request");
+    }
+
+    // A file cut short while it is sent: files.error, and no last frame.
+    {
+        p->deaf = true;
+        int64_t fetch = p->request("files.fetch", fetchParams(kLoggerId, "${data}/log/big.log", ",\"compress\":\"deflate\""));
+        turns(b, p, 20);
+        CHECK(truncate((data + "/log/big.log").c_str(), 1000) == 0);
+        p->deaf = false;
+        b.settle();
+        unsigned stream = (unsigned)integer(Parsed(p->reply(fetch)).result, "stream");
+        Parsed e(lastEvent(p, "files.error"));
+        CHECK(integer(e.params, "stream") == stream && str(e.params, "code") == "io-error" && p->ended.count(stream) == 0);
+        put(data + "/log/big.log", big);
+    }
+
+    // A link that ends in the middle of a stream ends the stream, and nothing else.
+    {
+        size_t links = b.agent.sessions();
+        Phone* gone = b.phone("3");
+        gone->deaf = true;
+        gone->request("files.fetch", fetchParams(kLoggerId, "${data}/log/big.log", ",\"compress\":\"none\""));
+        turns(b, gone, 20);
+        gone->hangUp();
+        b.settle();
+        CHECK(b.agent.sessions() == links);
+        fetched(b, p, fetchParams(kLoggerId, "${data}/log/older.log"), &bytes);
+        CHECK(bytes == "an older log\n");
+    }
+
+    // While a job runs no stream starts, and the list is still given.
+    {
+        Phone* q = b.phone("4");
+        std::string planId = planOk(b, q, kRuntime, "", kRuntime);
+        q->serve = false;
+        startJob(b, q, planId);
+        CHECK(Parsed(b.call(p, "files.fetch", fetchParams(kLoggerId, "${data}/log/older.log"))).code() == "busy");
+        CHECK(Parsed(b.call(p, "files.list", listParams(kLoggerId))).result.isObject());
+        q->serve = true;
+        q->answerHeld();
+        b.settle();
+        CHECK(has(outcome(q), "succeeded"));
+    }
+
+    // Not before auth on a phone's own link.
+    {
+        Phone* stranger = b.greeted("5", 4096, "serial");
+        CHECK(Parsed(b.call(stranger, "files.list", listParams(kLoggerId))).code() == "unauthenticated");
+    }
+
+    // ${tmp} goes with the package; and after a power down, which empties it, the agent makes it again at its start.
+    {
+        std::string planId = planOk(b, p, "", kLoggerId, "");
+        p->events.clear();
+        startJob(b, p, planId);
+        CHECK(has(outcome(p), "succeeded") && fs::kindOf(tmp) == fs::kNone && fs::kindOf(data) == fs::kDir);
+        install(b, p, kLogger, kLogger);
+        std::string why;
+        CHECK_IN(why, fs::removeTree(b.root + "/tmp", &why) && fs::removeTree(b.root + "/run", &why));
+        Bench again("files", true);
+        CHECK(fs::isDir(tmp));
+    }
+}
+
 static void testSession(const std::string& path) {
     std::string now = sessionText(), before = testutil::readFile(path);
     if (now != before) {
@@ -3101,6 +3415,7 @@ int main(int argc, char** argv) {
     testAgentUpdate();
     testDetachedSignature();
     testAutostart();
+    testFiles();
     testSession(session);
     fs::removeTree(gWork, 0);
     printf("test_agent: ok\n");

@@ -131,6 +131,15 @@ It has not run on a car:
   `blob.fetch`). A phone app closes its side as soon as the event arrives. The local socket's links get no such
   event, and neither does a link that ends for what the phone did wrong: the error in the answer says why. Why
   this matters on Bluetooth serial is under "How a link ends" below.
+- A controller can pull a package's log files, so that a user can send them to whoever asked. A package names
+  them in its manifest's `logs`: files or a folder with a wildcard, in `${app}`, `${data}`, `${tmp}` (the
+  package's own folder on the RAM disk, `/tmp/nbtapp/apps/<id>` on a car, which the agent makes for it and a
+  power down empties; hooks get it as `NBT_TMP_DIR`) or under `/tmp` and `/var` outside the agent's folders. The
+  agent's own logs are those of `org.nbtapp.agent`. `files.list` lists them, regular files only and none reached
+  through a link, and `files.fetch` sends one as a raw deflate stream (or as it is), a frame at a time while the
+  link keeps up; an agent that has these lists the capability `files` in `hello`. `nbtctl logs ID` lists them, and
+  `nbtctl pull ID PATH --out FILE` fetches one (`agent/log_files.hpp`, and the plan document's Message
+  reference).
 
 `agent/hu_probe.sh` collects those answers from a head unit: which node it is, what is mounted where and what is
 read-only, the room in `/var/opt` and `/tmp`, the plugin folders and their manifests, the tools a hook can count on,

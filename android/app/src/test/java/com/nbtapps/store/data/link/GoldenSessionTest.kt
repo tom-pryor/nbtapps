@@ -23,6 +23,10 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -70,6 +74,9 @@ class GoldenSessionTest {
                 if (!reader.raw(4).contentEquals(FrameCodec.MAGIC)) return fail("the link did not open with the magic bytes")
                 for (step in steps) {
                     if (!step.fromPhone) {
+                        // The app does not take DATA from the agent yet: its Peer ends a link that carries some.
+                        // Until it does, the stand-in leaves the files stream's frames out.
+                        if (decode(step.bytes).type == FrameCodec.TYPE_DATA) continue
                         link.output.write(step.bytes)
                         continue
                     }
@@ -264,6 +271,23 @@ class GoldenSessionTest {
                 val removed = session.eventsUntilDone()
                 assertEquals((1L..7L).toList(), removed.map { it.seq })
                 assertEquals(JobState.SUCCEEDED, (removed.last() as JobEvent.Done).result.state)
+
+                // The agent's own log, listed and fetched. The app has no files.fetch of its own yet, so the
+                // requests go as they are, and the stand-in leaves out the stream's one DATA frame.
+                val agentLogs = buildJsonObject {
+                    put("package", "org.nbtapp.agent")
+                    put("area", "logs")
+                }
+                val listed = session.peer.request("files.list", agentLogs)
+                assertEquals("agent.log", listed["files"]!!.jsonArray.single().jsonObject["path"]!!.jsonPrimitive.content)
+                val fetched = session.peer.request("files.fetch", buildJsonObject {
+                    put("package", "org.nbtapp.agent")
+                    put("area", "logs")
+                    put("path", "agent.log")
+                    put("compress", "deflate")
+                })
+                assertEquals(1, fetched["stream"]!!.jsonPrimitive.int)
+                assertEquals("{}", session.peer.request("files.cancel", buildJsonObject { put("stream", 1) }).toString())
 
                 client.restart("hmi")
 

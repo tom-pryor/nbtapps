@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-// Raw inflate and CRC32 on zlib: see inflate.hpp.
+// Raw inflate and deflate, and CRC32, on zlib: see inflate.hpp.
 
 #include "inflate.hpp"
 
@@ -54,6 +54,56 @@ Inflater::Result Inflater::inflate(const uint8_t** in, size_t* inLen, uint8_t* o
         return kError;
     }
     return z.avail_out == 0 ? kOutputFull : kNeedInput;
+}
+
+struct Deflater::State {
+    z_stream z;
+    bool ready;
+    bool finished;
+};
+
+Deflater::Deflater() : state_(new State) {
+    memset(&state_->z, 0, sizeof state_->z);
+    // Negative window bits: a raw stream, as for Inflater. Memory level 8 is zlib's default.
+    state_->ready = deflateInit2(&state_->z, 6, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) == Z_OK;
+    state_->finished = false;
+}
+
+Deflater::~Deflater() {
+    if (state_->ready) deflateEnd(&state_->z);
+    delete state_;
+}
+
+bool Deflater::deflate(const void* in, size_t len, bool finish, std::string* out) {
+    if (!state_->ready || state_->finished) return false;
+    z_stream& z = state_->z;
+    const uint8_t* p = (const uint8_t*)in;
+    uint8_t buffer[16384];
+    // zlib counts in unsigned int: the input goes in pieces it can count.
+    const size_t kChunk = 1u << 30;
+    for (;;) {
+        size_t feed = len < kChunk ? len : kChunk;
+        bool lastPiece = feed == len;
+        z.next_in = (Bytef*)p;
+        z.avail_in = (uInt)feed;
+        int flush = finish && lastPiece ? Z_FINISH : Z_NO_FLUSH;
+        int rc = Z_OK;
+        do {
+            z.next_out = buffer;
+            z.avail_out = sizeof buffer;
+            rc = ::deflate(&z, flush);
+            if (rc == Z_STREAM_ERROR) {
+                state_->finished = true;
+                return false;
+            }
+            out->append((const char*)buffer, sizeof buffer - z.avail_out);
+        } while (z.avail_out == 0 || (flush == Z_FINISH && rc != Z_STREAM_END));
+        p += feed;
+        len -= feed;
+        if (lastPiece) break;
+    }
+    if (finish) state_->finished = true;
+    return true;
 }
 
 uint32_t crc32(uint32_t crc, const void* data, size_t len) {

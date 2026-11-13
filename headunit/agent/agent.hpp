@@ -24,6 +24,10 @@
 //   system.restart                  answers, then restarts the HMI or the head unit
 //   blob.fetch                      the one request the agent makes: a range of an archive, or a manifest
 //   blob.error                      the controller's event that a stream cannot go on
+//   files.list, files.fetch         the log files of an installed package (log_files.hpp), and one of them sent
+//                                   as DATA frames from the agent, deflated or as it is
+//   files.cancel                    ends that stream; answered after the last of its frames the agent sends
+//   files.error                     the agent's event that such a stream cannot go on
 //   job.progress, job.log, job.done the agent's events, to every controller
 //   link.closing                    the agent's event to a phone whose link it is about to end; the last thing it
 //                                   says on that link
@@ -106,6 +110,12 @@
 // is to do. An install step can take minutes; while it runs the engine calls back, and the agent serves its links
 // from inside that call: a controller can connect and ask for the job's status. What would disturb the step is
 // refused with `busy` for as long: job.plan, job.start for another plan, packages.list and system.restart.
+//
+// The files streams (files.fetch). A controller pulls one file at a time on a link, and not while a job runs; a
+// stream that is running when a job starts on another link goes on. The agent reads the file as it was when the
+// request came, a piece at a time, and sends a stream's next frames only while less than two frames' worth waits
+// to be written on its link: the link's other messages, `ping` and its answer among them, wait behind two frames
+// at most. With `deflate` the frames carry one raw deflate stream (RFC 1951) of the file's bytes.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdint.h>
@@ -118,6 +128,7 @@
 #include "engine.hpp"
 #include "job.hpp"
 #include "link.hpp"
+#include "log_files.hpp"
 #include "peer.hpp"
 #include "phones.hpp"
 #include "planner.hpp"
@@ -125,6 +136,8 @@
 #include "sha256.hpp"
 
 namespace nbt {
+
+class Deflater;
 
 // Milliseconds that only go forward. A test supplies its own, so that what depends on time can be repeated.
 class Clock {
@@ -181,6 +194,8 @@ const uint64_t kLogCapBytes = 512 * 1024;
 // it went to the same file. A file that cannot be set aside is emptied instead. False, with nothing changed, if
 // `path` is not the regular file that standard error is written to.
 bool capLog(const std::string& path, uint64_t capBytes);
+// The file capLog took, or empty.
+std::string cappedLog();
 
 class Agent : public PeerHandler, public JobHost {
 public:
@@ -223,6 +238,9 @@ public:
     // A blob.fetch whose reply or stream stays silent this long ends its link, of whatever kind. A serial link
     // that has gone silent altogether is ended sooner, by the keep-alive.
     void setFetchTimeoutMs(int64_t ms) { fetchTimeoutMs_ = ms; }
+    // The file the launcher names in NBTAGENT_LOG, which the agent's own logs are listed by (log_files.hpp). By
+    // default the file that capLog took; a test names one.
+    void setOwnLog(const std::string& path) { ownLog_ = path; }
     // Where the agent's account of what it does goes, a line at a time: links that come and go, each request and
     // how it was answered, plans, what it fetches, and a job's steps, phases and log. 0 for nowhere. It says what
     // happened and is not part of the protocol: nothing may depend on its wording.
@@ -250,6 +268,20 @@ private:
         std::string method;
         int64_t atMs;
     };
+    // The files stream a controller asked for with files.fetch: one per link at a time.
+    struct Outgoing {
+        int fd;
+        uint16_t stream;
+        uint64_t size, left;   // the bytes of the file the stream holds, and of those the ones not read yet
+        Deflater* deflater;    // 0: the bytes go as they are
+        std::string pending;   // what is to go into DATA frames and is not in one yet
+        bool read;             // the whole range is read: `pending` is the rest of the stream
+        uint64_t sent;         // bytes in DATA frames so far
+        std::string package, path;   // these two for the log
+        int64_t startMs;
+
+        Outgoing() : fd(-1), stream(0), size(0), left(0), deflater(0), read(false), sent(0), startMs(0) {}
+    };
     struct Session {
         Peer* peer;
         unsigned number;       // for the log
@@ -270,10 +302,12 @@ private:
         std::string endingWhy; // and why, for the log
         std::string role, phoneId, name;
         std::map<int64_t, Asked> asked;
+        Outgoing* outgoing;    // the files stream that is open, or 0
+        uint16_t nextStream;   // the number the next files stream gets
 
         Session()
             : peer(0), number(0), greeted(false), serial(false), local(false), trusted(false), challenged(false),
-              openedMs(0), heardMs(0), pingedMs(0), pings(0), ending(false), endingMs(0) {}
+              openedMs(0), heardMs(0), pingedMs(0), pings(0), ending(false), endingMs(0), outgoing(0), nextStream(1) {}
     };
     // The pairing window.
     struct Pairing {
@@ -357,6 +391,18 @@ private:
     // started with the head unit, and whether it can be here; autostart.set switches that on or off, which is
     // the file `autostart` in the agent's folder. A person asks: a phone, or nbtctl. The iDrive plugin, which
     // does the starting, is not who decides it.
+    // The files of an installed package: see the top of this file, and log_files.hpp.
+    void filesList(Session* s, int64_t id, const json::Value& params);
+    void filesFetch(Session* s, int64_t id, const json::Value& params);
+    void filesCancel(Session* s, int64_t id, const json::Value& params);
+    // The log files of a package as they are now. False with the error's code and message if there is none such.
+    bool logsOf(const std::string& package, std::vector<LogFile>* out, const char** code, std::string* message);
+    // Feeds the open files streams while their links take more.
+    void pumpStreams();
+    // True if a files stream could send more at once: the loop then does not wait.
+    bool streamsWaiting() const;
+    // Ends a session's files stream. `how` is for the log; with `error` the controller is told files.error.
+    void endOutgoing(Session* s, const std::string& how, const std::string& error);
     void autostartGet(Session* s, int64_t id);
     void autostartSet(Session* s, int64_t id, const json::Value& params);
     // Whether something would start the agent with the head unit here if it were asked to. If not: the error's
@@ -407,6 +453,7 @@ private:
     int64_t handOverDeadlineMs_;     // 0, or when the process ends for a newer version whatever the links hold
     int64_t fetchTimeoutMs_;
     FILE* log_;
+    std::string ownLog_;
     std::string loggedProgress_;                     // the state, step and phase the log last named
     std::map<std::string, std::string> logTails_;    // by source: a job's log text that has no line end yet
 };

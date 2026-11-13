@@ -1,0 +1,1 @@
+Test package: names its logs, and its postInstall writes some.

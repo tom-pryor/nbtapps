@@ -16,6 +16,7 @@
 
 #include "fsutil.hpp"
 #include "hex.hpp"
+#include "inflate.hpp"
 #include "json_writer.hpp"
 #include "semver.hpp"
 #include "sha256.hpp"
@@ -31,6 +32,7 @@ const int64_t kFetchTimeoutMs = 60000;
 const int64_t kRestartFlushMs = 2000;         // how long a restart waits for its answer to be written out
 const int64_t kClosingFlushMs = 2000;         // how long a link that is told link.closing has to take the event
 const size_t kMaxPhoneName = 64;
+const size_t kFileReadBytes = 16384;          // read from a file that is streamed, at a time
 
 std::string number(uint64_t value) {
     char text[32];
@@ -112,6 +114,7 @@ Agent::Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std:
 Agent::~Agent() {
     delete building_;
     for (size_t i = 0; i < sessions_.size(); ++i) {
+        endOutgoing(sessions_[i], "", "");
         delete sessions_[i]->peer;
         delete sessions_[i];
     }
@@ -199,6 +202,13 @@ bool capLog(const std::string& path, uint64_t capBytes) {
     gLogWithStdout = fstat(STDOUT_FILENO, &out) == 0 && sameFile(named, out);
     pthread_mutex_unlock(&gLogLock);
     return true;
+}
+
+std::string cappedLog() {
+    pthread_mutex_lock(&gLogLock);
+    std::string path = gLogPath;
+    pthread_mutex_unlock(&gLogLock);
+    return path;
 }
 
 void Agent::note(const std::string& line) { logLine(log_, line); }
@@ -361,6 +371,19 @@ bool Agent::init(std::string* error) {
         random_->bytes(raw, sizeof raw);
         headUnitId_ = toHex(raw, sizeof raw);
         if (!fs::writeFile(idPath, headUnitId_ + "\n", 0600, error)) return false;
+    }
+
+    // ${tmp} is on the RAM disk, which a power down empties: the folders of the packages whose logs name it are
+    // made again. A package's own program makes its folder too, since it may start before the agent.
+    {
+        std::vector<InstalledPackage> installed;
+        std::string why;
+        if (engine_.store().loadAll(&installed, &why)) {
+            for (size_t i = 0; i < installed.size(); ++i) {
+                const Manifest& m = installed[i].manifest;
+                if (namesTmp(m) && !fs::makeDirs(platform_->tmpDir(m.id), &why)) note("the folder ${tmp} of " + m.id + " cannot be made: " + why);
+            }
+        }
     }
 
     // A record of the paired phones that cannot be read stops no start: the phones pair again.
@@ -560,6 +583,7 @@ void Agent::sessionClosed(Session* s) {
         building_ = 0;
     }
     if (fetch_.active && fetch_.session == s) fetch_ = Fetch();
+    endOutgoing(s, "the link ended", "");
     // Nobody shows the code any more.
     if (pairing_.open && pairing_.opener == s) closePairing(0);
     if (jobOwner_ == s) {
@@ -570,9 +594,10 @@ void Agent::sessionClosed(Session* s) {
 }
 
 void Agent::turn(int timeoutMs) {
-    if (job_.installing()) timeoutMs = 0;
+    if (job_.installing() || streamsWaiting()) timeoutMs = 0;
     else if ((!pendingRestart_.empty() || job_.handingOver()) && timeoutMs > 20) timeoutMs = 20;
     serve(timeoutMs);
+    pumpStreams();
     keepAlive();
     endOverdue();
     expirePairing();
@@ -598,6 +623,7 @@ void Agent::turn(int timeoutMs) {
 
 void Agent::jobIdle() {
     serve(0);
+    pumpStreams();
     keepAlive();
     endOverdue();
     expirePairing();
@@ -825,6 +851,9 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "job.cancel") jobCancel(s, id, params);
     else if (method == "job.status") jobStatus(s, id, params);
     else if (method == "system.restart") systemRestart(s, id, params);
+    else if (method == "files.list") filesList(s, id, params);
+    else if (method == "files.fetch") filesFetch(s, id, params);
+    else if (method == "files.cancel") filesCancel(s, id, params);
     else if (method == "autostart.get") autostartGet(s, id);
     else if (method == "autostart.set") autostartSet(s, id, params);
     else refuse(s, id, "unsupported", "this agent has no method " + sanitizeUtf8(method.substr(0, 64), 0));
@@ -886,10 +915,10 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     json::Writer w;
     w.beginObject().key("protocolMin").integer(kProtocolVersion).key("protocolMax").integer(kProtocolVersion);
     w.key("role").string("agent").key("headUnitId").string(headUnitId_).key("agentVersion").string(agentVersion_);
-    // What this agent has beyond the protocol's first version: autostart.get and autostart.set, and installs
-    // checked with the offer's signature.
+    // What this agent has beyond the protocol's first version: autostart.get and autostart.set, installs checked
+    // with the offer's signature, and the files of a package.
     w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart);
-    w.string(kCapabilityDetachedSignature).endArray().endObject();
+    w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).endArray().endObject();
     // What `auth` signs: the two payloads as they travel. The reply's is what respond() sends for this result.
     const std::string& asked = peer->incoming();
     std::string reply = resultText(id, w.text());
@@ -1251,7 +1280,10 @@ void Agent::packagesList(Session* s, int64_t id, const json::Value& params) {
         one.key("version").string(p.manifest.version).key("key").string(p.key).key("flags").beginArray();
         std::vector<std::string> flags = riskFlags(p.manifest);
         for (size_t f = 0; f < flags.size(); ++f) one.string(flags[f]);
-        one.endArray().endObject();
+        one.endArray();
+        // Whether files.list has anything to say about it: the logs its manifest names, or the agent's own.
+        if (!p.manifest.logs.empty() || p.manifest.id == kAgentPackageId) one.key("logs").boolean(true);
+        one.endObject();
         if (listed == kMaxListed || (listed > 0 && w.text().size() + one.text().size() + 1 > room)) {
             more = true;
             break;
@@ -1668,6 +1700,249 @@ void Agent::systemRestart(Session* s, int64_t id, const json::Value& params) {
     answer(s, id, "{}");
     pendingRestart_ = kind.string();
     restartDeadlineMs_ = clock_->nowMs() + kRestartFlushMs;
+}
+
+// ---- files --------------------------------------------------------------------------------------------------------
+
+namespace {
+
+// The package and area every files method takes. False with the error's code and message if they are not usable.
+bool packageAndArea(const json::Value& params, std::string* package, const char** code, std::string* message) {
+    json::Value id = params.find("package"), area = params.find("area");
+    if (!id.isString() || !validPackageId(id.string()) || !area.isString()) {
+        *code = "bad-request";
+        *message = "a package id and an area";
+        return false;
+    }
+    if (area.string() != "logs") {
+        *code = "unsupported";
+        *message = "this agent has the area logs only";
+        return false;
+    }
+    *package = id.string();
+    return true;
+}
+
+// "1234 bytes as 321 (26 %)".
+std::string ratio(uint64_t size, uint64_t sent) {
+    return number(size) + " bytes as " + number(sent) + (size == 0 ? std::string() : " (" + number(sent * 100 / size) + " %)");
+}
+
+}  // namespace
+
+bool Agent::logsOf(const std::string& package, std::vector<LogFile>* out, const char** code, std::string* message) {
+    if (package == kAgentPackageId) {
+        listAgentLogs(ownLog_.empty() ? cappedLog() : ownLog_, *platform_, out);
+        return true;
+    }
+    InstalledPackage installed;
+    std::string why;
+    if (!engine_.store().isInstalled(package)) {
+        *code = "not-found";
+        *message = "no such package is installed";
+        return false;
+    }
+    if (!engine_.store().load(package, &installed, &why)) {
+        *code = "internal";
+        *message = "the record of " + package + " cannot be read: " + why;
+        return false;
+    }
+    listPackageLogs(installed.manifest, engine_.store(), *platform_, out);
+    return true;
+}
+
+void Agent::filesList(Session* s, int64_t id, const json::Value& params) {
+    std::string package, message;
+    const char* code = 0;
+    if (!packageAndArea(params, &package, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    if (inStep_) {
+        refuse(s, id, "busy", "a job is installing; the packages are changing");
+        return;
+    }
+    std::vector<LogFile> files;
+    if (!logsOf(package, &files, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    // Newest first, as many as fit in the link's frame: the rest are older, and `more` says that there are some.
+    size_t room = s->peer->maxFrame() > kEnvelopeRoom + 32 ? s->peer->maxFrame() - kEnvelopeRoom - 32 : 0;
+    json::Writer w;
+    w.beginObject().key("files").beginArray();
+    bool more = false;
+    for (size_t i = 0; i < files.size(); ++i) {
+        json::Writer one;
+        one.beginObject().key("path").string(files[i].path).key("size").integer((int64_t)files[i].size);
+        one.key("modified").integer(files[i].modified).endObject();
+        if (w.text().size() + one.text().size() + 1 > room) {
+            more = true;
+            break;
+        }
+        w.raw(one.text());
+    }
+    w.endArray().key("more").boolean(more).endObject();
+    answer(s, id, w.text());
+}
+
+void Agent::filesFetch(Session* s, int64_t id, const json::Value& params) {
+    std::string package, message;
+    const char* code = 0;
+    if (!packageAndArea(params, &package, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    json::Value path = params.find("path"), offset = params.find("offset"), length = params.find("length");
+    json::Value compress = params.find("compress");
+    if (!path.isString() || (offset.present() && (!offset.isInteger() || offset.integer() < 0)) ||
+        (length.present() && (!length.isInteger() || length.integer() < 1)) || !compress.isString() ||
+        (compress.string() != "deflate" && compress.string() != "none")) {
+        refuse(s, id, "bad-request", "files.fetch takes a path, an offset from 0, a length from 1, and compress: deflate or none");
+        return;
+    }
+    if (s->outgoing != 0) {
+        refuse(s, id, "busy", "a files stream is open on this link");
+        return;
+    }
+    if (job_.active() || inStep_) {
+        refuse(s, id, "busy", "a job is running");
+        return;
+    }
+    std::vector<LogFile> files;
+    if (!logsOf(package, &files, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    // Only a file the listing of this moment has.
+    const LogFile* file = 0;
+    for (size_t i = 0; i < files.size() && file == 0; ++i) {
+        if (files[i].path == path.string()) file = &files[i];
+    }
+    int fd = -1;
+    uint64_t size = 0;
+    std::string why;
+    if (file == 0 || !openLogFile(*file, &fd, &size, &why)) {
+        refuse(s, id, "not-found", file == 0 ? "files.list has no such file for " + package : why);
+        return;
+    }
+    uint64_t from = offset.present() ? (uint64_t)offset.integer() : 0;
+    if (from > size) {
+        close(fd);
+        refuse(s, id, "out-of-range", "the file has " + countOf(size, "byte"));
+        return;
+    }
+    uint64_t count = size - from;
+    if (length.present() && (uint64_t)length.integer() < count) count = (uint64_t)length.integer();
+    if (count != 0 && lseek(fd, (off_t)from, SEEK_SET) != (off_t)from) {
+        close(fd);
+        refuse(s, id, "io-error", file->path + " cannot be read from byte " + number(from));
+        return;
+    }
+    json::Writer w;
+    w.beginObject();
+    if (count == 0) {
+        // Nothing to send, so no stream.
+        close(fd);
+        w.key("size").integer(0).key("compress").string(compress.string()).endObject();
+        answer(s, id, w.text());
+        return;
+    }
+    Outgoing* o = new Outgoing();
+    o->fd = fd;
+    o->stream = s->nextStream;
+    s->nextStream = s->nextStream == 65535 ? 1 : (uint16_t)(s->nextStream + 1);
+    o->size = o->left = count;
+    if (compress.string() == "deflate") o->deflater = new Deflater();
+    o->package = package;
+    o->path = file->path;
+    o->startMs = clock_->nowMs();
+    s->outgoing = o;
+    note(linkName(s->number) + ": files.fetch " + package + " " + sanitizeUtf8(file->path, 0) + ": stream " + number(o->stream) +
+         ", " + countOf(count, "byte") + " from " + number(from) + ", " + compress.string());
+    w.key("stream").integer(o->stream).key("size").integer((int64_t)count).key("compress").string(compress.string()).endObject();
+    // The DATA frames follow from the loop (pumpStreams), behind this answer.
+    answer(s, id, w.text());
+}
+
+void Agent::filesCancel(Session* s, int64_t id, const json::Value& params) {
+    json::Value stream = params.find("stream");
+    if (!stream.isInteger() || stream.integer() < 1 || stream.integer() > 65535) {
+        refuse(s, id, "bad-request", "files.cancel takes a stream from 1 to 65535");
+        return;
+    }
+    // The frames already queued go first, and this answer after them: nothing more comes on the stream once it is
+    // there. A stream that has ended already is answered the same.
+    if (s->outgoing != 0 && s->outgoing->stream == stream.integer()) {
+        endOutgoing(s, "cancelled after " + countOf(s->outgoing->sent, "byte") + " in DATA frames", "");
+    }
+    answer(s, id, "{}");
+}
+
+bool Agent::streamsWaiting() const {
+    for (size_t i = 0; i < sessions_.size(); ++i) {
+        const Session* s = sessions_[i];
+        if (s->outgoing != 0 && s->peer->open() && !s->peer->closing() && s->peer->queued() < 2 * (size_t)s->peer->maxFrame()) return true;
+    }
+    return false;
+}
+
+void Agent::pumpStreams() {
+    for (size_t i = 0; i < sessions_.size(); ++i) {
+        Session* s = sessions_[i];
+        Peer* peer = s->peer;
+        // A link that is closing sends nothing more; its stream goes when the link does.
+        if (s->outgoing == 0 || !peer->open() || peer->closing()) continue;
+        size_t frame = peer->maxFrame();
+        while (s->outgoing != 0 && peer->open() && peer->queued() < 2 * frame) {
+            Outgoing* o = s->outgoing;
+            if (!o->pending.empty() && (o->pending.size() >= frame || o->read)) {
+                size_t n = o->pending.size() < frame ? o->pending.size() : frame;
+                bool last = o->read && n == o->pending.size();
+                peer->data(o->stream, o->pending.data(), n, last);
+                o->sent += n;
+                o->pending.erase(0, n);
+                if (last) endOutgoing(s, ratio(o->size, o->sent), "");
+                continue;
+            }
+            char buffer[kFileReadBytes];
+            size_t want = o->left < sizeof buffer ? (size_t)o->left : sizeof buffer;
+            ssize_t got = read(o->fd, buffer, want);
+            if (got < 0 && errno == EINTR) continue;
+            if (got <= 0) {
+                // The file was cut short since it was opened, or cannot be read.
+                std::string why = got == 0 ? "the file ended " + countOf(o->left, "byte") + " early" : std::string("read failed: ") + strerror(errno);
+                endOutgoing(s, "io-error: " + why, why);
+                break;
+            }
+            o->left -= (uint64_t)got;
+            if (o->left == 0) o->read = true;
+            if (o->deflater == 0) {
+                o->pending.append(buffer, (size_t)got);
+            } else if (!o->deflater->deflate(buffer, (size_t)got, o->read, &o->pending)) {
+                endOutgoing(s, "io-error: the compression failed", "the compression failed");
+                break;
+            }
+        }
+    }
+}
+
+void Agent::endOutgoing(Session* s, const std::string& how, const std::string& error) {
+    Outgoing* o = s->outgoing;
+    if (o == 0) return;
+    s->outgoing = 0;
+    if (!error.empty() && s->peer->open()) {
+        json::Writer w;
+        w.beginObject().key("stream").integer(o->stream).key("code").string("io-error").key("message").string(error).endObject();
+        s->peer->event("files.error", -1, w.text());
+    }
+    if (!how.empty()) {
+        note(linkName(s->number) + ": files stream " + number(o->stream) + " -> " + how + " (" +
+             number((uint64_t)(clock_->nowMs() - o->startMs)) + " ms)");
+    }
+    close(o->fd);
+    delete o->deflater;
+    delete o;
 }
 
 }  // namespace nbt

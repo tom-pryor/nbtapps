@@ -23,6 +23,9 @@ are shell scripts that stand in for binaries.
   (no folder here)       org.nbtapp.plugin 0.9.0, 1.0.0 and 1.1.0, the iDrive plugin's own package: tests/make_packages.py
                          has tools/plugin_pkg.py make them, as it makes the one for a head unit, of the manifest
                          and UI description in plugin/ and stand-ins for the library and the two DBs
+  logger-1.0.0           names its logs (manifest `logs`): ${data}/log/*.log, ${tmp}/crash.txt and /tmp/logger.log.
+                         Its postInstall writes the first two; the tests make the third, which is outside the
+                         package's folders
   radio-1.0.0            declares two Bluetooth serial services, both registered by its program radiod (a script
                          that registers nothing): what the agent removes when that program is not running
   radio2-1.0.0           declares the first of radio's two services for a program of its own, so the two cannot

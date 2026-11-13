@@ -28,11 +28,18 @@
 //   forget  PHONEID | --all                end one phone's pairing, or every phone's
 //   autostart [on|off]                     whether the agent is started with the head unit, and whether it can
 //                                          be here; with on or off, switch it
+//   logs    ID                             the log files of an installed package (org.nbtapp.agent: the agent's
+//                                          own) a controller may pull: size, time (UTC) and path, newest first
+//   pull    ID PATH --out FILE [--offset N] [--length N] [--none]
+//                                          one of them, into FILE: deflated on the link, or with --none as it is
 //   call METHOD [JSON]                     any request, the reply printed as it came
 //
 // `autostart` prints three lines: "autostart on" or "autostart off"; "available yes", or "available no" with the
 // reason and, where it is the iDrive plugin that is wanting, its package and the versions that would do; and
 // "starts N", the starts with the head unit on record that no agent outlasted by five minutes.
+//
+// `pull` prints one line when the file is whole: "pulled N bytes, M on the link". A stream that ends short, does
+// not inflate, or that the agent ends with files.error leaves FILE as far as it came, says why, and exits with 1.
 //
 // `pair` prints "code NNNNNN" as its first line, then one line when the window has closed: "paired", or
 // "not paired: " and the reason (wrong-code, expired, replaced). Its exit status is 0 only for "paired".
@@ -63,6 +70,7 @@
 #include "frame.hpp"
 #include "fsutil.hpp"
 #include "hex.hpp"
+#include "inflate.hpp"
 #include "json.hpp"
 #include "json_text.hpp"
 #include "json_writer.hpp"
@@ -100,9 +108,11 @@ public:
     Controller()
         : peer_(0), nextStream_(1), streaming_(false), stream_(0), left_(0), file_(0), memory_(0), memoryAt_(0),
           archiveStream_(false), archiveBytes_(0), cancelAfter_(-1), dropAfter_(-1), cancelSent_(false), done_(false),
-          quiet_(false), restarting_(false) {}
+          quiet_(false), restarting_(false), pullId_(0), pullStream_(0), pullSize_(0), pullWire_(0), pullBytes_(0),
+          pullOut_(0), pullInflater_(0), pullEnded_(false) {}
     ~Controller() {
         if (file_ != 0) fclose(file_);
+        delete pullInflater_;
         delete peer_;
     }
 
@@ -161,6 +171,34 @@ public:
         }
         return peer_->open() || lost();
     }
+
+    // files.fetch with these params, its stream written to `out`. True when the stream is whole; false with *why
+    // set otherwise, and with *linkBroke if that is why.
+    bool pull(const std::string& params, FILE* out, std::string* why, bool* linkBroke) {
+        *linkBroke = false;
+        json::Document doc;
+        doc.parse(params, 0);
+        json::Value compress = doc.root().find("compress");
+        pullOut_ = out;
+        pullInflater_ = compress.isString() && compress.string() == "deflate" ? new Inflater() : 0;
+        pullId_ = peer_->request("files.fetch", params);
+        if (pullId_ == 0) {
+            *why = "files.fetch does not fit in a frame";
+            return false;
+        }
+        // The DATA frames may come in the same read as the reply: onResponse takes the stream's number at once.
+        while (!pullEnded_) {
+            if (!pump(1000)) {
+                *linkBroke = true;
+                *why = "the link ended";
+                return false;
+            }
+        }
+        *why = pullError_;
+        return pullError_.empty();
+    }
+    uint64_t pulledBytes() const { return pullBytes_; }
+    uint64_t pulledWire() const { return pullWire_; }
 
     // Until the job that is running reports job.done. False if the link broke.
     bool waitForJob() {
@@ -289,6 +327,23 @@ public:
 
     virtual void onResponse(Peer*, int64_t id, bool ok, const json::Value& result, const std::string& code,
                             const std::string& message) {
+        if (pullId_ != 0 && id == pullId_) {
+            pullId_ = 0;
+            json::Value stream = result.find("stream"), size = result.find("size");
+            if (!ok) {
+                endPull(code + ": " + message);
+            } else if (!size.isInteger() || size.integer() < 0) {
+                endPull("the reply has no size");
+            } else if (size.integer() == 0) {
+                endPull("");   // nothing follows
+            } else if (!stream.isInteger() || stream.integer() < 1 || stream.integer() > 65535) {
+                endPull("the reply has no stream");
+            } else {
+                pullStream_ = (uint16_t)stream.integer();
+                pullSize_ = (uint64_t)size.integer();
+            }
+            return;
+        }
         Reply reply;
         reply.ok = ok;
         if (ok) {
@@ -326,6 +381,11 @@ public:
         } else if (event == "job.done") {
             done_ = true;
             doneText_ = jsonText(params);
+        } else if (event == "files.error") {
+            json::Value stream = params.find("stream"), message = params.find("message");
+            if (pullStream_ != 0 && stream.isInteger() && stream.integer() == pullStream_) {
+                endPull("the agent ended the stream: " + (message.isString() ? message.string() : std::string("io-error")));
+            }
         } else if (event == "pairing.closed") {
             json::Value reason = params.find("reason");
             pairingClosed_ = reason.isString() && !reason.string().empty() ? reason.string() : std::string("closed");
@@ -333,7 +393,35 @@ public:
         fflush(stdout);
     }
 
-    virtual void onData(Peer* peer, uint16_t, const std::string&, bool) { peer->close("the agent sent a DATA frame"); }
+    // DATA from the agent: the stream of this controller's files.fetch, and nothing else.
+    virtual void onData(Peer* peer, uint16_t stream, const std::string& bytes, bool last) {
+        if (pullStream_ == 0 || stream != pullStream_) {
+            peer->close("the agent sent a DATA frame for a stream that is not open");
+            return;
+        }
+        pullWire_ += bytes.size();
+        if (pullInflater_ == 0) {
+            pullBytes_ += bytes.size();
+            if (pullBytes_ > pullSize_) return endPull("the stream is longer than its reply said");
+            if (!bytes.empty() && fwrite(bytes.data(), 1, bytes.size(), pullOut_) != bytes.size()) return endPull("the file cannot be written");
+        } else {
+            const uint8_t* in = (const uint8_t*)bytes.data();
+            size_t left = bytes.size();
+            Inflater::Result result = Inflater::kNeedInput;
+            do {
+                uint8_t buffer[16384];
+                size_t produced = 0;
+                result = pullInflater_->inflate(&in, &left, buffer, sizeof buffer, &produced);
+                if (result == Inflater::kError) return endPull("the stream does not inflate");
+                pullBytes_ += produced;
+                if (pullBytes_ > pullSize_) return endPull("the stream inflates to more than its reply said");
+                if (produced != 0 && fwrite(buffer, 1, produced, pullOut_) != produced) return endPull("the file cannot be written");
+            } while (result == Inflater::kOutputFull || (result == Inflater::kNeedInput && left != 0));
+            if (result == Inflater::kDone && (left != 0 || !last)) return endPull("the deflate stream ends before the last frame");
+            if (last && result != Inflater::kDone) return endPull("the deflate stream does not end in the last frame");
+        }
+        if (last) endPull(pullBytes_ == pullSize_ ? "" : "the stream ended at " + number(pullBytes_) + " of " + number(pullSize_) + " bytes");
+    }
 
     static void printLog(const std::string& source, const std::string& text) {
         size_t at = 0;
@@ -400,6 +488,12 @@ private:
         }
     }
 
+    void endPull(const std::string& error) {
+        pullError_ = error;
+        pullEnded_ = true;
+        pullStream_ = 0;
+    }
+
     void endStream() {
         streaming_ = false;
         if (file_ != 0) fclose(file_);
@@ -433,6 +527,17 @@ private:
     bool quiet_;
     std::string pairingClosed_;   // the reason of pairing.closed, once it has come
     bool restarting_;   // the job has said that the agent restarts for its own update
+
+    // The one files.fetch of `pull`.
+    int64_t pullId_;           // its request, until the reply has come
+    uint16_t pullStream_;      // then its stream, until the stream has ended
+    uint64_t pullSize_;        // the file's bytes, as the reply said
+    uint64_t pullWire_;        // bytes in DATA frames
+    uint64_t pullBytes_;       // bytes written
+    FILE* pullOut_;
+    Inflater* pullInflater_;   // 0 for compress: none
+    bool pullEnded_;
+    std::string pullError_;
 };
 
 int usage() {
@@ -450,6 +555,8 @@ int usage() {
             "  phones                   the paired phones\n"
             "  forget  PHONEID | --all  end a phone's pairing\n"
             "  autostart [on|off]       whether the agent is started with the head unit; switch it on or off\n"
+            "  logs    ID               the log files of a package (org.nbtapp.agent: the agent's own)\n"
+            "  pull    ID PATH --out FILE [--offset N] [--length N] [--none]\n"
             "  call METHOD [JSON]\n"
             "The socket is $NBT_AGENT_SOCKET if --socket is not given"
 #ifdef __QNXNTO__
@@ -570,8 +677,9 @@ int main(int argc, char** argv) {
     std::vector<std::string> args;
     std::string from;
     std::vector<std::string> removes;
-    bool deleteData = false, events = false, all = false;
-    long long cancelAfter = -1, dropAfter = -1;
+    bool deleteData = false, events = false, all = false, uncompressed = false;
+    long long cancelAfter = -1, dropAfter = -1, offset = -1, length = -1;
+    std::string out;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         const char* value = i + 1 < argc ? argv[i + 1] : 0;
@@ -590,6 +698,17 @@ int main(int argc, char** argv) {
         } else if (arg == "--drop-after" && value != 0) {
             dropAfter = atoll(value);
             ++i;
+        } else if (arg == "--out" && value != 0) {
+            out = value;
+            ++i;
+        } else if (arg == "--offset" && value != 0) {
+            offset = atoll(value);
+            ++i;
+        } else if (arg == "--length" && value != 0) {
+            length = atoll(value);
+            ++i;
+        } else if (arg == "--none") {
+            uncompressed = true;
         } else if (arg == "--delete-data") {
             deleteData = true;
         } else if (arg == "--events") {
@@ -739,6 +858,55 @@ int main(int argc, char** argv) {
             printf("available no %s\n", text(r, "reason").c_str());
         }
         printf("starts %lld\n", integer(r, "starts"));
+        return 0;
+    }
+
+    if (command == "logs") {
+        if (args.size() != 1) return usage();
+        json::Writer w;
+        w.beginObject().key("package").string(args[0]).key("area").string("logs").endObject();
+        if (!c.call("files.list", w.text(), &reply)) return 3;
+        if (!reply.ok) return refused("files.list", reply);
+        doc.parse(reply.text, 0);
+        json::Value files = doc.root().find("files"), more = doc.root().find("more");
+        for (size_t i = 0; i < files.size(); ++i) {
+            json::Value f = files.at(i);
+            time_t at = (time_t)integer(f, "modified");
+            struct tm when;
+            char date[32] = "-";
+            if (gmtime_r(&at, &when) != 0) strftime(date, sizeof date, "%Y-%m-%dT%H:%M:%SZ", &when);
+            // The path last: it may hold a space.
+            printf("%lld %s %s\n", integer(f, "size"), date, text(f, "path").c_str());
+        }
+        if (more.isBool() && more.boolean()) fprintf(stderr, "nbtctl: older files are not listed: the reply was full\n");
+        return 0;
+    }
+
+    if (command == "pull") {
+        if (args.size() != 2 || out.empty()) return usage();
+        json::Writer w;
+        w.beginObject().key("package").string(args[0]).key("area").string("logs").key("path").string(args[1]);
+        if (offset >= 0) w.key("offset").integer(offset);
+        if (length >= 0) w.key("length").integer(length);
+        w.key("compress").string(uncompressed ? "none" : "deflate").endObject();
+        FILE* file = fopen(out.c_str(), "wb");
+        if (file == 0) {
+            fprintf(stderr, "nbtctl: %s cannot be written\n", out.c_str());
+            return 1;
+        }
+        std::string why;
+        bool linkBroke = false;
+        bool whole = c.pull(w.text(), file, &why, &linkBroke);
+        if (fclose(file) != 0 && whole) {
+            whole = false;
+            why = "the file cannot be written";
+        }
+        if (linkBroke) return 3;
+        if (!whole) {
+            fprintf(stderr, "nbtctl: files.fetch: %s\n", why.c_str());
+            return 1;
+        }
+        printf("pulled %llu bytes, %llu on the link\n", (unsigned long long)c.pulledBytes(), (unsigned long long)c.pulledWire());
         return 0;
     }
 
