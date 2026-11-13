@@ -5,6 +5,9 @@
 # app/src/test/resources/agent. Run it after the agent repo's spec or test packages change; the unit test
 # AgentVectorsInSyncTest fails while the two differ and the agent repo is there.
 #
+# The test packages are built in the agent repo's bench (tools/bench.py testdata), so it needs Docker: they are
+# compared byte for byte, and only the bench's pinned Debian makes the same deflate data on every machine.
+#
 #   tools/sync_agent_vectors.sh [AGENT_REPO]      default: ../headunit
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -20,8 +23,9 @@ cp "$agent/spec/protocol/frames.vectors" "$agent/spec/protocol/session.vectors" 
     "$out/protocol/"
 # Public halves only. The private halves stay in the agent repo, which signs the test packages.
 cp "$agent/tests/keys/"*.pub "$out/keys/"
-# The same input gives the same bytes, so this is the corpus the agent's own tests read.
-python3 "$agent/tests/make_packages.py" "$out/packages" > /dev/null
+# The corpus the agent's own tests read (`make testdata`), built in the bench so that its bytes are the same on
+# every machine.
+python3 "$agent/tools/bench.py" testdata "$out/packages" > /dev/null
 
 cat > "$out/README" <<'TEXT'
 Copied from the agent repo by tools/sync_agent_vectors.sh. Do not edit here: change the agent repo and copy again.
@@ -31,7 +35,7 @@ Copied from the agent repo by tools/sync_agent_vectors.sh. Do not edit here: cha
   protocol/session.vectors  one conversation between a phone and the agent (spec/protocol/session.vectors)
   protocol/constants.txt    the names and numbers both sides must hold alike (spec/protocol/constants.txt)
   packages/                 good and deliberately broken .nbtpkg files, with vectors.json saying what each is
-                            (tests/make_packages.py)
+                            (tests/make_packages.py, run in the bench: tools/bench.py testdata)
   keys/                     the public halves of the test keys that sign those packages (tests/keys)
 
 Test keys only. Their private halves are public, so nothing signed with them is trustworthy: they are for

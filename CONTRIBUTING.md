@@ -39,7 +39,8 @@ If you don't agree, please don't open a pull request.
   - The QNX builds (`./build.sh`, `./build.sh agent`) need a licensed QNX SDK. If you don't have one, say so in the
     pull request and they'll be run for you.
 - **Shared test files.** After a change to `headunit/spec/`, `headunit/tests/make_packages.py` or
-  `headunit/plugin/NbtApp.xml`, run `android/tools/sync_agent_vectors.sh` and include what it changes.
+  `headunit/plugin/NbtApp.xml`, run `android/tools/sync_agent_vectors.sh` and include what it changes. It needs
+  Docker: the test packages are built in the agent's bench, so that their bytes are the same on every machine.
 - **No real car data.** No GPS positions, street names, VINs, Bluetooth addresses or bytes captured from a car in
   code, tests or comments. Make up values instead.
 - **Names.** The head unit's app framework is the "HU Framework" in prose (the code's namespace stays `bmw`).

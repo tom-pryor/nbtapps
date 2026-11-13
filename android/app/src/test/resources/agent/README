@@ -5,7 +5,7 @@ Copied from the agent repo by tools/sync_agent_vectors.sh. Do not edit here: cha
   protocol/session.vectors  one conversation between a phone and the agent (spec/protocol/session.vectors)
   protocol/constants.txt    the names and numbers both sides must hold alike (spec/protocol/constants.txt)
   packages/                 good and deliberately broken .nbtpkg files, with vectors.json saying what each is
-                            (tests/make_packages.py)
+                            (tests/make_packages.py, run in the bench: tools/bench.py testdata)
   keys/                     the public halves of the test keys that sign those packages (tests/keys)
 
 Test keys only. Their private halves are public, so nothing signed with them is trustworthy: they are for

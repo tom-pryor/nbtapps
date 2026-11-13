@@ -309,8 +309,8 @@
       "id": "org.nbtapp.plugin",
       "version": "0.9.0",
       "name": "NBTApp iDrive plugin",
-      "sha256": "aaa2debd11efec9b55ebc58e51799102d1b38ed2a61dab9c5c90bae5b1b264f4",
-      "size": 3677,
+      "sha256": "b459327715b1b19c97389807653af8a7913fc25e647fce4c9281e1b739673af6",
+      "size": 3675,
       "manifestSha256": "da1064285a89debc8d07abdb420ec796d6de0b9275a91bc4760b448fb890c9b3",
       "flags": [
         "needs-reboot"
@@ -324,8 +324,8 @@
       "id": "org.nbtapp.plugin",
       "version": "1.0.0",
       "name": "NBTApp iDrive plugin",
-      "sha256": "ad55d73d68aa55827b251a17206db5a58986cc7b1025c487f790e060a900e29e",
-      "size": 3673,
+      "sha256": "ab989dbc5c5720fd24115d10d89c0162f7cf764350e5609c3bcc9a9fb1ce76c0",
+      "size": 3671,
       "manifestSha256": "54263cbc6ac510b49224bc1f122a8bed9f5dff60675ee13b133bd40c5867ad33",
       "flags": [
         "needs-reboot"
@@ -339,8 +339,8 @@
       "id": "org.nbtapp.plugin",
       "version": "1.1.0",
       "name": "NBTApp iDrive plugin",
-      "sha256": "b38b7a7eaab2cd88458a38c25bfd7c707a8b33834be0cc19f791e1851c5bc643",
-      "size": 3673,
+      "sha256": "2faa9d0c61cc80a9a677ef1868153af79a0166b7c656540bc8216863131ef39e",
+      "size": 3671,
       "manifestSha256": "f5e9f14705bc02a086146440703c81b62ff7efbbad29ffad49a6f27f0093f052",
       "flags": [
         "needs-reboot"

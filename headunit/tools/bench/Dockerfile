@@ -6,8 +6,15 @@
 #
 #   tools/bench.py image        (docker build -f tools/bench/Dockerfile -t nbtapp-bench .)
 #
+# A second image, built from the stage `vectors` below, makes the test packages (tests/make_packages.py) for the
+# app's copies and the check that they are current: tools/bench.py testdata.
+#
+# The Debian image is pinned by its digest. The test packages are compared byte for byte, and their deflate data is
+# whatever this image's zlib makes of them: another Debian, or this machine's own zlib, can make other bytes of the
+# same files. A new digest here means running android/tools/sync_agent_vectors.sh again.
+#
 # What goes into the build is listed in Dockerfile.dockerignore next to this file.
-FROM debian:trixie-slim AS build
+FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258 AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ make zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -23,7 +30,15 @@ RUN make -j"$(nproc)" agent-programs VERSION="$VERSION" \
     && mkdir /out \
     && cp build/agent-host/nbtagent build/agent-host/nbtagent-next build/agent-host/nbtctl build/agent-host/test_* /out/
 
-FROM debian:trixie-slim
+# Python and the library nbtpkg signs with, for tests/make_packages.py, and nothing of the agent: built only as
+# its own image (tools/bench.py testdata), so the agent's image below stays without Python, as a head unit is.
+FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258 AS vectors
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-cryptography \
+    && rm -rf /var/lib/apt/lists/*
+
+# The agent's image: the last stage, so the one a plain `docker build` makes.
+FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 COPY --from=build /out/ /opt/nbtagent/
 # Fails the build here, and not a test later, if the image lacks a library the programs need.
 RUN /opt/nbtagent/nbtagent --version && /opt/nbtagent/nbtagent-next --version && /opt/nbtagent/test_sha256

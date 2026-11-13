@@ -8,6 +8,7 @@
   tools/bench.py agent ARGS...         nbtagent in a container; ARGS as the host build's nbtagent takes them
   tools/bench.py test NAME [ARGS...]   the test program NAME (such as test_engine) in a container
   tools/bench.py sh SCRIPT [ARGS...]   a shell script of this checkout in a container, under the image's sh
+  tools/bench.py testdata OUTDIR       the test packages (tests/make_packages.py) built in a container, into OUTDIR
 
 Why: a package's hook is an ordinary process of whoever runs the agent. --root says where the agent puts files; it
 does not keep a script from the rest of the machine. In the container a hook sees a small Debian, the folders
@@ -29,12 +30,21 @@ start programs as a package's hook does; the image's sh is Debian's dash, not th
 Stopping: a SIGINT or SIGTERM to this program reaches the agent, which ends as it does on the host. If this program
 is killed outright, the container goes on until the agent is done; `docker ps --filter label=nbtapp-bench` shows it.
 
+`testdata` is for the copies of the test packages that the Android app's tests keep, and for the check that they
+are current. Those are compared byte for byte, and the deflate data in a package is whatever the zlib that made it
+makes: zlib and zlib-ng, say, make other bytes of the same files. So they are made with the zlib of one pinned
+Debian, in an image of their own (the Dockerfile's stage `vectors`, named as the bench image with "-vectors"),
+which may read this checkout and write OUTDIR only, and has no network. `make testdata` still builds them with this
+machine's Python, for the agent's own tests, which compare them with nothing.
+
 The image is nbtapp-bench, or what NBT_BENCH_IMAGE names. Needs docker, and for `image` git.
 """
 import os, socket, subprocess, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGE = os.environ.get("NBT_BENCH_IMAGE", "nbtapp-bench")
+VECTORS_IMAGE = IMAGE + "-vectors"
+DOCKERFILE = os.path.join(REPO, "tools", "bench", "Dockerfile")
 PROGRAMS = "/opt/nbtagent"
 WORK = os.path.join(REPO, "build", "bench", "work")
 
@@ -53,7 +63,7 @@ def image():
     print("bench.py: building the image %s (minutes the first time, a moment when nothing has changed)" % IMAGE,
           file=sys.stderr, flush=True)
     os.execvp("docker", ["docker", "build", "--quiet", "--provenance=false", "--tag", IMAGE, "--build-arg", "VERSION=" + version,
-                         "--file", os.path.join(REPO, "tools", "bench", "Dockerfile"), REPO])
+                         "--file", DOCKERFILE, REPO])
 
 
 def have():
@@ -64,7 +74,7 @@ def have():
     sys.exit(0 if found.returncode == 0 else 1)
 
 
-def container(kind, options, command):
+def container(kind, options, command, image=IMAGE):
     """Replaces this program with `docker run`: what the container prints, its exit status and the signals sent
     here are then the container's."""
     # With this machine's time zone, so that the times in the agent's log are the ones on the wall here.
@@ -78,7 +88,7 @@ def container(kind, options, command):
         "--read-only", "--tmpfs", "/tmp",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
         "--label", "nbtapp-bench=" + kind,
-    ] + options + [IMAGE] + command)
+    ] + options + [image] + command)
 
 
 def bind(path, mode="rw"):
@@ -174,9 +184,24 @@ def shell(args):
     container("sh", in_repo(), ["/bin/sh", script] + args[1:])
 
 
+def testdata(args):
+    if len(args) != 1:
+        fail("testdata takes the folder to build the test packages into")
+    out = os.path.abspath(args[0])
+    # Built each time, as `image` is: quick when nothing has changed. Its build prints only what went wrong.
+    built = subprocess.run(["docker", "build", "--quiet", "--provenance=false", "--target", "vectors",
+                            "--tag", VECTORS_IMAGE, "--file", DOCKERFILE, REPO], stdout=subprocess.DEVNULL)
+    if built.returncode != 0:
+        fail("could not build the image %s" % VECTORS_IMAGE, built.returncode)
+    # Made here: a folder Docker has to make itself would belong to root.
+    os.makedirs(out, exist_ok=True)
+    options = bind(REPO, "ro") + bind(out) + ["--workdir", REPO, "--network", "none", "--env", "PYTHONDONTWRITEBYTECODE=1"]
+    container("testdata", options, ["python3", os.path.join(REPO, "tests", "make_packages.py"), out], VECTORS_IMAGE)
+
+
 def main():
     commands = {"image": image, "have": have}
-    with_args = {"agent": agent, "test": test, "sh": shell}
+    with_args = {"agent": agent, "test": test, "sh": shell, "testdata": testdata}
     args = sys.argv[1:]
     try:
         if len(args) == 1 and args[0] in commands:
