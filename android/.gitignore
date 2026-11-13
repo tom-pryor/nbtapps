@@ -15,7 +15,7 @@ captures/
 .externalNativeBuild/
 .cxx/
 
-# What tools/release.sh leaves
+# What tools/build_release.sh and tools/sign.sh leave
 /release/
 
 # Signing

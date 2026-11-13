@@ -8,7 +8,7 @@
 #   run by hand              (Actions tab, or `gh workflow run android-release.yml --ref BRANCH`) the build only:
 #                            the APK is kept with the run for two weeks, to compare with a build made elsewhere
 #                            (android/tools/compare_apks.py)
-#   a pull request that changes this file: the build only, as run by hand
+#   a pull request that changes this file or the build's scripts: the build only, as run by hand
 #
 # Two jobs, so that the one that may write releases runs none of the repo's code: `build` has a read-only token
 # and does everything the repo says; `draft` checks out nothing, and only hands the build's two files to GitHub.
@@ -23,6 +23,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/android-release.yml"
+      - "android/tools/build_release.sh"
+      - "android/tools/apk_checks.sh"
 
 permissions:
   contents: read
@@ -77,43 +79,31 @@ jobs:
         working-directory: headunit
         run: python3 tools/bench.py image
 
-      # The release goes out only from a build whose tests pass, the real agent's included.
+      # The script a release is built with by hand, so that the two make the same file: the tests, the real agent's
+      # included, then the unsigned release build and its checks. It leaves the APK and its SHA-256 in release/.
       - name: Tests and release build
         env:
           NBT_REQUIRE_BENCH: "1"
-        run: ./gradlew :app:testDebugUnitTest :app:assembleRelease
+        run: tools/build_release.sh
 
-      # The APK is read as release.sh reads it: the package, its version, not debuggable, and not signed.
-      - name: Check the APK
+      - name: The APK
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          fail() { echo "::error::$*"; exit 1; }
-          tools=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)
-          built=app/build/outputs/apk/release
-          apk=$built/app-release-unsigned.apk
-          [ -f "$apk" ] || fail "the build left no unsigned APK at $apk"
-          [ ! -e "$built/app-release.apk" ] || fail "the build signed the APK: there is no key on CI"
-          if "$tools/apksigner" verify "$apk" > /dev/null 2>&1; then fail "the APK has a signature"; fi
-          "$tools/zipalign" -c -P 16 4 "$apk" || fail "the APK is not aligned"
-          badging=$("$tools/aapt2" dump badging "$apk")
-          field() { printf '%s\n' "$badging" | sed -n "s/^package:.* $1='\([^']*\)'.*/\1/p"; }
-          [ "$(field name)" = com.nbtapps.store ] || fail "the APK is the package '$(field name)'"
-          [ "$(field versionName)" = "$VERSION" ] || fail "the APK's version is '$(field versionName)', not $VERSION"
-          case $badging in
-            *application-debuggable*) fail "the APK is debuggable" ;;
-          esac
-          mkdir -p ../out
-          file=nbtapps-$VERSION-unsigned.apk
-          cp "$apk" "../out/$file"
-          (cd ../out && sha256sum "$file" > "$file.sha256")
-          echo "$file, version code $(field versionCode), $(wc -c < "../out/$file") bytes" >> "$GITHUB_STEP_SUMMARY"
-          echo "SHA-256 \`$(cut -d ' ' -f 1 "../out/$file.sha256")\`" >> "$GITHUB_STEP_SUMMARY"
+          file=release/nbtapps-$VERSION-unsigned.apk
+          if [ ! -f "$file" ]; then
+            echo "::error::the build left no $file"
+            exit 1
+          fi
+          echo "${file#release/}, $(wc -c < "$file") bytes" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA-256 \`$(cut -d ' ' -f 1 "$file.sha256")\`" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nbtapps-${{ steps.version.outputs.version }}-unsigned
-          path: out/
+          path: |
+            android/release/nbtapps-${{ steps.version.outputs.version }}-unsigned.apk
+            android/release/nbtapps-${{ steps.version.outputs.version }}-unsigned.apk.sha256
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
