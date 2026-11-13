@@ -11,7 +11,8 @@
 //   3. spec/manifest.schema.json, walked in the order of the text: a wrong type, form or range is bad-manifest;
 //      a key the schema does not know, inside requires or install, is            unsupported-manifest
 //   4. the cross-field rules: unique paths, every src and hook script listed in contents, a folder to a folder,
-//      no destination placed twice, no serial service declared twice             bad-manifest
+//      no destination placed twice, no serial service declared twice, no log path named twice
+//                                                                                  bad-manifest
 //
 // The schema is written out by hand in manifest.cpp, because the agent has no regular expressions. The test
 // packages and tests/agent/test_manifest.cpp hold the two implementations together.
@@ -30,6 +31,7 @@ namespace nbt {
 const size_t kMaxManifestBytes = 1u << 20;
 const size_t kMaxPathBytes = 255;
 const int kManifestVersion = 1;   // the highest manifestVersion this agent installs
+const size_t kMaxLogs = 16;       // entries in a manifest's logs
 
 struct ManifestDependency {
     std::string id;
@@ -95,6 +97,8 @@ struct Manifest {
     ManifestHook hooks[kHookCount];
     std::string reboot;       // "none", "hmi-restart" or "required"
     std::vector<ManifestSerialService> serialServices;
+    // logs[].path: the log files a controller may pull (files.list, files.fetch), as the manifest writes them.
+    std::vector<std::string> logs;
 
     std::vector<Placement> placements;   // files, with folder entries expanded, in manifest order
 
@@ -125,6 +129,12 @@ bool validSha256Hex(const std::string& text);
 // program is a file name of 1 to 64 of [A-Za-z0-9._+-], and not "." or "..".
 bool validSerialServiceName(const std::string& name);
 bool validProgramName(const std::string& program);
+
+// The form of a logs entry's path ($defs/log/path): ${app}/, ${data}/ or ${tmp}/ and a relative path, or an
+// absolute path under /tmp or /var that is not in /tmp/nbtapp or /var/opt/nbtapp, the agent's own folders. Its
+// segments are not empty, "." or "..", and only the last may hold the wildcards * and ?. No slash at the end, at
+// most 255 characters.
+bool validLogPath(const std::string& path);
 
 // True for a destination inside one of the package's own places: ${app}/, ${data}/ or ${plugins}/.
 bool inOwnDirs(const std::string& dest);

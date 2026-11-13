@@ -35,6 +35,21 @@
       "what": "folder entries are ignored"
     },
     {
+      "id": "org.nbtapp.hello",
+      "version": "1.2.0",
+      "name": "Hello NBT",
+      "sha256": "dbaf73cff49c9eeab1cf91cc15f9bc879bf0509254bb4ab48eff3508b694a207",
+      "size": 2484,
+      "manifestSha256": "dbbd88df0467515e4a9e75487d22a0e1217cf16a1506373b2658ce5dc39559bc",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "30e17b5b2fdc177b5f6eb80a0c326b6ef5d910cbaf58588007e7ce0a51b4f9753e04654e3005c199e8f449c6ec76e930ee8cb76ade3bd7b34a60174373d6a204",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/logs.nbtpkg",
+      "what": "logs in each place one may be, one entry with a key this version does not know"
+    },
+    {
       "id": "org.nbtapp.agent",
       "version": "1.1.0",
       "name": "NBTApp agent",
@@ -537,6 +552,11 @@
       "what": "a destination that is not absolute"
     },
     {
+      "file": "bad/dest-tmp.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a destination in ${tmp}, which is for logs only"
+    },
+    {
       "file": "bad/dest-twice.nbtpkg",
       "code": "bad-manifest",
       "what": "two files placed at one destination"
@@ -645,6 +665,81 @@
       "file": "bad/local-size-differs.nbtpkg",
       "code": "bad-archive",
       "what": "local header and directory give different sizes"
+    },
+    {
+      "file": "bad/logs-absolute-elsewhere.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path outside /tmp and /var"
+    },
+    {
+      "file": "bad/logs-agent-run.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path in the agent's folder on the RAM disk"
+    },
+    {
+      "file": "bad/logs-agent-state.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path in the agent's state folder"
+    },
+    {
+      "file": "bad/logs-dotdot.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path with `..`"
+    },
+    {
+      "file": "bad/logs-entry-not-object.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a logs entry that is a string"
+    },
+    {
+      "file": "bad/logs-folder.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path that ends in a slash"
+    },
+    {
+      "file": "bad/logs-no-path.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a logs entry with no path"
+    },
+    {
+      "file": "bad/logs-not-a-list.nbtpkg",
+      "code": "bad-manifest",
+      "what": "logs is one entry, not a list"
+    },
+    {
+      "file": "bad/logs-other-tmp.nbtpkg",
+      "code": "bad-manifest",
+      "what": "another package's ${tmp}, named by its path"
+    },
+    {
+      "file": "bad/logs-plugins.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path in the HMI's plugin folder"
+    },
+    {
+      "file": "bad/logs-relative.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path that is not absolute"
+    },
+    {
+      "file": "bad/logs-too-many.nbtpkg",
+      "code": "bad-manifest",
+      "what": "17 logs entries"
+    },
+    {
+      "file": "bad/logs-twice.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the same log named twice"
+    },
+    {
+      "file": "bad/logs-unknown-variable.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path with an unknown variable"
+    },
+    {
+      "file": "bad/logs-wildcard-in-folder.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a wildcard outside the last segment"
     },
     {
       "file": "bad/manifest-changed-after-signing.nbtpkg",

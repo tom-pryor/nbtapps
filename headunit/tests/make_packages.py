@@ -318,6 +318,33 @@ def build_all(out_dir):
              "unsupported-manifest", "a key in a serial service that this version does not know")):
         bad[label] = (with_changed_manifest(field(["install", "serialServices"], services)), code, why)
 
+    # ---- logs: the files a controller may pull ----
+    every_form = [{"path": "${data}/log/*.log"}, {"path": "${app}/state.txt"}, {"path": "${tmp}/crash-?.txt"},
+                  {"path": "/var/log/hello.log", "label": "an unknown key in an entry is ignored"},
+                  {"path": "/tmp/hello.log"}]
+    good["logs"] = (with_changed_manifest(field(["logs"], every_form)),
+                    "logs in each place one may be, one entry with a key this version does not know")
+    for label, logs, why in (
+            ("logs-not-a-list", {"path": "/tmp/hello.log"}, "logs is one entry, not a list"),
+            ("logs-entry-not-object", ["/tmp/hello.log"], "a logs entry that is a string"),
+            ("logs-no-path", [{"label": "hello"}], "a logs entry with no path"),
+            ("logs-too-many", [{"path": "/tmp/hello-%d.log" % i} for i in range(17)], "17 logs entries"),
+            ("logs-twice", [{"path": "/tmp/hello.log"}, {"path": "/tmp/hello.log"}], "the same log named twice"),
+            ("logs-dotdot", [{"path": "${data}/../../var/opt/nbtapp/phones.json"}], "a log path with `..`"),
+            ("logs-relative", [{"path": "log/hello.log"}], "a log path that is not absolute"),
+            ("logs-unknown-variable", [{"path": "${home}/hello.log"}], "a log path with an unknown variable"),
+            ("logs-plugins", [{"path": "${plugins}/Hello/hello.log"}], "a log path in the HMI's plugin folder"),
+            ("logs-folder", [{"path": "${data}/log/"}], "a log path that ends in a slash"),
+            ("logs-wildcard-in-folder", [{"path": "${data}/*/hello.log"}], "a wildcard outside the last segment"),
+            ("logs-absolute-elsewhere", [{"path": "/etc/passwd"}], "a log path outside /tmp and /var"),
+            ("logs-agent-state", [{"path": "/var/opt/nbtapp/phones.json"}], "a log path in the agent's state folder"),
+            ("logs-agent-run", [{"path": "/tmp/nbtapp/log/agent.log"}], "a log path in the agent's folder on the RAM disk"),
+            ("logs-other-tmp", [{"path": "/tmp/nbtapp/apps/org.other.radio/radio.log"}],
+             "another package's ${tmp}, named by its path")):
+        bad[label] = (with_changed_manifest(field(["logs"], logs)), "bad-manifest", why)
+    bad["dest-tmp"] = (with_changed_manifest(field(["install", "files", 0, "dest"], "${tmp}/bin/hello")), "bad-manifest",
+                       "a destination in ${tmp}, which is for logs only")
+
     # ---- detached signatures: a package its author signed, with the catalogue's signature over its manifest ----
     countersigned = nbtpkg.sign(seed, manifest_bytes)
     flipped = bytearray(countersigned)

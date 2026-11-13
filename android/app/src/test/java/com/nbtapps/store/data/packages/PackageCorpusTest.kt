@@ -13,6 +13,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -60,6 +61,35 @@ class PackageCorpusTest {
         assertEquals(listOf(ManifestSerialService("TestRadio", "radio2d")), services("org.nbtapp.radio2-1.0.0.nbtpkg"))
         // A package that declares none has none.
         assertTrue(services("org.nbtapp.runtime-2.1.0.nbtpkg").isEmpty())
+    }
+
+    @Test
+    fun `the logs a package names are read, in the order of the text`() {
+        fun logs(file: String) =
+            PackageArchive.verify(AgentVectors.file("packages/good/$file"), listOf(AgentVectors.packageKey)).manifest.logs
+
+        assertEquals(
+            listOf("\${data}/log/*.log", "\${app}/state.txt", "\${tmp}/crash-?.txt", "/var/log/hello.log", "/tmp/hello.log"),
+            logs("logs.nbtpkg"),
+        )
+        assertTrue(logs("org.nbtapp.hello-1.2.0.nbtpkg").isEmpty())
+    }
+
+    @Test
+    fun `a log path is in the package's own folders, or under tmp or var and outside the agent's`() {
+        for (path in listOf("\${data}/*", "\${tmp}/a", "/tmp/a/b", "/var/opt/nbtappx/y", "/tmp/nbtapps/a", "\${data}/.x")) {
+            assertTrue(path, ManifestParser.isLogPath(path))
+        }
+        for (path in listOf(
+            "", "\${data}", "\${data}/", "\${data}/x/", "\${data}/../x", "\${data}/*/x", "\${data}x/y", "\${plugins}/x",
+            "\${home}/x", "x", "/etc/passwd", "/tmp", "/tmpx/y", "/tmp/nbtapp", "/tmp/nbtapp/x", "/var/opt/nbtapp",
+            "/var/opt/nbtapp/phones.json", "\${data}/a\\b", "\${data}/a\nb",
+        )) {
+            assertFalse(path, ManifestParser.isLogPath(path))
+        }
+        // 255 characters, not bytes, as the agent counts them.
+        assertTrue(ManifestParser.isLogPath("\${data}/" + "é".repeat(247)))
+        assertFalse(ManifestParser.isLogPath("\${data}/" + "x".repeat(248)))
     }
 
     @Test

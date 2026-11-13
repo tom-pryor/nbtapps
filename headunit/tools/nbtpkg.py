@@ -125,8 +125,8 @@ def parse_json(data):
 # ---- the subset of JSON Schema that spec/manifest.schema.json uses ---------------------------------------------
 
 _SCHEMA_KEYWORDS = {"$schema", "$defs", "$ref", "title", "description", "type", "required", "properties",
-                    "additionalProperties", "items", "minItems", "minLength", "maxLength", "pattern", "minimum",
-                    "maximum", "const", "enum"}
+                    "additionalProperties", "items", "minItems", "maxItems", "minLength", "maxLength", "pattern",
+                    "minimum", "maximum", "const", "enum"}
 _patterns = {}
 
 
@@ -182,6 +182,8 @@ def validate(value, schema, root, where):
             raise SchemaError(where, "must be an array")
         if len(value) < schema.get("minItems", 0):
             raise SchemaError(where, "needs at least %d item(s)" % schema["minItems"])
+        if len(value) > schema.get("maxItems", len(value)):
+            raise SchemaError(where, "has more than %d items" % schema["maxItems"])
         for i, child in enumerate(value):
             validate(child, schema.get("items", {}), root, "%s[%d]" % (where, i))
     elif kind == "string":
@@ -279,6 +281,11 @@ def check_manifest(manifest):
         if service["name"] in services:
             bad("declares the serial service %s twice" % service["name"])
         services.add(service["name"])
+    logs = set()
+    for log in manifest.get("logs", []):
+        if log["path"] in logs:
+            bad("names the log %s twice" % log["path"])
+        logs.add(log["path"])
 
 
 def load_manifest(data):

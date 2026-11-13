@@ -197,6 +197,27 @@ bool isProgramName(const std::string& text) {
     return true;
 }
 
+// $defs/log/path: see validLogPath in manifest.hpp.
+bool isLogPath(const std::string& text) {
+    if (utf8Length(text) > 255) return false;
+    size_t rest = 0;
+    if (startsWith(text, "${app}", &rest) || startsWith(text, "${data}", &rest) || startsWith(text, "${tmp}", &rest)) {
+        // the package's own folders
+    } else if (startsWith(text, "/tmp", &rest)) {
+        if (text.compare(0, 11, "/tmp/nbtapp") == 0 && (text.size() == 11 || text[11] == '/')) return false;
+    } else if (startsWith(text, "/var", &rest)) {
+        if (text.compare(0, 15, "/var/opt/nbtapp") == 0 && (text.size() == 15 || text[15] == '/')) return false;
+    } else {
+        return false;
+    }
+    if (rest >= text.size() || text[rest] != '/' || !segments(text, rest + 1, false)) return false;
+    size_t last = text.rfind('/');
+    for (size_t i = rest; i < last; ++i) {
+        if (text[i] == '*' || text[i] == '?') return false;   // a wildcard outside the last segment
+    }
+    return true;
+}
+
 // ---- the schema, walked in the order of the text --------------------------------------------------------------
 
 class Checker {
@@ -225,6 +246,8 @@ public:
                 if (!contents(v)) return false;
             } else if (key == "install") {
                 if (!install(v)) return false;
+            } else if (key == "logs") {
+                if (!logs(v)) return false;
             }
             // manifestVersion was checked by the caller; any other key at this level is ignored.
         }
@@ -369,6 +392,25 @@ private:
                 }
             }
             m_->serialServices.push_back(service);
+        }
+        return true;
+    }
+
+    // properties/logs: at most 16 of $defs/log, which is open.
+    bool logs(const Value& v) {
+        static const char* const required[] = {"path", 0};
+        if (!v.isArray()) return bad("manifest.logs", "must be an array");
+        if (v.size() > kMaxLogs) return bad("manifest.logs", "has more than 16 entries");
+        for (size_t i = 0; i < v.size(); ++i) {
+            Value l = v.at(i);
+            std::string at = item("manifest.logs", i);
+            if (!l.isObject()) return bad(at, "must be an object");
+            if (!has(l, required, at)) return false;
+            std::string path;
+            for (size_t k = 0; k < l.size(); ++k) {
+                if (l.key(k) == "path" && !text(l.at(k), isLogPath, at + ".path", &path)) return false;
+            }
+            m_->logs.push_back(path);
         }
         return true;
     }
@@ -548,6 +590,10 @@ private:
             const std::string& name = m_->serialServices[i].name;
             if (!services.insert(name).second) return bad("manifest", ("declares the serial service " + name + " twice").c_str());
         }
+        std::set<std::string> logs;
+        for (size_t i = 0; i < m_->logs.size(); ++i) {
+            if (!logs.insert(m_->logs[i]).second) return bad("manifest", ("names the log " + m_->logs[i] + " twice").c_str());
+        }
         return true;
     }
 
@@ -565,6 +611,7 @@ bool validSha256Hex(const std::string& text) { return isSha256(text); }
 bool validVersion(const std::string& version) { return isVersion(version); }
 bool validSerialServiceName(const std::string& name) { return isSerialServiceName(name); }
 bool validProgramName(const std::string& program) { return isProgramName(program); }
+bool validLogPath(const std::string& path) { return isLogPath(path); }
 
 bool parseManifest(const void* data, size_t len, Manifest* out, Error* error) {
     if (len > kMaxManifestBytes) return error->fail("bad-manifest", "manifest is larger than 1 MiB");

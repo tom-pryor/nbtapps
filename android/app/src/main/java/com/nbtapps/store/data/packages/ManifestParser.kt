@@ -30,7 +30,7 @@ import kotlinx.serialization.json.longOrNull
  * it must give the same verdict: a manifest one of them takes and the other refuses is a bug in one of them.
  *
  * Unknown keys are refused inside `requires` and `install`, because an install key that is skipped could
- * place a file wrongly, and ignored everywhere else.
+ * place a file wrongly, and ignored everywhere else, a `logs` entry included.
  */
 object ManifestParser {
     const val SUPPORTED_MANIFEST_VERSION = 1
@@ -42,6 +42,12 @@ object ManifestParser {
 
     /** The name the car has for its own serial service, which no package's service may take. */
     private const val CAR_SERIAL_SERVICE = "SPP"
+
+    /** Entries in `logs`. */
+    const val MAX_LOGS = 16
+
+    /** The agent's own folders, which no log path may name: its state, with the pairing keys, and its RAM folder. */
+    private val AGENT_FOLDERS = listOf("/tmp/nbtapp", "/var/opt/nbtapp")
 
     /** @throws PackageFormatException with the code `bad-manifest` or `unsupported-manifest`. */
     fun parse(bytes: ByteArray): PackageManifest {
@@ -67,6 +73,7 @@ object ManifestParser {
         var conflicts = emptyList<PackageDependency>()
         var contents = emptyList<PackageContent>()
         var install = Install()
+        var logs = emptyList<String>()
         // Members are checked in the order of the text, as the agent does, so both name the same first fault.
         for ((key, value) in root) {
             when (key) {
@@ -78,6 +85,7 @@ object ManifestParser {
                 "conflicts" -> conflicts = dependencies(value, "conflicts")
                 "contents" -> contents = contents(value)
                 "install" -> install = install(value)
+                "logs" -> logs = logs(value)
             }
         }
         val manifest = PackageManifest(
@@ -94,6 +102,7 @@ object ManifestParser {
             hooks = install.hooks,
             reboot = install.reboot,
             serialServices = install.serialServices,
+            logs = logs,
         )
         crossFields(manifest)
         return manifest
@@ -200,6 +209,18 @@ object ManifestParser {
                 }
             }
             ManifestSerialService(name, program)
+        }
+    }
+
+    /** `logs`: at most 16 entries, each open, with a `path`. */
+    private fun logs(value: JsonElement): List<String> {
+        val array = value as? JsonArray ?: bad("logs must be an array")
+        if (array.size > MAX_LOGS) bad("logs has more than $MAX_LOGS entries")
+        return array.mapIndexed { i, item ->
+            val at = "logs[$i]"
+            val obj = item as? JsonObject ?: bad("$at must be an object")
+            val path = obj["path"] ?: bad("$at has no \"path\"")
+            text(path, "$at.path", ::isLogPath)
         }
     }
 
@@ -332,6 +353,10 @@ object ManifestParser {
         for (service in manifest.serialServices) {
             if (!services.add(service.name)) bad("declares the serial service ${service.name} twice")
         }
+        val logs = HashSet<String>()
+        for (log in manifest.logs) {
+            if (!logs.add(log)) bad("names the log $log twice")
+        }
     }
 
     // ---- the string forms of the schema ----
@@ -378,6 +403,19 @@ object ManifestParser {
         if (Utf8.length(text) > 255) return false
         val rest = listOf("\${app}", "\${data}", "\${plugins}").firstOrNull { text.startsWith(it) }?.let { text.substring(it.length) } ?: text
         return rest.startsWith("/") && segments(rest.substring(1), false)
+    }
+
+    /**
+     * A `logs` entry's path: `${app}/`, `${data}/` or `${tmp}/` and a relative path, or an absolute path under `/tmp`
+     * or `/var` outside the agent's own folders. Only the last segment may hold the wildcards `*` and `?`.
+     */
+    internal fun isLogPath(text: String): Boolean {
+        if (Utf8.length(text) > 255) return false
+        val prefix = listOf("\${app}", "\${data}", "\${tmp}", "/tmp", "/var").firstOrNull { text.startsWith(it) } ?: return false
+        if (AGENT_FOLDERS.any { text == it || text.startsWith("$it/") }) return false
+        val rest = text.substring(prefix.length)
+        if (!rest.startsWith("/") || !segments(rest.substring(1), trailingSlash = false)) return false
+        return rest.substringBeforeLast('/').none { it == '*' || it == '?' }
     }
 
     private fun isLinkTarget(text: String): Boolean = Utf8.length(text) in 1..255 && noControls(text)

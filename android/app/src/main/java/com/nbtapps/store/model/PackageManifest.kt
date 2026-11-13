@@ -25,6 +25,8 @@ data class PackageManifest(
     val reboot: String = "none",
     /** The Bluetooth serial services the package's programs register on the car, for the agent to clear up after them. */
     val serialServices: List<ManifestSerialService> = emptyList(),
+    /** `logs[].path`: the package's log files, which the agent sends a controller that asks with `files.fetch`. */
+    val logs: List<String> = emptyList(),
 ) {
     /**
      * The risk flags, worked out from the install plan the way the agent does it. The app shows these, not

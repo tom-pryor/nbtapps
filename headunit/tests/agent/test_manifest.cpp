@@ -270,6 +270,50 @@ int main() {
         assert(validProgramName("radiod") && !validProgramName("bin/radiod") && !validProgramName(".."));
     }
 
+    // 11b. Logs: the package's own folders or a path under /tmp or /var outside the agent's, a wildcard in the last
+    //      segment only, at most 16 entries, none twice. An entry is open, and old agents skip the key: a top-level
+    //      key they do not know is ignored.
+    {
+        struct Logs {
+            static std::string code(const std::string& list, Manifest* out = 0) {
+                return ::code(make(std::string(kHead) + "\"logs\":" + list + ",", "", ""), out);
+            }
+            static std::string one(const std::string& path) { return code("[{\"path\":\"" + path + "\"}]"); }
+        };
+        assert(Logs::code("[]", &m) == "" && m.logs.empty());
+        assert(Logs::code("[{\"path\":\"${data}/log/*.log\"},{\"path\":\"/tmp/radio.log\",\"label\":\"x\"}]", &m) == "");
+        assert(m.logs.size() == 2 && m.logs[0] == "${data}/log/*.log" && m.logs[1] == "/tmp/radio.log" && riskFlags(m).empty());
+        const char* const good[] = {"${app}/x", "${data}/*", "${tmp}/crash.txt", "${data}/log/radio.?.log", "/var/log/x.log",
+                                    "/tmp/a/b/c", "/var/opt/nbtappx/y", "/tmp/nbtapps/a", "/tmp/...", "${data}/.hidden",
+                                    "${data}/a b/c.log", 0};
+        for (int i = 0; good[i] != 0; ++i) {
+            assert(Logs::one(good[i]) == "" && validLogPath(good[i]));
+        }
+        const char* const noPaths[] = {"", "${data}", "${data}/", "${data}/log/", "${data}//x", "${data}/../x",
+                                       "${data}/./x", "${data}/x/..", "${data}/*/x", "${data}/l?g/x", "${plugins}/x",
+                                       "${home}/x", "${data}x/y", "log/x", "/etc/passwd", "/tmp", "/tmp/", "/tmpx/y",
+                                       "/var", "/varx/y", "/tmp/nbtapp", "/tmp/nbtapp/x", "/tmp/nbtapp/apps/other/x",
+                                       "/var/opt/nbtapp", "/var/opt/nbtapp/", "/var/opt/nbtapp/phones.json",
+                                       "${data}/a\\\\b", "${data}/a\\nb", 0};
+        for (int i = 0; noPaths[i] != 0; ++i) assert(Logs::one(noPaths[i]) == bad);
+        assert(!validLogPath("/var/opt/nbtapp/phones.json") && !validLogPath("${data}/*/x"));
+        // 255 characters, not bytes, as for a destination.
+        std::string longest = "${data}/" + std::string(247, 'x');
+        assert(longest.size() == 255 && Logs::one(longest) == "" && Logs::one(longest + "x") == bad);
+        std::string accents = "${data}/";
+        for (int i = 0; i < 247; ++i) accents += "\\u00e9";
+        assert(Logs::one(accents) == "");
+        std::string sixteen = "[", seventeen;
+        for (int i = 0; i < 16; ++i) sixteen += std::string(i ? "," : "") + "{\"path\":\"/tmp/" + std::string(1, (char)('a' + i)) + "\"}";
+        seventeen = sixteen + ",{\"path\":\"/tmp/q\"}]";
+        sixteen += "]";
+        assert(Logs::code(sixteen, &m) == "" && m.logs.size() == 16 && Logs::code(seventeen) == bad);
+        assert(Logs::code("{}") == bad && Logs::code("[\"/tmp/x\"]") == bad && Logs::code("[{}]") == bad);
+        assert(Logs::code("[{\"path\":7}]") == bad && Logs::code("[{\"file\":\"/tmp/x\"}]") == bad);
+        assert(Logs::code("[{\"path\":\"/tmp/x\"},{\"path\":\"/tmp/x\"}]") == bad);
+        assert(Logs::code("[{\"path\":\"/tmp/x\"},{\"path\":\"/tmp/y\"}]") == "");
+    }
+
     // 12. Risk flags: a destination outside the package's own places, or a `replaces`, is modifies-system.
     assert(code(make(kHead, content("a/b"), "\"files\":[{\"src\":\"a/b\",\"dest\":\"${data}/x\",\"mode\":\"0644\"}]"), &m) == "");
     assert(riskFlags(m).empty());
