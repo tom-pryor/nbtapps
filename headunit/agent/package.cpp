@@ -290,6 +290,10 @@ bool Package::readEntries(Error* error) {
 }
 
 bool Package::open(ByteSource* source, const std::vector<TrustedKey>& keys, Error* error) {
+    return open(source, keys, std::string(), error);
+}
+
+bool Package::open(ByteSource* source, const std::vector<TrustedKey>& keys, const std::string& signature, Error* error) {
     source_ = source;
     size_ = source->size();
     entries_.clear();
@@ -320,14 +324,24 @@ bool Package::open(ByteSource* source, const std::vector<TrustedKey>& keys, Erro
     }
     if (entries_[0].usize > kMaxManifestBytes) return error->fail("bad-manifest", "manifest is larger than 1 MiB");
 
-    // 3. The signature is the second, and is checked before the manifest is parsed.
-    if (entries_.size() < 2 || entries_[1].name != kSignatureName) {
+    // 3. The signature is the second, and is checked before the manifest is parsed. A detached one is checked
+    //    instead, and manifest.sig is then not read.
+    bool hasSig = entries_.size() >= 2 && entries_[1].name == kSignatureName;
+    if (!hasSig) {
         for (size_t i = 0; i < entries_.size(); ++i) {
             if (entries_[i].name == kSignatureName) return badArchive(error, "manifest.sig is not the second entry");
         }
-        return error->fail("bad-signature", "the package is not signed");
     }
-    if (entries_[1].usize != kEd25519SignatureBytes) return error->fail("bad-signature", "manifest.sig is not 64 bytes");
+    if (!signature.empty()) {
+        if (signature.size() != kEd25519SignatureBytes) {
+            return error->fail("bad-signature", "the signature given is not 64 bytes");
+        }
+        signatureBytes_ = signature;
+    } else if (!hasSig) {
+        return error->fail("bad-signature", "the package is not signed");
+    } else if (entries_[1].usize != kEd25519SignatureBytes) {
+        return error->fail("bad-signature", "manifest.sig is not 64 bytes");
+    }
     for (size_t i = 0; i < keys.size() && keyIndex_ < 0; ++i) {
         if (ed25519Verify(keys[i].key, manifestBytes_.data(), manifestBytes_.size(), (const uint8_t*)signatureBytes_.data())) {
             keyIndex_ = (int)i;
@@ -340,7 +354,7 @@ bool Package::open(ByteSource* source, const std::vector<TrustedKey>& keys, Erro
     manifestSha256_ = toHex(entries_[0].sha256, kSha256Bytes);
 
     // 5. The files are exactly the ones the manifest lists.
-    for (size_t i = 2; i < entries_.size(); ++i) {
+    for (size_t i = hasSig ? 2 : 1; i < entries_.size(); ++i) {
         if (!entries_[i].dir) files_[entries_[i].name] = i;
     }
     for (size_t i = 0; i < manifest_.contents.size(); ++i) {

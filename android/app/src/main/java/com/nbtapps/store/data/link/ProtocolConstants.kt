@@ -65,4 +65,12 @@ object ProtocolConstants {
      * whether the agent is started with the head unit. An agent that does not list it has no such switch.
      */
     const val CAPABILITY_AUTOSTART = "autostart"
+
+    /**
+     * A capability: the agent installs an offer with the offer's `signature`, checked over the manifest, and does
+     * not read the archive's `manifest.sig`. That is what a package needs whose author signed it with a key of their
+     * own and whose catalogue gives a detached signature for it. An agent that does not list it refuses such a
+     * package at install with `bad-signature`.
+     */
+    const val CAPABILITY_DETACHED_SIGNATURE = "detached-signature"
 }

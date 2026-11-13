@@ -59,3 +59,8 @@ auth.nonceBytes 16
 # that lists this one has the methods autostart.get and autostart.set, which say and set whether the agent is
 # started with the head unit; one that does not list it answers them with `unsupported`.
 capability.autostart autostart
+# An agent that lists this one installs an offer with the signature the offer gives (job.plan's `signature`), checked
+# over the manifest, and does not read the archive's manifest.sig. That signature may be a catalogue's detached one,
+# for a package whose author signed it with a key of their own. An agent that does not list it checks manifest.sig
+# when it installs, so such a package is refused there with `bad-signature`.
+capability.detachedSignature detached-signature

@@ -6,9 +6,12 @@
   OUTDIR/good/*.nbtpkg   the sources in tests/packages, signed with tests/keys/test-package.key, plus variants a
                          reader must also accept
   OUTDIR/bad/*.nbtpkg    hello 1.2.0 with one defect each; every reader must refuse each of them
+  OUTDIR/detached/*.nbtpkg  hello 1.2.0 as an author might sign it, each read with a detached signature over its
+                         manifest instead of its manifest.sig
   OUTDIR/vectors.json    what each file is: for a good one the values an index entry or a job.plan offer carries,
                          for a bad one the code the refusal has (bad-archive, bad-signature, bad-manifest or
-                         unsupported-manifest) and what is wrong with it
+                         unsupported-manifest) and what is wrong with it, for a detached one the signature to read it
+                         with and the code ("" when it is accepted, trusting the package key only)
 
 The same sources give the same files, byte for byte. Every implementation that reads packages runs against this
 set: tools/nbtpkg.py here (tests/test_nbtpkg.py), the agent's reader and the Android app's.
@@ -315,9 +318,32 @@ def build_all(out_dir):
              "unsupported-manifest", "a key in a serial service that this version does not know")):
         bad[label] = (with_changed_manifest(field(["install", "serialServices"], services)), code, why)
 
+    # ---- detached signatures: a package its author signed, with the catalogue's signature over its manifest ----
+    countersigned = nbtpkg.sign(seed, manifest_bytes)
+    flipped = bytearray(countersigned)
+    flipped[10] ^= 0x01
+    authors = with_manifest(manifest_bytes, signer=other_seed)
+    def moved_signature(ms):
+        ms.append(ms.pop(1))
+    detached = {
+        "author-signed": (authors, countersigned, "", "signed by its author's key, with the catalogue's signature"),
+        "unsigned": (with_members(lambda ms: ms.pop(1) and None), countersigned, "",
+                     "no manifest.sig, with the catalogue's signature"),
+        "author-signature-short": (with_members(short_signature), countersigned, "",
+                                   "a manifest.sig of 63 bytes, which is not read"),
+        "package-signed-other-detached": (base, nbtpkg.sign(other_seed, manifest_bytes), "bad-signature",
+                                          "a manifest.sig the reader trusts does not stand in for a detached "
+                                          "signature it does not"),
+        "detached-flipped": (authors, bytes(flipped), "bad-signature", "one bit of the detached signature is changed"),
+        "detached-short": (authors, countersigned[:63], "bad-signature", "a detached signature of 63 bytes"),
+        "signature-not-second": (with_members(moved_signature), countersigned, "bad-archive",
+                                 "manifest.sig is there but not the second entry"),
+    }
+
     # ---- write ----
-    vectors = {"keys": {"package": public.hex(), "other": nbtpkg.public_key(other_seed).hex()}, "good": [], "bad": []}
-    for kind in ("good", "bad"):
+    vectors = {"keys": {"package": public.hex(), "other": nbtpkg.public_key(other_seed).hex()}, "good": [], "bad": [],
+               "detached": []}
+    for kind in ("good", "bad", "detached"):
         os.makedirs(os.path.join(out_dir, kind), exist_ok=True)
         for stale in os.listdir(os.path.join(out_dir, kind)):
             os.remove(os.path.join(out_dir, kind, stale))
@@ -331,6 +357,11 @@ def build_all(out_dir):
         with open(os.path.join(out_dir, path), "wb") as f:
             f.write(data)
         vectors["bad"].append({"file": path, "code": code, "what": why})
+    for label, (data, signature, code, why) in sorted(detached.items()):
+        path = "detached/%s.nbtpkg" % label
+        with open(os.path.join(out_dir, path), "wb") as f:
+            f.write(data)
+        vectors["detached"].append({"file": path, "signature": signature.hex(), "code": code, "what": why})
     with open(os.path.join(out_dir, "vectors.json"), "w") as f:
         json.dump(vectors, f, indent=2)
         f.write("\n")

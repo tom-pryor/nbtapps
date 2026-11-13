@@ -46,7 +46,9 @@ struct Offer {
     std::string sha256;            // of the archive
     uint64_t size;                 // of the archive
     std::string manifestSha256;
-    std::string signature;         // the archive's manifest.sig, as hex
+    // A trusted key's signature over the manifest, as hex: the archive's manifest.sig, or a catalogue's detached
+    // signature for a package its author signed. The install checks this one, not manifest.sig.
+    std::string signature;
 
     Offer() : size(0) {}
 };
@@ -94,6 +96,7 @@ struct PlanStep {
     std::string sha256;             // the archive, for install and upgrade
     uint64_t size;
     std::string manifestSha256;
+    std::string signature;          // the offer's, as hex, which the install checks again
     bool deleteData;                // removals only
 
     PlanStep() : size(0), deleteData(false) {}

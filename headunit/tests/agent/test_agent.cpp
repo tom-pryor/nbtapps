@@ -30,6 +30,7 @@
 #include <map>
 #include <vector>
 
+#include "../../agent/ed25519.hpp"
 #include "../../agent/fsutil.hpp"
 #include "../../agent/host_platform.hpp"
 #include "../../agent/json.hpp"
@@ -109,6 +110,31 @@ static void loadPackages() {
         CHECK_IN(name + ": " + error.message, package.open(&source, both, &error));
         p.manifest = package.manifestBytes();
         CHECK_IN(name, hashOf(p.manifest) == p.manifestSha256 && hashOf(p.bytes) == p.sha256 && p.bytes.size() == p.size);
+        gPkgs[name] = p;
+    }
+    // Packages read with a detached signature, under "detached/<label>": the offer carries that signature, not the
+    // archive's manifest.sig. Only the ones a reader takes are loaded.
+    json::Value detached = doc.root().find("detached");
+    for (size_t i = 0; i < detached.size(); ++i) {
+        json::Value d = detached.at(i);
+        if (!d.find("code").string().empty()) continue;
+        std::string file = d.find("file").string();
+        std::string name = file.substr(0, file.size() - 7);   // "detached/<label>"
+        Pkg p;
+        p.bytes = testutil::readFile(gData + "/" + file);
+        p.signature = d.find("signature").string();
+        std::string signature(kEd25519SignatureBytes, '\0');
+        CHECK_IN(name, fromHex(p.signature, (uint8_t*)&signature[0], signature.size()));
+        MemorySource source(p.bytes.data(), p.bytes.size());
+        Package package;
+        Error error;
+        CHECK_IN(name + ": " + error.message, package.open(&source, both, signature, &error));
+        p.id = package.manifest().id;
+        p.version = package.manifest().version;
+        p.sha256 = package.sha256();
+        p.size = package.size();
+        p.manifestSha256 = package.manifestSha256();
+        p.manifest = package.manifestBytes();
         gPkgs[name] = p;
     }
 }
@@ -671,8 +697,9 @@ static void testHello() {
     Parsed r(b.call(p, "hello", "{\"protocolMin\":1,\"protocolMax\":7,\"role\":\"cli\",\"maxFrame\":4096,\"capabilities\":[\"zstd\"],\"extra\":{\"a\":[1]}}"));
     CHECK(integer(r.result, "protocolMin") == 1 && integer(r.result, "protocolMax") == 1 && str(r.result, "role") == "agent");
     CHECK(str(r.result, "headUnitId") == kHeadUnitId && str(r.result, "agentVersion") == "1.0.0");
-    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 1 &&
-          r.result.find("capabilities").at(0).string() == kCapabilityAutostart);
+    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 2 &&
+          r.result.find("capabilities").at(0).string() == kCapabilityAutostart &&
+          r.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature);
     CHECK(Parsed(b.call(p, "hello", kGoodHello)).code() == "bad-state");
     // Methods that are not there.
     const char* missing[] = {"job.frobnicate", "pairing.frobnicate", ""};
@@ -2838,6 +2865,76 @@ static bool flag(json::Value object, const char* name) {
     return v.isBool() && v.boolean();
 }
 
+// A package its author signed with a key of their own, offered with the catalogue's signature over its manifest.
+static void testDetachedSignature() {
+    const char kAuthors[] = "detached/author-signed";
+    std::string why;
+
+    // The bench trusts the package key only. The archive's manifest.sig is the other key's, so before agents took
+    // the offer's signature the plan passed and the install was refused with bad-signature.
+    {
+        Bench b("detached");
+        Phone* p = b.phone();
+        Parsed hello(p->helloReply);
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 2 &&
+                                    hello.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature);
+        // First the version before it, signed in the usual way: one key then verifies both, so the upgrade's key
+        // matches the installed one.
+        install(b, p, kHelloOld, std::string(kHelloOld) + " " + kRuntime);
+        p->events.clear();
+        std::string planId = planOk(b, p, kAuthors, "", kAuthors);
+        startJob(b, p, planId);
+        CHECK_IN(outcome(p), outcome(p) == "succeeded done");
+        CHECK(b.versionOf("org.nbtapp.hello") == "1.2.0" && fs::kindOf(b.app("org.nbtapp.hello") + "/bin/hello") == fs::kFile);
+        // The installed record names the key that verified the planned signature: the package key, which is
+        // built in, as the reserved org.nbtapp. ids need.
+        InstalledPackage record;
+        CHECK_IN(why, b.agent.engine().store().load("org.nbtapp.hello", &record, &why));
+        CHECK(record.key == toHex(gPackageKey.key, sizeof gPackageKey.key));
+        // The job's record keeps the signature with its step, so an agent that starts again mid-job checks the same.
+        std::string job;
+        CHECK_IN(why, fs::readFile(b.root + "/state/job/job.json", 65536, &job, &why));
+        CHECK_IN(job, has(job, "\"signature\":\"" + pkg(kAuthors).signature + "\""));
+    }
+
+    // The same archive offered with its own manifest.sig: a key the agent does not trust, refused at the plan.
+    {
+        Bench b("detached-own");
+        Phone* p = b.phone();
+        Pkg own = pkg(kAuthors);
+        MemorySource source(own.bytes.data(), own.bytes.size());
+        Package package;
+        Error error;
+        std::vector<TrustedKey> other(1, gOtherKey);
+        CHECK_IN(error.message, package.open(&source, other, &error));
+        own.signature = toHex((const uint8_t*)package.signatureBytes().data(), package.signatureBytes().size());
+        std::string params = "{\"install\":[{\"id\":\"org.nbtapp.hello\",\"version\":\"1.2.0\"}],\"remove\":[],\"offers\":[" +
+                             offer(own) + "]}";
+        planRefused(b, p, params, "bad-signature", "org.nbtapp.hello");
+        CHECK(!b.installed("org.nbtapp.hello"));
+    }
+
+    // A planned signature that does not verify at install is refused there too: the step reads the one it was given.
+    {
+        Bench b("detached-step");
+        Phone* p = b.phone();
+        install(b, p, kRuntime, kRuntime);   // hello needs it
+        std::string archive = b.root + "/author-signed.nbtpkg";
+        CHECK_IN(why, fs::makeDirs(b.root, &why) && fs::writeFile(archive, pkg(kAuthors).bytes, 0600, &why));
+        std::string flipped = pkg(kAuthors).signature;
+        flipped[20] = flipped[20] == '0' ? '1' : '0';
+        StepReport report = b.agent.engine().install(archive, pkg(kAuthors).manifestSha256, 0, flipped);
+        CHECK_IN(report.error.message, report.error.code == "bad-signature" && !b.installed("org.nbtapp.hello"));
+        report = b.agent.engine().install(archive, pkg(kAuthors).manifestSha256, 0, "not hex");
+        CHECK_IN(report.error.message, report.error.code == "bad-signature" && !b.installed("org.nbtapp.hello"));
+        // Without one the archive's own manifest.sig is read, and the bench does not trust its key.
+        report = b.agent.engine().install(archive, pkg(kAuthors).manifestSha256, 0);
+        CHECK_IN(report.error.message, report.error.code == "bad-signature" && !b.installed("org.nbtapp.hello"));
+        report = b.agent.engine().install(archive, pkg(kAuthors).manifestSha256, 0, pkg(kAuthors).signature);
+        CHECK_IN(report.error.message, report.error.code.empty() && b.versionOf("org.nbtapp.hello") == "1.2.0");
+    }
+}
+
 static void testAutostart() {
     const char kPlugin[] = "org.nbtapp.plugin";
     const std::string on = "{\"on\":true}", off = "{\"on\":false}";
@@ -2848,7 +2945,7 @@ static void testAutostart() {
         Bench b("autostart-nowhere", false, false, "1.1.0");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 1 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 2 &&
                                     hello.result.find("capabilities").at(0).string() == kCapabilityAutostart);
         Parsed state(b.call(p, "autostart.get", "{}"));
         CHECK(state.result.size() == 4 && !flag(state.result, "on") && !flag(state.result, "available"));
@@ -3002,6 +3099,7 @@ int main(int argc, char** argv) {
     testQuietStart();
     testCrashDuringJob();
     testAgentUpdate();
+    testDetachedSignature();
     testAutostart();
     testSession(session);
     fs::removeTree(gWork, 0);

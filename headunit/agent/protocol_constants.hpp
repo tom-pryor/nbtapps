@@ -35,6 +35,9 @@ const size_t kAuthNonceBytes = 16;
 
 // A capability, as `hello` names it: this agent has autostart.get and autostart.set.
 const char* const kCapabilityAutostart = "autostart";
+// A capability: this agent installs an offer with the offer's signature, which may be a catalogue's detached
+// signature over the manifest, and does not read the archive's manifest.sig.
+const char* const kCapabilityDetachedSignature = "detached-signature";
 
 }  // namespace nbt
 

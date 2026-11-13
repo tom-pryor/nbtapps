@@ -11,6 +11,7 @@
 
 #include <string.h>
 
+#include "../../agent/hex.hpp"
 #include "../../agent/json.hpp"
 #include "../../agent/sha256.hpp"
 #include "test_util.hpp"
@@ -141,6 +142,37 @@ int main(int argc, char** argv) {
                  code == v.find("code").string());
     }
 
+    // 2b. Detached signatures: the one given is checked, and manifest.sig is not read.
+    json::Value detached = root.find("detached");
+    CHECK(detached.size() >= 7);
+    for (size_t i = 0; i < detached.size(); ++i) {
+        json::Value v = detached.at(i);
+        std::string file = v.find("file").string();
+        std::string data = readFile(dir + "/" + file);
+        std::string hex = v.find("signature").string();
+        std::string signature(hex.size() / 2, '\0');
+        CHECK_IN(file, fromHex(hex, (uint8_t*)&signature[0], signature.size()));
+        MemorySource source(data.data(), data.size());
+        Package package;
+        Error error;
+        bool ok = package.open(&source, packageOnly, signature, &error);
+        std::string want = v.find("code").string();
+        CHECK_IN(file + " (" + v.find("what").string() + "): got " + (ok ? "accepted" : error.code),
+                 ok ? want.empty() : error.code == want);
+        if (!ok) continue;
+        CHECK_IN(file, package.keyIndex() == 0 && package.signatureBytes() == signature);
+        CHECK_IN(file, package.manifestSha256() == hashOf(package.manifestBytes()));
+        const Manifest& m = package.manifest();
+        for (size_t k = 0; k < m.contents.size(); ++k) {
+            testutil::StringSink sink;
+            CHECK_IN(file + ": " + m.contents[k].path, package.extract(m.contents[k].path, &sink, &error));
+            CHECK_IN(file, hashOf(sink.text) == m.contents[k].sha256);
+        }
+        MemorySource again(data.data(), data.size());
+        Package other;
+        CHECK_IN(file, !other.open(&again, otherOnly, signature, &error) && error.code == "bad-signature");
+    }
+
     // 3. A file extracted is the file in the source tree, and a sink that refuses is an io-error.
     {
         MemorySource source(hello.data(), hello.size());
@@ -203,7 +235,7 @@ int main(int argc, char** argv) {
         CHECK(!package.extract("scripts/post-remove.sh", &sink, &error) && error.code == "bad-archive");
     }
 
-    printf("test_package: ok (%lu good, %lu bad, %lu of %lu one-byte changes made no difference)\n",
-           (unsigned long)good.size(), (unsigned long)bad.size(), (unsigned long)accepted, (unsigned long)hello.size());
+    printf("test_package: ok (%lu good, %lu bad, %lu detached, %lu of %lu one-byte changes made no difference)\n",
+           (unsigned long)good.size(), (unsigned long)bad.size(), (unsigned long)detached.size(), (unsigned long)accepted, (unsigned long)hello.size());
     return 0;
 }

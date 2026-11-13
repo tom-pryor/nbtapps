@@ -95,6 +95,14 @@ It has not run on a car:
 - The official package key is built in (`agent/embedded_keys.hpp`): the public half of the key that signs the
   official catalogue's packages. An agent built for the head unit trusts that key and no other. The host build
   also takes `--test-key` for the test keys.
+- The signature an install checks is the one the plan checked: the `signature` of the controller's offer, over the
+  manifest. For a package the official catalogue built, that is the archive's own `manifest.sig`. For a package
+  its author built and signed with a key of their own, the catalogue gives a detached signature over the same
+  manifest, signed with the official key, and the archive's `manifest.sig` is not read (`Package::open` with a
+  signature; `nbtpkg.py verify --signature`). Such a package is the author's archive byte for byte, at the
+  author's address. Agents from 1.2.0 on list the capability `detached-signature` in `hello`; an older agent plans
+  such an offer and then refuses it at install with `bad-signature`. `nbtctl install --from` offers each archive
+  with its own `manifest.sig`, so it does not install such a package.
 - The links are a local socket; in the head unit's build, Bluetooth serial, which has not run on a car (see
   below); and in the host build only, a TCP port on the loopback address (`--debug-tcp`), for the phone app's
   debug build on an emulator. TCP for a car, with the frame MAC it needs, is still to come.

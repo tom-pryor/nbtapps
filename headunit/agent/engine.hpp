@@ -181,8 +181,12 @@ public:
 
     // Installs the archive at `archivePath`, as a new package or over an older version. With
     // `expectedManifestSha256` not empty, the archive must hold exactly that manifest (the one a plan was made
-    // with), or the step fails with bad-archive.
-    StepReport install(const std::string& archivePath, const std::string& expectedManifestSha256, StepListener* listener);
+    // with), or the step fails with bad-archive. With `signatureHex` not empty (128 hex characters: the signature
+    // the plan's offer gave and the planner checked), that signature over the manifest is the one checked, and the
+    // archive's own manifest.sig is not read; this is how a package that its author signed is installed with a
+    // catalogue's signature. Empty: manifest.sig is checked.
+    StepReport install(const std::string& archivePath, const std::string& expectedManifestSha256, StepListener* listener,
+                       const std::string& signatureHex = std::string());
 
     // Removes an installed package. `deleteData` also deletes its ${data}.
     StepReport remove(const std::string& id, bool deleteData, StepListener* listener);

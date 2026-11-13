@@ -886,8 +886,10 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     json::Writer w;
     w.beginObject().key("protocolMin").integer(kProtocolVersion).key("protocolMax").integer(kProtocolVersion);
     w.key("role").string("agent").key("headUnitId").string(headUnitId_).key("agentVersion").string(agentVersion_);
-    // What this agent has beyond the protocol's first version: autostart.get and autostart.set.
-    w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart).endArray().endObject();
+    // What this agent has beyond the protocol's first version: autostart.get and autostart.set, and installs
+    // checked with the offer's signature.
+    w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart);
+    w.string(kCapabilityDetachedSignature).endArray().endObject();
     // What `auth` signs: the two payloads as they travel. The reply's is what respond() sends for this result.
     const std::string& asked = peer->incoming();
     std::string reply = resultText(id, w.text());

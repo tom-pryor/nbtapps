@@ -7,7 +7,7 @@
   nbtpkg.py build DIR [-o OUTDIR] [--key KEY]  DIR -> OUTDIR/<id>-<version>.nbtpkg, signed if a key is given
   nbtpkg.py sign PKG --key KEY [-o OUT]        adds or replaces manifest.sig (in place without -o)
   nbtpkg.py sign-file FILE --key KEY           FILE.sig: a detached signature, as index.json.sig is
-  nbtpkg.py verify PKG [--key PUB]... [--unsigned] [--json]
+  nbtpkg.py verify PKG [--key PUB]... [--unsigned] [--signature HEX] [--json]
 
 A package source DIR holds manifest.json without `contents`, and every other file as it sits in the archive
 (payload/..., scripts/..., icon.png). `build` fills in `contents`, checks the manifest and writes the archive. The
@@ -22,6 +22,8 @@ The format, as the plan document sets it:
     after another in directory order, local headers equal to the central directory, no data descriptors, zip64,
     encryption, duplicate names or archive comment, and no name longer than 255 bytes
   - manifest.sig is the 64-byte Ed25519 signature over the exact bytes of manifest.json
+  - a catalogue may instead give a detached signature over those bytes, for a package whose author signed it with a
+    key of their own (verify --signature): the app and the agent then check that one and do not read manifest.sig
   - manifest.json follows the strict JSON profile and spec/manifest.schema.json, and its `contents` lists every
     other file with its size and the SHA-256 of its uncompressed bytes
 
@@ -519,9 +521,13 @@ def read_zip(data):
 
 # ---- packages --------------------------------------------------------------------------------------------------
 
-def verify_package(data, keys=None, allow_unsigned=False):
+def verify_package(data, keys=None, allow_unsigned=False, signature=None):
     """Checks a whole package. `keys` is a list of trusted public keys; None skips the signature check. Returns
-    what the index and a job.plan offer say about the package. Raises PkgError."""
+    what the index and a job.plan offer say about the package. Raises PkgError.
+
+    `signature` is a detached signature over the manifest (64 bytes), as a catalogue gives one for a package whose
+    author signed it with a key of their own. With it, that signature is the one checked: manifest.sig is not read,
+    may be signed by any key or missing, and only has to be the second entry if it is there."""
     entries = read_zip(data)
     if not entries or entries[0]["name"] != MANIFEST:
         raise PkgError("bad-archive", "the package does not start with its manifest")
@@ -533,17 +539,20 @@ def verify_package(data, keys=None, allow_unsigned=False):
         raise PkgError("bad-archive", "manifest.sig is not the second entry")
 
     # The signature is checked before the manifest is parsed, so only authenticated bytes reach the parser.
-    signature = key = None
-    if signed:
+    key = None
+    if signature is not None:
+        if len(signature) != SIGNATURE_BYTES:
+            raise PkgError("bad-signature", "the signature given is not %d bytes" % SIGNATURE_BYTES)
+    elif signed:
         signature = entries[1]["data"]
         if len(signature) != SIGNATURE_BYTES:
             raise PkgError("bad-signature", "manifest.sig is not %d bytes" % SIGNATURE_BYTES)
-        if keys is not None:
-            key = next((k for k in keys if signature_ok(k, manifest_bytes, signature)), None)
-            if key is None:
-                raise PkgError("bad-signature", "no trusted key verifies the signature")
     elif not allow_unsigned:
         raise PkgError("bad-signature", "the package is not signed")
+    if signature is not None and keys is not None:
+        key = next((k for k in keys if signature_ok(k, manifest_bytes, signature)), None)
+        if key is None:
+            raise PkgError("bad-signature", "no trusted key verifies the signature")
 
     manifest = load_manifest(manifest_bytes)
 
@@ -664,10 +673,16 @@ def cmd_sign_file(args):
     print("%s.sig  key %s" % (args.file, fingerprint(public_key(read_key(args.key)))))
 
 
+def _signature_hex(text):
+    if not re.fullmatch(r"[0-9a-f]{%d}" % (SIGNATURE_BYTES * 2), text):
+        raise argparse.ArgumentTypeError("a signature is %d lowercase hex characters" % (SIGNATURE_BYTES * 2))
+    return bytes.fromhex(text)
+
+
 def cmd_verify(args):
     keys = [read_key(k) for k in args.key] if args.key else None
     with open(args.pkg, "rb") as f:
-        info = verify_package(f.read(), keys, allow_unsigned=args.unsigned)
+        info = verify_package(f.read(), keys, allow_unsigned=args.unsigned, signature=args.signature)
     if args.json:
         print(json.dumps(info, indent=2))
         return
@@ -713,6 +728,8 @@ def main(argv=None):
     p.add_argument("pkg")
     p.add_argument("--key", action="append", help="trusted public key file; may be given more than once")
     p.add_argument("--unsigned", action="store_true", help="accept a package with no manifest.sig")
+    p.add_argument("--signature", type=_signature_hex, metavar="HEX",
+                   help="a detached signature over the manifest (128 hex characters), checked instead of manifest.sig")
     p.add_argument("--json", action="store_true", help="print the result as JSON")
     p.set_defaults(run=cmd_verify)
 

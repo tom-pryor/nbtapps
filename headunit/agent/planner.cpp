@@ -403,6 +403,7 @@ bool Planner::resolve(const PlanRequest& request, const std::map<std::string, Of
         step.sha256 = offer.sha256;
         step.size = offer.size;
         step.manifestSha256 = offer.manifestSha256;
+        step.signature = offer.signature;
         plan->steps.push_back(step);
 
         std::vector<Problem> problems;

@@ -6,7 +6,8 @@
 
   1. the strict JSON profile agrees with every line of spec/json-profile.vectors
   2. the manifest schema uses only keywords the tool implements
-  3. every good test package verifies and every bad one is refused with the code vectors.json gives it
+  3. every good test package verifies and every bad one is refused with the code vectors.json gives it, and each
+     detached-signature case gets the verdict it gives
   4. the same source builds the same bytes, and `build` + `sign` equals a signed `build`
   5. Python's own zip reader accepts a good package, so ordinary tools can inspect one
   6. the command line: keygen never overwrites, sign-file signs, verify reports and fails as documented
@@ -128,6 +129,22 @@ def main():
         assert hello["flags"] == ["runs-scripts"]
         print("[ok] test packages: %d good, %d bad" % (len(vectors["good"]), len(vectors["bad"])))
 
+        # Detached signatures: the one given is checked, manifest.sig is not read.
+        assert len(vectors["detached"]) >= 7
+        for entry in vectors["detached"]:
+            data, signature = data_of(entry), bytes.fromhex(entry["signature"])
+            try:
+                if entry["code"]:
+                    refused(entry["code"], nbtpkg.verify_package, data, [public], signature=signature)
+                    continue
+                info = nbtpkg.verify_package(data, [other, public], signature=signature)
+                assert info["key"] == public.hex() and info["signature"] == entry["signature"]
+                assert info["manifestSha256"] == hello["manifestSha256"]
+                refused("bad-signature", nbtpkg.verify_package, data, [other], signature=signature)
+            except AssertionError as e:
+                raise AssertionError("%s (%s): %s" % (entry["file"], entry["what"], e))
+        print("[ok] detached signatures: %d cases" % len(vectors["detached"]))
+
         # Risk flags come from the manifest alone.
         assert nbtpkg.risk_flags({"install": {"files": [{"dest": "/etc/x"}], "reboot": "hmi-restart"}}) == \
             ["modifies-system", "needs-reboot"]
@@ -184,6 +201,13 @@ def main():
         assert unchecked.returncode == 0 and "NOT checked" in unchecked.stdout
         wrong = run("verify", package, "--key", os.path.join(KEYS, "test-package.pub"))
         assert wrong.returncode != 0 and "bad-signature" in wrong.stderr
+        # Signed with k, read with the test package key's detached signature over the same manifest.
+        countersigned = nbtpkg.sign(seed, nbtpkg.read_zip(signed)[0]["data"]).hex()
+        detached = run("verify", package, "--key", os.path.join(KEYS, "test-package.pub"), "--signature", countersigned,
+                       "--json")
+        assert detached.returncode == 0 and json.loads(detached.stdout)["signature"] == countersigned
+        assert run("verify", package, "--key", pub, "--signature", countersigned).returncode != 0
+        assert run("verify", package, "--signature", countersigned.upper()).returncode != 0
 
         index = os.path.join(tmp, "index.json")
         with open(index, "wb") as f:

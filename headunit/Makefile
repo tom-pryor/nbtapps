@@ -225,7 +225,7 @@ $(AGENT_HOST)/nbtctl: agent/nbtctl.cpp $(AGENT_HOST)/libnbtagent.a $(AGENT_HDRS)
 # The same nbtagent, built to say that it is a later version (agent/version.hpp), so that an update of the agent
 # by the agent can be run from end to end: tests/e2e/run_launcher.py makes a package of this program, as the
 # version it says it is. Test bench only, like the options above.
-AGENT_NEXT_VERSION = 1.2.0
+AGENT_NEXT_VERSION = 1.3.0
 $(AGENT_HOST)/nbtagent-next: agent/nbtagent.cpp $(AGENT_HOST)/libnbtagent.a $(AGENT_HDRS) $(BUILD)/version
 	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_TEST_KEYS -DNBT_DEBUG_TCP -DNBT_TEST_AGENT_VERSION='"$(AGENT_NEXT_VERSION)"' \
 	    -DNBT_APP_VERSION='"$(VERSION)"' -o $@ $< $(AGENT_HOST)/libnbtagent.a -lz

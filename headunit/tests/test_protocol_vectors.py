@@ -241,6 +241,7 @@ CONSTANTS = {
     "pairing.codeDigits": "number", "pairing.windowSeconds": "number", "pairing.tries": "number",
     "pairing.pauseSeconds": "number", "auth.nonceBytes": "number",
     "capability.autostart": "name",
+    "capability.detachedSignature": "name",
 }
 
 

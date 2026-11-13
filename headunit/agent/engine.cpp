@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 
+#include "ed25519.hpp"
 #include "fsutil.hpp"
 #include "hex.hpp"
 #include "hmi_ids.hpp"
@@ -775,7 +776,8 @@ public:
         : engine_(engine), log_(engine, listener, quiet), manifest_(0), undecided_(0), old_(0), keyEmbedded_(false),
           self_(false), backups_(0), moved_(0) {}
 
-    StepReport run(const std::string& archivePath, const std::string& expectedManifestSha256);
+    StepReport run(const std::string& archivePath, const std::string& expectedManifestSha256,
+                   const std::string& signatureHex);
     // The checks of plan() and checkSpace() alone, for Engine::precheck.
     bool check(const Manifest& manifest, const std::vector<InstalledPackage>& installed,
                const std::set<std::string>& undecided, Error* error);
@@ -868,11 +870,12 @@ private:
     unsigned backups_, moved_;
 };
 
-StepReport Engine::install(const std::string& archivePath, const std::string& expectedManifestSha256, StepListener* listener) {
+StepReport Engine::install(const std::string& archivePath, const std::string& expectedManifestSha256, StepListener* listener,
+                           const std::string& signatureHex) {
     StepReport report;
     {
         InstallStep step(this, listener);
-        report = step.run(archivePath, expectedManifestSha256);
+        report = step.run(archivePath, expectedManifestSha256, signatureHex);
     }
     if (observer_ != 0) observer_->stepEnded();
     return report;
@@ -896,7 +899,8 @@ bool InstallStep::check(const Manifest& manifest, const std::vector<InstalledPac
     return ok;
 }
 
-StepReport InstallStep::run(const std::string& archivePath, const std::string& expectedManifestSha256) {
+StepReport InstallStep::run(const std::string& archivePath, const std::string& expectedManifestSha256,
+                            const std::string& signatureHex) {
     report_.action = "install";
     log_.begin("install " + archivePath);
     std::string why;
@@ -913,7 +917,17 @@ StepReport InstallStep::run(const std::string& archivePath, const std::string& e
             ioFail(why);
             break;
         }
-        if (!package_.open(&source_, engine_->keys_, &report_.error)) break;
+        // The signature the plan checked, if it gave one, is the one checked here too: for a package its author
+        // signed, manifest.sig is the author's and the catalogue's signature comes with the offer.
+        std::string signature;
+        if (!signatureHex.empty()) {
+            signature.assign(kEd25519SignatureBytes, '\0');
+            if (!fromHex(signatureHex, (uint8_t*)&signature[0], signature.size())) {
+                fail("bad-signature", "the planned signature is not 128 hex characters");
+                break;
+            }
+        }
+        if (!package_.open(&source_, engine_->keys_, signature, &report_.error)) break;
         report_.id = m().id;
         report_.version = m().version;
         if (!expectedManifestSha256.empty() && expectedManifestSha256 != package_.manifestSha256()) {

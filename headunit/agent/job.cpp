@@ -81,6 +81,7 @@ bool Job::persist(std::string* error) const {
         } else {
             w.key("sha256").string(s.plan.sha256).key("size").integer((int64_t)s.plan.size);
             w.key("manifestSha256").string(s.plan.manifestSha256);
+            if (!s.plan.signature.empty()) w.key("signature").string(s.plan.signature);
         }
         if (!s.result.empty()) w.key("result").string(s.result);
         if (!s.error.code.empty()) {
@@ -131,6 +132,7 @@ bool Job::load(bool recovered, const StepReport& report, std::string* error) {
         s.plan.oldVersion = stringOf(v, "oldVersion");
         s.plan.sha256 = stringOf(v, "sha256");
         s.plan.manifestSha256 = stringOf(v, "manifestSha256");
+        s.plan.signature = stringOf(v, "signature");
         s.plan.size = v.find("size").isInteger() ? (uint64_t)v.find("size").integer() : 0;
         s.plan.deleteData = v.find("deleteData").isBool() && v.find("deleteData").boolean();
         s.result = stringOf(v, "result");
@@ -550,7 +552,8 @@ void Job::runStep() {
     emitProgress(true);
 
     StepReport report = s.plan.action == "remove" ? engine_->remove(s.plan.id, s.plan.deleteData, this)
-                                                  : engine_->install(blobPath(s), s.plan.manifestSha256, this);
+                                                  : engine_->install(blobPath(s), s.plan.manifestSha256, this,
+                                                                     s.plan.signature);
     if (report.outcome == kStepRestart) {
         // The step has placed a newer version of the agent, and only that version can decide it. Written down
         // first: whichever agent starts next finds a job that is restarting, and the files say the rest.

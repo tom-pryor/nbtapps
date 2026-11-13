@@ -12,6 +12,9 @@
 //      and at most 1 MiB                                                                  bad-manifest
 //   3. manifest.sig is the second entry (elsewhere: bad-archive), is 64 bytes, and one of the trusted keys
 //      verifies it over the exact bytes of manifest.json                                  bad-signature
+//      With a detached signature given to open(), as a catalogue gives one for a package whose author signed it
+//      with a key of their own, that signature is the one checked. manifest.sig is then not read: it may be
+//      missing or signed by any key, and only has to be the second entry if it is there.
 //   4. the manifest itself, see manifest.hpp                               bad-manifest, unsupported-manifest
 //   5. the files are exactly the ones `contents` lists, with those sizes and hashes        bad-archive
 //
@@ -79,10 +82,14 @@ public:
     // Checks the whole archive against `keys`. `source` must stay alive for as long as extract() is used.
     // On a refusal returns false with error->code set as listed above; an archive that cannot be read is io-error.
     bool open(ByteSource* source, const std::vector<TrustedKey>& keys, Error* error);
+    // The same with a detached signature over the manifest (64 bytes), checked instead of manifest.sig. An empty
+    // `signature` is the same as the call above.
+    bool open(ByteSource* source, const std::vector<TrustedKey>& keys, const std::string& signature, Error* error);
 
     const Manifest& manifest() const { return manifest_; }
     const std::string& manifestBytes() const { return manifestBytes_; }     // as signed
-    const std::string& signatureBytes() const { return signatureBytes_; }   // the 64 bytes of manifest.sig
+    // The 64 bytes of the signature that was checked: manifest.sig's, or the detached one given to open().
+    const std::string& signatureBytes() const { return signatureBytes_; }
     // What an index entry or a job.plan offer says about this archive, all as lowercase hex.
     const std::string& sha256() const { return sha256_; }
     uint64_t size() const { return size_; }

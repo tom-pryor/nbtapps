@@ -826,5 +826,49 @@
       "code": "bad-archive",
       "what": "directory sizes hold the zip64 marker"
     }
+  ],
+  "detached": [
+    {
+      "file": "detached/author-signature-short.nbtpkg",
+      "signature": "aa2280e795c1408fdb5ab93dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f86320d",
+      "code": "",
+      "what": "a manifest.sig of 63 bytes, which is not read"
+    },
+    {
+      "file": "detached/author-signed.nbtpkg",
+      "signature": "aa2280e795c1408fdb5ab93dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f86320d",
+      "code": "",
+      "what": "signed by its author's key, with the catalogue's signature"
+    },
+    {
+      "file": "detached/detached-flipped.nbtpkg",
+      "signature": "aa2280e795c1408fdb5ab83dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f86320d",
+      "code": "bad-signature",
+      "what": "one bit of the detached signature is changed"
+    },
+    {
+      "file": "detached/detached-short.nbtpkg",
+      "signature": "aa2280e795c1408fdb5ab93dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f8632",
+      "code": "bad-signature",
+      "what": "a detached signature of 63 bytes"
+    },
+    {
+      "file": "detached/package-signed-other-detached.nbtpkg",
+      "signature": "3828e5d90db1bb65a56d01eaf4c9cd66d22b1e86c78f357afeefc6a3096ca126014e06b76202f7e11c0c1388ff68652bf3618105dd2a68edac21bbaeee50b40a",
+      "code": "bad-signature",
+      "what": "a manifest.sig the reader trusts does not stand in for a detached signature it does not"
+    },
+    {
+      "file": "detached/signature-not-second.nbtpkg",
+      "signature": "aa2280e795c1408fdb5ab93dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f86320d",
+      "code": "bad-archive",
+      "what": "manifest.sig is there but not the second entry"
+    },
+    {
+      "file": "detached/unsigned.nbtpkg",
+      "signature": "aa2280e795c1408fdb5ab93dde118f31b99fa3791366b743b87242051b136028315d6a612b43541fbed5892df58f359ca007bfd70842f0116d62ac767f86320d",
+      "code": "",
+      "what": "no manifest.sig, with the catalogue's signature"
+    }
   ]
 }
