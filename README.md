@@ -35,6 +35,25 @@ NBTApps has two parts, and you need both: **NBTApps for Android** on your phone 
 - **Setting up the Agent:** [headunit/INSTALL.md](headunit/INSTALL.md) walks through it. It starts from a root
   shell on the head unit, which it doesn’t cover how to get.
 
+## Community packages
+
+Besides the project’s own packages, the catalogue lists **community** packages: apps that other developers build,
+sign and submit.
+
+**Submit your own app** to [tom-pryor/nbtapps-packages](https://github.com/tom-pryor/nbtapps-packages) by pull
+request:
+
+1. Build your package with [`headunit/tools/nbtpkg.py`](headunit/tools/nbtpkg.py), following
+   [`headunit/spec/manifest.schema.json`](headunit/spec/manifest.schema.json), and sign it with a key of your own.
+2. Publish the `.nbtpkg` archive at an https address of your own, such as a release of your app’s repo.
+3. Open a pull request that adds your package’s listing, your public key and a record of the version, which pins
+   the archive’s SHA-256 and names the source commit it was built from.
+
+Each pull request gets an automatic check, and then a review of the source and of the archive. Once accepted, the
+version is listed in the next publish of the catalogue. Your archive stays at your address, as you signed it. The
+[repo’s README](https://github.com/tom-pryor/nbtapps-packages#readme) has the layout, the rules (ids, iDrive
+plugins, logs) and how to run the check before opening a pull request.
+
 ## What’s in this repo
 
 | Folder | What it is |
