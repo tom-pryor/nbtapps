@@ -73,4 +73,10 @@ object ProtocolConstants {
      * package at install with `bad-signature`.
      */
     const val CAPABILITY_DETACHED_SIGNATURE = "detached-signature"
+
+    /**
+     * A capability: the agent has `files.list`, `files.fetch` and `files.cancel`, and sends the logs of an installed
+     * package, those its manifest names in `logs`, and its own. An agent that does not list it has none to send.
+     */
+    const val CAPABILITY_FILES = "files"
 }

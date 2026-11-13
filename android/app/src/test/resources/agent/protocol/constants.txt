@@ -64,3 +64,7 @@ capability.autostart autostart
 # for a package whose author signed it with a key of their own. An agent that does not list it checks manifest.sig
 # when it installs, so such a package is refused there with `bad-signature`.
 capability.detachedSignature detached-signature
+# An agent that lists this one has files.list, files.fetch and files.cancel: it sends a controller the files of an
+# installed package, as yet only the logs its manifest names in `logs` and the agent's own (the Message reference,
+# "Files"). One that does not list it answers them with `unsupported`.
+capability.files files

@@ -38,6 +38,9 @@ const char* const kCapabilityAutostart = "autostart";
 // A capability: this agent installs an offer with the offer's signature, which may be a catalogue's detached
 // signature over the manifest, and does not read the archive's manifest.sig.
 const char* const kCapabilityDetachedSignature = "detached-signature";
+// A capability: this agent has files.list, files.fetch and files.cancel, and sends a controller the logs of an
+// installed package.
+const char* const kCapabilityFiles = "files";
 
 }  // namespace nbt
 

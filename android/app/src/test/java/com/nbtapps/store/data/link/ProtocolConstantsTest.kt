@@ -46,6 +46,7 @@ class ProtocolConstantsTest {
         "auth.nonceBytes" to ProtocolConstants.AUTH_NONCE_BYTES.toString(),
         "capability.autostart" to ProtocolConstants.CAPABILITY_AUTOSTART,
         "capability.detachedSignature" to ProtocolConstants.CAPABILITY_DETACHED_SIGNATURE,
+        "capability.files" to ProtocolConstants.CAPABILITY_FILES,
     )
 
     /** What only the agent needs. Nothing at present: the app reads manifests, and so needs the service's name too. */

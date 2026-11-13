@@ -242,6 +242,7 @@ CONSTANTS = {
     "pairing.pauseSeconds": "number", "auth.nonceBytes": "number",
     "capability.autostart": "name",
     "capability.detachedSignature": "name",
+    "capability.files": "name",
 }
 
 
