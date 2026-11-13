@@ -153,9 +153,10 @@ case $answer in
         ;;
 esac
 
-# The draft's notes say it is not published yet: that line goes, and what was signed takes its place.
+# The draft's notes say it is not published yet: that line goes (cat -s closes the gap it leaves), and what was
+# signed takes its place.
 notes="$out/github/notes.md"
-(cd "$here" && gh release view "$tag" --json body --jq .body) | grep -v '^Not published yet' > "$notes"
+(cd "$here" && gh release view "$tag" --json body --jq .body) | grep -v '^Not published yet' | cat -s > "$notes"
 {
     echo "$file SHA-256: \`$sha\`"
     echo
