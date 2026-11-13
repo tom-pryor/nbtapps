@@ -98,6 +98,15 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // On CI (GitHub Actions sets CI), lint leaves out the checks that look up the newest Gradle and library
+    // versions on the internet: their findings change whenever something is published, not when this repo does.
+    // Dependabot proposes those updates instead. On this machine they still show.
+    lint {
+        if (providers.environmentVariable("CI").isPresent) {
+            disable += setOf("AndroidGradlePluginVersion", "NewerVersionAvailable", "GradleDependency")
+        }
+    }
 }
 
 dependencies {

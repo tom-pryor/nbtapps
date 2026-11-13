@@ -4,13 +4,13 @@ package com.nbtapps.store
 
 import java.io.File
 import org.junit.Assert.assertArrayEquals
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 /**
  * The copies under `src/test/resources/agent` against the agent repo they came from, `headunit/`, when it is
  * there. A difference means one side moved on: run `tools/sync_agent_vectors.sh`, then make the tests
- * pass again. Without the agent repo there is nothing to compare, and the test is skipped.
+ * pass again. Without the agent repo there is nothing to compare, and the test is skipped (fails under
+ * `NBT_REQUIRE_BENCH`: see [AgentBench.need]).
  */
 class AgentVectorsInSyncTest {
 
@@ -19,7 +19,7 @@ class AgentVectorsInSyncTest {
 
     private fun assertSame(copy: String, original: String) {
         val source = File(agentRepo, original)
-        assumeTrue("no agent repo at ${agentRepo}", source.isFile)
+        AgentBench.need("no agent repo at ${agentRepo}", source.isFile)
         assertArrayEquals("$copy differs from the agent repo's $original", source.readBytes(), AgentVectors.file(copy).readBytes())
     }
 

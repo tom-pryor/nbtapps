@@ -4,6 +4,8 @@ package com.nbtapps.store
 
 import java.io.File
 import java.util.concurrent.TimeUnit
+import org.junit.Assert.fail
+import org.junit.Assume.assumeTrue
 
 /**
  * The real agent for a test: the agent repo's `nbtagent`, run by its `tools/bench.py` in a Docker container.
@@ -13,7 +15,7 @@ import java.util.concurrent.TimeUnit
  * test key, and nothing else of this machine.
  *
  * It needs the agent repo, Docker, and the bench image (`make bench-image` in the agent repo). A test asks
- * [available] first and is skipped without them.
+ * [available] first, through [need], and is skipped without them.
  *
  * The agent repo is this repo's `headunit/` folder, next to `android/`. Where it is somewhere else, the environment
  * variable `NBT_AGENT_REPO` names its folder; `NBT_BENCH_IMAGE`,
@@ -35,6 +37,22 @@ object AgentBench {
     }
 
     const val MISSING ="no agent bench: it needs the agent repo (../headunit, or what NBT_AGENT_REPO names), Docker and `make bench-image` there"
+
+    /**
+     * Set when the environment variable `NBT_REQUIRE_BENCH` is: CI sets it, so that a bench or an agent repo that
+     * is missing there fails the run, and does not leave it passing with these tests skipped.
+     */
+    private val required = !System.getenv("NBT_REQUIRE_BENCH").isNullOrEmpty()
+
+    /**
+     * What a test that needs the bench, the agent repo or one of its tools asks before it starts: without [present]
+     * the test is skipped, as `assumeTrue` skips it, or fails when [required] is set. [reason] says what is missing.
+     */
+    fun need(reason: String, present: Boolean) {
+        if (present) return
+        if (required) fail("NBT_REQUIRE_BENCH is set, and $reason")
+        assumeTrue(reason, false)
+    }
 
     /** True if the container can be started. Asked once for a test run. */
     val available: Boolean by lazy {

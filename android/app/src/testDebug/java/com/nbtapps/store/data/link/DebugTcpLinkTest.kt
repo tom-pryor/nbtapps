@@ -35,7 +35,6 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -50,7 +49,8 @@ import org.junit.Test
  *
  * The agent runs in a Docker container ([AgentBench]), which publishes the port on this machine's loopback
  * address. It needs the agent repo (`headunit/`), Docker, and the bench image (`make bench-image` there).
- * Without those the tests that need it are skipped. Nothing here goes near a car.
+ * Without those the tests that need it are skipped, or fail under `NBT_REQUIRE_BENCH` ([AgentBench.need]).
+ * Nothing here goes near a car.
  */
 class DebugTcpLinkTest {
 
@@ -87,7 +87,7 @@ class DebugTcpLinkTest {
      * agent names there is the one inside its container; on this machine the port is on 127.0.0.1.
      */
     private fun startAgent() {
-        assumeTrue(AgentBench.MISSING, AgentBench.available)
+        AgentBench.need(AgentBench.MISSING, AgentBench.available)
         val log = File(work, "agent.log")
         socket = File(work, "s/a")
         agent = AgentBench.start(File(work, "root"), socket, log, debugTcp = true)

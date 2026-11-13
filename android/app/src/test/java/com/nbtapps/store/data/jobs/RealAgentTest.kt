@@ -58,7 +58,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -69,7 +68,7 @@ import org.junit.Test
  *
  * The agent runs in a Docker container ([AgentBench]), because it runs the packages' hook scripts. It needs the
  * agent repo (`headunit/`), Docker, and the bench image (`make bench-image` there). Without those the tests
- * are skipped. Nothing here goes near a car.
+ * are skipped, or fail under `NBT_REQUIRE_BENCH` ([AgentBench.need]). Nothing here goes near a car.
  */
 class RealAgentTest {
 
@@ -129,7 +128,7 @@ class RealAgentTest {
 
     @Before
     fun startAgent() {
-        assumeTrue(AgentBench.MISSING, AgentBench.available)
+        AgentBench.need(AgentBench.MISSING, AgentBench.available)
         // A short path: a local socket's name has to fit in about a hundred bytes. The socket has a folder of its
         // own, because the agent's container is handed that folder.
         work = Files.createTempDirectory("nbt").toFile()
@@ -384,7 +383,7 @@ class RealAgentTest {
 
     @Test
     fun `a job stopped on the phone during the transfer ends cancelled, with nothing installed`() = test {
-        assumeTrue("the agent repo's package tool is needed to build a large package", File(agentRepo, "tools/nbtpkg.py").isFile)
+        AgentBench.need("the agent repo's package tool is needed to build a large package", File(agentRepo, "tools/nbtpkg.py").isFile)
         val big = largePackage()
         connector.delayMillis = 20
         assertTrue(jobs.connect("bench").isSuccess)
@@ -406,7 +405,7 @@ class RealAgentTest {
 
     @Test
     fun `a transfer cut off by a lost link goes on over a new one and installs`() = test {
-        assumeTrue("the agent repo's package tool is needed to build a large package", File(agentRepo, "tools/nbtpkg.py").isFile)
+        AgentBench.need("the agent repo's package tool is needed to build a large package", File(agentRepo, "tools/nbtpkg.py").isFile)
         val big = largePackage()
         connector.delayMillis = 20
         assertTrue(jobs.connect("bench").isSuccess)
@@ -433,7 +432,7 @@ class RealAgentTest {
 
     @Test
     fun `a job does not outlast the agent, and the app says so`() = test {
-        assumeTrue("the agent repo's package tool is needed to build a large package", File(agentRepo, "tools/nbtpkg.py").isFile)
+        AgentBench.need("the agent repo's package tool is needed to build a large package", File(agentRepo, "tools/nbtpkg.py").isFile)
         val big = largePackage()
         connector.delayMillis = 20
         assertTrue(jobs.connect("bench").isSuccess)
