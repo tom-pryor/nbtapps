@@ -78,6 +78,7 @@ HeadUnitConfig HeadUnitConfig::car() {
     c.runDir = "/tmp/nbtapp";                          // plan document, "Target platform": /tmp is cleared on reboot
     c.appsDir = "/var/opt/nbtapp/apps";                // the probe's --exec-test: a program starts from /var/opt
     c.dataDir = "/var/opt/nbtapp/data";                // plan document, "Files": ${data} sits under /var/opt/nbtapp
+    c.tmpDir = "/tmp/nbtapp/apps";                     // plan document, "Pulling files": ${tmp} on the RAM disk
     c.pluginsDir = "/opt/hmi/ID5/data/ro/Plugins";     // README, "Installing"
     c.agentDir = "/var/opt/nbtapp/agent";              // plan document, "Agent updates"; hu_install.sh puts it there
     c.systemMount = "/fs/sda0";                        // the probe: /opt is a link into it
@@ -102,7 +103,7 @@ std::string HeadUnitConfig::missing() const {
         const char* name;
         const std::string* value;
     } paths[] = {{"stateDir", &stateDir}, {"stagingDir", &stagingDir}, {"runDir", &runDir},           {"appsDir", &appsDir},
-                 {"dataDir", &dataDir},   {"pluginsDir", &pluginsDir}, {"agentDir", &agentDir},
+                 {"dataDir", &dataDir},   {"tmpDir", &tmpDir},   {"pluginsDir", &pluginsDir}, {"agentDir", &agentDir},
                  {"systemMount", &systemMount}, {"shell", &shell}};
     for (size_t i = 0; i < sizeof paths / sizeof paths[0]; ++i) {
         if (!absolute(*paths[i].value)) names += std::string(names.empty() ? "" : ", ") + paths[i].name;
@@ -149,7 +150,7 @@ bool HeadUnitPlatform::prepare(std::string* error) {
     }
     if (!fs::makeDirs(config_.stateDir, error) || !fs::makeDirs(config_.stagingDir, error) ||
         !fs::makeDirs(config_.runDir, error) || !fs::makeDirs(config_.appsDir, error) ||
-        !fs::makeDirs(config_.dataDir, error)) {
+        !fs::makeDirs(config_.dataDir, error) || !fs::makeDirs(config_.tmpDir, error)) {
         return false;
     }
     startNote_.clear();

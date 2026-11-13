@@ -86,6 +86,7 @@ struct Car {
         config.runDir = root + "/tmp/nbtapp";
         config.appsDir = config.stateDir + "/apps";
         config.dataDir = config.stateDir + "/data";
+        config.tmpDir = config.runDir + "/apps";
         config.pluginsDir = root + "/system/opt/hmi/Plugins";
         config.agentDir = config.stateDir + "/agent";
         config.systemMount = root + "/system";
@@ -156,6 +157,7 @@ static void testConfig() {
     CHECK(real.appDir("org.nbtapp.hello") == "/var/opt/nbtapp/apps/org.nbtapp.hello");
     CHECK(real.dataDir("org.nbtapp.hello") == "/var/opt/nbtapp/data/org.nbtapp.hello" && real.shell() == "/bin/ksh");
     CHECK(real.stagingDir() == "/var/opt/nbtapp/staging" && real.runDir() == "/tmp/nbtapp");
+    CHECK(real.tmpDir("org.nbtapp.hello") == "/tmp/nbtapp/apps/org.nbtapp.hello");
 
     // A machine that lacks a folder every head unit has is not one, or the configuration is wrong about it.
     // Either way nothing is made there.
@@ -187,6 +189,7 @@ static void testConfig() {
     prepared(p);
     CHECK(p.startNote().empty() && !p.remounted());
     CHECK(fs::isDir(c.config.stateDir) && fs::isDir(c.config.stagingDir) && fs::isDir(c.config.appsDir) && fs::isDir(c.config.dataDir));
+    CHECK(fs::isDir(c.config.tmpDir) && p.tmpDir("org.nbtapp.hello") == c.config.tmpDir + "/org.nbtapp.hello");
     // Staging is beside the state, where there is room; the marks are where a power down takes them away.
     CHECK(fs::isDir(c.config.runDir) && p.runDir() == c.root + "/tmp/nbtapp" && p.stagingDir() == c.config.stateDir + "/staging");
     CHECK(p.markerPath() == c.config.runDir + "/system-writable");

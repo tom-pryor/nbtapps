@@ -10,6 +10,7 @@
 //   <root>/staging    blob cache, unpacked packages     <root>/data/<id>   ${data}
 //   <root>/plugins    ${plugins}                        <root>/system/...  absolute destinations
 //   <root>/run        the marks a power down takes away: removing this folder is the power cut of a test
+//   <root>/tmp/<id>   ${tmp}, which a power down would take away too
 //   <root>/agent      the agent's own folder, if a test or a launcher has made one: prepare() does not
 //
 // Nothing is remounted and nothing restarts: those calls are counted, so a test can see that the engine made them.
@@ -39,6 +40,7 @@ public:
     virtual std::string runDir() const { return root_ + "/run"; }
     virtual std::string appDir(const std::string& id) const { return root_ + "/apps/" + id; }
     virtual std::string dataDir(const std::string& id) const { return root_ + "/data/" + id; }
+    virtual std::string tmpDir(const std::string& id) const { return root_ + "/tmp/" + id; }
     virtual std::string pluginsDir() const { return root_ + "/plugins"; }
     virtual std::string agentHome() const { return root_ + "/agent"; }
     virtual std::vector<std::string> pluginScanDirs() const {

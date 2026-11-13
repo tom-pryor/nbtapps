@@ -34,6 +34,9 @@ public:
     // ${app} and ${data} of one package, and ${plugins}, the HMI's plugin folder.
     virtual std::string appDir(const std::string& id) const = 0;
     virtual std::string dataDir(const std::string& id) const = 0;
+    // ${tmp} of one package: its own folder on the RAM disk, for logs that are to spare the flash and may go at a
+    // power down. Only a manifest's `logs` names it (log_files.hpp). /tmp/nbtapp/apps/<id> on the head unit.
+    virtual std::string tmpDir(const std::string& id) const = 0;
     virtual std::string pluginsDir() const = 0;
     // The agent's own folder (agent_home.hpp): a folder for each version of it, and the files that say which one
     // the launcher starts. /var/opt/nbtapp/agent on the head unit. It is there only where the agent was put

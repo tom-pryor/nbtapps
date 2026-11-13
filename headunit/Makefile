@@ -131,6 +131,7 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 #                    is not running
 #   phones       the paired phones and their pairing keys, on disk
 #   agent_home   the agent's own folder: its versions, and the files that say which one the launcher starts
+#   log_files    the files a controller may pull: the logs a package's manifest names, and the agent's own
 # One static library, one test program per tests/agent/test_*.cpp, and two programs: nbtagent (the agent: on a
 # folder that stands in for the head unit, and in the build for the head unit also on the head unit itself) and
 # nbtctl (a command-line controller, and a package source from a folder). `make agent-test` builds all of it into a Docker image and runs it there: the engine runs packages'
@@ -144,7 +145,7 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/store.cpp agent/hmi_ids.cpp agent/engine.cpp agent/frame.cpp agent/link.cpp agent/peer.cpp \
                agent/planner.cpp agent/job.cpp agent/agent.cpp agent/hu_platform.cpp agent/dsi_client.cpp \
                agent/spp_service.cpp agent/spp_gate.cpp agent/serial_link.cpp agent/programs.cpp \
-               agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp
+               agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 # src/*.hpp: test_plugin runs the plugin's screens about phones, which are headers, against an agent, and
@@ -235,6 +236,7 @@ $(AGENT_HOST)/nbtagent-next: agent/nbtagent.cpp $(AGENT_HOST)/libnbtagent.a $(AG
 BENCH_WORK = $(BUILD)/bench/work
 run-agent-test_fsutil: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_log_cap: TEST_ARGS = $(BENCH_WORK)
+run-agent-test_log_files: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_phones: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_plugin: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_agent_home: TEST_ARGS = $(BENCH_WORK)

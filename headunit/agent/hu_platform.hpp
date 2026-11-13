@@ -49,6 +49,7 @@ struct HeadUnitConfig {
     std::string runDir;        // lost at power down: the marker, and the agent's own marks
     std::string appsDir;       // ${app} of a package is <appsDir>/<id>
     std::string dataDir;       // ${data} of a package is <dataDir>/<id>
+    std::string tmpDir;        // ${tmp} of a package is <tmpDir>/<id>: on the RAM disk, lost at power down
     std::string pluginsDir;    // ${plugins}
     std::string agentDir;      // the agent's own folder: its versions, and the files the launcher reads
     std::vector<std::string> otherPluginDirs;   // further folders the HMI loads plugins from
@@ -89,7 +90,7 @@ class HeadUnitPlatform : public Platform {
 public:
     explicit HeadUnitPlatform(const HeadUnitConfig& config);
 
-    // Makes the agent's own folders: state, staging, run, and the ones that hold ${app} and ${data}. If an agent that
+    // Makes the agent's own folders: state, staging, run, and the ones that hold ${app}, ${data} and ${tmp}. If an agent that
     // died left the system partition writable, puts it back; startNote() then says what was found and done. So
     // the caller has to know that no other agent is at work on this head unit: its marker would be taken for a
     // dead one's.
@@ -105,6 +106,7 @@ public:
     virtual std::string runDir() const { return config_.runDir; }
     virtual std::string appDir(const std::string& id) const { return config_.appsDir + "/" + id; }
     virtual std::string dataDir(const std::string& id) const { return config_.dataDir + "/" + id; }
+    virtual std::string tmpDir(const std::string& id) const { return config_.tmpDir + "/" + id; }
     virtual std::string pluginsDir() const { return config_.pluginsDir; }
     virtual std::string agentHome() const { return config_.agentDir; }
     virtual std::vector<std::string> pluginScanDirs() const;

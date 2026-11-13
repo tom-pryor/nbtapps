@@ -17,6 +17,7 @@
 #include "journal.hpp"
 #include "json.hpp"
 #include "json_writer.hpp"
+#include "log_files.hpp"
 #include "process.hpp"
 #include "semver.hpp"
 #include "sha256.hpp"
@@ -298,7 +299,7 @@ Engine::Engine(Platform* platform, const std::vector<TrustedKey>& keys, const st
 
 bool Engine::init(std::string* error) {
     return store_.init(error) && fs::makeDirs(fs::parentOf(platform_->appDir("x")), error) &&
-           fs::makeDirs(fs::parentOf(platform_->dataDir("x")), error);
+           fs::makeDirs(fs::parentOf(platform_->dataDir("x")), error) && fs::makeDirs(fs::parentOf(platform_->tmpDir("x")), error);
 }
 
 void Engine::clearJournalFolder() {
@@ -327,6 +328,7 @@ bool Engine::runHook(const Manifest& m, HookKind kind, const std::string& cwd, c
     if (!oldVersion.empty()) env.push_back("NBT_OLD_VERSION=" + oldVersion);
     env.push_back("NBT_APP_DIR=" + store_.appDir(m));
     env.push_back("NBT_DATA_DIR=" + platform_->dataDir(m.id));
+    env.push_back("NBT_TMP_DIR=" + platform_->tmpDir(m.id));
 
     putBackReadOnly(log);
     log->line(std::string("running ") + name + ": " + hook.script);
@@ -489,6 +491,8 @@ bool Engine::removeFiles(const InstalledPackage& p, bool deleteData, bool runPre
     // ${app} is the package's own: whatever is left in it goes too.
     if (!fs::removeTree(store_.appDir(m), &why)) failure.fail("io-error", why);
     if (deleteData && !fs::removeTree(platform_->dataDir(m.id), &why)) failure.fail("io-error", why);
+    // ${tmp} holds logs only, on the RAM disk: it goes with the package, data or not, and nothing hangs on it.
+    fs::removeTree(platform_->tmpDir(m.id), 0);
     crash("action");
 
     if (!failure.code.empty()) {
@@ -1621,8 +1625,10 @@ bool InstallStep::apply() {
         if (files_[i].what == FileAction::kPlace) total += m().contents[files_[i].content].size;
     }
     // ${app} and ${data} exist once a package is installed, whether or not it places anything there: hooks get
-    // both as NBT_APP_DIR and NBT_DATA_DIR.
+    // both as NBT_APP_DIR and NBT_DATA_DIR. ${tmp} exists for a package whose logs name it (NBT_TMP_DIR); it is
+    // on the RAM disk, so an undo leaves it, and the agent makes it again at every start (Agent::init).
     if (!ensureDir("${app}") || !ensureDir("${data}")) return false;
+    if (namesTmp(m()) && !fs::makeDirs(platform()->tmpDir(m().id), &why)) return ioFail(why);
     for (size_t i = 0; i < files_.size(); ++i) {
         const FileAction& a = files_[i];
         if (a.what != FileAction::kPlace) continue;
