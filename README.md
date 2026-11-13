@@ -96,7 +96,4 @@ both. The license texts are in [LICENSES/](LICENSES/).
 Third-party code keeps its own terms: TweetNaCl in `headunit/agent/vendor/tweetnacl/` (public domain) and the
 Gradle wrapper in `android/` (Apache-2.0).
 
-Still to do: the Android app bundles libraries (AndroidX, Kotlin and others, mostly Apache-2.0) whose notices
-should go out with the APK; the app has no screen for them yet.
-
 Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
