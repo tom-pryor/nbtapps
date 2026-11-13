@@ -14,7 +14,7 @@ plugins {
 // The app's version, in this one place. Android takes an update only when its version code is higher than the
 // installed one's, so the code is worked out from the name and rises whenever the name does:
 // major * 10000 + minor * 100 + patch, which makes 0.1.0 the code 100 and leaves minor and patch two digits each.
-val appVersion = "0.2.1"
+val appVersion = "0.3.0"
 val appVersionCode = appVersion.split('.').map { it.toIntOrNull() }.let { parts ->
     require(parts.size == 3 && parts.all { it != null && it >= 0 } && parts[1]!! < 100 && parts[2]!! < 100) {
         "Not a version of the form major.minor.patch, with minor and patch below 100: $appVersion"
