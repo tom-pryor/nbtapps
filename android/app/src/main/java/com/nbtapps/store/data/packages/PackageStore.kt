@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.data.packages
 
+import com.nbtapps.store.data.crypto.Ed25519
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.link.Blob
 import com.nbtapps.store.model.Offer
@@ -32,10 +33,19 @@ data class StoredPackage(
     val sha256: String,
     val size: Long,
     val manifestSha256: String,
-    /** The contents of `manifest.sig`, in hex. */
+    /**
+     * The signature that verified the manifest, in hex: the catalogue's detached one where [detachedSignature],
+     * otherwise the contents of `manifest.sig`. It is the one the agent is offered, and checks again.
+     */
     val signature: String,
     /** The public key that verified the signature, in hex. */
     val key: String,
+    /**
+     * [signature] is the catalogue's own, over a package its author signed: only an agent that lists
+     * [CAPABILITY_DETACHED_SIGNATURE][com.nbtapps.store.data.link.ProtocolConstants.CAPABILITY_DETACHED_SIGNATURE]
+     * installs it.
+     */
+    val detachedSignature: Boolean = false,
     /** The risk flags, worked out from the manifest. */
     val flags: List<String> = emptyList(),
     val depends: List<PackageDependency> = emptyList(),
@@ -119,6 +129,9 @@ class PackageStore(
      * catalogue entry that led to it. Nothing is kept unless all of it holds. [onProgress] gets the bytes
      * copied so far.
      *
+     * The signature is the archive's `manifest.sig`, or where the entry [expected] has one, the entry's
+     * [signature][PackageVersion.signature] in its place.
+     *
      * @throws PackageFormatException if the archive is refused. The message is for the user.
      * @throws IOException if it cannot be read or stored.
      */
@@ -145,7 +158,11 @@ class PackageStore(
                     onProgress(copied)
                 }
             }
-            val verified = PackageArchive.verify(part, trustedKeys)
+            val detached = expected?.second?.signature?.let { hex ->
+                Hex.decodeOrNull(hex, Ed25519.SIGNATURE_BYTES)
+                    ?: throw PackageFormatException("The catalogue's signature for the package isn't valid", PackageFormatException.BAD_SIGNATURE)
+            }
+            val verified = PackageArchive.verify(part, trustedKeys, detached)
             expected?.let { (id, version) -> verified.requireMatches(id, version) }
 
             val pkg = StoredPackage(
@@ -157,6 +174,7 @@ class PackageStore(
                 manifestSha256 = verified.manifestSha256,
                 signature = Hex.encode(verified.signature),
                 key = Hex.encode(verified.key),
+                detachedSignature = detached != null,
                 flags = verified.manifest.flags,
                 depends = verified.manifest.depends,
                 requiresAgent = verified.manifest.requires.agent,

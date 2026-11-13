@@ -9,8 +9,13 @@ import com.nbtapps.store.data.link.Blob
 import com.nbtapps.store.model.PackageVersion
 import java.io.File
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -122,6 +127,50 @@ class PackageStoreTest {
         assertEquals(emptyList<String>(), leftovers())
 
         assertNotNull(add("org.nbtapp.runtime", entry))
+    }
+
+    /** A package its author signed, and the catalogue's signature for it: from the agent repo's test packages. */
+    private val authorSigned = AgentVectors.file("packages/detached/author-signed.nbtpkg")
+    private val catalogueSignature: String = Json.parseToJsonElement(AgentVectors.file("packages/vectors.json").readText())
+        .jsonObject.getValue("detached").jsonArray.map { it.jsonObject }
+        .first { it.getValue("file").jsonPrimitive.content == "detached/author-signed.nbtpkg" }
+        .getValue("signature").jsonPrimitive.content
+
+    private fun communityEntry(signature: String?): PackageVersion {
+        val verified = PackageArchive.verify(authorSigned, keys, Hex.decodeOrNull(catalogueSignature, 64))
+        return PackageVersion(
+            "1.2.0", url = "https://example.invalid/h.nbtpkg", size = verified.size, sha256 = verified.sha256,
+            manifestSha256 = verified.manifestSha256, signature = signature,
+        )
+    }
+
+    @Test
+    fun `a community archive is checked against the catalogue's signature, which is the one offered`() = runTest {
+        val store = PackageStore(dir).also { it.load() }
+
+        val stored = authorSigned.inputStream().use { store.add(it, keys, "org.nbtapp.hello" to communityEntry(catalogueSignature)) }
+
+        assertTrue(stored.detachedSignature)
+        assertEquals(catalogueSignature, stored.signature)
+        assertEquals(catalogueSignature, stored.offer().signature)
+        assertEquals(Hex.encode(AgentVectors.packageKey), stored.key)
+        // And so it stays, for a store that starts later.
+        assertEquals(listOf(stored), PackageStore(dir).also { it.load() }.packages.value)
+        // One the catalogue does not sign is the source's own, as before.
+        assertFalse(runtime.inputStream().use { store.add(it, keys) }.detachedSignature)
+    }
+
+    @Test
+    fun `a community archive without the catalogue's signature, or with a wrong one, is refused`() = runTest {
+        val store = PackageStore(dir).also { it.load() }
+        val flipped = catalogueSignature.replaceRange(0, 1, if (catalogueSignature[0] == '0') "1" else "0")
+        for (signature in listOf(null, flipped, catalogueSignature.uppercase(), catalogueSignature.drop(2))) {
+            val refusal = assertThrows("$signature", PackageFormatException::class.java) {
+                kotlinx.coroutines.runBlocking { authorSigned.inputStream().use { store.add(it, keys, "org.nbtapp.hello" to communityEntry(signature)) } }
+            }
+            assertEquals("$signature", PackageFormatException.BAD_SIGNATURE, refusal.code)
+        }
+        assertEquals(emptyList<String>(), leftovers())
     }
 
     @Test

@@ -86,6 +86,7 @@ fun CataloguePackageScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 Header(pkg)
+                if (pkg.community) CommunityCard(pkg, uiState.sourceName)
                 uiState.get?.let { get -> GetCard(get, onDownload = viewModel::download, onInstall = { onInstall(pkg.id, get.version.version) }) }
                 pkg.latest?.let { latest ->
                     LatestVersionCard(latest)
@@ -110,6 +111,7 @@ private fun Header(pkg: CataloguePackage) {
         PackageIcon(pkg.name, 56.dp)
         Column {
             Text(pkg.name, style = MaterialTheme.typography.headlineSmall)
+            if (pkg.community) CommunityLabel("")
             Text(
                 listOf(pkg.author, categoryLabel(pkg.category)).filter { it.isNotEmpty() }.joinToString(" · "),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -118,6 +120,22 @@ private fun Header(pkg: CataloguePackage) {
         }
     }
     if (pkg.summary.isNotEmpty()) Text(pkg.summary, style = MaterialTheme.typography.bodyLarge)
+}
+
+/** Who made a community package and what the catalogue vouches for: the file it reviewed, not the developer. */
+@Composable
+private fun CommunityCard(pkg: CataloguePackage, sourceName: String?) {
+    val source = sourceName ?: "the catalogue"
+    val maker = pkg.author.ifEmpty { "an outside developer" }
+    Section("Community package") {
+        Text("Made by $maker, not by $source.", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            "${source.replaceFirstChar { it.uppercase() }} reviewed each version listed here and signed it. It downloads from the developer's own " +
+                "release, and the phone and the head unit both check that it is the file that was signed.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 /** The way from the catalogue to the head unit: download to the phone at home, install in the car. */
@@ -172,7 +190,7 @@ private fun GetCard(get: GetState, onDownload: () -> Unit, onInstall: () -> Unit
 private fun LatestVersionCard(version: PackageVersion) {
     Section("Version ${version.version}") {
         Text(versionFacts(version))
-        version.requires.agent?.let { Text("Needs agent ${rangeLabel(it)}") }
+        version.agentRange?.let { Text("Needs agent ${rangeLabel(it)}") }
     }
 }
 

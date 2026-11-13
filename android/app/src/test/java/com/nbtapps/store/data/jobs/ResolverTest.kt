@@ -10,6 +10,8 @@ import com.nbtapps.store.model.PackageDependency
 import com.nbtapps.store.model.PackageRequirements
 import com.nbtapps.store.model.PackageVersion
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -96,5 +98,29 @@ class ResolverTest {
     @Test
     fun `a cycle ends`() {
         assertEquals(listOf("b 1.0.0", "a 1.0.0"), resolve("a").names())
+    }
+
+    private fun community(agent: String?) = version("1.0.0", agent).copy(signature = "ab".repeat(64))
+
+    @Test
+    fun `a version with a detached signature needs an agent that checks one`() {
+        assertEquals(">=1.2.0", community(null).agentRange)
+        // A lower bound below the floor is needless beside it; others stand.
+        assertEquals(">=1.2.0", community(">=1.0.0").agentRange)
+        assertEquals(">=1.2.0 <2.0.0", community(">=1.1.0 <2.0.0").agentRange)
+        assertEquals(">=1.2.0", community(">1.1.9").agentRange)
+        // A range that already keeps older agents out is as published.
+        assertEquals(">=1.3.0", community(">=1.3.0").agentRange)
+        assertEquals(">1.2.0 <2.0.0", community(">1.2.0 <2.0.0").agentRange)
+        assertEquals("1.4.0", community("1.4.0").agentRange)
+        // And one with no signature of its own is as published.
+        assertEquals(">=1.0.0", version("1.0.0", ">=1.0.0").agentRange)
+        assertNull(version("1.0.0").agentRange)
+
+        assertFalse(Resolver.suits(community(">=1.0.0"), "1.1.1"))
+        assertTrue(Resolver.suits(community(">=1.0.0"), "1.2.0"))
+        assertFalse(Resolver.suits(community(">=1.1.0 <2.0.0"), "2.0.0"))
+        assertTrue(Resolver.suits(community(null), null))
+        assertTrue(Resolver.suits(version("1.0.0", ">=1.0.0"), "1.1.1"))
     }
 }

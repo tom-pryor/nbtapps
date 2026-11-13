@@ -466,9 +466,18 @@ class JobRepository(
      * Asks the agent what installing [install] and removing [remove] would take, offering the archives
      * [offers]. Nothing on the head unit changes. The agent fetches the manifests it needs over the link
      * before it answers.
+     *
+     * An archive with the catalogue's detached signature is offered only to an agent that lists
+     * [ProtocolConstants.CAPABILITY_DETACHED_SIGNATURE]: an older one would plan it and then check the author's
+     * `manifest.sig` at install.
      */
     suspend fun plan(install: List<InstallTarget>, remove: List<RemoveTarget>, offers: List<StoredPackage>): Result<Plan> =
         withSession { current ->
+            if (offers.any { it.detachedSignature } &&
+                ProtocolConstants.CAPABILITY_DETACHED_SIGNATURE !in current.client.capabilities
+            ) {
+                throw IOException(NO_DETACHED_SIGNATURE)
+            }
             val blobs = HashMap<String, Blob>()
             for (offer in offers) blobs += store.blobs(offer)
             current.blobs.offer(blobs)
@@ -776,5 +785,6 @@ class JobRepository(
     private companion object {
         const val MAX_LOG_LINES = 2_000
         const val NOT_CONNECTED = "Not connected to a head unit"
+        const val NO_DETACHED_SIGNATURE = "This head unit's agent can't install community packages. Update the agent first."
     }
 }

@@ -835,6 +835,35 @@ class JobRepositoryTest {
         assertEquals(ConnectionState.NeedsPairing("car", overTcp, stale = false), jobs.connection.value)
     }
 
+    // ---- community packages ----
+
+    @Test
+    fun `an archive with the catalogue's detached signature is offered only to an agent that checks one`() = test {
+        // What the store keeps of a community archive; that this one is the runtime makes no odds to the phone.
+        val community = stored().copy(detachedSignature = true)
+        val install = listOf(InstallTarget("org.nbtapp.runtime", "2.1.0"))
+        assertTrue(jobs.connect("car").isSuccess)
+
+        val refused = jobs.plan(install, emptyList(), listOf(community)).exceptionOrNull()
+        assertTrue("$refused", refused?.message.orEmpty().contains("community packages"))
+        assertTrue(connector.agent.requestsOf("job.plan").isEmpty())
+        // The source's own archives are offered to it as before.
+        planning(connector.agent, community)
+        assertTrue(jobs.plan(install, emptyList(), listOf(community.copy(detachedSignature = false))).isSuccess)
+        jobs.disconnect()
+
+        connector.onConnect = { agent ->
+            agent.handlers["hello"] = {
+                """{"protocolMin":1,"protocolMax":1,"role":"agent","headUnitId":"$agentId","agentVersion":"1.2.0","maxFrame":65536,"capabilities":["detached-signature"]}"""
+            }
+            planning(agent, community)
+        }
+        assertTrue(jobs.connect("car").isSuccess)
+        assertTrue(jobs.plan(install, emptyList(), listOf(community)).isSuccess)
+        val offer = (connector.agent.requestsOf("job.plan").single().getValue("offers") as JsonArray)[0] as JsonObject
+        assertEquals(community.signature, offer.getValue("signature").jsonPrimitive.content)
+    }
+
     // ---- starting with the head unit ----
 
     private val pluginRow = """{"id":"org.nbtapp.plugin","name":"NBTApp iDrive plugin","version":"1.0.0","key":"${"ab".repeat(32)}","flags":[]}"""

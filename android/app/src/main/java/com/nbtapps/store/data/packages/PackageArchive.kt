@@ -46,7 +46,10 @@ class VerifiedPackage(
     val sha256: String,
     /** Size of the archive file in bytes. */
     val size: Long,
-    /** The 64 bytes of `manifest.sig`. */
+    /**
+     * The 64 bytes of the signature that was checked: the detached one [PackageArchive.verify] was given, or
+     * else `manifest.sig`.
+     */
     val signature: ByteArray,
     /** The trusted key that verified [signature]. */
     val key: ByteArray,
@@ -75,7 +78,9 @@ class VerifiedPackage(
  * Reads `.nbtpkg` files. A package is a zip archive used as a plain container under a strict profile:
  *
  *  - `manifest.json` is the first entry and `manifest.sig` the second: the source's Ed25519 signature, 64
- *    bytes, over the exact bytes of the manifest
+ *    bytes, over the exact bytes of the manifest. A catalogue may instead give a detached signature over those
+ *    bytes, for a package whose author signed it with a key of their own: that one is then checked, and
+ *    `manifest.sig` is not read (it may be missing), though where it is present it is still the second entry
  *  - every other file is listed in the manifest's `contents` with its size and the SHA-256 of its
  *    uncompressed bytes, and nothing unlisted is present
  *  - entries are stored or deflated; no zip64, no encryption, no data descriptor, no duplicate name, no
@@ -123,12 +128,18 @@ object PackageArchive {
      * A package that passes is intact, self-consistent and signed by one of the keys. Whether it is the one
      * a catalogue lists is a separate question: see [VerifiedPackage.requireMatches].
      *
+     * With [detachedSignature], that is the signature checked over the manifest, in place of `manifest.sig`.
+     *
      * @throws PackageFormatException if the file breaks the profile, is damaged, is not signed by a trusted
      *   key or disagrees with its manifest.
      * @throws IOException if the file can't be read.
      */
     @Throws(IOException::class)
-    fun verify(file: File, trustedKeys: List<ByteArray>): VerifiedPackage = RandomAccessFile(file, "r").use { archive ->
+    fun verify(
+        file: File,
+        trustedKeys: List<ByteArray>,
+        detachedSignature: ByteArray? = null,
+    ): VerifiedPackage = RandomAccessFile(file, "r").use { archive ->
         // 1. The container. With no archive comment the end record is exactly the last 22 bytes.
         val length = archive.length()
         if (length < END_RECORD_BYTES) fail("The file is too short to be a package")
@@ -161,12 +172,16 @@ object PackageArchive {
         }
         val manifestBytes = requireNotNull(read.manifest)
 
-        // 3. The signature is the second, and is checked before the manifest is parsed.
-        if (entries.size < 2 || entries[1].name != SIGNATURE_NAME) {
-            if (entries.any { it.name == SIGNATURE_NAME }) fail("The package's signature isn't where it belongs")
-            fail("The package isn't signed", PackageFormatException.BAD_SIGNATURE)
+        // 3. The signature is the second, and is checked before the manifest is parsed. A detached one is checked
+        //    in its place, and manifest.sig is then not read; where it is present, it is still the second entry.
+        val hasSignature = entries.size >= 2 && entries[1].name == SIGNATURE_NAME
+        if (!hasSignature && entries.any { it.name == SIGNATURE_NAME }) fail("The package's signature isn't where it belongs")
+        val signature = when {
+            detachedSignature != null -> detachedSignature.takeIf { it.size == Ed25519.SIGNATURE_BYTES }
+                ?: fail("The catalogue's signature for the package isn't 64 bytes long", PackageFormatException.BAD_SIGNATURE)
+            !hasSignature -> fail("The package isn't signed", PackageFormatException.BAD_SIGNATURE)
+            else -> read.signature ?: fail("The package's signature isn't 64 bytes long", PackageFormatException.BAD_SIGNATURE)
         }
-        val signature = read.signature ?: fail("The package's signature isn't 64 bytes long", PackageFormatException.BAD_SIGNATURE)
         val key = trustedKeys.firstOrNull { Ed25519.verify(it, manifestBytes, signature) }
             ?: fail("The package isn't signed by a key this app trusts", PackageFormatException.BAD_SIGNATURE)
 
@@ -174,7 +189,7 @@ object PackageArchive {
         val manifest = ManifestParser.parse(manifestBytes)
 
         // 5. The files are exactly the ones the manifest lists.
-        val files = entries.drop(2).filter { !it.isFolder }.associateBy { it.name }
+        val files = entries.drop(if (hasSignature) 2 else 1).filter { !it.isFolder }.associateBy { it.name }
         for (content in manifest.contents) {
             val entry = files[content.path] ?: fail("The package's manifest lists ${content.path}, which isn't in the package")
             if (entry.size != content.size || Hex.encode(entry.sha256) != content.sha256) {

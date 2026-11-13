@@ -3,8 +3,14 @@
 package com.nbtapps.store.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
-/** A catalogue source's `v1/index.json`: every package and version it publishes. */
+/**
+ * A catalogue source's `v1/index.json`: every package and version it publishes.
+ *
+ * Packages from outside developers are published apart from the source's own, under `community`, and the parser
+ * puts them in [packages] with [CataloguePackage.community] set: see [CatalogueParser][com.nbtapps.store.data.catalogue.CatalogueParser].
+ */
 @Serializable
 data class CatalogueIndex(
     val schema: Int,
@@ -62,6 +68,12 @@ data class CataloguePackage(
     val details: String? = null,
     /** Newest first once the index has been through the parser. */
     val versions: List<PackageVersion> = emptyList(),
+    /**
+     * From an outside developer: published under the index's `community`, reviewed and countersigned by the
+     * source, with each version's archive at the developer's own address. Set by the parser only, never read
+     * from the file.
+     */
+    @Transient val community: Boolean = false,
 ) {
     val latest: PackageVersion? get() = versions.firstOrNull()
 }
@@ -83,8 +95,44 @@ data class PackageVersion(
     val depends: List<PackageDependency> = emptyList(),
     /** Risk flags as published. Unknown values are kept; see [RiskFlag] for the ones the app explains. */
     val flags: List<String> = emptyList(),
+    /**
+     * The source's own signature over the archive's `manifest.json`, 128 hex characters, for a version of a
+     * [community][CataloguePackage.community] package: the archive's `manifest.sig` is its author's, and this is
+     * checked in its place, by the app and by the agent. Null for every other version.
+     */
+    val signature: String? = null,
 ) {
     val riskFlags: List<RiskFlag> get() = flags.mapNotNull(RiskFlag::fromId)
+
+    /** The archive is to be checked against [signature], not its own `manifest.sig`. */
+    val detachedSignature: Boolean get() = signature != null
+
+    /**
+     * The agent versions this version installs on: [requires], and for one with a [detachedSignature], no agent
+     * below [DETACHED_SIGNATURE_AGENT], since an older one would check the archive's own `manifest.sig`. A lower
+     * bound that the second makes needless is left out. Null where any agent will do.
+     */
+    val agentRange: String?
+        get() {
+            val published = requires.agent?.trim()?.takeIf { it.isNotEmpty() }
+            if (!detachedSignature) return published
+            val floor = SemVer.parseOrNull(DETACHED_SIGNATURE_AGENT)!!
+            val parts = published?.split(Regex("\\s+")).orEmpty()
+            fun bound(part: String, op: String) = if (part.startsWith(op)) SemVer.parseOrNull(part.drop(op.length)) else null
+            // A part that already keeps out every agent below the floor.
+            val enough = parts.any { part ->
+                val at = bound(part, ">=") ?: bound(part, ">") ?: (if (part.first().isDigit()) bound(part, "") else bound(part, "="))
+                at != null && at >= floor
+            }
+            if (enough) return published
+            val kept = parts.filterNot { part -> (bound(part, ">=") ?: bound(part, ">"))?.let { it < floor } == true }
+            return (listOf(">=$DETACHED_SIGNATURE_AGENT") + kept).joinToString(" ")
+        }
+
+    companion object {
+        /** The first agent that installs a package with the catalogue's detached signature. */
+        const val DETACHED_SIGNATURE_AGENT = "1.2.0"
+    }
 }
 
 @Serializable

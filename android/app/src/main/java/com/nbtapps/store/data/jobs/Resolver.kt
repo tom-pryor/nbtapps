@@ -73,7 +73,10 @@ object Resolver {
         return Resolution(chosen.values.toList() + target, unavailable)
     }
 
-    /** Whether [version] runs on an agent of [agentVersion]. An unknown agent version rules nothing out. */
+    /**
+     * Whether [version] runs on an agent of [agentVersion]: see [PackageVersion.agentRange]. An unknown agent
+     * version rules nothing out.
+     */
     fun suits(version: PackageVersion, agentVersion: String?): Boolean =
-        agentVersion == null || VersionRange.matches(agentVersion, version.requires.agent)
+        agentVersion == null || VersionRange.matches(agentVersion, version.agentRange)
 }

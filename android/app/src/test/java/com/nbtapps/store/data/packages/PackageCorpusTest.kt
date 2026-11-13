@@ -76,4 +76,25 @@ class PackageCorpusTest {
             }
         }
     }
+
+    @Test
+    fun `a detached signature is checked in place of the archive's own, with the outcome the agent gives`() {
+        val detached = vectors.getValue("detached").jsonArray.map { it.jsonObject }
+        assertTrue("the corpus looks cut short", detached.size >= 7)
+        for (entry in detached) {
+            val what = "${entry.text("file")} (${entry.text("what")})"
+            val signature = AgentVectors.hex(entry.text("signature"))
+            val file = AgentVectors.file("packages/${entry.text("file")}")
+            // Only the package key is trusted: the author's own key, which signed some manifest.sig, is not.
+            val outcome = try {
+                val verified = PackageArchive.verify(file, listOf(AgentVectors.packageKey), signature)
+                assertArrayEquals(what, signature, verified.signature)
+                assertArrayEquals(what, AgentVectors.packageKey, verified.key)
+                ""
+            } catch (e: PackageFormatException) {
+                e.code
+            }
+            assertEquals(what, entry.text("code"), outcome)
+        }
+    }
 }

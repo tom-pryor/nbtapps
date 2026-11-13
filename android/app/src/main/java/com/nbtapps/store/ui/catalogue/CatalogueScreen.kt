@@ -234,8 +234,8 @@ internal fun sectionTitle(kind: CatalogueSection.Kind, filter: CatalogueFilter):
 internal fun PackageStatus.note(): String? {
     val held = heldBack
     return when {
-        !suits -> offered.requires.agent?.let { "Needs agent ${rangeLabel(it)}" }
-        held != null -> held.requires.agent?.let { "${held.version} needs agent ${rangeLabel(it)}" }
+        !suits -> offered.agentRange?.let { "Needs agent ${rangeLabel(it)}" }
+        held != null -> held.agentRange?.let { "${held.version} needs agent ${rangeLabel(it)}" }
         else -> null
     }
 }
@@ -538,6 +538,7 @@ private fun PackageRow(row: CatalogueRow, onClick: () -> Unit) {
         },
         supportingContent = {
             Column {
+                if (pkg.community) CommunityLabel(pkg.author)
                 Text(pkg.summary, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 status?.note()?.let { Text(it, color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall) }
             }
@@ -610,6 +611,33 @@ internal fun PackageIcon(name: String, size: Dp, modifier: Modifier = Modifier) 
             color = MaterialTheme.colorScheme.onSecondaryContainer,
             style = if (size >= 56.dp) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleMedium,
         )
+    }
+}
+
+/**
+ * Marks a package from an outside developer, with its author where the catalogue names one: "Community · Jo
+ * Bloggs". The source reviewed and signed it; it did not make it.
+ */
+@Composable
+internal fun CommunityLabel(author: String, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            "Community",
+            Modifier
+                .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(10.dp))
+                .padding(horizontal = 8.dp, vertical = 1.dp),
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        if (author.isNotEmpty()) {
+            Text(
+                author,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

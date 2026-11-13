@@ -8,8 +8,10 @@ import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.MemoryPairingKeys
 import com.nbtapps.store.data.PhoneIdentity
 import com.nbtapps.store.data.catalogue.CatalogueParser
+import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.model.Autostart
@@ -18,6 +20,7 @@ import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.InstallTarget
 import com.nbtapps.store.model.JobState
+import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RemoveTarget
 import com.nbtapps.store.model.TcpEndpoint
@@ -43,6 +46,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -243,6 +250,33 @@ class RealAgentTest {
         assertTrue(jobs.connect("bench").isSuccess)
         assertEquals(removal.planId, jobs.job.value?.planId)
         assertEquals(JobState.SUCCEEDED, jobs.job.value?.job?.state)
+    }
+
+    @Test
+    fun `a package its author signed installs on the real agent with the catalogue's signature`() = test {
+        assertTrue(jobs.connect("bench").isSuccess)
+        assertEquals(JobState.SUCCEEDED, run(planInstall("org.nbtapp.hello", "1.1.0")).job.state)
+
+        // The agent repo's test package signed by another key than the source's, as a community catalogue entry.
+        val vectors = Json.parseToJsonElement(AgentVectors.file("packages/vectors.json").readText()).jsonObject
+        val case = vectors.getValue("detached").jsonArray.map { it.jsonObject }
+            .first { it.getValue("file").jsonPrimitive.content == "detached/author-signed.nbtpkg" }
+        val signature = case.getValue("signature").jsonPrimitive.content
+        val file = AgentVectors.file("packages/detached/author-signed.nbtpkg")
+        val verified = PackageArchive.verify(file, listOf(AgentVectors.packageKey), AgentVectors.hex(signature))
+        val entry = PackageVersion(
+            "1.2.0", url = "https://example.invalid/hello.nbtpkg", size = verified.size, sha256 = verified.sha256,
+            manifestSha256 = verified.manifestSha256, signature = signature,
+        )
+        val stored = file.inputStream().use { store.add(it, listOf(AgentVectors.packageKey), "org.nbtapp.hello" to entry) }
+        assertTrue(stored.detachedSignature)
+
+        val upgrade = jobs.plan(listOf(InstallTarget("org.nbtapp.hello", "1.2.0")), emptyList(), listOf(stored)).getOrThrow()
+        assertEquals(listOf("upgrade org.nbtapp.hello 1.2.0"), upgrade.steps.map { "${it.action} ${it.id} ${it.version}" })
+        assertEquals(JobState.SUCCEEDED, run(upgrade).job.state)
+        awaitInstalled("org.nbtapp.hello 1.2.0", "org.nbtapp.runtime 2.1.0")
+        // Recorded as signed by the source's key, which the next upgrade must be signed by too.
+        assertEquals(Hex.encode(AgentVectors.packageKey), connected().installed.first { it.id == "org.nbtapp.hello" }.key)
     }
 
     @Test

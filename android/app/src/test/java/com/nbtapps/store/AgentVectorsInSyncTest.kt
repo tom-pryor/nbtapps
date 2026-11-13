@@ -44,7 +44,7 @@ class AgentVectorsInSyncTest {
     fun `the test packages are the ones the agent repo builds`() {
         // The agent repo builds them into its build folder; they are compared only once it has.
         assertSame("packages/vectors.json", "build/testdata/vectors.json")
-        for (kind in listOf("good", "bad")) {
+        for (kind in listOf("good", "bad", "detached")) {
             for (file in AgentVectors.file("packages/$kind").listFiles().orEmpty()) {
                 assertSame("packages/$kind/${file.name}", "build/testdata/$kind/${file.name}")
             }

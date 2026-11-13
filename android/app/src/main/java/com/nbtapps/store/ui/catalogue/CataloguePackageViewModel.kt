@@ -172,7 +172,7 @@ class CataloguePackageViewModel @Inject constructor(
             installedAsOf = head?.seenAt?.takeIf { !head.live && status.installed != null },
             incompatible = when {
                 agentVersion == null -> null
-                !status.suits -> "Needs agent ${version.requires.agent?.let(::rangeLabel)}; this head unit's agent is $agentVersion."
+                !status.suits -> "Needs agent ${version.agentRange?.let(::rangeLabel)}; this head unit's agent is $agentVersion."
                 resolution.unavailable.isNotEmpty() ->
                     "Needs ${resolution.unavailable.joinToString { it.id }}, which this catalogue doesn't have in a version that fits."
                 else -> null

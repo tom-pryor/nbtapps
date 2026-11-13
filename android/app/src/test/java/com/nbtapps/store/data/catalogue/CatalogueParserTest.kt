@@ -5,8 +5,10 @@ package com.nbtapps.store.data.catalogue
 import com.nbtapps.store.model.PackageDependency
 import com.nbtapps.store.model.RiskFlag
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CatalogueParserTest {
@@ -207,6 +209,87 @@ class CatalogueParserTest {
             assertNull(app, parsed.app)
             assertEquals(app, listOf("a"), parsed.packages.map { it.id })
         }
+    }
+
+    private val sig = "ab".repeat(64)
+
+    private fun indexWithCommunity(community: String, packages: String = """{ "id": "org.example.app", "name": "App", "versions": [${version("1.0.0")}] }""") =
+        """{ "schema": 1, "source": { "id": "test", "name": "Test" }, "serial": 7, "packages": [$packages],
+             "community": [$community] }""".encodeToByteArray()
+
+    @Test
+    fun `community packages join the source's own, marked and with their signatures`() {
+        val parsed = CatalogueParser.parseIndex(
+            indexWithCommunity(
+                """{ "id": "io.github.someone.radio", "name": "Radio", "author": "Someone",
+                     "versions": [${version("1.0.0", """, "signature": "$sig"""")}, ${version("1.1.0", """, "signature": "$sig"""")}] }""",
+            ),
+        )
+
+        assertEquals(listOf("org.example.app", "io.github.someone.radio"), parsed.packages.map { it.id })
+        val (official, community) = parsed.packages
+        assertFalse(official.community)
+        assertNull(official.latest?.signature)
+        assertTrue(community.community)
+        assertEquals("Someone", community.author)
+        assertEquals(listOf("1.1.0", "1.0.0"), community.versions.map { it.version })
+        assertEquals(sig, community.latest?.signature)
+        assertTrue(community.latest!!.detachedSignature)
+    }
+
+    @Test
+    fun `an index without community packages lists only the source's own`() {
+        val parsed = CatalogueParser.parseIndex(index("""{ "id": "a", "name": "A", "versions": [${version("1.0.0")}] }"""))
+        assertEquals(listOf("a"), parsed.packages.map { it.id })
+        assertFalse(parsed.packages.single().community)
+    }
+
+    @Test
+    fun `the source's own versions never carry a detached signature, nor are they marked community by the file`() {
+        val pkg = CatalogueParser.parseIndex(
+            index("""{ "id": "a", "name": "A", "community": true, "versions": [${version("1.0.0", """, "signature": "$sig"""")}] }"""),
+        ).packages.single()
+
+        assertFalse(pkg.community)
+        assertNull(pkg.latest?.signature)
+    }
+
+    @Test
+    fun `community packages that cannot be trusted are left out, and the rest are listed`() {
+        fun signed(v: String) = version(v, """, "signature": "$sig"""")
+        val parsed = CatalogueParser.parseIndex(
+            indexWithCommunity(
+                listOf(
+                    // An id reserved for the source's own, which the agent lets the source's key sign.
+                    """{ "id": "org.nbtapp.radio", "name": "R", "versions": [${signed("1.0.0")}] }""",
+                    // The source's own package, under the same id.
+                    """{ "id": "org.example.app", "name": "Impostor", "versions": [${signed("2.0.0")}] }""",
+                    // Not a package id.
+                    """{ "id": "Not An Id", "name": "N", "versions": [${signed("1.0.0")}] }""",
+                    // Malformed: no name.
+                    """{ "id": "io.github.a.nameless", "versions": [${signed("1.0.0")}] }""",
+                    // Versions without a usable signature, and none left.
+                    """{ "id": "io.github.a.unsigned", "name": "U", "versions": [${version("1.0.0")}, ${version("1.1.0", """, "signature": "${sig.uppercase()}"""")}, ${version("1.2.0", """, "signature": "${sig.drop(2)}"""")}] }""",
+                    // Kept, without its unsigned version.
+                    """{ "id": "io.github.a.kept", "name": "K", "versions": [${signed("1.0.0")}, ${version("1.1.0")}] }""",
+                    // The same id again: the first is kept.
+                    """{ "id": "io.github.a.kept", "name": "K2", "versions": [${signed("9.0.0")}] }""",
+                ).joinToString(","),
+            ),
+        )
+
+        assertEquals(listOf("org.example.app", "io.github.a.kept"), parsed.packages.map { it.id })
+        assertEquals("App", parsed.packages[0].name)
+        assertEquals(listOf("1.0.0"), parsed.packages[1].versions.map { it.version })
+        assertEquals("K", parsed.packages[1].name)
+    }
+
+    @Test
+    fun `a community key that is not a list is ignored`() {
+        val parsed = CatalogueParser.parseIndex(
+            """{ "schema": 1, "source": { "id": "t", "name": "T" }, "serial": 1, "packages": [], "community": { "x": 1 } }""".encodeToByteArray(),
+        )
+        assertTrue(parsed.packages.isEmpty())
     }
 
     @Test
