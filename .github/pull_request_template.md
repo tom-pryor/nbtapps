@@ -5,8 +5,8 @@ By opening this pull request you agree to the contributor agreement in
 
 ## How it was tested
 
-- [ ] `reuse lint` passes
-- [ ] Android unit tests (`./gradlew :app:testDebugUnitTest`)
+CI runs `reuse lint`, the Android unit tests, the release build and lint.
+
 - [ ] Head-unit host tests (`make agent-test`, `make test-pkg`)
 - [ ] QNX build (`./build.sh`, `./build.sh agent`), or: I have no QNX SDK
 - [ ] Tried on a car (which head unit?)
