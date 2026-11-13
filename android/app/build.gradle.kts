@@ -77,6 +77,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = !trial
+            // No META-INF/version-control-info.textproto with the commit: AGP writes it from a plain git checkout
+            // only, not from a worktree or an unpacked source, so the same sources would make two different APKs.
+            // The release on GitHub names the commit instead.
+            vcsInfo.include = false
             if (trial) {
                 signingConfig = signingConfigs.getByName("debug")
                 versionNameSuffix = "-trial"
