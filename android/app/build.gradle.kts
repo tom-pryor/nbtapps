@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-import java.util.Properties
-
 plugins {
     alias(libs.plugins.android.application)
     // Kotlin support is built into AGP 9; only compiler plugins are applied here.
@@ -23,31 +21,15 @@ val appVersionCode = appVersion.split('.').map { it.toIntOrNull() }.let { parts 
 }
 
 // `-Ptrial` makes the release build one that can go onto a phone on this machine's USB, for a trial on a car:
-// signed with this machine's debug key, whether or not there is a release key, and not minified. Its code and
-// its bindings are the release build's. The version's name ends in "-trial", so that it is not taken for a
-// release; it is not one, and is not for handing on. A phone that has it cannot take a release as an update,
-// because the two are signed with different keys: the trial is uninstalled first.
+// signed with this machine's debug key, and not minified. Its code and its bindings are the release build's. The
+// version's name ends in "-trial", so that it is not taken for a release; it is not one, and is not for handing
+// on. A phone that has it cannot take a release as an update, because the two are signed with different keys: the
+// trial is uninstalled first.
 //   ./gradlew :app:installRelease -Ptrial
 val trial = providers.gradleProperty("trial").isPresent
 
-// The release key is not in this repo. A properties file beside it says where it is and how it is opened:
-//   storeFile=android-release.jks      (a path from the properties file's own folder, or a whole path)
-//   storePassword=...
-//   keyAlias=...
-//   keyPassword=...                    (left out or empty: the store's password, as in a store made by keytool)
-// The file is ~/.config/nbtapps/keys/android-release.properties, or the one NBTAPPS_SIGNING names. Without it the
-// release build is left unsigned (app-release-unsigned.apk), which no phone installs; tools/release.sh refuses
-// to go on from there. Every release has to be signed with this one key: Android takes an update only from the
-// key the installed app was signed with, so a lost key means no installed app can be updated again.
-val releaseSigningFile = file(
-    providers.environmentVariable("NBTAPPS_SIGNING").orNull
-        ?: "${providers.systemProperty("user.home").get()}/.config/nbtapps/keys/android-release.properties",
-)
-val releaseSigning: Properties? = releaseSigningFile.takeIf { it.isFile }?.let { source ->
-    Properties().apply { source.inputStream().use { load(it) } }
-}
-fun releaseSigningValue(name: String): String =
-    releaseSigning?.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() } ?: error("$releaseSigningFile has no $name")
+// The release build is never signed here: it is the same unsigned APK wherever it is built, and tools/sign.sh
+// signs it with the release key, which no build sees. android/RELEASING.md says how a release goes out.
 
 android {
     namespace = "com.nbtapps.store"
@@ -61,19 +43,6 @@ android {
         versionName = appVersion
     }
 
-    signingConfigs {
-        if (releaseSigning != null) {
-            create("release") {
-                storeFile = releaseSigningFile.resolveSibling(releaseSigningValue("storeFile"))
-                storePassword = releaseSigningValue("storePassword")
-                keyAlias = releaseSigningValue("keyAlias")
-                // keytool's stores (PKCS12) open the key with the store's own password and never ask for another.
-                keyPassword = releaseSigning.getProperty("keyPassword")?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: releaseSigningValue("storePassword")
-            }
-        }
-    }
-
     buildTypes {
         release {
             isMinifyEnabled = !trial
@@ -84,8 +53,6 @@ android {
             if (trial) {
                 signingConfig = signingConfigs.getByName("debug")
                 versionNameSuffix = "-trial"
-            } else if (releaseSigning != null) {
-                signingConfig = signingConfigs.getByName("release")
             }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
