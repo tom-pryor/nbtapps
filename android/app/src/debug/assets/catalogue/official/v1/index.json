@@ -4,8 +4,8 @@
     "id": "official",
     "name": "NBTApp sample catalogue (test keys)"
   },
-  "serial": 5,
-  "generated": "2026-11-12T12:00:00Z",
+  "serial": 6,
+  "generated": "2026-11-13T12:00:00Z",
   "packages": [
     {
       "id": "org.nbtapp.agent",
@@ -314,6 +314,46 @@
           },
           "depends": [],
           "flags": []
+        }
+      ]
+    }
+  ],
+  "community": [
+    {
+      "id": "com.github.sample-dev.tripnotes",
+      "name": "Trip Notes",
+      "summary": "Notes the distance and time of each trip",
+      "author": "sample-dev",
+      "category": "utilities",
+      "details": "details/com.github.sample-dev.tripnotes.json",
+      "versions": [
+        {
+          "version": "0.2.0",
+          "released": "2026-11-10",
+          "url": "https://example.invalid/packages/com.github.sample-dev.tripnotes-0.2.0.nbtpkg",
+          "size": 966,
+          "sha256": "d076f0e0379d261e82ef850add677b66a90c2d664ca73a664c8ecd4e71cc8bb5",
+          "manifestSha256": "f14734b658be23f01a5be5813ace3550c929c9014e99e9e71d7b831b0d39306a",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [],
+          "flags": [],
+          "signature": "a7e2e6e1ae57ccf371a290e22e83a23ea150c3f664ec3c8890e8c68f3761b6945014ed541c218d308c9ddcca5db69eff43469c19772942c02f6739b3a03c4307"
+        },
+        {
+          "version": "0.1.0",
+          "released": "2026-10-20",
+          "url": "https://example.invalid/packages/com.github.sample-dev.tripnotes-0.1.0.nbtpkg",
+          "size": 965,
+          "sha256": "c17b03fbed44d5d5580ceda13945572a660dc02969211a917deda1691d15833a",
+          "manifestSha256": "e1e0148289ab88accd31bd5ebe2458699824cdbb340a6e90439271c75a816ff2",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [],
+          "flags": [],
+          "signature": "baa8ef0666d54da151f2025ca2174ec6b864714230b9c0a77c5cdedb9d0d08df346bed210a5886eaa47a9876d96ccedb036521dddf81aaa277e4aebac5f28b03"
         }
       ]
     }

@@ -10,6 +10,7 @@ import com.nbtapps.store.data.jobs.Holdings
 import com.nbtapps.store.data.jobs.Resolver
 import com.nbtapps.store.data.jobs.agentUpdate
 import com.nbtapps.store.data.packages.PackageArchive
+import com.nbtapps.store.data.packages.PackageFormatException
 import com.nbtapps.store.model.RestartKind
 import java.io.File
 import kotlinx.serialization.json.Json
@@ -18,6 +19,7 @@ import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -53,8 +55,8 @@ class SampleCatalogueTest {
 
     @Test
     fun `no package or version is dropped by the parser`() {
-        val published = Json.parseToJsonElement(rawIndex.decodeToString())
-            .jsonObject.getValue("packages").jsonArray
+        val tree = Json.parseToJsonElement(rawIndex.decodeToString()).jsonObject
+        val published = listOf("packages", "community").flatMap { tree.getValue(it).jsonArray }
             .sumOf { it.jsonObject.getValue("versions").jsonArray.size }
 
         assertTrue(index.packages.isNotEmpty())
@@ -88,7 +90,10 @@ class SampleCatalogueTest {
                 val name = version.url.substringAfterLast('/')
                 listed += name
 
-                val verified = PackageArchive.verify(File(root, "packages/$name"), listOf(packageKey))
+                // A community package's archive is checked with the catalogue's signature over its manifest.
+                val signature = version.signature?.let { requireNotNull(Hex.decodeOrNull(it, 64)) { "$what has a bad signature" } }
+                assertEquals(what, pkg.community, signature != null)
+                val verified = PackageArchive.verify(File(root, "packages/$name"), listOf(packageKey), signature)
                 verified.requireMatches(pkg.id, version)
                 // What the index copies out of the manifest is still what the manifest says.
                 assertEquals(what, pkg.name, verified.manifest.name)
@@ -112,17 +117,18 @@ class SampleCatalogueTest {
 
     /**
      * The catalogue screen's card for a newer agent can be seen in the debug build: the sample has the agent's
-     * package in a version above the one a test bench runs, and a package whose newest version waits for it.
+     * package in a version above the one a test bench runs, and packages whose newest versions wait for it.
      */
     @Test
-    fun `the sample has an update of the agent for a bench agent, and a package that waits for it`() {
+    fun `the sample has an update of the agent for a bench agent, and packages that wait for it`() {
         // The sample's agent is a whole major version above the real one, whichever of its releases a bench runs.
         val bench = Holdings("bench", "Bench", live = true, agentVersion = "1.1.0", installed = emptyList(), restartNeeded = RestartKind.NONE, seenAt = 0)
 
         val update = requireNotNull(agentUpdate(index, bench)) { "no $AGENT_PACKAGE_ID above 1.1.0 in the sample" }
 
         assertEquals("2.0.0", update.version)
-        assertEquals(listOf("App Launcher 0.3.0"), update.unblocks.map { it.label })
+        // App Launcher asks for agent 2.0.0, and a community package for one that checks the catalogue's signature.
+        assertEquals(listOf("App Launcher 0.3.0", "Trip Notes 0.2.0"), update.unblocks.map { it.label })
     }
 
     /**
@@ -136,6 +142,27 @@ class SampleCatalogueTest {
 
         assertTrue(Resolver.suits(requireNotNull(plugin.latest), "1.1.0"))
         assertEquals(RestartKind.HMI, PackageArchive.verify(File(root, "packages/org.nbtapp.plugin-1.0.0.nbtpkg"), listOf(packageKey)).manifest.reboot)
+    }
+
+    /**
+     * The sample has a community package, as one comes into the catalogue: its author signed its archive with a key
+     * of their own, and the index gives the catalogue's signature over the manifest. The app installs it with that
+     * signature, and only on an agent that checks one.
+     */
+    @Test
+    fun `the sample's community package installs with the catalogue's signature, on an agent from 1_2_0`() {
+        val pkg = requireNotNull(index.packages.find { it.community }) { "no community package in the sample" }
+        val newest = requireNotNull(pkg.latest)
+        val file = File(root, "packages/${newest.url.substringAfterLast('/')}")
+        val signature = requireNotNull(Hex.decodeOrNull(requireNotNull(newest.signature), 64))
+
+        PackageArchive.verify(file, listOf(packageKey), signature).requireMatches(pkg.id, newest)
+        assertThrows("its own manifest.sig is its author's", PackageFormatException::class.java) {
+            PackageArchive.verify(file, listOf(packageKey))
+        }
+        assertFalse(pkg.id.startsWith("org.nbtapp."))
+        assertFalse(Resolver.suits(newest, "1.1.0"))
+        assertTrue(Resolver.suits(newest, "1.2.0"))
     }
 
     /** As the real agent's package is: an agent refuses a package of its own that places no launcher for the version. */

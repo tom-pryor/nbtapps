@@ -1,0 +1,20 @@
+{
+  "id": "com.github.sample-dev.tripnotes",
+  "description": "Writes a line for each trip to a file on the head unit: when it started, how long it took and how far it went.\n\nA community package: its author built it and signed it with a key of their own, and the catalogue lists it with a signature of its own over its manifest. In the sample catalogue its program is a stand-in that does nothing.",
+  "homepage": "https://example.invalid/com.github.sample-dev.tripnotes",
+  "screenshots": [],
+  "changelog": [
+    {
+      "version": "0.2.0",
+      "notes": [
+        "Keeps the last 500 trips"
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "notes": [
+        "First version"
+      ]
+    }
+  ]
+}
