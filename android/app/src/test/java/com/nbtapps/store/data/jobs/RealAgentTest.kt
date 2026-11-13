@@ -11,6 +11,8 @@ import com.nbtapps.store.data.catalogue.CatalogueParser
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.logs.LogPullRequest
+import com.nbtapps.store.data.logs.LogPullState
 import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
@@ -35,6 +37,7 @@ import java.nio.channels.SocketChannel
 import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipFile
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -134,7 +137,7 @@ class RealAgentTest {
         socket = File(work, "s/a")
         launchAgent()
         store = PackageStore(File(work, "phone"))
-        jobs = JobRepository(headUnits, connector, identity, keys, store, {}, scope)
+        jobs = JobRepository(headUnits, connector, identity, keys, store, {}, scope, shareDir = File(work, "share"))
     }
 
     private fun launchAgent() {
@@ -455,5 +458,59 @@ class RealAgentTest {
         // Planned again, it installs.
         val again = jobs.plan(listOf(InstallTarget("org.nbtapp.big", "1.0.0")), emptyList(), listOf(big)).getOrThrow()
         assertEquals(JobState.SUCCEEDED, run(again).job.state)
+    }
+
+    /**
+     * The agent repo's test package with logs: its hook writes them where its manifest names them, and the test
+     * writes the one under `/tmp` itself, which on the bench is the head unit folder's `system/tmp`. The app lists
+     * them, pulls them over the real agent's deflate streams, and has each in its ZIP byte for byte.
+     */
+    @Test
+    fun `the logs a package names are pulled from the real agent into a ZIP, byte for byte`() = test {
+        assertTrue(jobs.connect("bench").isSuccess)
+        assertTrue("the agent lists files", connected().files)
+        val logger = AgentVectors.file("packages/good/org.nbtapp.logger-1.0.0.nbtpkg").inputStream().use { store.add(it, listOf(AgentVectors.packageKey)) }
+        val plan = jobs.plan(listOf(InstallTarget("org.nbtapp.logger", "1.0.0")), emptyList(), listOf(logger)).getOrThrow()
+        assertEquals(JobState.SUCCEEDED, run(plan).job.state)
+        awaitInstalled("org.nbtapp.logger 1.0.0")
+        assertTrue("packages.list says it has logs", connected().installed.single().logs)
+        val system = File(root, "system/tmp").apply { mkdirs() }
+        File(system, "logger.log").writeText("a log at a fixed place\n".repeat(50))
+
+        val where = mapOf(
+            "\${data}/log/logger.log" to File(root, "data/org.nbtapp.logger/log/logger.log"),
+            "\${data}/log/older.log" to File(root, "data/org.nbtapp.logger/log/older.log"),
+            "\${tmp}/crash.txt" to File(root, "tmp/org.nbtapp.logger/crash.txt"),
+            "/tmp/logger.log" to File(system, "logger.log"),
+        )
+        val listing = jobs.listLogs("org.nbtapp.logger").getOrThrow()
+        assertEquals(where.keys, listing.files.map { it.path }.toSet())
+        assertFalse(listing.more)
+
+        val zip = jobs.pullLogs(LogPullRequest("org.nbtapp.logger", listing.files), "0.0.0-test").getOrThrow()
+        val done = jobs.logPull.value as LogPullState.Done
+        assertEquals(listOf<String?>(null, null, null, null), done.files.map { it.failure })
+        ZipFile(zip).use { file ->
+            for (pulled in done.files) {
+                val entry = requireNotNull(file.getEntry(pulled.entry)) { "no ${pulled.entry} in the ZIP" }
+                val bytes = file.getInputStream(entry).readBytes()
+                assertTrue(pulled.file.path, where.getValue(pulled.file.path).readBytes().contentEquals(bytes))
+            }
+            assertTrue(file.getInputStream(file.getEntry("info.txt")).readBytes().decodeToString().contains("Logs of Logger (org.nbtapp.logger 1.0.0)"))
+        }
+        // The large log is text, and crossed the link deflated.
+        val large = done.files.first { it.file.path == "\${data}/log/logger.log" }
+        assertTrue("${large.sent} bytes for ${large.bytes}", large.sent * 5 < large.bytes)
+
+        // The end of it only, and the agent's own logs, which it always has.
+        val tail = jobs.pullLogs(LogPullRequest("org.nbtapp.logger", listing.files.filter { it.path == large.file.path }, tailBytes = 4096), "0.0.0-test").getOrThrow()
+        ZipFile(tail).use { file ->
+            val whole = where.getValue(large.file.path).readBytes()
+            val end = file.getInputStream(file.getEntry("org.nbtapp.logger/data/log/logger.log")).readBytes()
+            assertTrue(whole.copyOfRange(whole.size - 4096, whole.size).contentEquals(end))
+        }
+        val own = jobs.listLogs(AGENT_PACKAGE_ID).getOrThrow().files
+        assertTrue(jobs.pullLogs(LogPullRequest(AGENT_PACKAGE_ID, own), "0.0.0-test").isSuccess)
+        assertEquals(own.size, (jobs.logPull.value as LogPullState.Done).included)
     }
 }

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<!-- What the share provider may hand out: the ZIPs of logs in the cache folder's share/, and nothing else. -->
+<paths>
+    <cache-path name="share" path="share/" />
+</paths>

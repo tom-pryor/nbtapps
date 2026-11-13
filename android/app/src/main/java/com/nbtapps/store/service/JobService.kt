@@ -17,6 +17,7 @@ import com.nbtapps.store.R
 import com.nbtapps.store.data.jobs.JobKeeper
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.JobView
+import com.nbtapps.store.data.logs.LogPullState
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.JobState
 import dagger.hilt.android.AndroidEntryPoint
@@ -26,6 +27,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -39,6 +41,9 @@ import kotlinx.coroutines.launch
  *
  * A job that updates the agent itself ends the link on purpose: the agent restarts, and the app connects again
  * by itself to see how it went ([JobView.reconnecting]). The job's link is not lost then, and this stays.
+ *
+ * A pull of logs from the head unit ([JobRepository.logPull]) is kept alive the same way, wake lock and all: it
+ * is a transfer too, the other way, and as slow on Bluetooth serial.
  */
 @AndroidEntryPoint
 class JobService : Service() {
@@ -65,19 +70,19 @@ class JobService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // The promise made by startForegroundService is kept before anything else, whatever the job's state.
-        startForeground(NOTIFICATION_ID, notification(jobs.job.value), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        startForeground(NOTIFICATION_ID, notification(jobs.job.value, jobs.logPull.value as? LogPullState.Pulling), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         if (!watching) {
             watching = true
             scope.launch {
-                jobs.job.collect { view ->
-                    if (view == null || !view.needsPhone) {
+                combine(jobs.job, jobs.logPull) { view, pull -> view?.takeIf { it.needsPhone } to (pull as? LogPullState.Pulling) }.collect { (view, pull) ->
+                    if (view == null && pull == null) {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     } else {
-                        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(view))
+                        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(view, pull))
                         // And while the app waits to connect again after the agent restarted: a phone that dozes
                         // sits out the wait for far longer than it is meant to last.
-                        holdAwake(view.job.state == JobState.FETCHING || view.reconnecting)
+                        holdAwake(pull != null || view?.job?.state == JobState.FETCHING || view?.reconnecting == true)
                     }
                 }
             }
@@ -98,7 +103,8 @@ class JobService : Service() {
         if (hold && !lock.isHeld) lock.acquire(MAX_TRANSFER_MILLIS) else if (!hold && lock.isHeld) lock.release()
     }
 
-    private fun notification(view: JobView?): Notification {
+    /** Where the job stands, or with none that needs the phone, the pull of logs [pull]. */
+    private fun notification(view: JobView?, pull: LogPullState.Pulling?): Notification {
         val open = PendingIntent.getActivity(
             this,
             0,
@@ -111,6 +117,12 @@ class JobService : Service() {
             .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+        if (view == null && pull != null) {
+            builder.setContentTitle("Getting logs from the head unit")
+                .setContentText("File ${pull.file} of ${pull.files} · keep the ignition on")
+            if (pull.total > 0) builder.setProgress(1000, (pull.bytes * 1000 / pull.total).toInt().coerceIn(0, 1000), false) else builder.setProgress(0, 0, true)
+            return builder.build()
+        }
         val job = view?.job
         if (job != null) {
             val step = if (job.steps > 0) "Step ${job.step} of ${job.steps}: " else ""
@@ -135,7 +147,7 @@ class JobService : Service() {
     }
 }
 
-/** Starts [JobService] when a job begins. */
+/** Starts [JobService] when a job begins, or a pull of logs. */
 class ServiceJobKeeper @Inject constructor(
     @ApplicationContext private val context: Context,
 ) : JobKeeper {

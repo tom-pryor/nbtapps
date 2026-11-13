@@ -84,6 +84,8 @@ data class HeadUnitDetailUiState(
     val autostartBusy: Boolean = false,
     /** Why the agent did not take the last throw of the switch. */
     val autostartError: String? = null,
+    /** There is a link to this head unit, and its agent can send log files: see [com.nbtapps.store.ui.logs.LogPullScreen]. */
+    val logs: Boolean = false,
 )
 
 @HiltViewModel
@@ -128,6 +130,7 @@ class HeadUnitDetailViewModel @Inject constructor(
                 autostart = connected?.autostart,
                 autostartBusy = local.autostartBusy,
                 autostartError = local.autostartError,
+                logs = connected?.files == true,
             )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
 

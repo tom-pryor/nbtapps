@@ -22,12 +22,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.toRoute
 import com.nbtapps.store.R
 import com.nbtapps.store.ui.catalogue.CataloguePackageScreen
 import com.nbtapps.store.ui.catalogue.CatalogueScreen
 import com.nbtapps.store.ui.detail.HeadUnitDetailScreen
 import com.nbtapps.store.ui.headunits.HeadUnitsScreen
 import com.nbtapps.store.ui.job.JobScreen
+import com.nbtapps.store.ui.logs.LogPullScreen
 import com.nbtapps.store.ui.pairing.PairingScreen
 import com.nbtapps.store.ui.spptest.SppTestScreen
 import kotlinx.serialization.Serializable
@@ -41,6 +43,10 @@ data class HeadUnitDetailRoute(val headUnitId: String)
 /** Where this phone is paired with the head unit [headUnitId], by the code from the car's screen. */
 @Serializable
 data class PairingRoute(val headUnitId: String)
+
+/** The log files of the package [packageId] on the head unit [headUnitId], pulled into a ZIP to share. */
+@Serializable
+data class LogPullRoute(val headUnitId: String, val packageId: String)
 
 @Serializable
 object SppTestRoute
@@ -121,14 +127,19 @@ fun NbtNavHost(startOnHeadUnits: Boolean, navController: NavHostController = rem
                     onOpenSppTest = { navController.navigate(SppTestRoute) },
                 )
             }
-            composable<HeadUnitDetailRoute> {
+            composable<HeadUnitDetailRoute> { entry ->
+                val headUnitId = entry.toRoute<HeadUnitDetailRoute>().headUnitId
                 HeadUnitDetailScreen(
                     onBack = { navController.popBackStack() },
                     onUninstall = { id -> navController.navigate(JobRoute(removeId = id)) },
                     onOpenJob = { navController.navigate(JobRoute()) },
                     onPair = pairHeadUnit,
                     onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
+                    onOpenLogs = { id -> navController.navigate(LogPullRoute(headUnitId, id)) },
                 )
+            }
+            composable<LogPullRoute> {
+                LogPullScreen(onBack = { navController.popBackStack() })
             }
             composable<PairingRoute> {
                 PairingScreen(onBack = { navController.popBackStack() })

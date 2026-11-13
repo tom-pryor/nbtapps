@@ -52,6 +52,19 @@
             android:name=".service.JobService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+        <!--
+            Hands a ZIP of logs pulled from a head unit to the app the user sends it with, through the share sheet:
+            only the cache folder's share/, where nothing else is, and only to the app that is granted the one file.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.share"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/share_paths" />
+        </provider>
     </application>
 
 </manifest>

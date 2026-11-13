@@ -42,6 +42,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
+import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
@@ -59,6 +60,7 @@ fun HeadUnitDetailScreen(
     onOpenJob: () -> Unit,
     onPair: (headUnitId: String) -> Unit,
     onOpenPackage: (packageId: String) -> Unit,
+    onOpenLogs: (packageId: String) -> Unit,
     viewModel: HeadUnitDetailViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -105,11 +107,13 @@ fun HeadUnitDetailScreen(
                 onPair = { onPair(unit.id) },
             )
             uiState.job?.let { JobCard(it, onOpenJob) }
-            uiState.profile?.let { AgentCard(it, connected, uiState.restartError, viewModel::restart) }
+            uiState.profile?.let {
+                AgentCard(it, connected, uiState.restartError, viewModel::restart, onLogs = { onOpenLogs(AGENT_PACKAGE_ID) }.takeIf { uiState.logs })
+            }
             uiState.autostart?.takeIf { connected }?.let { state ->
                 AutostartCard(state, uiState.autostartBusy, uiState.autostartError, viewModel::setAutostart, onOpenPackage)
             }
-            InstalledCard(uiState, connected, onUninstall)
+            InstalledCard(uiState, connected, onUninstall, onOpenLogs)
         }
     }
 }
@@ -189,7 +193,7 @@ private fun JobCard(view: JobView, onOpenJob: () -> Unit) {
 }
 
 @Composable
-private fun AgentCard(profile: HeadUnitProfile, connected: Boolean, restartError: String?, onRestart: (String) -> Unit) {
+private fun AgentCard(profile: HeadUnitProfile, connected: Boolean, restartError: String?, onRestart: (String) -> Unit, onLogs: (() -> Unit)?) {
     val context = LocalContext.current
     Section("Agent") {
         Text("Version ${profile.agentVersion}")
@@ -213,6 +217,7 @@ private fun AgentCard(profile: HeadUnitProfile, connected: Boolean, restartError
                 }
             }
         }
+        onLogs?.let { TextButton(onClick = it) { Text("Get the agent's logs") } }
         restartError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
 }
@@ -265,12 +270,14 @@ private fun AutostartCard(state: Autostart, busy: Boolean, error: String?, onSet
 }
 
 @Composable
-private fun InstalledCard(uiState: HeadUnitDetailUiState, connected: Boolean, onUninstall: (String) -> Unit) {
+private fun InstalledCard(uiState: HeadUnitDetailUiState, connected: Boolean, onUninstall: (String) -> Unit, onOpenLogs: (String) -> Unit) {
     Section("Installed packages") {
         when {
             uiState.profile == null && !connected -> Text("Not known yet: the app hasn't been connected to this head unit's agent.")
             uiState.installed.isEmpty() -> Text("Nothing is installed.")
-            else -> uiState.installed.forEach { pkg -> InstalledRow(pkg, connected, onUninstall) }
+            else -> uiState.installed.forEach { pkg ->
+                InstalledRow(pkg, connected, onUninstall, onLogs = { onOpenLogs(pkg.id) }.takeIf { uiState.logs && pkg.logs })
+            }
         }
         if (!connected && uiState.installed.isNotEmpty()) {
             Text(
@@ -283,13 +290,16 @@ private fun InstalledCard(uiState: HeadUnitDetailUiState, connected: Boolean, on
 }
 
 @Composable
-private fun InstalledRow(pkg: InstalledPackage, connected: Boolean, onUninstall: (String) -> Unit) {
+private fun InstalledRow(pkg: InstalledPackage, connected: Boolean, onUninstall: (String) -> Unit, onLogs: (() -> Unit)?) {
     val flags = pkg.flags.mapNotNull(RiskFlag::fromId).joinToString(" · ") { it.label }
     ListItem(
         headlineContent = { Text(pkg.name) },
         supportingContent = { Text(listOf("${pkg.id} · ${pkg.version}", flags).filter { it.isNotEmpty() }.joinToString("\n")) },
         trailingContent = {
-            TextButton(onClick = { onUninstall(pkg.id) }, enabled = connected) { Text("Uninstall") }
+            Column(horizontalAlignment = Alignment.End) {
+                TextButton(onClick = { onUninstall(pkg.id) }, enabled = connected) { Text("Uninstall") }
+                onLogs?.let { TextButton(onClick = it) { Text("Get logs") } }
+            }
         },
     )
 }

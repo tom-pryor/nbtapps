@@ -16,12 +16,17 @@ import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.data.link.ProtocolException
 import com.nbtapps.store.data.link.RemoteException
 import com.nbtapps.store.data.link.monotonicMillis
+import com.nbtapps.store.data.logs.LogPull
+import com.nbtapps.store.data.logs.LogPullAbout
+import com.nbtapps.store.data.logs.LogPullRequest
+import com.nbtapps.store.data.logs.LogPullState
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.Endpoint
+import com.nbtapps.store.model.FileListing
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.Hello
@@ -35,7 +40,11 @@ import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.PlanRequest
 import com.nbtapps.store.model.RemoveTarget
 import com.nbtapps.store.model.inConnectOrder
+import java.io.File
 import java.io.IOException
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -69,7 +78,12 @@ sealed interface ConnectionState {
          * no such switch: one from before there was one.
          */
         val autostart: Autostart? = null,
-    ) : ConnectionState
+        /** What the agent listed in its `hello` as its capabilities: the names in [ProtocolConstants]. */
+        val capabilities: List<String> = emptyList(),
+    ) : ConnectionState {
+        /** The agent can send log files: [JobRepository.listLogs] and [JobRepository.startPull]. */
+        val files: Boolean get() = ProtocolConstants.CAPABILITY_FILES in capabilities
+    }
 
     /**
      * A link is open and the agent answered `hello` on it, but it will tell this phone nothing more until the
@@ -198,6 +212,11 @@ class JobRepository(
     private val now: () -> Long = System::currentTimeMillis,
     private val greeting: Greeting = Greeting(),
     private val rejoin: Rejoin = Rejoin(),
+    /**
+     * Where a pull of logs writes its ZIP, for the share sheet to hand on: the app's cache, which Android may
+     * empty, since a pull is done again in a minute. Each pull empties it first.
+     */
+    private val shareDir: File = File(System.getProperty("java.io.tmpdir"), "nbt-share"),
 ) {
     private val connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val jobState = MutableStateFlow<JobView?>(null)
@@ -206,6 +225,15 @@ class JobRepository(
 
     /** The running job or the last one, on whichever head unit it was. Null until there has been one. */
     val job: StateFlow<JobView?> = jobState.asStateFlow()
+
+    private val logPullState = MutableStateFlow<LogPullState?>(null)
+
+    /** The pull of logs that runs, or the last one. Null until there has been one. */
+    val logPull: StateFlow<LogPullState?> = logPullState.asStateFlow()
+
+    /** The pull that runs, if one does: see [startPull]. */
+    @Volatile
+    private var pulling: Job? = null
 
     private val connectLock = Mutex()
 
@@ -422,7 +450,7 @@ class JobRepository(
             connected.installed
         }
         val autostart = autostartOf(current)
-        if (session === current) show(connected.headUnitId, connected.endpoint, info, installed, autostart)
+        if (session === current) show(connected.headUnitId, connected.endpoint, info, installed, autostart, current.client.capabilities)
     }
 
     /**
@@ -512,6 +540,86 @@ class JobRepository(
         val view = jobState.value?.takeIf { !it.ended } ?: throw IOException("No job is running")
         current.blobs.cancel(current.peer)
         current.client.cancel(view.planId)
+    }
+
+    /**
+     * The log files of the package [packageId] on the connected head unit, newest first: of the agent's own for
+     * [AGENT_PACKAGE_ID]. Only an agent that lists [ProtocolConstants.CAPABILITY_FILES] has them.
+     */
+    suspend fun listLogs(packageId: String): Result<FileListing> = withSession { current ->
+        if (ProtocolConstants.CAPABILITY_FILES !in current.client.capabilities) throw IOException(NO_FILES)
+        try {
+            current.client.filesList(packageId)
+        } catch (e: RemoteException) {
+            if (e.code == "busy") throw IOException(PULL_BUSY)
+            throw e
+        }
+    }
+
+    /**
+     * Pulls the log files [request] names into a ZIP, as [pullLogs] does, on the app's own scope: it goes on when
+     * the screen that started it is left, and the foreground service keeps the process alive meanwhile. Where
+     * stands is [logPull]. A pull that runs already is left to run, and this does nothing.
+     */
+    fun startPull(request: LogPullRequest, appVersion: String) {
+        if (pulling?.isActive == true) return
+        // In the state at once, so a screen that started it never sees the last one's end.
+        logPullState.value = LogPullState.Pulling(request.packageId, 1, request.files.size, 0, request.files.sumOf { LogPull.wanted(it, request.tailBytes) })
+        pulling = scope.launch { pullLogs(request, appVersion) }
+    }
+
+    /** Stops the pull that runs: the stream that is open is stopped with `files.cancel`, and no ZIP is left. */
+    fun cancelPull() {
+        pulling?.cancel()
+    }
+
+    /**
+     * Pulls the log files [request] names from the connected head unit into a ZIP in the share folder, and
+     * returns it: see [LogPull]. The share folder is emptied first. Where it stands is published in [logPull]
+     * throughout, and so is its end, whether it went well or not.
+     *
+     * While a job runs the agent sends no files, and the failure says to wait for it ([AgentRefusal] `busy`).
+     */
+    suspend fun pullLogs(request: LogPullRequest, appVersion: String): Result<File> {
+        val id = request.packageId
+        val total = request.files.sumOf { LogPull.wanted(it, request.tailBytes) }
+        logPullState.value = LogPullState.Pulling(id, 1, request.files.size, 0, total)
+        keeper.jobRunning()
+        val result = try {
+            withSession { current ->
+                val connected = connectionState.value as? ConnectionState.Connected ?: throw IOException(NOT_CONNECTED)
+                if (!connected.files) throw IOException(NO_FILES)
+                val began = now()
+                val about = LogPullAbout(
+                    packageName = connected.installed.firstOrNull { it.id == id }?.name
+                        ?: if (id == AGENT_PACKAGE_ID) "the agent" else id,
+                    packageVersion = connected.installed.firstOrNull { it.id == id }?.version
+                        ?: connected.info.agentVersion.takeIf { id == AGENT_PACKAGE_ID },
+                    headUnitName = headUnits.headUnit(connected.headUnitId).first()?.name.orEmpty(),
+                    agentVersion = connected.info.agentVersion,
+                    appVersion = appVersion,
+                    pulledAt = began,
+                )
+                // Only the app's own files are in the folder, and only those of the last pull.
+                shareDir.listFiles()?.forEach { it.deleteRecursively() }
+                shareDir.mkdirs()
+                val zip = File(shareDir, "$id-${ZIP_TIME.format(Instant.ofEpochMilli(began).atZone(ZoneId.systemDefault()))}.zip")
+                val files = LogPull(current.client, File(shareDir, "work")).run(request, about, zip) { file, bytes, all ->
+                    logPullState.value = LogPullState.Pulling(id, file, request.files.size, bytes, all)
+                }
+                File(shareDir, "work").deleteRecursively()
+                logPullState.value = LogPullState.Done(id, zip, files)
+                zip
+            }
+        } catch (e: CancellationException) {
+            logPullState.value = LogPullState.Cancelled(id)
+            throw e
+        }
+        result.exceptionOrNull()?.let { failure ->
+            val reason = if (failure is AgentRefusal && failure.code == "busy") PULL_BUSY else failure.message ?: "The logs couldn't be pulled"
+            logPullState.value = LogPullState.Failed(id, reason)
+        }
+        return result
     }
 
     /** Restarts iDrive ([kind] `hmi`) or the whole head unit (`reboot`). */
@@ -639,7 +747,7 @@ class JobRepository(
         }
         session = next
         if (forgottenBy == unit.id) forgottenBy = null
-        show(unit.id, endpoint, info, installed, autostartOf(next))
+        show(unit.id, endpoint, info, installed, autostartOf(next), next.client.capabilities)
         val before = jobState.value
         follow(next, unit.id)
         // A job of this app's that ended while there was no link, as the agent's own update does: it ends on the
@@ -653,8 +761,15 @@ class JobRepository(
     }
 
     /** Publishes what the agent reported, and keeps it with the head unit for when the phone is not in the car. */
-    private suspend fun show(headUnitId: String, endpoint: Endpoint, info: AgentInfo, installed: List<InstalledPackage>, autostart: Autostart?) {
-        connectionState.value = ConnectionState.Connected(headUnitId, endpoint, info, installed, autostart)
+    private suspend fun show(
+        headUnitId: String,
+        endpoint: Endpoint,
+        info: AgentInfo,
+        installed: List<InstalledPackage>,
+        autostart: Autostart?,
+        capabilities: List<String>,
+    ) {
+        connectionState.value = ConnectionState.Connected(headUnitId, endpoint, info, installed, autostart, capabilities)
         val profile = HeadUnitProfile(info.agentVersion, info.manifestVersion, info.free, info.restartNeeded, installed, now())
         headUnits.update(headUnitId) { it.copy(profile = profile) }
     }
@@ -786,5 +901,10 @@ class JobRepository(
         const val MAX_LOG_LINES = 2_000
         const val NOT_CONNECTED = "Not connected to a head unit"
         const val NO_DETACHED_SIGNATURE = "This head unit's agent can't install community packages. Update the agent first."
+        const val NO_FILES = "This head unit's agent can't send log files. Update the agent first."
+        const val PULL_BUSY = "Wait for the install to finish, then try again."
+
+        /** The time in a ZIP's name: the phone's own, as the user reads it. */
+        val ZIP_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
     }
 }

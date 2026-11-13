@@ -148,6 +148,7 @@ abstract class AppModule {
             store: PackageStore,
             keeper: JobKeeper,
             @ApplicationScope scope: CoroutineScope,
-        ): JobRepository = JobRepository(headUnits, connector, identity, keys, store, keeper, scope)
+            @ApplicationContext context: Context,
+        ): JobRepository = JobRepository(headUnits, connector, identity, keys, store, keeper, scope, shareDir = File(context.cacheDir, "share"))
     }
 }
