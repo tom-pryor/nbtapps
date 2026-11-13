@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<!--
+    None of the app's data leaves the phone: not to a cloud backup, and not to a new phone in a device-to-device
+    transfer. From Android 12, allowBackup="false" in the manifest no longer covers the transfer; these rules do.
+    Each excluded domain is the whole of it: the files, the databases, the preferences (DataStore keeps its files
+    under "file"), the external files, and the device-protected storage.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+        <exclude domain="device_root" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+        <exclude domain="device_root" />
+    </device-transfer>
+</data-extraction-rules>

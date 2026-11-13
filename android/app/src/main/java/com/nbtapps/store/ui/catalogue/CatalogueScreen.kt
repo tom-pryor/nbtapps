@@ -5,7 +5,6 @@ package com.nbtapps.store.ui.catalogue
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.provider.Settings
 import android.text.format.DateUtils
 import android.text.format.Formatter
@@ -62,6 +61,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
@@ -299,7 +299,7 @@ internal fun appUpdateAction(update: AppUpdateView): AppUpdateAction? = when {
 
 /** Opens the page of Android's settings where this app is allowed to install apps, or the list of such apps. */
 private fun openInstallSettings(context: Context) {
-    val page = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
+    val page = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:${context.packageName}".toUri())
     try {
         context.startActivity(page)
     } catch (e: ActivityNotFoundException) {
