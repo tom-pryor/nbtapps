@@ -18,7 +18,7 @@ class FrameException(message: String) : Exception(message)
  *
  *     u8  type      1 = MSG (UTF-8 JSON), 2 = DATA (binary)
  *     u8  flags     bit 0: reserved for a compressed payload; bit 1: last DATA frame of its stream
- *     u16 stream    0 for MSG; for DATA, the stream its blob.fetch reply named
+ *     u16 stream    0 for MSG; for DATA, the stream its blob.fetch or files.fetch reply named
  *     u32 length    payload bytes, at most 65,536 or the lower maxFrame from hello
  *         payload
  *     u32 check     CRC32 over the header and the payload

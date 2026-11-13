@@ -94,6 +94,11 @@ data class InstalledPackage(
     val key: String = "",
     /** The risk flags, worked out by the agent from the manifest. */
     val flags: List<String> = emptyList(),
+    /**
+     * The package has log files that `files.list` gives: its manifest names some, or it is the agent's own.
+     * False from an agent that has no `files`, which leaves it out.
+     */
+    val logs: Boolean = false,
 )
 
 @Serializable
@@ -284,4 +289,49 @@ data class JobResult(
     val steps: List<StepResult> = emptyList(),
     /** What the steps that are done need now. */
     val restart: String = RestartKind.NONE,
+)
+
+/** The areas of a package's files that a controller may list and fetch: in version 1, its logs only. */
+object FileArea {
+    const val LOGS = "logs"
+}
+
+/** How the agent sends a file's bytes in `files.fetch`. */
+object FileCompress {
+    /** One raw deflate stream (RFC 1951, no zlib or gzip header) across all the stream's DATA frames. */
+    const val DEFLATE = "deflate"
+
+    /** The bytes themselves. */
+    const val NONE = "none"
+}
+
+/** One file `files.list` gives. */
+@Serializable
+data class AgentFile(
+    /** As the manifest's `logs` entry names it, its last part filled in; for the agent's own logs a bare name. */
+    val path: String,
+    /** Bytes, as the file was when it was listed. */
+    val size: Long,
+    /** Seconds since 1970 by the head unit's clock, which may be wrong. */
+    val modified: Long = 0,
+)
+
+/** The result of `files.list`. */
+@Serializable
+data class FileListing(
+    /** Newest first. */
+    val files: List<AgentFile> = emptyList(),
+    /** Older files were left out, because the answer would not fit the link's frame. There is no asking for them. */
+    val more: Boolean = false,
+)
+
+/** The result of `files.fetch`. */
+@Serializable
+data class FileFetch(
+    /** The stream the DATA frames come on. Null when [size] is 0: then nothing follows. */
+    val stream: Int? = null,
+    /** The file's bytes that follow, before compression. */
+    val size: Long,
+    /** One of [FileCompress]'s: what was asked for. */
+    val compress: String,
 )

@@ -9,13 +9,17 @@ import com.nbtapps.store.data.json.StrictJson
 import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.VerifiedPackage
 import com.nbtapps.store.model.AgentText
+import com.nbtapps.store.model.FileCompress
 import com.nbtapps.store.model.InstallTarget
 import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.LinkClosing
 import com.nbtapps.store.model.Offer
 import com.nbtapps.store.model.PlanRequest
 import com.nbtapps.store.model.RemoveTarget
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.zip.Inflater
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,10 +27,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -74,9 +74,6 @@ class GoldenSessionTest {
                 if (!reader.raw(4).contentEquals(FrameCodec.MAGIC)) return fail("the link did not open with the magic bytes")
                 for (step in steps) {
                     if (!step.fromPhone) {
-                        // The app does not take DATA from the agent yet: its Peer ends a link that carries some.
-                        // Until it does, the stand-in leaves the files stream's frames out.
-                        if (decode(step.bytes).type == FrameCodec.TYPE_DATA) continue
                         link.output.write(step.bytes)
                         continue
                     }
@@ -125,6 +122,34 @@ class GoldenSessionTest {
             if (event is JobEvent.Done) break
         }
         return out
+    }
+
+    /** A stream's frames, inflated as one raw deflate stream. */
+    private class Inflated : StreamSink {
+        private val inflater = Inflater(true)
+        val bytes = ByteArrayOutputStream()
+        val ended = CompletableDeferred<String>()
+
+        @Volatile
+        var finished = false
+
+        override fun onData(bytes: ByteArray, last: Boolean) {
+            inflater.setInput(bytes)
+            val buffer = ByteArray(8192)
+            while (!inflater.finished()) {
+                val count = inflater.inflate(buffer)
+                if (count == 0 && inflater.needsInput()) break
+                this.bytes.write(buffer, 0, count)
+            }
+            if (last) {
+                finished = inflater.finished() && inflater.remaining == 0
+                ended.complete("last")
+            }
+        }
+
+        override fun onEnd(code: String?, message: String) {
+            ended.complete("$code: $message")
+        }
     }
 
     private suspend fun codeOf(block: suspend () -> Unit): String = try {
@@ -272,22 +297,21 @@ class GoldenSessionTest {
                 assertEquals((1L..7L).toList(), removed.map { it.seq })
                 assertEquals(JobState.SUCCEEDED, (removed.last() as JobEvent.Done).result.state)
 
-                // The agent's own log, listed and fetched. The app has no files.fetch of its own yet, so the
-                // requests go as they are, and the stand-in leaves out the stream's one DATA frame.
-                val agentLogs = buildJsonObject {
-                    put("package", "org.nbtapp.agent")
-                    put("area", "logs")
-                }
-                val listed = session.peer.request("files.list", agentLogs)
-                assertEquals("agent.log", listed["files"]!!.jsonArray.single().jsonObject["path"]!!.jsonPrimitive.content)
-                val fetched = session.peer.request("files.fetch", buildJsonObject {
-                    put("package", "org.nbtapp.agent")
-                    put("area", "logs")
-                    put("path", "agent.log")
-                    put("compress", "deflate")
-                })
-                assertEquals(1, fetched["stream"]!!.jsonPrimitive.int)
-                assertEquals("{}", session.peer.request("files.cancel", buildJsonObject { put("stream", 1) }).toString())
+                // The agent's own log, listed and fetched as one raw deflate stream, which the agent's zlib made and
+                // the phone's inflates. The stream has ended by the time it is cancelled, and that is answered too.
+                val listed = client.filesList("org.nbtapp.agent")
+                val log = listed.files.single()
+                assertEquals("agent.log", log.path)
+                assertFalse(listed.more)
+                val stream = Inflated()
+                val fetched = client.filesFetch("org.nbtapp.agent", "agent.log", FileCompress.DEFLATE, stream)
+                assertEquals(1, fetched.stream)
+                assertEquals(log.size, fetched.size)
+                assertEquals("last", stream.ended.await())
+                assertEquals(fetched.size, stream.bytes.size().toLong())
+                assertTrue(stream.finished)
+                assertEquals(40, stream.bytes.toString().lines().count { it.isNotEmpty() })
+                client.filesCancel(1)
 
                 client.restart("hmi")
 

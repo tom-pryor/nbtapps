@@ -31,6 +31,22 @@ class RemoteException(val code: String, message: String) : Exception(message)
  */
 class Exchange(val result: JsonObject, val sent: ByteArray, val received: ByteArray)
 
+/**
+ * Where the DATA frames of a stream the phone asked for go: one that the agent sends, as for `files.fetch`.
+ * Called on the peer's reading coroutine, in the order the frames came, so a sink that takes long holds up the
+ * link: it hands the bytes on and returns.
+ */
+interface StreamSink {
+    /** One frame's payload. With [last] the stream is over, and nothing more comes on it. */
+    fun onData(bytes: ByteArray, last: Boolean)
+
+    /**
+     * The stream ends without its last frame: the agent said why ([code] is from the protocol's list, as in
+     * `files.error`), or with [code] null the link ended. Nothing more comes on it.
+     */
+    fun onEnd(code: String?, message: String)
+}
+
 /** What a [Peer] hands up: the requests and events the other side sends. Called on the peer's reading coroutine. */
 interface PeerHandler {
     /**
@@ -51,7 +67,8 @@ interface PeerHandler {
  *    and an event `{"event","seq"?,"params"}`. Each side counts its own ids from 1.
  *  - A message outside the strict JSON profile, or one that is none of the three, closes the link. So does a
  *    framing error. There is no resync: the phone connects again.
- *  - The phone never fetches, so a DATA frame from the agent closes the link too.
+ *  - A DATA frame from the agent is taken only for a stream the phone asked for with [requestStream], which
+ *    the answer to that request names. Any other closes the link, as one after a stream's last frame does.
  *
  * [run] reads until the link ends. Everything else may be called from any coroutine; frames go out whole and
  * in the order the calls were made.
@@ -98,6 +115,12 @@ class Peer(
     /** The answers waited for: each completes with the result and the payload it came in. */
     private val waiting = ConcurrentHashMap<Long, CompletableDeferred<Pair<JsonObject, ByteArray>>>()
 
+    /** By request id: where the stream that the answer to [requestStream] names is to go. */
+    private val streamRequests = ConcurrentHashMap<Long, StreamSink>()
+
+    /** The streams from the other side that are open, by their number. Only the reading coroutine adds or ends one. */
+    private val streams = ConcurrentHashMap<Int, StreamSink>()
+
     /** Reads and dispatches until the link ends, and returns why it ended. Call it once. */
     suspend fun run(): String = withContext(io) {
         try {
@@ -119,7 +142,12 @@ class Peer(
                 decoder.feed(buffer, offset, count - offset)
                 while (isOpen) {
                     val frame = decoder.next() ?: break
-                    if (frame.type == FrameCodec.TYPE_DATA) throw FrameException("a DATA frame, which a phone never asks for")
+                    if (frame.type == FrameCodec.TYPE_DATA) {
+                        val sink = streams[frame.stream] ?: throw FrameException("a DATA frame of stream ${frame.stream}, which the phone did not ask for")
+                        if (frame.last) streams.remove(frame.stream)
+                        sink.onData(frame.payload, frame.last)
+                        continue
+                    }
                     handleMessage(frame.payload)
                 }
             }
@@ -142,8 +170,32 @@ class Peer(
      */
     suspend fun request(method: String, params: JsonObject = JsonObject(emptyMap())): JsonObject = exchange(method, params).result
 
+    /**
+     * Sends a request whose answer may name a `stream` that the other side then sends, and has that stream's DATA
+     * frames go to [sink]. It is taken up as the answer is read, before the next frame is, so not a frame of it is
+     * missed however soon it follows. An answer that names no stream opens none, and [sink] is told nothing.
+     *
+     * The stream ends with its last frame, with [endStream], or with the link; [sink] hears of each but the second.
+     */
+    suspend fun requestStream(method: String, params: JsonObject, sink: StreamSink): JsonObject = exchange(method, params, sink).result
+
+    /**
+     * Ends the stream [stream] on this side: nothing more of it is taken, and a DATA frame of it that still comes
+     * closes the link. For when the other side has said it sends no more, as the answer to `files.cancel` does.
+     */
+    fun endStream(stream: Int) {
+        streams.remove(stream)
+    }
+
+    /** The other side says the stream [stream] cannot go on, as `files.error` does: its sink is told, and it ends. */
+    fun failStream(stream: Int, code: String, message: String) {
+        streams.remove(stream)?.onEnd(code, message)
+    }
+
     /** [request], with the bytes the request and its answer went as. */
-    suspend fun exchange(method: String, params: JsonObject = JsonObject(emptyMap())): Exchange {
+    suspend fun exchange(method: String, params: JsonObject = JsonObject(emptyMap())): Exchange = exchange(method, params, null)
+
+    private suspend fun exchange(method: String, params: JsonObject, sink: StreamSink?): Exchange {
         val id = nextId.getAndIncrement()
         val text = buildJsonObject {
             put("id", id)
@@ -152,6 +204,7 @@ class Peer(
         }
         val answer = CompletableDeferred<Pair<JsonObject, ByteArray>>()
         waiting[id] = answer
+        sink?.let { streamRequests[id] = it }
         try {
             closeReason?.let { throw LinkClosedException(it) }
             val sent = sendMessage(text)
@@ -159,6 +212,7 @@ class Peer(
             return Exchange(result, sent, received)
         } finally {
             waiting.remove(id)
+            streamRequests.remove(id)
         }
     }
 
@@ -209,6 +263,7 @@ class Peer(
         }
         link.close()
         for (answer in waiting.values) answer.completeExceptionally(LinkClosedException(reason))
+        for (stream in streams.keys.toList()) streams.remove(stream)?.onEnd(null, reason)
     }
 
     /** Sends [message] in one frame, and returns the payload it went as. */
@@ -272,6 +327,8 @@ class Peer(
         if (id != null && (result is JsonObject || error is JsonObject) && !(result != null && error != null)) {
             val answer = waiting[id] ?: return // an answer to nothing we asked: ignored
             if (result is JsonObject) {
+                // Here, before the next frame is read: the stream's first DATA frame may be that one.
+                streamRequests.remove(id)?.let { sink -> openStream(result, sink) }
                 answer.complete(result to payload)
             } else {
                 val code = (error as JsonObject)["code"].stringOrNull() ?: throw FrameException("an error with no code")
@@ -282,8 +339,20 @@ class Peer(
         throw FrameException("a message that is not a request, a response or an event")
     }
 
+    /** Takes up the stream that [result] names, if any, for [sink]. */
+    private fun openStream(result: JsonObject, sink: StreamSink) {
+        val stream = result["stream"]?.integerOrNull() ?: return
+        if (stream !in 1..MAX_STREAM) throw FrameException("an answer that names stream $stream, which is not a stream number")
+        if (streams.putIfAbsent(stream.toInt(), sink) != null) throw FrameException("an answer that names stream $stream, which is open already")
+        // The link may have closed meanwhile, and told only the sinks it found.
+        closeReason?.let { reason -> streams.remove(stream.toInt())?.onEnd(null, reason) }
+    }
+
     private fun encode(message: JsonObject): ByteArray = Json.encodeToString(JsonObject.serializer(), message).encodeToByteArray()
 }
+
+/** The highest stream number: streams are numbered from 1, in the frame header's 16 bits. */
+private const val MAX_STREAM = 65_535L
 
 /** Milliseconds on a clock that is never set back. */
 internal fun monotonicMillis(): Long = System.nanoTime() / 1_000_000

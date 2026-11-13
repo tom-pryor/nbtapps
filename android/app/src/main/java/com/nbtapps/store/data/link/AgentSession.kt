@@ -114,6 +114,12 @@ class AgentSession(
             closeAs(params["reason"].stringOrNull().orEmpty())
             return
         }
+        if (name == FILES_ERROR) {
+            // Here too, so that the stream's sink hears of it in its place among the stream's frames.
+            val stream = params["stream"].integerOrNull()?.takeIf { it in 1..65_535 } ?: return
+            peer.failStream(stream.toInt(), params["code"].stringOrNull() ?: "io-error", params["message"].stringOrNull().orEmpty())
+            return
+        }
         JobEvent.parse(name, seq, params)?.let { eventChannel.trySend(it) }
     }
 
@@ -139,5 +145,10 @@ class AgentSession(
         } catch (e: IOException) {
             // The link ended.
         }
+    }
+
+    private companion object {
+        /** The agent's event that a files stream cannot go on: see [AgentClient.filesFetch]. */
+        const val FILES_ERROR = "files.error"
     }
 }

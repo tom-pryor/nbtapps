@@ -25,9 +25,13 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.Deflater
 import kotlin.concurrent.thread
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
+
+/** A log file a [FakeAgent] lists and sends: see [FakeAgent.logs]. */
+class FakeLog(val path: String, val bytes: ByteArray, val modified: Long = 1_794_400_000)
 
 /** Thrown by a [FakeAgent] handler to answer a request with an error. */
 class Refusal(val code: String) : Exception(code)
@@ -70,6 +74,10 @@ class FakePhones {
  * `auth` and `pairing.issue` until the phone has proved a pairing key, issues a key for the code of an open
  * pairing window, and ends a link on which `auth` failed. Without [phones] it is an agent that asks for no
  * `auth`, and has no such methods.
+ *
+ * It also sends files as the agent does for `files.fetch`, from [logs]: the answer, and then the DATA frames of
+ * one raw deflate stream, [dataChunk] bytes a frame. A test can have a stream stop until it is cancelled, end with
+ * `files.error`, or come damaged.
  */
 class FakeAgent(private val link: Link, val headUnitId: String) {
     /** See the class. Set before the phone's first byte arrives. */
@@ -104,6 +112,37 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
     @Volatile
     var restartNeeded = "none"
 
+    /** The JSON array text of the capabilities `hello` lists. */
+    @Volatile
+    var capabilities = "[]"
+
+    /** The log files `files.list` gives and `files.fetch` sends, by package id, newest first. */
+    val logs = ConcurrentHashMap<String, List<FakeLog>>()
+
+    /** The bytes of one DATA frame of a files stream, at most. */
+    @Volatile
+    var dataChunk = 1000
+
+    /** After this many DATA frames a files stream sends no more until it is cancelled. */
+    @Volatile
+    var stallAfterFrames: Int? = null
+
+    /** After this many DATA frames a files stream ends with `files.error`. */
+    @Volatile
+    var errorAfterFrames: Int? = null
+
+    /** The paths whose deflate streams come with a byte of them changed. */
+    val damaged: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** A files stream that is being sent: its frames go out with its lock held, so a cancel comes after them all. */
+    private class Outgoing {
+        var cancelled = false
+        val stopped = CountDownLatch(1)
+    }
+
+    private val outgoing = ConcurrentHashMap<Int, Outgoing>()
+    private val nextStream = AtomicInteger(1)
+
     private val reader = FrameReader(link)
     private val answers = ConcurrentHashMap<Int, LinkedBlockingQueue<JsonObject>>()
     private val streams = ConcurrentHashMap<Int, LinkedBlockingQueue<Frame>>()
@@ -115,7 +154,7 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
 
     init {
         handlers["hello"] = {
-            """{"protocolMin":1,"protocolMax":1,"role":"agent","headUnitId":"$headUnitId","agentVersion":"1.0.0","maxFrame":65536,"capabilities":[]}"""
+            """{"protocolMin":1,"protocolMax":1,"role":"agent","headUnitId":"$headUnitId","agentVersion":"1.0.0","maxFrame":65536,"capabilities":$capabilities}"""
         }
         handlers["info.get"] = {
             """{"agentVersion":"1.0.0","headUnitId":"$headUnitId","manifestVersion":1,""" +
@@ -124,6 +163,17 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
         handlers["packages.list"] = { """{"packages":$installed,"more":false}""" }
         handlers["job.status"] = { """{"events":[],"more":false}""" }
         handlers["ping"] = { "{}" }
+        handlers["files.list"] = { params ->
+            val files = logs[params["package"]?.jsonPrimitive?.content] ?: throw Refusal("not-found")
+            files.joinToString(",", """{"files":[""", """],"more":false}""") { """{"path":"${it.path}","size":${it.bytes.size},"modified":${it.modified}}""" }
+        }
+        handlers["files.cancel"] = { params ->
+            outgoing[params.getValue("stream").jsonPrimitive.content.toInt()]?.let { stream ->
+                synchronized(stream) { stream.cancelled = true }
+                stream.stopped.countDown()
+            }
+            "{}"
+        }
         thread(isDaemon = true, name = "fake-agent") { run() }
     }
 
@@ -205,6 +255,7 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
     private fun answer(id: String, method: String, params: JsonObject, payload: ByteArray) {
         try {
             val known = phones
+            if (method == "files.fetch" && !handlers.containsKey(method) && (known == null || trusted)) return sendFile(id, params)
             val result = when {
                 known != null && method == "auth" -> auth(known, params)
                 known != null && method == "pairing.issue" -> issue(known, params)
@@ -229,6 +280,52 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
         } catch (e: IOException) {
             // The link ended meanwhile.
         }
+    }
+
+    /** `files.fetch` from [logs]: the answer, then the stream's DATA frames, as the test has them go. */
+    private fun sendFile(id: String, params: JsonObject) {
+        try {
+            val log = logs[params["package"]?.jsonPrimitive?.content]?.firstOrNull { it.path == params["path"]?.jsonPrimitive?.content }
+                ?: throw Refusal("not-found")
+            val offset = params["offset"]?.jsonPrimitive?.content?.toInt() ?: 0
+            if (offset > log.bytes.size) throw Refusal("out-of-range")
+            val length = params["length"]?.jsonPrimitive?.content?.toInt() ?: Int.MAX_VALUE
+            val bytes = log.bytes.copyOfRange(offset, offset + minOf(length, log.bytes.size - offset))
+            val compress = params["compress"]?.jsonPrimitive?.content ?: throw Refusal("bad-request")
+            if (bytes.isEmpty()) return send("""{"id":$id,"result":{"size":0,"compress":"$compress"}}""")
+            val payload = if (compress == "deflate") deflate(bytes) else bytes
+            if (log.path in damaged) payload[payload.size / 2] = (payload[payload.size / 2].toInt() xor 0x55).toByte()
+            val number = nextStream.getAndIncrement()
+            val stream = Outgoing().also { outgoing[number] = it }
+            send("""{"id":$id,"result":{"stream":$number,"size":${bytes.size},"compress":"$compress"}}""")
+            val frames = (payload.indices step dataChunk).map { payload.copyOfRange(it, minOf(it + dataChunk, payload.size)) }
+            for ((i, frame) in frames.withIndex()) {
+                if (i == stallAfterFrames) stream.stopped.await(10, TimeUnit.SECONDS)
+                synchronized(stream) {
+                    if (stream.cancelled) return
+                    if (i == errorAfterFrames) {
+                        send("""{"event":"files.error","params":{"stream":$number,"code":"io-error","message":"read failed"}}""")
+                        return
+                    }
+                    synchronized(link) {
+                        link.output.write(FrameCodec.encode(FrameCodec.TYPE_DATA, if (i == frames.size - 1) FrameCodec.FLAG_LAST else 0, number, frame))
+                    }
+                }
+            }
+        } catch (e: Refusal) {
+            send("""{"id":$id,"error":{"code":"${e.code}","message":"the fake agent says ${e.code}"}}""")
+        }
+    }
+
+    private fun deflate(bytes: ByteArray): ByteArray {
+        val deflater = Deflater(6, true)
+        deflater.setInput(bytes)
+        deflater.finish()
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (!deflater.finished()) out.write(buffer, 0, deflater.deflate(buffer))
+        deflater.end()
+        return out.toByteArray()
     }
 
     /** `auth`, in its two requests: the phone's nonce, answered with the agent's and its proof; then the phone's proof. */

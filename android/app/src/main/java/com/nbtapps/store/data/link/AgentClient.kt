@@ -7,6 +7,9 @@ import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.crypto.newSha256
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.Autostart
+import com.nbtapps.store.model.FileArea
+import com.nbtapps.store.model.FileFetch
+import com.nbtapps.store.model.FileListing
 import com.nbtapps.store.model.Hello
 import com.nbtapps.store.model.InstalledPackage
 import com.nbtapps.store.model.InstalledPage
@@ -260,6 +263,64 @@ class AgentClient(
      *   on, and with `busy` from an agent that is on trial after its own update.
      */
     suspend fun setAutostart(on: Boolean): Autostart = call("autostart.set", buildJsonObject { put("on", on) })
+
+    /** The files of the package [packageId] in [area], newest first: see [FileListing]. Only an agent that lists `files` has this. */
+    suspend fun filesList(packageId: String, area: String = FileArea.LOGS): FileListing =
+        call("files.list", buildJsonObject {
+            put("package", packageId)
+            put("area", area)
+        })
+
+    /**
+     * Has the agent send the file [path] of the package [packageId], from byte [offset] for [length] bytes or to
+     * its end, in the way [compress] says. Its DATA frames go to [sink] as they come, the first maybe before this
+     * returns. With a size of 0 there is no stream, and [sink] is told nothing.
+     *
+     * @throws RemoteException with `not-found` for a path that `files.list` does not give now, `out-of-range` for
+     *   an offset past the end, `busy` while a job runs or another stream is open on the link.
+     */
+    suspend fun filesFetch(
+        packageId: String,
+        path: String,
+        compress: String,
+        sink: StreamSink,
+        offset: Long? = null,
+        length: Long? = null,
+        area: String = FileArea.LOGS,
+    ): FileFetch {
+        val result = peer.requestStream(
+            "files.fetch",
+            buildJsonObject {
+                put("package", packageId)
+                put("area", area)
+                put("path", path)
+                offset?.let { put("offset", it) }
+                length?.let { put("length", it) }
+                put("compress", compress)
+            },
+            sink,
+        )
+        val fetch = try {
+            decode<FileFetch>(result)
+        } catch (e: ProtocolException) {
+            result["stream"].integerOrNull()?.let { peer.endStream(it.toInt()) }
+            throw e
+        }
+        if (fetch.size < 0 || fetch.compress != compress || (fetch.stream == null) != (fetch.size == 0L)) {
+            fetch.stream?.let(peer::endStream)
+            throw ProtocolException("The head unit sent an answer this app can't read")
+        }
+        return fetch
+    }
+
+    /**
+     * Stops the stream [stream] of a `files.fetch`. The answer comes after the stream's last frame that the agent
+     * sends, so once this returns nothing more comes on it. A stream that has ended already is answered the same.
+     */
+    suspend fun filesCancel(stream: Int) {
+        call<JsonObject>("files.cancel", buildJsonObject { put("stream", stream) })
+        peer.endStream(stream)
+    }
 
     private fun planIdParams(planId: String) = buildJsonObject { put("planId", planId) }
 

@@ -2,6 +2,9 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.data.link
 
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -124,8 +127,123 @@ class PeerTest {
         }
     }
 
+    /** What a stream brought: its frames' bytes, whether its last came, and how it ended without one. */
+    private class Recorded : StreamSink {
+        val bytes = ByteArrayOutputStream()
+        val frames = AtomicInteger()
+        val ended = CompletableDeferred<String>()
+
+        override fun onData(bytes: ByteArray, last: Boolean) {
+            synchronized(this) { this.bytes.write(bytes) }
+            frames.incrementAndGet()
+            if (last) ended.complete("last")
+        }
+
+        override fun onEnd(code: String?, message: String) {
+            ended.complete("${code ?: "link"}: $message")
+        }
+    }
+
+    private fun data(stream: Int, bytes: String, last: Boolean = false) =
+        FrameCodec.encode(FrameCodec.TYPE_DATA, if (last) FrameCodec.FLAG_LAST else 0, stream, bytes.encodeToByteArray())
+
+    private fun msg(json: String) = FrameCodec.encode(FrameCodec.TYPE_MSG, 0, 0, json.encodeToByteArray())
+
     @Test
-    fun `a DATA frame from the agent closes the link`() = test {
+    fun `a stream the phone asked for takes the DATA that comes with its answer, and ends with its last frame`() = test {
+        val sink = Recorded()
+        val answer = async { session.peer.requestStream("files.fetch", buildJsonObject { put("path", "a.log") }, sink) }
+        agent.expectMagic()
+        agent.message()
+        // The answer and the stream's frames in one write, as they may come off the link in one read.
+        agent.raw(msg("""{"id":1,"result":{"stream":7,"size":11,"compress":"none"}}""") + data(7, "hello ") + data(7, "world", last = true))
+        assertEquals("""{"stream":7,"size":11,"compress":"none"}""", answer.await().toString())
+        assertEquals("last", sink.ended.await())
+        assertEquals("hello world", sink.bytes.toString())
+        assertEquals(2, sink.frames.get())
+        assertTrue(session.peer.isOpen)
+
+        // The stream is over: one more frame of it closes the link.
+        agent.raw(data(7, "late"))
+        assertTrue(agent.closedByPhone())
+        assertEquals(2, sink.frames.get())
+    }
+
+    @Test
+    fun `an answer that names no stream opens none, and the stream number stays free`() = test {
+        val sink = Recorded()
+        val answer = async { session.peer.requestStream("files.fetch", JsonObject(emptyMap()), sink) }
+        agent.expectMagic()
+        agent.message()
+        agent.send("""{"id":1,"result":{"size":0,"compress":"deflate"}}""")
+        answer.await()
+        agent.raw(data(1, "nothing was asked"))
+        assertTrue(agent.closedByPhone())
+        assertEquals(0, sink.frames.get())
+        assertFalse(sink.ended.isCompleted)
+    }
+
+    @Test
+    fun `files-error ends the stream it names, with its code, and the link stays`() = test {
+        val sink = Recorded()
+        val answer = async { session.peer.requestStream("files.fetch", JsonObject(emptyMap()), sink) }
+        agent.expectMagic()
+        agent.message()
+        agent.raw(msg("""{"id":1,"result":{"stream":3,"size":100,"compress":"none"}}""") + data(3, "part"))
+        answer.await()
+        agent.send("""{"event":"files.error","params":{"stream":3,"code":"io-error","message":"read failed"}}""")
+        assertEquals("io-error: read failed", sink.ended.await())
+        assertEquals("part", sink.bytes.toString())
+        // Asked again, the stream number may come again.
+        val again = Recorded()
+        val second = async { session.peer.requestStream("files.fetch", JsonObject(emptyMap()), again) }
+        agent.message()
+        agent.raw(msg("""{"id":2,"result":{"stream":3,"size":2,"compress":"none"}}""") + data(3, "ok", last = true))
+        second.await()
+        assertEquals("last", again.ended.await())
+        assertTrue(session.peer.isOpen)
+    }
+
+    @Test
+    fun `a stream that the phone ends takes no more, and the link ending ends one that is open`() = test {
+        val first = Recorded()
+        val answer = async { session.peer.requestStream("files.fetch", JsonObject(emptyMap()), first) }
+        agent.expectMagic()
+        agent.message()
+        agent.raw(msg("""{"id":1,"result":{"stream":5,"size":100,"compress":"none"}}""") + data(5, "a"))
+        answer.await()
+        val cancel = async { session.client.filesCancel(5) }
+        assertEquals("\"files.cancel\"", agent.message()["method"].toString())
+        agent.raw(data(5, "queued before the cancel") + msg("""{"id":2,"result":{}}"""))
+        cancel.await()
+        assertEquals("aqueued before the cancel", first.bytes.toString())
+        assertFalse("ended by the phone, it is not told", first.ended.isCompleted)
+
+        val second = Recorded()
+        val open = async { session.peer.requestStream("files.fetch", JsonObject(emptyMap()), second) }
+        agent.message()
+        agent.send("""{"id":3,"result":{"stream":6,"size":100,"compress":"none"}}""")
+        open.await()
+        agent.close()
+        assertTrue(second.ended.await().startsWith("link: "))
+    }
+
+    @Test
+    fun `an answer that names a stream that is open already closes the link`() = test {
+        val answer = async { session.peer.requestStream("files.fetch", JsonObject(emptyMap()), Recorded()) }
+        agent.expectMagic()
+        agent.message()
+        agent.send("""{"id":1,"result":{"stream":4,"size":100,"compress":"none"}}""")
+        answer.await()
+        val twice = async { closedReason { session.peer.requestStream("files.fetch", JsonObject(emptyMap()), Recorded()) } }
+        agent.message()
+        agent.send("""{"id":2,"result":{"stream":4,"size":100,"compress":"none"}}""")
+        assertTrue(twice.await().isNotEmpty())
+        assertTrue(agent.closedByPhone())
+    }
+
+    @Test
+    fun `a DATA frame of a stream the phone did not ask for closes the link`() = test {
         val request = async { closedReason { session.peer.request("info.get") } }
         agent.expectMagic()
         agent.message()
