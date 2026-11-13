@@ -278,7 +278,7 @@ class Peer(
         writeLock.withLock {
             closeReason?.let { throw LinkClosedException(it) }
             // A frame goes out whole or the link is done: a caller that is cancelled must not leave half of one.
-            withContext(io + NonCancellable) {
+            val sent = withContext(io + NonCancellable) {
                 try {
                     if (!opened) {
                         link.output.write(FrameCodec.MAGIC)
@@ -286,11 +286,16 @@ class Peer(
                     }
                     link.output.write(bytes)
                     link.output.flush()
+                    true
                 } catch (e: IOException) {
                     close("The link to the head unit was lost")
+                    false
                 }
             }
-            closeReason?.let { throw LinkClosedException(it) }
+            // Only a frame that did not go out fails here. The other side may answer one that did and end the link
+            // straight after, as the agent does after system.restart, and the reader can have taken both in before
+            // this line: the answer is then the request's, and the link's end is for whatever comes next.
+            if (!sent) throw LinkClosedException(closeReason ?: "The link to the head unit was lost")
         }
     }
 
