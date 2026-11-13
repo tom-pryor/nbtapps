@@ -25,7 +25,7 @@
 # The log names the car's processes with their arguments and the files of its plugin folders, and nothing of a
 # phone or a person that I know of; it goes only where the command line above sends it.
 #
-# Written for the head unit's ksh and few tools: no head, tail, sed, awk or printf is assumed. Never run on a car.
+# Written for the head unit's ksh and few tools: no head, tail, sed, awk or printf is assumed.
 
 EXEC_DIRS=${HU_PROBE_EXEC_DIRS:-"/tmp /var/opt"}     # override only for host tests
 PROBE_FILE=""

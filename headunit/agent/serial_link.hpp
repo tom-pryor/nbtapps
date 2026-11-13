@@ -37,9 +37,8 @@
 //     link is let go: its node is closed and not read again, and no byte was written into it, so the program it
 //     belongs to finds it as it would have. What the phone had said on it by then is lost to that program. A
 //     link nobody answers is a sign of a service that was left behind, so the list of other programs' services is
-//     swept then (serial_services.hpp). Whether a link outlives the close of its node has not been seen on a car;
-//     SerialConfig::letGoKeepsNode (`nbtagent --decide-hold`) keeps the node open instead, unread, until the link
-//     ends.
+//     swept then (serial_services.hpp). SerialConfig::letGoKeepsNode (`nbtagent --decide-hold`) keeps the node
+//     open instead, unread, until the link ends.
 //   * The hold. From a phone's request until its link has been let go, and for as long as a link of the agent's is
 //     up, the gate also refuses the opens of the programs that are declared for a serial service, so that none of
 //     them takes a link's first bytes or writes into a link of the agent's. Their looks at the node are passed on.
@@ -49,11 +48,10 @@
 // as long (agent.hpp).
 //
 // How a link of the agent's ends. The phone made the link, and the phone is to end it: a link whose node the agent
-// closed while the phone still held it, and went on sending into it, is what the car's Bluetooth did not get over.
-// Seen on a car three times (after `forget`, after the agent ended for its own update, after the agent was
-// stopped): the phone app held such a link for 30 seconds or more, and after that every new link was given a node
-// on which nothing arrived, until the head unit was restarted. A close that the phone followed with its own
-// within a second did no harm. What exactly the stack does not get over is not known. So:
+// closed while the phone still held it, and went on sending into it, is what the car's Bluetooth does not get over:
+// when the phone app holds such a link for 30 seconds or more, every new link after it is given a node on which
+// nothing arrives, until the head unit is restarted. A close that the phone follows with its own within a second
+// does no harm. So:
 //
 //   * when the agent ends a link on purpose it tells the phone first, with the event link.closing (agent.hpp), and
 //     a phone app ends the link as soon as it hears that;

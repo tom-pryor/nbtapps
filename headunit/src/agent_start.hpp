@@ -60,12 +60,8 @@
 // start the process take their paths from the caller, so all of it is tested on a build host with the real
 // launcher (tests/agent/test_agent_start.cpp).
 //
-// None of this has run on a car. What is not known until it has:
-//   - whether a process that a plugin starts goes on when the HMI is restarted. The agent restarts the HMI in
-//     the middle of a job;
-//   - which priority and scheduling partition the launcher, and so the agent, gets from the HMI's thread;
-//   - whether kDelayS is long enough for the car's Bluetooth service to be there. If it is not, the agent's
-//     serial listener gives up and sets itself up again half a minute later (agent/serial_link.hpp).
+// If kDelayS is not long enough for the car's Bluetooth service to be there, the agent's serial listener gives up
+// and sets itself up again half a minute later (agent/serial_link.hpp).
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <errno.h>

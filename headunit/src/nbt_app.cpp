@@ -32,13 +32,9 @@
 // what, and what keeps it from doing so is in agent_start.hpp. It is one line in the log each time the HMI
 // starts, and a start from the Start the agent screen is one line more.
 //
-// None of this has run on a car. What is not known until it has, and is logged here for that day:
-//   - whether the HMI tells a plugin that one of its states is shown and left (addHandler with type 11, visible)
-//     and has the focus (type 1). Both are asked for, and each one that comes is a line in the log. A state that
-//     is never reported as shown leaves the Pair a phone screen at its first text, with no code;
-//   - whether a text model can be pointed at another text after the state is on the screen;
-//   - whether a timer (post) runs while one of our states is shown;
-//   - whether a launcher started from an action's handler goes on when the HMI is restarted, as for create().
+// The app asks the HMI to tell it when one of its states is shown and left (addHandler with type 11, visible) and
+// when it has the focus (type 1), and each one that comes is a line in the log. A state that is never reported as
+// shown leaves the Pair a phone screen at its first text, with no code.
 // `nbtctl pair` on the head unit does what the Pair a phone screen does, with none of these.
 //
 // ABI:

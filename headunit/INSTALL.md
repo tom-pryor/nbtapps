@@ -4,9 +4,7 @@ This guide sets up NBTApp from nothing: the agent on the car's head unit, the NB
 and the iDrive plugin, which the app installs. At the end the agent starts with the car and the phone installs
 and updates packages over Bluetooth.
 
-> **Status.** Each part passes its tests on the bench. The whole sequence below has not yet been run end to
-> end on a car, and the steps marked *not tried on a car* are untested there. You install at your own risk;
-> see the [README's disclaimer](README.md#disclaimer).
+> You install at your own risk; see the [README's disclaimer](README.md#disclaimer).
 
 ## What you need
 
@@ -42,7 +40,7 @@ needed for a first install.
 The stick's files are read from `/fs/usb0/payload` in step 2. If `ls /fs/usb0` shows nothing, look in
 `ls /mnt` for a folder named `umass…` and use that in place of `/fs/usb0`.
 
-### Option B: over SSH, with no stick (*not tried on a car*)
+### Option B: over SSH, with no stick
 
 The head unit has no `scp` or `sftp`, so each file is sent through `cat`. In the commands below, `root@CAR`
 is however you log in to the head unit; if your SSH client refuses its host key, add

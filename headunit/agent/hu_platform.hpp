@@ -10,7 +10,7 @@
 // and the command lines that remount and restart. So the class itself holds no fact about a car, and the bench
 // runs it whole against a folder, with scripts standing in for `mount` and the restart program
 // (tests/agent/test_hu_platform.cpp). The head unit's build of nbtagent uses it when it is started with no
-// --root, with HeadUnitConfig::car(). It has not run on a car.
+// --root, with HeadUnitConfig::car().
 //
 // The system partition:
 //   - makeWritable(path) does nothing for a path on a writable file system. For one on a read-only file system it

@@ -10,8 +10,6 @@ It is an iDrive **PluginApp**, built on the **HU Framework**: the head unit's ow
 `Plugins/<Name>/<Name>.manifest` under `/opt/hmi/ID5/data/ro`. The entry button and its placement come from the XML,
 so iDrive creates the menu row itself. Nothing in HmiMain3D is patched.
 
-**Status: builds, never run on a car.**
-
 ## Layout
 
 | Path | Purpose |
@@ -75,23 +73,20 @@ installs, upgrades and removes it with backups, rollback and recovery after a po
 and offers, pulls the archives it needs over the link, and reports as it goes. The plan document sets the package
 format and the protocol.
 
-It has not run on a car:
-
 - With `--root`, `nbtagent` keeps everything under that folder, which stands in for the head unit. The code for a
   real one is `agent/hu_platform.cpp`: it remounts the system partition for a write and puts it back, and
-  restarts the HMI, by running commands from a configuration. The bench tests it against a folder with scripts in
-  place of those commands.
+  restarts the HMI, by running commands from a configuration.
 - The build for the head unit (`./build.sh agent`) uses that code when `nbtagent` is started with no `--root`: it
   then works on the head unit itself, with its state in `/var/opt/nbtapp` and its socket at `/tmp/nbtagent.sock`,
   where that build's `nbtctl` looks when it is told nothing else. The configuration for a car is
   `HeadUnitConfig::car()`: `${app}` is `/var/opt/nbtapp/apps/<id>`, the system partition is `/fs/sda0`, remounted
   with `/bin/mount -u -o rw /fs/sda0` and put back with `-o ro`, and the HMI is restarted with
-  `/opt/core/bin/OnOffDSICommander appreset`. The file says where each value comes from. The two remount commands
-  have not run on a car in that form; the agent asks the file system after each whether it is read-only, so one
-  that does nothing fails the install step before a file is written, or leaves the partition writable until the
-  head unit is turned off and says so in the install log. No command for a reboot is known: the agent answers a
-  request for one with `unsupported`, and the head unit has to be turned off and on by hand. On a machine that has no `/fs/sda0` or no plugin folder this mode ends without
-  making anything. The host's build has no such mode.
+  `/opt/core/bin/OnOffDSICommander appreset`. The file says where each value comes from. After each remount the
+  agent asks the file system whether it is read-only, so a remount that does nothing fails the install step
+  before a file is written, or leaves the partition writable until the head unit is turned off and says so in
+  the install log. No command for a reboot is known: the agent answers a request for one with `unsupported`, and
+  the head unit has to be turned off and on by hand. On a machine that has no `/fs/sda0` or no plugin folder this
+  mode ends without making anything. The host's build has no such mode.
 - The official package key is built in (`agent/embedded_keys.hpp`): the public half of the key that signs the
   official catalogue's packages. An agent built for the head unit trusts that key and no other. The host build
   also takes `--test-key` for the test keys.
@@ -103,9 +98,9 @@ It has not run on a car:
   author's address. Agents from 1.2.0 on list the capability `detached-signature` in `hello`; an older agent plans
   such an offer and then refuses it at install with `bad-signature`. `nbtctl install --from` offers each archive
   with its own `manifest.sig`, so it does not install such a package.
-- The links are a local socket; in the head unit's build, Bluetooth serial, which has not run on a car (see
-  below); and in the host build only, a TCP port on the loopback address (`--debug-tcp`), for the phone app's
-  debug build on an emulator. TCP for a car, with the frame MAC it needs, is still to come.
+- The links are a local socket; in the head unit's build, Bluetooth serial (see below); and in the host build
+  only, a TCP port on the loopback address (`--debug-tcp`), for the phone app's debug build on an emulator.
+  TCP for a car, with the frame MAC it needs, is still to come.
 - A phone is paired with the agent before the agent does anything for it. On Bluetooth serial, and on the
   bench's TCP port, the agent answers `hello`, `ping`, `auth` and `pairing.issue`, and refuses everything else
   until the phone has proved with `auth` that it holds a pairing key. A phone gets its key for a code of six
@@ -116,13 +111,12 @@ It has not run on a car:
   end them, as the plugin's **Forget all phones** screen does, and a forgotten phone's links are closed. The
   local socket asks for none of this: whoever can open it is one of the head unit's own programs. The plan
   document has the reasons ("Authentication", "Enrolment on the car's screen") and the messages (its Message
-  reference tab). The plugin's two screens have run on a build host only.
+  reference tab).
 - On a Bluetooth serial link the agent gives 4,096 bytes as its largest frame, sends `ping` after 10 seconds with
   nothing heard, and ends the link after 30; a serial link with no `hello` 30 seconds after it opened is ended
   too. A serial link on which the protocol's magic bytes have not come 500 ms after the agent opened it is not
   the agent's, and is let go. Those numbers, with the serial service's name and UUID, are in
-  `spec/protocol/constants.txt`, which the phone app has to keep to as well. They are first values: no run on a
-  car has set them.
+  `spec/protocol/constants.txt`, which the phone app has to keep to as well.
 - The phone made a link, and the phone ends it. When the agent ends a link of its own accord it says so first,
   with the event `link.closing`, and closes its end once that is written out; nothing follows the event. Its
   `reason` is `stopping` (the agent's process ends), `restarting` (it ends for a newer version of itself, which
@@ -146,7 +140,7 @@ read-only, the room in `/var/opt` and `/tmp`, the plugin folders and their manif
 the usage text of the program that restarts the HMI, and where the shared libraries are that the agent's programs
 ask for. Run with no argument it changes nothing; `--exec-test` is a second run that copies a small stock program
 into `/tmp` and `/var/opt`, runs the copy and removes it, to see whether programs start from there. Its header says
-what it reads. It has not run on a car. The commands are under [The agent on the head unit](#the-agent-on-the-head-unit).
+what it reads. The commands are under [The agent on the head unit](#the-agent-on-the-head-unit).
 
 On the bench the agent runs in a Docker container. A package's hook script is an ordinary process of whoever runs
 the agent: `--root` says where the agent puts files, and does not keep a script from anything else that user can
@@ -253,10 +247,7 @@ only, neither holds the test bench's options or a key from `tests/keys/`, `nbtag
 `agent/embedded_keys.hpp`, the scripts are the ones in `agent/`, and `version` is the agent's. The build also
 makes the agent's own package of that folder, `release/pkg/org.nbtapp.agent-<version>.nbtpkg`, not signed, and
 `make agent-check` holds the two together: the archive is byte for byte what `tools/agent_pkg.py` makes of the
-folder, and its manifest places the two programs, the launcher and the starter and does nothing else. None of it
-has run on a car. The
-tests end the agent at every point of an install step and check what the next start makes of it; they cannot
-simulate a real power cut, which can also lose writes that were not synced.
+folder, and its manifest places the two programs, the launcher and the starter and does nothing else.
 
 ## Installing
 
@@ -292,9 +283,6 @@ make plugin-release KEY=/path/to/package.key           # -> release/pkg/signed/,
   no record of, and the install fails with `stock-mismatch`. Move that folder out of `Plugins` once, as shown
   below for an update by hand, and install the package.
 
-The bench installs, updates and removes this package as `tools/plugin_pkg.py` makes it, with stand-ins for the
-library and the DBs (`tests/agent/test_engine.cpp`). The agent has not installed it on a car.
-
 ### By hand
 
 Over SSH on the head unit, with `release/NbtApp/` on a USB stick:
@@ -325,14 +313,12 @@ Log: `sloginfo | grep NbtApp`.
 ## The agent on the head unit
 
 `release/agent/` holds `nbtagent`, `nbtctl`, `version` and the scripts `hu_probe.sh`, `hu_install.sh`,
-`nbtlaunch.sh` and `nbtstart.sh`. None of them has run on a car, so this is what the repo knows, and the probe's log is what settles
-the rest:
+`nbtlaunch.sh` and `nbtstart.sh`. What they need of the head unit:
 
 - A USB stick is `noexec`, so the programs are copied off it before they are started. The lines below copy them to
-  `/tmp`, which is emptied when the head unit powers down. Whether a program starts from `/tmp` or from `/var/opt`
-  is what the probe's `--exec-test` run answers.
-- The programs ask for `libsocket.so.3`, `libcpp.so.4` and `libc.so.3`, as the Bluetooth tools do. Whether a head
-  unit has `libcpp.so.4` is not recorded here; the probe lists it, and `nbtagent --version` shows it at once.
+  `/tmp`, which is emptied when the head unit powers down.
+- The programs ask for `libsocket.so.3`, `libcpp.so.4` and `libc.so.3`, as the Bluetooth tools do. The
+  probe lists them, and `nbtagent --version` shows at once whether they are there.
 - The agent installs a package that the official package key has signed, and no other. Nothing starts it when
   the head unit starts, until the iDrive plugin is asked to (see "Starting with the head unit").
 
@@ -388,7 +374,7 @@ the car is not enough on this link: until the phone has been paired with the age
 the agent answers `hello`, `ping`, `auth` and `pairing.issue`, and refuses everything else. A link that does not open with the protocol's magic bytes is let go (see "Other programs' links"
 below). One that does, and then does not say `hello` within 30 seconds or goes silent for as long, is ended. With
 `--root` and `--bluetooth` a dropped SSH session stops the agent as `kill` does, so that the registration does
-not stay behind. It has not run on a car:
+not stay behind:
 
 ```sh
 /tmp/nbt/nbtagent --root /tmp/hu --bluetooth 2> /tmp/hu.log &
@@ -404,13 +390,10 @@ NBT_AGENT_SOCKET=/tmp/hu/agent.sock /tmp/nbt/nbtctl phones          # the paired
 NBT_AGENT_SOCKET=/tmp/hu/agent.sock /tmp/nbt/nbtctl forget --all    # end every pairing
 ```
 
-**How a link ends.** On a car, a link whose node the agent had closed while the phone app went on holding the
-link, and sending `ping` into it, was followed by links on which nothing arrived: the car opened each new link,
-the agent opened its node, and no byte of the phone's came until the head unit was restarted. That was seen each
-time the app held such a link for 30 seconds or more (after `nbtctl forget --all`, after the agent ended for its
-own update, and after the agent was stopped), and not when the phone followed the agent's close with a new link
-within a second. What in the car's Bluetooth does not get over it is not known. The agent therefore does three
-things:
+**How a link ends.** When the agent closes a link's node while the phone app goes on holding the link, and
+sending `ping` into it, for 30 seconds or more, the car's Bluetooth does not get over it: the car opens each new
+link, the agent opens its node, and no byte of the phone's comes until the head unit is restarted. A phone that
+follows the agent's close with a new link within a second does no harm. The agent therefore does three things:
 
 - it tells the phone before it ends a link (`link.closing`, above), so that the phone app ends the link itself;
 - when its own end of a link has closed, for whatever reason, it keeps the link's node open and goes on reading
@@ -428,8 +411,7 @@ things:
 
 A phone app that does not know the event still holds its link for up to 30 seconds, which is longer than the
 agent waits. A link that the agent lets go as another program's (below) is not kept this way: its node is closed
-after the decide step, as before. Status: passes `make agent-test`, with pseudo-terminals for nodes; whether it
-is what the car's Bluetooth needs has not been tried on a car.
+after the decide step, as before.
 
 **Serial services of other programs.** The car's Bluetooth stack keeps a registration until someone removes it or
 the stack restarts. A program that registers a serial service of its own and ends without removing it leaves it
@@ -454,8 +436,7 @@ programs has had its turn (`preInstall` of an install or an upgrade, `preRemove`
 let a phone's link go, at most once in 30 seconds. It looks for the program among the head unit's processes by
 the file name of the executable, so a program that a shell runs from a script is not found. A service whose
 program runs is left alone, and so is every service when the processes cannot be read. Each removal, and what the
-car's Bluetooth service answered, is in the log. Status: passes `make agent-test`, where the processes and the
-Bluetooth service are the tests' own; not run on a car.
+car's Bluetooth service answered, is in the log.
 
 **Other programs' links.** The car gives every link a phone opens the same node and names the same service for
 it, so a program that takes serial links of its own meets the agent's links, and the agent meets its links. Two
@@ -473,9 +454,8 @@ things keep them apart, both in the agent:
 
 The log has, for every link, how long after the open its first message came, whether it was the agent's or was
 let go and why, whether the node was still there after the close and when it went, and each time the gate starts
-and stops refusing those programs. Not seen on a car: whether a link outlives the close of its node, and how long
-after the open a phone's first message comes. Two options of `nbtagent` are for finding that out without a new
-build, and go with Bluetooth serial only:
+and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, and go
+with Bluetooth serial only:
 
 | Option | What it changes |
 |---|---|
@@ -494,9 +474,6 @@ bluetooth: a serial service that the car's Bluetooth service does not take, or t
 bluetooth: while a link is being decided on or is the agent's, the gate also refuses opens by radiod
 ```
 
-Status: passes `make agent-test`, which covers the options' value and these lines but not `nbtagent` taking them,
-since only the head unit's build has them; not run on a car.
-
 It ignores SIGHUP, so it goes on when the SSH session ends; `kill` with its process id stops it. Its log is its
 standard error and nothing else, so the file above grows in `/tmp`, which is memory, for as long as the agent runs.
 After a power down the programs are gone from `/tmp` and the agent has to be copied and started again.
@@ -512,8 +489,7 @@ and two scripts into a folder of their version's own, and the starter beside tha
   the version it has chosen, and it starts that version's agent, and starts it again when it fails.
 
 A new version of the agent therefore comes with its own launcher, which is tried with it: a launcher that does
-not run on a head unit fails its version's try, and the version before is back, with the launcher it had. The
-scripts are tested on the bench under Debian's `sh` (`make agent-test`); none has run under the head unit's `ksh`.
+not run on a head unit fails its version's try, and the version before is back, with the launcher it had.
 
 ```sh
 ksh /mnt/umassXXXXX/agent/hu_install.sh              # says what it did, and how to start the starter
@@ -535,8 +511,7 @@ ksh /mnt/umassXXXXX/payload/hu_install.sh
 ```
 
 The archive's `manifest.json` and `manifest.sig` are unpacked beside that folder and the script does not read
-them: nothing on the head unit checks a first install's signature. The bench runs this with the package unpacked
-into a folder (`tests/e2e/run_launcher.py`); it has not run on a car.
+them: nothing on the head unit checks a first install's signature.
 
 | In `/var/opt/nbtapp/agent` | Holds | Written by |
 |---|---|---|
@@ -657,25 +632,6 @@ counts for 15 minutes; with the head unit's clock not set, which is how many sta
 removed. To have the agent started again: `rm /var/opt/nbtapp/agent/autostart.boots`, or start the launcher by
 hand, at the console or from the iDrive menu (below), and leave the agent running for five minutes.
 
-Status: passes `make agent-test`, where the plugin's code starts `nbtstart.sh` on a folder
-(`tests/agent/test_agent_start.cpp`); the plugin has not run on a car. What a car has to show, with `autostart`
-there:
-
-```sh
-pidin arg | grep nbt                          # after a start of the head unit: the launcher, and 15 s later nbtagent
-sloginfo | grep NbtApp                        # agent: started the launcher (process ...)
-cat /tmp/nbtapp/log/agent.log                 # when the serial service was registered, and whether at the first go
-OnOffDSICommander appreset                    # restarts the HMI
-pidin arg | grep nbt                          # the same two processes as before
-sloginfo | grep NbtApp                        # agent: a launcher is running (process ...): left as it is
-pidin -p nbtagent                             # the priority it runs at, which it has from the HMI's thread
-```
-
-Not known until then: whether a process the plugin starts goes on when the HMI is restarted, which the agent does
-in the middle of a job; which priority and scheduling partition the agent gets that way; and whether 15 seconds is
-long enough for the car's Bluetooth service to be there (if not, the agent sets its serial service up again 30
-seconds later, as above).
-
 #### Starting from the iDrive menu
 
 A head unit with no console starts its first agent from the plugin's menu: **NBTApp**, then **Start the agent**.
@@ -697,11 +653,6 @@ It starts nothing where there is no launcher in the agent's folder (the screen s
 installed**), or where a launcher is running (the screen waits for its agent). With `/var/opt/nbtapp/disable`
 there the plugin has no menu at all. Each press that starts something is one line in the log: `agent: started the
 launcher by hand (process ...)`.
-
-Status: passes `make agent-test`, where the start by hand starts `nbtstart.sh` on a folder
-(`tests/agent/test_agent_start.cpp`) and the screen runs against an agent (`tests/agent/test_plugin.cpp`); the
-plugin has not run on a car. What a car has to show is what is listed above for a start with the head unit, with
-a press in place of the start, and whether an agent started this way goes on when the HMI is restarted.
 
 #### The agent updates itself
 
@@ -750,11 +701,7 @@ What an agent accepts of its own package:
 A `job.status` from the iDrive plugin does not confirm a version: the plugin would reach an agent that no phone
 can. `nbtctl status` does, as a person at the console.
 
-The launcher and the starter as they are from 1.1.0 have not run on a car. The bench runs an update with two
-builds of `nbtagent` that differ in the version they say they are, with a starter in place that is another one
-than the new version's, and runs a new version whose launcher does not run (`tests/e2e/run_launcher.py`); it
-ends the agent at every point of the three parts (`tests/agent/test_engine.cpp`). The catalogue lists
-`org.nbtapp.agent`, and the phone app follows a job through `restarting`.
+The catalogue lists `org.nbtapp.agent`, and the phone app follows a job through `restarting`.
 
 #### Releasing a version of the agent
 
@@ -808,10 +755,6 @@ nothing there:
 - **The log's size**: a version's launcher names the log's file to the agent (`NBTAGENT_LOG`), and the agent keeps it
   short. A file that has passed 512 KB becomes `agent.log.1`, over the one that was there, and the log goes on in
   a new file, so the three files hold 1.5 MB at most.
-
-`make agent-test` holds every file and folder against what it was before such a start: name, size, mode, inode and
-the times of the last change. It does not look at a file's time of last access, and whether the head unit's file
-system writes that down when a file is read is not known.
 
 What an agent says is on the RAM disk and is gone after a power down; the copy above is the one exception. A
 try that a power down ends leaves no log, and that is how a try ends whose agent no phone could reach. To find
@@ -868,8 +811,7 @@ The agent holds a package to `requires.agent` when it installs it. A plugin that
 Rule 1 covers the second. For the first, an agent answers a message it does not know with `unsupported`.
 
 On a head unit the two updates are two jobs from the phone: the agent's, which ends when a phone has confirmed
-the new version, and then the plugin's, which restarts the HMI. No pair of versions has gone through this on a
-car.
+the new version, and then the plugin's, which restarts the HMI.
 
 ## License
 

@@ -137,9 +137,8 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 # nbtctl (a command-line controller, and a package source from a folder). `make agent-test` builds all of it into a Docker image and runs it there: the engine runs packages'
 # hook scripts, and a script is not held to the folder the agent works in, so the agent's side of every test is
 # kept in a container (tools/bench.py; nbtctl, which runs nothing, is this machine's own). `make agent` builds the
-# same for the head unit, where it cannot run here: it shows that the code compiles and links with qcc. Nothing
-# here has run on a car. What the head unit's nbtagent goes by when it works on one is HeadUnitConfig::car(), in
-# agent/hu_platform.cpp.
+# same for the head unit, where it cannot run here: it shows that the code compiles and links with qcc. What the
+# head unit's nbtagent goes by when it works on one is HeadUnitConfig::car(), in agent/hu_platform.cpp.
 AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.cpp agent/semver.cpp \
                agent/manifest.cpp agent/package.cpp agent/fsutil.cpp agent/process.cpp agent/journal.cpp \
                agent/store.cpp agent/hmi_ids.cpp agent/engine.cpp agent/frame.cpp agent/link.cpp agent/peer.cpp \

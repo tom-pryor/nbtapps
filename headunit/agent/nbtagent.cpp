@@ -17,7 +17,7 @@
 // Without --root, the build for the head unit (qcc, __QNXNTO__) works on the head unit: the real folders, the
 // system partition remounted for a write and put back, the HMI restarted (hu_platform.hpp). What it needs to know
 // for that is HeadUnitConfig::car(). On a machine that lacks the system partition's folder or the plugin folder
-// it ends, having made nothing. It has not run on a car. In this mode:
+// it ends, having made nothing. In this mode:
 //   - the socket is /tmp/nbtagent.sock and cannot be put elsewhere. The socket is what keeps a second agent off
 //     the same head unit: one that finds an agent answering there ends before it looks at anything else;
 //   - SIGHUP is ignored, so the agent outlives the SSH session it was started from;

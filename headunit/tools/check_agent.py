@@ -27,8 +27,8 @@ is not there.
     those four and the rest of what a first install needs, hu_install.sh and version, and nothing else:
     unpacked onto a USB stick, that folder is what hu_install.sh is run from
 
-What it cannot say is that the programs run on a car. NEEDED is what they ask for, which is what the Bluetooth
-tools ask for too; whether a head unit has libcpp.so.4 is not recorded in this repo, and hu_probe.sh lists it.
+NEEDED is what the programs ask for, which is what the Bluetooth tools ask for too; hu_probe.sh lists what a head
+unit has.
 Needs readelf (binutils).
 """
 import glob, hashlib, os, re, shutil, subprocess, sys
