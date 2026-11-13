@@ -93,10 +93,11 @@ class LogPullViewModelTest {
         assertEquals((big.bytes.size + small.bytes.size).toLong(), state.bytes)
         assertTrue(state.canPull)
 
+        // The screen's state follows each change a moment later, so a test waits for it.
         viewModel.choose(big.path, false)
-        assertEquals(setOf(small.path), viewModel.uiState.value.chosen)
+        assertEquals(setOf(small.path), await(viewModel.uiState, "the big file taken out") { it.chosen.size == 1 }.chosen)
         viewModel.choose(small.path, false)
-        assertFalse("nothing to pull", viewModel.uiState.value.canPull)
+        assertFalse("nothing to pull", await(viewModel.uiState, "nothing chosen") { it.chosen.isEmpty() }.canPull)
     }
 
     @Test
@@ -106,7 +107,7 @@ class LogPullViewModelTest {
         // 600 KB and a line at 20 KB/s, rounded up.
         assertEquals(31L, state.estimateSeconds)
         viewModel.setTail(true)
-        val tailed = viewModel.uiState.value
+        val tailed = await(viewModel.uiState, "the tail") { it.tail }
         assertEquals(LogPullViewModel.TAIL_BYTES + small.bytes.size, tailed.bytes)
         assertEquals(13L, tailed.estimateSeconds)
         assertEquals("about 13 seconds", duration(13))
@@ -128,7 +129,7 @@ class LogPullViewModelTest {
         assertEquals((big.bytes.size - LogPullViewModel.TAIL_BYTES).toString(), fetch.getValue("offset").jsonPrimitive.content)
 
         viewModel.shared(zip)
-        val after = viewModel.uiState.value
+        val after = await(viewModel.uiState, "the ZIP handed on") { it.shareNow == null }
         assertNull("not again by itself", after.shareNow)
         assertEquals("but when asked", zip, after.zip)
 
@@ -138,7 +139,8 @@ class LogPullViewModelTest {
         assertEquals(zip, shown.zip)
         assertNull(shown.shareNow)
         // Another package's screen shows none of it.
-        assertNull(LogPullViewModel("car", "org.nbtapp.agent", jobs, "0.4.0").uiState.value.pull)
+        val other = LogPullViewModel("car", "org.nbtapp.agent", jobs, "0.4.0")
+        assertNull(await(other.uiState, "the agent's listing") { it.listing !is Listing.Loading }.pull)
     }
 
     @Test

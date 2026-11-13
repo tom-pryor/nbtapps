@@ -140,7 +140,10 @@ class LogPullViewModel internal constructor(
     fun setTail(on: Boolean) = local.update { it.copy(tail = on) }
 
     fun start() {
-        val state = uiState.value
+        // The screen's own choices come from where they are kept, not from uiState: that is worked out from them a
+        // moment later, and a start right after a change would otherwise go by the choices from before it.
+        val choices = local.value
+        val state = uiState.value.copy(listing = choices.listing, chosen = choices.chosen, tail = choices.tail)
         if (!state.canPull) return
         val listing = state.listing as? Listing.Ready ?: return
         local.update { it.copy(started = true) }
