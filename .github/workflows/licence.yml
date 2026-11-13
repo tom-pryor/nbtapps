@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
+# Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
+# The repo's licensing, on every push to main and every pull request, whatever it changes: `reuse lint`, and the
+# check for source files without their header, which reuse cannot see (.github/scripts/check_headers.sh says why).
+#
+# reuse is the version this repo is checked with locally, from PyPI. Each action is pinned to the commit of its
+# release, named in the comment beside it.
+name: Licence
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels its run still going; a run on main is not cancelled once it has started.
+concurrency:
+  group: licence-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  licence:
+    name: REUSE and headers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: reuse lint
+        run: pipx run reuse==6.2.0 lint
+
+      - name: Headers
+        run: .github/scripts/check_headers.sh

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
+# Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
+# Dependabot proposes updates as pull requests, once a week: the actions the workflows use (it keeps their commit
+# pins and version comments), and the Android app's Gradle plugins and libraries (android/gradle/libs.versions.toml).
+# This is where newer versions are heard of; lint's own version checks are off on CI. Nothing is merged by itself.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: gradle
+    directory: /android
+    schedule:
+      interval: weekly

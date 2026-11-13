@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
+# Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
+# The Android app's checks, on a push to main and on a pull request that changes the app, the head unit (whose agent
+# the tests run against) or this file:
+#   - the unit tests, with the real agent in its Docker bench; NBT_REQUIRE_BENCH makes a missing bench fail them
+#     instead of skipping them
+#   - the minified release build, unsigned: no key is ever on CI, and this proves that R8 and the release-only
+#     sources (src/release) still build
+#   - lint on both builds, without the checks for newer versions (app/build.gradle.kts leaves those out on CI)
+# Nothing is kept from a run that passes; one that fails keeps its test and lint reports for two weeks.
+#
+# Each action is pinned to the commit of its release, named in the comment beside it.
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "headunit/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "headunit/**"
+      - ".github/workflows/android.yml"
+
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels its run still going; a run on main is not cancelled once it has started.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Tests, release build, lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The JDK that android/gradle/gradle-daemon-jvm.properties asks for, so that Gradle need not download one.
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Gradle's caches between runs; written only by runs on main. It also checks the wrapper jar.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      # The real agent's container, and the test packages the head unit builds, which AgentVectorsInSyncTest holds
+      # the app's copies against.
+      - name: Bench image and test packages
+        working-directory: headunit
+        run: |
+          python3 tools/bench.py image
+          make testdata
+
+      # --continue: a failing test does not stop the release build and lint from being checked too.
+      - name: Tests, release build and lint
+        env:
+          NBT_REQUIRE_BENCH: "1"
+        run: ./gradlew --continue :app:testDebugUnitTest :app:assembleRelease :app:lintDebug :app:lintRelease
+
+      - name: Keep the reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-reports
+          path: |
+            android/app/build/reports/
+            android/app/build/test-results/
+          retention-days: 14
