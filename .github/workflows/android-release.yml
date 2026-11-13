@@ -1,0 +1,172 @@
+# SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
+# Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
+# The Android app's release build, unsigned. The release key is never on GitHub: android/tools/sign.sh signs the
+# APK on the maintainer's machine, adds it to the release and publishes it.
+#
+#   tag android-v<version>   the build, then a draft release of that tag holding the unsigned APK and its SHA-256.
+#                            The version must be appVersion in android/app/build.gradle.kts
+#   run by hand              (Actions tab, or `gh workflow run android-release.yml --ref BRANCH`) the build only:
+#                            the APK is kept with the run for two weeks, to compare with a build made elsewhere
+#                            (android/tools/compare_apks.py)
+#   a pull request that changes this file: the build only, as run by hand
+#
+# Two jobs, so that the one that may write releases runs none of the repo's code: `build` has a read-only token
+# and does everything the repo says; `draft` checks out nothing, and only hands the build's two files to GitHub.
+#
+# Each action is pinned to the commit of its release, named in the comment beside it.
+name: Android release
+
+on:
+  push:
+    tags: ["android-v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/android-release.yml"
+
+permissions:
+  contents: read
+
+# Never cancelled: a release build is seen through. A second run for the same tag waits for the first.
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Unsigned release build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: android
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Checked before the build, so that a tag for the wrong version fails at once.
+      - name: Version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^val appVersion = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' app/build.gradle.kts)
+          if [ -z "$version" ]; then
+            echo "::error::no appVersion of the form major.minor.patch in app/build.gradle.kts"
+            exit 1
+          fi
+          if [ "$EVENT" = push ] && [ "$TAG" != "android-v$version" ]; then
+            echo "::error::the tag $TAG is not the app's version $version: its tag is android-v$version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Reads the cache that the checks' runs on main write; a release run writes none.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Bench image
+        working-directory: headunit
+        run: python3 tools/bench.py image
+
+      # The release goes out only from a build whose tests pass, the real agent's included.
+      - name: Tests and release build
+        env:
+          NBT_REQUIRE_BENCH: "1"
+        run: ./gradlew :app:testDebugUnitTest :app:assembleRelease
+
+      # The APK is read as release.sh reads it: the package, its version, not debuggable, and not signed.
+      - name: Check the APK
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)
+          built=app/build/outputs/apk/release
+          apk=$built/app-release-unsigned.apk
+          [ -f "$apk" ] || fail "the build left no unsigned APK at $apk"
+          [ ! -e "$built/app-release.apk" ] || fail "the build signed the APK: there is no key on CI"
+          if "$tools/apksigner" verify "$apk" > /dev/null 2>&1; then fail "the APK has a signature"; fi
+          "$tools/zipalign" -c -P 16 4 "$apk" || fail "the APK is not aligned"
+          badging=$("$tools/aapt2" dump badging "$apk")
+          field() { printf '%s\n' "$badging" | sed -n "s/^package:.* $1='\([^']*\)'.*/\1/p"; }
+          [ "$(field name)" = com.nbtapps.store ] || fail "the APK is the package '$(field name)'"
+          [ "$(field versionName)" = "$VERSION" ] || fail "the APK's version is '$(field versionName)', not $VERSION"
+          case $badging in
+            *application-debuggable*) fail "the APK is debuggable" ;;
+          esac
+          mkdir -p ../out
+          file=nbtapps-$VERSION-unsigned.apk
+          cp "$apk" "../out/$file"
+          (cd ../out && sha256sum "$file" > "$file.sha256")
+          echo "$file, version code $(field versionCode), $(wc -c < "../out/$file") bytes" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA-256 \`$(cut -d ' ' -f 1 "../out/$file.sha256")\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nbtapps-${{ steps.version.outputs.version }}-unsigned
+          path: out/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Keep the reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-reports
+          path: |
+            android/app/build/reports/
+            android/app/build/test-results/
+          retention-days: 14
+
+  draft:
+    name: Draft release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: out
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nbtapps-${{ needs.build.outputs.version }}-unsigned
+          path: out
+
+      # A release that is already there for the tag, published or a draft, is left as it is: a tag goes out once.
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          file=nbtapps-$VERSION-unsigned.apk
+          sha256sum -c "$file.sha256"
+          if gh release list --limit 1000 --json tagName --jq '.[].tagName' | grep -qxF "$TAG"; then
+            echo "::error::there is already a release, or a draft of one, for $TAG"
+            exit 1
+          fi
+          {
+            run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+            echo "Unsigned build of $COMMIT, from the workflow run $run."
+            echo
+            echo "$file SHA-256: \`$(cut -d ' ' -f 1 "$file.sha256")\`"
+            echo
+            echo "Not published yet: android/tools/sign.sh $VERSION signs it, adds nbtapps-$VERSION.apk and publishes."
+          } > ../notes.md
+          gh release create "$TAG" --draft --verify-tag --title "NBTApps $VERSION" --notes-file ../notes.md \
+            "$file" "$file.sha256"
