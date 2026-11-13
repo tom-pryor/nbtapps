@@ -137,9 +137,9 @@ It has not run on a car:
   power down empties; hooks get it as `NBT_TMP_DIR`) or under `/tmp` and `/var` outside the agent's folders. The
   agent's own logs are those of `org.nbtapp.agent`. `files.list` lists them, regular files only and none reached
   through a link, and `files.fetch` sends one as a raw deflate stream (or as it is), a frame at a time while the
-  link keeps up; an agent that has these lists the capability `files` in `hello`. `nbtctl logs ID` lists them, and
-  `nbtctl pull ID PATH --out FILE` fetches one (`agent/log_files.hpp`, and the plan document's Message
-  reference).
+  link keeps up; an agent from 1.3.0 has these and lists the capability `files` in `hello`. `nbtctl logs ID`
+  lists them, and `nbtctl pull ID PATH --out FILE` fetches one (`agent/log_files.hpp`, and the plan document's
+  Message reference).
 
 `agent/hu_probe.sh` collects those answers from a head unit: which node it is, what is mounted where and what is
 read-only, the room in `/var/opt` and `/tmp`, the plugin folders and their manifests, the tools a hook can count on,

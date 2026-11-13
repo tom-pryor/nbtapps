@@ -14,7 +14,7 @@ namespace nbt {
 // of the agent by the agent to be run from end to end. nbtagent.cpp does not compile for a head unit with it.
 const char kAgentVersion[] = NBT_TEST_AGENT_VERSION;
 #else
-const char kAgentVersion[] = "1.2.0";
+const char kAgentVersion[] = "1.3.0";
 #endif
 
 }  // namespace nbt

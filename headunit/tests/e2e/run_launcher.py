@@ -795,7 +795,7 @@ def real_agent_started_wrongly(c):
 
 with open(os.path.join(ROOT, "agent", "version.hpp")) as _f:
     VERSION = re.search(r'^const char kAgentVersion\[\] = "(.*)";$', _f.read(), re.M).group(1)
-NEXT_VERSION = "1.3.0"      # what the image's nbtagent-next says it is: AGENT_NEXT_VERSION in the Makefile
+NEXT_VERSION = "1.4.0"      # what the image's nbtagent-next says it is: AGENT_NEXT_VERSION in the Makefile
 OLDER_STARTER = read(STARTER) + "# This line is the test's: the starter as a version before had it.\n"
 next_package = []           # the path of that version's package, once it is made
 
