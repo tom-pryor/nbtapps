@@ -230,10 +230,18 @@ internal fun sectionTitle(kind: CatalogueSection.Kind, filter: CatalogueFilter):
     }
 }
 
-/** Under a package's summary: what stands between the head unit and a version of it, if anything does. */
+/**
+ * Under a package's summary: what stands between the head unit and a version of it, if anything does. First a
+ * pre-release of another package that the offered version waits for, as its page asks for it.
+ */
 internal fun PackageStatus.note(): String? {
     val held = heldBack
+    val ask = asks.firstOrNull()?.takeIf { !upToDate }
     return when {
+        ask != null -> when (asks.size) {
+            1 -> "${offered.version} needs ${ask.name} ${ask.version}, a pre-release"
+            else -> "${offered.version} needs pre-releases of ${ask.name} and ${asks.size - 1} more"
+        }
         !suits -> offered.agentRange?.let { "Needs agent ${rangeLabel(it)}" }
         held != null -> held.agentRange?.let { "${held.version} needs agent ${rangeLabel(it)}" }
         else -> null

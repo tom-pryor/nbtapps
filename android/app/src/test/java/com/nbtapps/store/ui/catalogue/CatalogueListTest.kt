@@ -223,12 +223,12 @@ class CatalogueListTest {
     fun `a row notes the agent a version waits for`() {
         val launcher = index.packages.single { it.id == "launcher" }
 
-        assertEquals("0.3.0 needs agent 1.1.0 or later", packageStatus(launcher, car)!!.note())
-        assertNull(packageStatus(launcher, car.copy(agentVersion = "1.1.0"))!!.note())
-        assertNull(packageStatus(launcher, null)!!.note())
+        assertEquals("0.3.0 needs agent 1.1.0 or later", packageStatus(index, launcher, car)!!.note())
+        assertNull(packageStatus(index, launcher, car.copy(agentVersion = "1.1.0"))!!.note())
+        assertNull(packageStatus(index, launcher, null)!!.note())
 
         val future = pkg("future", "Future", "hmi", version("1.0.0", ">=2.0.0"))
-        assertEquals("Needs agent 2.0.0 or later", packageStatus(future, car)!!.note())
+        assertEquals("Needs agent 2.0.0 or later", packageStatus(index, future, car)!!.note())
     }
 
     private fun waits(name: String, version: String) = Unblocked(name.lowercase(), name, version, installed = null)

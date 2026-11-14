@@ -329,7 +329,7 @@ class PrereleaseTest {
             for ((pkg, plain) in index.packages.zip(without.packages)) {
                 // The two that an app without channels never saw: what is out only in pre-releases, and what needs it.
                 if (pkg.prereleaseOnly || pkg.id == "needsearly") continue
-                assertEquals("${pkg.id} on $head", packageStatus(plain, head), packageStatus(pkg, head))
+                assertEquals("${pkg.id} on $head", packageStatus(without, plain, head), packageStatus(index, pkg, head))
                 val target = Resolver.Needed(pkg, pkg.latest!!)
                 val with = Resolver.resolve(index, target, head?.installed.orEmpty(), head?.agentVersion)
                 val before = Resolver.resolve(without, Resolver.Needed(plain, plain.latest!!), head?.installed.orEmpty(), head?.agentVersion)
@@ -341,7 +341,7 @@ class PrereleaseTest {
         }
         // The one with no stable version is listed, and is never an update; what needs it asks for it, where an
         // app without channels found it missing.
-        val early = requireNotNull(packageStatus(index.packages.first { it.id == "early" }, held("1.2.0")))
+        val early = requireNotNull(packageStatus(index, index.packages.first { it.id == "early" }, held("1.2.0")))
         assertTrue(early.needsSwitch)
         assertFalse(early.updateAvailable)
         val needs = resolve("needsearly", "1.0.0")

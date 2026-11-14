@@ -35,6 +35,19 @@ fun offeredVersions(pkg: CataloguePackage, prerelease: Boolean): List<PackageVer
 fun offeredVersions(pkg: CataloguePackage, switchedOn: Set<String>): List<PackageVersion> = offeredVersions(pkg, pkg.id in switchedOn)
 
 /**
+ * A package whose pre-release the offered version needs while its switch is off: a dependency, or the agent. The
+ * package's page names it and offers to switch it on, and the list's row notes it; nothing is switched on without
+ * the user.
+ */
+data class PrereleaseAsk(
+    val id: String,
+    /** The catalogue's name for it. */
+    val name: String,
+    /** The pre-release that would do. */
+    val version: String,
+)
+
+/**
  * Where a catalogue package stands against a head unit: the one rule the catalogue's list, a package's page and
  * the agent's update card all show, so that they agree. The agent has the last word when a job is planned.
  */
@@ -63,6 +76,12 @@ data class PackageStatus(
      * and a pre-release already on the head unit counts as up to date.
      */
     val needsSwitch: Boolean = false,
+    /**
+     * The packages whose pre-releases [offered] needs, with their switches off: dependencies first, then the agent.
+     * [offered] cannot go on the head unit until the user switches them on, so it is no update meanwhile. Filled in
+     * only by the [packageStatus] that is given the catalogue.
+     */
+    val asks: List<PrereleaseAsk> = emptyList(),
 ) {
     /**
      * [offered] is what the head unit already has, or older than it. With the switch off, a pre-release on the
@@ -76,8 +95,11 @@ data class PackageStatus(
             return have >= offer
         }
 
-    /** The head unit has an older version than [offered], and its agent runs [offered]. */
-    val updateAvailable: Boolean get() = installed != null && suits && !upToDate
+    /**
+     * The head unit has an older version than [offered], its agent runs [offered], and [offered] waits for no other
+     * package's pre-release ([asks]).
+     */
+    val updateAvailable: Boolean get() = installed != null && suits && !upToDate && asks.isEmpty()
 }
 
 /** The version of [id] that counts as installed: for the agent's own package, the agent that runs. */
@@ -91,6 +113,9 @@ fun installedVersion(id: String, installed: List<InstalledPackage>, agentVersion
  *
  * A package out only in pre-release versions is shown all the same, with the newest of those, so that it can be
  * found: see [PackageStatus.needsSwitch].
+ *
+ * What the offered version waits for in other packages is not looked at here, since that takes the catalogue:
+ * the screens take a package's status from the [packageStatus] that is given it.
  */
 fun packageStatus(
     pkg: CataloguePackage,
@@ -116,8 +141,33 @@ fun packageStatus(
     )
 }
 
-fun packageStatus(pkg: CataloguePackage, holdings: Holdings?, switchedOn: Set<String> = emptySet()): PackageStatus? =
-    packageStatus(pkg, holdings?.installed.orEmpty(), holdings?.agentVersion, switchedOn)
+/**
+ * The status of [pkg] of [index] on the head unit of [holdings] (null when none is known), with what its offered
+ * version waits for: the pre-releases of other packages it needs, whose switches among [switchedOn] are off
+ * ([PackageStatus.asks]). The list, its counts, a package's page and the agent's card all take it from here.
+ */
+fun packageStatus(index: CatalogueIndex, pkg: CataloguePackage, holdings: Holdings?, switchedOn: Set<String> = emptySet()): PackageStatus? {
+    val status = packageStatus(pkg, holdings?.installed.orEmpty(), holdings?.agentVersion, switchedOn) ?: return null
+    val resolution = resolveOffered(index, pkg, status, holdings, switchedOn)
+    // The agent is asked for where no version suits the agent that runs, and a pre-release agent would run one.
+    val agent = if (status.suits || status.needsSwitch) null else agentPrereleaseFor(index, status.offered, holdings?.agentVersion, switchedOn)
+    val asks = resolution?.needsPrerelease.orEmpty().distinctBy { it.id }.map { PrereleaseAsk(it.id, nameOf(index, it.id), it.version) } +
+        listOfNotNull(agent?.let { PrereleaseAsk(AGENT_PACKAGE_ID, nameOf(index, AGENT_PACKAGE_ID), it.version) })
+    return status.copy(asks = asks)
+}
+
+/**
+ * What installing the version [status] offers of [pkg] takes on the head unit of [holdings]: with no link, what
+ * it had the last time. Null for a version that waits for the package's own switch, of which nothing is worked out.
+ */
+fun resolveOffered(index: CatalogueIndex, pkg: CataloguePackage, status: PackageStatus, holdings: Holdings?, switchedOn: Set<String>): Resolver.Resolution? =
+    if (status.needsSwitch) {
+        null
+    } else {
+        Resolver.resolve(index, Resolver.Needed(pkg, status.offered), holdings?.installed.orEmpty(), holdings?.agentVersion, switchedOn)
+    }
+
+private fun nameOf(index: CatalogueIndex, id: String): String = index.packages.find { it.id == id }?.name ?: id
 
 /**
  * The pre-release of the agent that [version] waits for, on a head unit that runs agent [running]: where the
@@ -214,7 +264,7 @@ data class AgentUpdate(
 fun agentUpdate(index: CatalogueIndex, holdings: Holdings?, switchedOn: Set<String> = emptySet()): AgentUpdate? {
     if (holdings == null) return null
     val agent = index.packages.find { it.id == AGENT_PACKAGE_ID } ?: return null
-    val status = packageStatus(agent, holdings, switchedOn)?.takeIf { it.updateAvailable } ?: return null
+    val status = packageStatus(index, agent, holdings, switchedOn)?.takeIf { it.updateAvailable } ?: return null
     val newer = status.offered.version
     return AgentUpdate(
         version = newer,

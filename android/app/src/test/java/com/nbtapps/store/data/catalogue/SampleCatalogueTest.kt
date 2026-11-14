@@ -10,10 +10,13 @@ import com.nbtapps.store.data.jobs.Holdings
 import com.nbtapps.store.data.jobs.Resolver
 import com.nbtapps.store.data.jobs.agentUpdate
 import com.nbtapps.store.data.jobs.offeredVersions
+import com.nbtapps.store.data.jobs.packageStatus
 import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.PackageFormatException
 import com.nbtapps.store.model.CataloguePackage
+import com.nbtapps.store.model.InstalledPackage
 import com.nbtapps.store.model.RestartKind
+import com.nbtapps.store.ui.catalogue.note
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -180,6 +183,26 @@ class SampleCatalogueTest {
         assertFalse(pkg.id.startsWith("org.nbtapp."))
         assertFalse(Resolver.suits(newest, "1.1.0"))
         assertTrue(Resolver.suits(newest, "1.2.0"))
+    }
+
+    /**
+     * The sample's Hello NBT has a pre-release that only NBT Runtime's pre-release meets. With Hello NBT's switch on
+     * and the runtime's off, it is no update, and its row says what it waits for, as its page asks for it.
+     */
+    @Test
+    fun `the sample's Hello NBT pre-release waits for NBT Runtime's, and is no update until that is switched on`() {
+        val installed = listOf(InstalledPackage("org.nbtapp.hello", "Hello NBT", "1.2.0"), InstalledPackage("org.nbtapp.runtime", "NBT Runtime", "2.1.0"))
+        val bench = Holdings("bench", "Bench", live = true, agentVersion = "2.0.0", installed = installed, restartNeeded = RestartKind.NONE, seenAt = 0)
+        val hello = requireNotNull(index.packages.find { it.id == "org.nbtapp.hello" })
+
+        val off = requireNotNull(packageStatus(index, hello, bench, setOf("org.nbtapp.hello")))
+        assertEquals("1.3.0-beta.1", off.offered.version)
+        assertFalse(off.updateAvailable)
+        assertEquals("1.3.0-beta.1 needs NBT Runtime 2.2.0-beta.1, a pre-release", off.note())
+
+        val on = requireNotNull(packageStatus(index, hello, bench, setOf("org.nbtapp.hello", "org.nbtapp.runtime")))
+        assertTrue(on.updateAvailable)
+        assertTrue(on.asks.isEmpty())
     }
 
     /** As the real agent's package is: an agent refuses a package of its own that places no launcher for the version. */

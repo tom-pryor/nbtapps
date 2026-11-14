@@ -13,11 +13,12 @@ import com.nbtapps.store.data.catalogue.CatalogueState
 import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.Holdings
 import com.nbtapps.store.data.jobs.JobRepository
+import com.nbtapps.store.data.jobs.PrereleaseAsk
 import com.nbtapps.store.data.jobs.Resolver
-import com.nbtapps.store.data.jobs.agentPrereleaseFor
 import com.nbtapps.store.data.jobs.holdings
 import com.nbtapps.store.data.jobs.offeredVersions
 import com.nbtapps.store.data.jobs.packageStatus
+import com.nbtapps.store.data.jobs.resolveOffered
 import com.nbtapps.store.data.packages.DownloadState
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
@@ -50,18 +51,6 @@ data class DependencyRow(
     val name: String,
     val versionRange: String?,
     val inCatalogue: Boolean,
-)
-
-/**
- * A package whose pre-release the offered version needs while its switch is off: a dependency, or the agent. The
- * page names it and offers to switch it on; nothing is switched on without the user.
- */
-data class PrereleaseAsk(
-    val id: String,
-    /** The catalogue's name for it. */
-    val name: String,
-    /** The pre-release that would do. */
-    val version: String,
 )
 
 /** Where the package stands between the catalogue, the phone and the head unit the app is working with. */
@@ -204,22 +193,16 @@ private fun getState(
     head: Holdings?,
     switchedOn: Set<String>,
 ): GetState? {
-    val status = packageStatus(pkg, head, switchedOn) ?: return null
+    // The asks are the status's, so that the list's row says what this page does.
+    val status = packageStatus(index, pkg, head, switchedOn) ?: return null
     val version = status.offered
     val agentVersion = head?.agentVersion
-    // With no link, what the head unit had the last time decides what is worth downloading before the car. Nothing
-    // is worked out for a version that waits for the package's switch.
-    val resolution = Resolver.resolve(index, Resolver.Needed(pkg, version), head?.installed.orEmpty(), agentVersion, switchedOn)
-        .takeIf { !status.needsSwitch }
+    // With no link, what the head unit had the last time decides what is worth downloading before the car.
+    val resolution = resolveOffered(index, pkg, status, head, switchedOn)
     val toDownload = resolution?.needed.orEmpty().filter { needed -> stored.none { it.sha256 == needed.version.sha256 } }
     val states = toDownload.mapNotNull { downloads[it.version.sha256] }
     val running = states.filterIsInstance<DownloadState.Running>()
-    val agentAsk = if (status.suits || status.needsSwitch) null else agentPrereleaseFor(index, version, agentVersion, switchedOn)
-    val asks = resolution?.needsPrerelease.orEmpty().distinctBy { it.id }.map { need ->
-        PrereleaseAsk(need.id, index.packages.find { it.id == need.id }?.name ?: need.id, need.version)
-    } + listOfNotNull(
-        agentAsk?.let { agent -> PrereleaseAsk(AGENT_PACKAGE_ID, index.packages.find { it.id == AGENT_PACKAGE_ID }?.name ?: AGENT_PACKAGE_ID, agent.version) },
-    )
+    val agentAsk = status.asks.any { it.id == AGENT_PACKAGE_ID }
     return GetState(
         version = version,
         stored = stored.any { it.sha256 == version.sha256 },
@@ -233,7 +216,7 @@ private fun getState(
         incompatible = when {
             agentVersion == null || status.needsSwitch -> null
             // Asked for instead: the agent that would run it is a pre-release.
-            agentAsk != null -> null
+            agentAsk -> null
             !status.suits -> "Needs agent ${version.agentRange?.let(::rangeLabel)}; this head unit's agent is $agentVersion."
             resolution?.unavailable.orEmpty().isNotEmpty() ->
                 "Needs ${resolution?.unavailable.orEmpty().joinToString { it.id }}, which this catalogue doesn't have in a version that fits."
@@ -242,7 +225,7 @@ private fun getState(
         offeredPrerelease = status.offeredPrerelease,
         installedPrerelease = status.installedPrerelease,
         needsSwitch = status.needsSwitch,
-        asks = asks,
+        asks = status.asks,
     )
 }
 

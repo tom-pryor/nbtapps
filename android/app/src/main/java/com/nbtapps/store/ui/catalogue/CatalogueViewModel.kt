@@ -119,7 +119,8 @@ internal data class HeadUnitRefresh(val running: Boolean = false, val error: Str
  * the updates at the top; it stays in the list, and counts as an update.
  *
  * Each package is offered its pre-release versions where it is among [switchedOn], and only its stable ones
- * otherwise: see [offeredVersions][com.nbtapps.store.data.jobs.offeredVersions].
+ * otherwise: see [offeredVersions][com.nbtapps.store.data.jobs.offeredVersions]. A version that waits for another
+ * package's pre-release to be switched on is no update, here as on its page: its row notes what it waits for.
  */
 internal fun catalogueUiState(
     catalogue: CatalogueState,
@@ -130,7 +131,8 @@ internal fun catalogueUiState(
     switchedOn: Set<String> = emptySet(),
 ): CatalogueUiState {
     val index = catalogue.index
-    val all = index?.packages.orEmpty().map { CatalogueRow(it, packageStatus(it, head, switchedOn)) }
+    // Each row's status is the one its package's page shows, what it waits for in other packages among it.
+    val all = index?.let { loaded -> loaded.packages.map { CatalogueRow(it, packageStatus(loaded, it, head, switchedOn)) } }.orEmpty()
     val categories = all.map { it.pkg.category }.filter { it.isNotEmpty() }.distinct().sorted()
     val filter = when (selected) {
         CatalogueFilter.All -> selected

@@ -6,6 +6,8 @@ import com.nbtapps.store.data.catalogue.CatalogueState
 import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.Holdings
 import com.nbtapps.store.data.jobs.PackageStatus
+import com.nbtapps.store.data.jobs.PrereleaseAsk
+import com.nbtapps.store.data.jobs.packageStatus
 import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.model.CatalogueIndex
 import com.nbtapps.store.model.CataloguePackage
@@ -282,5 +284,93 @@ class PrereleasePageTest {
         val agent = catalogueUiState(CatalogueState(index = index), older, "", CatalogueFilter.All, HeadUnitRefresh(), setOf(AGENT_PACKAGE_ID))
         assertEquals("1.2.0-rc.1", agent.agentUpdate?.version)
         assertTrue(agent.agentUpdate!!.prerelease)
+    }
+
+    // ---- the list and the page agree ----
+
+    private fun list(head: Holdings?, switchedOn: Set<String>, filter: CatalogueFilter = CatalogueFilter.All) =
+        catalogueUiState(CatalogueState(index = index), head, "", filter, HeadUnitRefresh(), switchedOn)
+
+    private fun CatalogueUiState.row(id: String) = sections.flatMap { it.rows }.single { it.pkg.id == id }
+
+    @Test
+    fun `an update that waits for another package's pre-release is no update in the list, and its row says why`() {
+        val head = held("1.1.0", has("radio", "1.0.0"), has("lib", "2.0.0"))
+        // Radio's pre-release is switched on, the runtime's is not: the page asks for that, and will not update.
+        val page = requireNotNull(page("radio", setOf("radio"), head).get)
+        assertEquals(listOf(PrereleaseAsk("lib", "Runtime", "2.1.0-rc.1")), page.asks)
+        assertFalse(page.canInstall)
+
+        val off = list(head, setOf("radio"))
+        val row = off.row("radio")
+        assertEquals(page.asks, row.status!!.asks)
+        assertEquals(page.version, row.status!!.offered)
+        assertFalse(row.status!!.updateAvailable)
+        assertEquals("1.1.0-rc.1 needs Runtime 2.1.0-rc.1, a pre-release", row.status!!.note())
+        assertEquals(0, off.updateCount)
+        assertTrue(off.sections.none { it.kind == CatalogueSection.Kind.UPDATES })
+        assertEquals("No updates for Car.", list(head, setOf("radio"), CatalogueFilter.Updates).emptyMessage())
+
+        // With the runtime switched on as well both are updates, and the note has gone.
+        val on = list(head, setOf("radio", "lib"))
+        assertEquals(2, on.updateCount)
+        assertEquals(listOf("Radio", "Runtime"), on.sections.first { it.kind == CatalogueSection.Kind.UPDATES }.rows.map { it.pkg.name })
+        assertNull(on.row("radio").status!!.note())
+    }
+
+    @Test
+    fun `a package that is not installed notes the pre-release it waits for, as its page asks for it`() {
+        val head = held("1.1.0")
+        val page = requireNotNull(page("radio", setOf("radio"), head).get)
+        val row = list(head, setOf("radio")).row("radio")
+
+        assertEquals(page.asks, row.status!!.asks)
+        assertEquals("1.1.0-rc.1 needs Runtime 2.1.0-rc.1, a pre-release", row.status!!.note())
+        // With no head unit known the page asks all the same, and so does the row.
+        assertEquals(page("radio", setOf("radio"), head = null).get!!.asks, list(null, setOf("radio")).row("radio").status!!.asks)
+    }
+
+    @Test
+    fun `a version that waits for a pre-release agent is no update, and its row names that agent`() {
+        val head = held("1.1.0", has("next", "0.1.0-beta.1"))
+        val page = requireNotNull(page("next", setOf("next"), head).get)
+        val off = list(head, setOf("next"))
+        val row = off.row("next")
+
+        assertEquals(listOf(PrereleaseAsk(AGENT_PACKAGE_ID, "NBTApp agent", "1.2.0-rc.1")), row.status!!.asks)
+        assertEquals(page.asks, row.status!!.asks)
+        assertFalse(row.status!!.updateAvailable)
+        assertEquals(0, off.updateCount)
+        assertEquals("0.1.0-rc.1 needs NBTApp agent 1.2.0-rc.1, a pre-release", row.status!!.note())
+        // Not installed, the same.
+        assertEquals("0.1.0-rc.1 needs NBTApp agent 1.2.0-rc.1, a pre-release", list(held("1.1.0"), setOf("next")).row("next").status!!.note())
+    }
+
+    @Test
+    fun `whatever is switched on, a row counts an update exactly where its page would install one`() {
+        val ids = listOf("radio", "lib", "next", "early", AGENT_PACKAGE_ID)
+        val heads = listOf(
+            held("1.1.0"),
+            held("1.1.0", has("radio", "1.0.0"), has("lib", "2.0.0")),
+            held("1.1.0", has("next", "0.1.0-beta.1"), has("early", "0.1.0-alpha.1")),
+            held("1.2.0-rc.1", has("radio", "1.0.0"), has("lib", "2.1.0-rc.1")),
+        )
+        for (mask in 0 until (1 shl ids.size)) {
+            val switchedOn = ids.filterIndexed { i, _ -> mask and (1 shl i) != 0 }.toSet()
+            for (head in heads) {
+                val listed = list(head, switchedOn)
+                for (pkg in index.packages) {
+                    val what = "${pkg.id} with $switchedOn on ${head.agentVersion} ${head.installed}"
+                    val status = requireNotNull(listed.row(pkg.id).status)
+                    val first = requireNotNull(page(pkg.id, switchedOn, head).get)
+                    // Everything it needs on the phone already: what stands in the way is then the head unit's alone.
+                    val ready = requireNotNull(page(pkg.id, switchedOn, head, stored = first.toDownload.map { stored(it.version) }).get)
+                    assertEquals(what, first.asks, status.asks)
+                    assertEquals(what, first.version, status.offered)
+                    assertEquals(what, ready.canInstall && ready.installedVersion != null, status.updateAvailable)
+                }
+                assertEquals(listed.packages.count { listed.row(it.id).status!!.updateAvailable }, listed.updateCount)
+            }
+        }
     }
 }
