@@ -9,6 +9,7 @@ import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.Holdings
 import com.nbtapps.store.data.jobs.Resolver
 import com.nbtapps.store.data.jobs.agentUpdate
+import com.nbtapps.store.data.jobs.offeredVersions
 import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.PackageFormatException
 import com.nbtapps.store.model.CataloguePackage
@@ -117,11 +118,17 @@ class SampleCatalogueTest {
 
     @Test
     fun `every package can be resolved from the catalogue alone, for an agent that suits it`() {
-        for (pkg in index.packages) {
-            val newest = requireNotNull(pkg.latest)
-            val resolution = Resolver.resolve(index, Resolver.Needed(pkg, newest), installed = emptyList(), agentVersion = null)
-            assertEquals("${pkg.id} has a dependency the catalogue can't meet", emptyList<Any>(), resolution.unavailable)
-            assertEquals(pkg.id, resolution.needed.last().pkg.id)
+        // Its stable versions with every switch off, and with every switch on its pre-releases too.
+        val everything = index.packages.mapTo(HashSet()) { it.id }
+        for (switchedOn in listOf(emptySet(), everything)) {
+            for (pkg in index.packages) {
+                val newest = offeredVersions(pkg, switchedOn).firstOrNull() ?: continue
+                val resolution = Resolver.resolve(index, Resolver.Needed(pkg, newest), installed = emptyList(), agentVersion = null, switchedOn = switchedOn)
+                val what = "${pkg.id} ${newest.version}"
+                assertEquals("$what has a dependency the catalogue can't meet", emptyList<Any>(), resolution.unavailable)
+                if (switchedOn.isNotEmpty()) assertEquals(what, emptyList<Any>(), resolution.needsPrerelease)
+                assertEquals(pkg.id, resolution.needed.last().pkg.id)
+            }
         }
     }
 

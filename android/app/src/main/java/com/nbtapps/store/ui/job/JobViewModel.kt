@@ -6,6 +6,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
+import com.nbtapps.store.data.PrereleaseRepository
 import com.nbtapps.store.data.catalogue.CatalogueRepository
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
@@ -27,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -82,6 +84,7 @@ class JobViewModel @Inject constructor(
     private val catalogue: CatalogueRepository,
     private val store: PackageStore,
     private val downloader: PackageDownloader,
+    private val prereleases: PrereleaseRepository,
 ) : ViewModel() {
 
     private val route = savedStateHandle.toRoute<JobRoute>()
@@ -100,7 +103,7 @@ class JobViewModel @Inject constructor(
     private var planning: Job? = null
 
     val uiState: StateFlow<JobUiState> =
-        combine(local, jobs.job, jobs.connection, catalogue.catalogue) { local, job, connection, catalogue ->
+        combine(local, jobs.job, jobs.connection, catalogue.catalogue, prereleases.switchedOn) { local, job, connection, catalogue, switchedOn ->
             val connected = connection as? ConnectionState.Connected
             val names = HashMap<String, String>()
             catalogue.index?.packages?.forEach { names[it.id] = it.name }
@@ -112,7 +115,7 @@ class JobViewModel @Inject constructor(
                 review = local.review,
                 job = shown,
                 nowAvailable = if (result != null && index != null && connected != null && connected.headUnitId == shown.headUnitId) {
-                    unblockedBy(index, connected.installed, result)
+                    unblockedBy(index, connected.installed, result, switchedOn)
                 } else {
                     emptyList()
                 },
@@ -216,11 +219,14 @@ class JobViewModel @Inject constructor(
         if (catalogue.catalogue.value.index == null) catalogue.refresh()
         val index = catalogue.catalogue.value.index ?: return Review.Failed("The catalogue couldn't be loaded.")
         val pkg = index.packages.find { it.id == id }
-        val version = pkg?.versions?.find { it.version == route.installVersion }
+        // The version the package's page asked for, which may be a pre-release: that page offers one only with its switch on.
+        val version = pkg?.let { it.versions + it.prereleases }?.find { it.version == route.installVersion }
             ?: return Review.Failed("The catalogue no longer has this version.")
 
-        // The phone's own resolution, to know what to offer. The agent resolves again and has the last word.
-        val needed = Resolver.resolve(index, Resolver.Needed(pkg, version), connected.installed, connected.info.agentVersion).needed
+        // The phone's own resolution, to know what to offer. The agent resolves again and has the last word. A
+        // dependency is taken in a pre-release only where its own switch is on.
+        val switchedOn = prereleases.switchedOn.first()
+        val needed = Resolver.resolve(index, Resolver.Needed(pkg, version), connected.installed, connected.info.agentVersion, switchedOn).needed
         // The store reads its folder when the app starts; after a cold start that may still be under way.
         store.awaitLoaded()
         val offers = needed.mapNotNull { item -> store.packages.value.find { it.sha256 == item.version.sha256 } }
