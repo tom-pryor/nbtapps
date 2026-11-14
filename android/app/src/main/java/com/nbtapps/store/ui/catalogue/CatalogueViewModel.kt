@@ -5,6 +5,7 @@ package com.nbtapps.store.ui.catalogue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.data.HeadUnitRepository
+import com.nbtapps.store.data.PrereleaseRepository
 import com.nbtapps.store.data.catalogue.CatalogueRepository
 import com.nbtapps.store.data.catalogue.CatalogueState
 import com.nbtapps.store.data.jobs.AgentUpdate
@@ -116,6 +117,9 @@ internal data class HeadUnitRefresh(val running: Boolean = false, val error: Str
  *
  * While the agent's update has its card ([CatalogueUiState.agentUpdate]) the agent's package is not also among
  * the updates at the top; it stays in the list, and counts as an update.
+ *
+ * Each package is offered its pre-release versions where it is among [switchedOn], and only its stable ones
+ * otherwise: see [offeredVersions][com.nbtapps.store.data.jobs.offeredVersions].
  */
 internal fun catalogueUiState(
     catalogue: CatalogueState,
@@ -123,9 +127,10 @@ internal fun catalogueUiState(
     query: String,
     selected: CatalogueFilter,
     refresh: HeadUnitRefresh,
+    switchedOn: Set<String> = emptySet(),
 ): CatalogueUiState {
     val index = catalogue.index
-    val all = index?.packages.orEmpty().map { CatalogueRow(it, packageStatus(it, head)) }
+    val all = index?.packages.orEmpty().map { CatalogueRow(it, packageStatus(it, head, switchedOn)) }
     val categories = all.map { it.pkg.category }.filter { it.isNotEmpty() }.distinct().sorted()
     val filter = when (selected) {
         CatalogueFilter.All -> selected
@@ -146,7 +151,7 @@ internal fun catalogueUiState(
         .filter { it.pkg.matches(query) }
         .sortedBy { it.pkg.name.lowercase() }
 
-    val card = index?.takeIf { filter == CatalogueFilter.All && !searching }?.let { agentUpdate(it, head) }
+    val card = index?.takeIf { filter == CatalogueFilter.All && !searching }?.let { agentUpdate(it, head, switchedOn) }
     val updates = shown.filter { it.status?.updateAvailable == true && !(card != null && it.pkg.id == AGENT_PACKAGE_ID) }
     val sections = when {
         shown.isEmpty() -> emptyList()
@@ -204,13 +209,15 @@ class CatalogueViewModel @Inject constructor(
     private val jobs: JobRepository,
     private val updater: AppUpdater,
     private val installed: InstalledApp,
+    prereleases: PrereleaseRepository,
 ) : ViewModel() {
 
     private val query = MutableStateFlow("")
     private val filter = MutableStateFlow<CatalogueFilter>(CatalogueFilter.All)
     private val headUnitRefresh = MutableStateFlow(HeadUnitRefresh())
 
-    private val head = combine(headUnits.headUnits, jobs.connection, ::holdings)
+    /** The head unit the list is shown against, and the packages switched on for pre-releases. */
+    private val head = combine(combine(headUnits.headUnits, jobs.connection, ::holdings), prereleases.switchedOn, ::Pair)
 
     /** The app's own update: what the catalogue offers this copy, how far it has got, and whether a job is in its way. */
     private val ownUpdate = combine(repository.catalogue, updater.state, jobs.job) { catalogue, state, job ->
@@ -218,7 +225,9 @@ class CatalogueViewModel @Inject constructor(
     }
 
     val uiState: StateFlow<CatalogueUiState> =
-        combine(repository.catalogue, head, query, filter, headUnitRefresh, ::catalogueUiState)
+        combine(repository.catalogue, head, query, filter, headUnitRefresh) { catalogue, (head, switchedOn), query, filter, refresh ->
+            catalogueUiState(catalogue, head, query, filter, refresh, switchedOn)
+        }
             .combine(ownUpdate) { ui, (offer, state, busy) -> ui.withAppUpdate(offer, installed.versionName, state, busy) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CatalogueUiState())
 

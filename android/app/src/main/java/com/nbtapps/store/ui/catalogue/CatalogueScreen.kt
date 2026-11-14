@@ -490,6 +490,7 @@ private fun AgentUpdateCard(update: AgentUpdate, headUnitName: String, onOpen: (
                 Icon(painterResource(R.drawable.ic_download), contentDescription = null)
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Agent ${update.version} is available", style = MaterialTheme.typography.titleMedium)
+                    if (update.prerelease) PrereleaseLabel()
                     Text(agentUpdateText(update, headUnitName), style = MaterialTheme.typography.bodyMedium)
                 }
             }
@@ -547,7 +548,10 @@ private fun PackageRow(row: CatalogueRow, onClick: () -> Unit) {
     )
 }
 
-/** At the end of a row: an update with both versions, or that it is installed and in which, or the version on offer. */
+/**
+ * At the end of a row: an update with both versions, or that it is installed and in which, or the version on
+ * offer; under it, a pre-release's label where the version it names is one ([rowPrereleaseLabel]).
+ */
 @Composable
 private fun RowStatus(status: PackageStatus) {
     val installed = status.installed
@@ -578,6 +582,49 @@ private fun RowStatus(status: PackageStatus) {
                 Text(installed)
             }
             else -> Text(status.offered.version)
+        }
+        rowPrereleaseLabel(status)?.let { PrereleaseLabel(label = it) }
+    }
+}
+
+/**
+ * The pre-release label under a row's version, or null where the version the row names is a stable one: the one
+ * it updates to, or the one installed, or the one on offer. A package out only in pre-releases says so, unless the
+ * head unit has it already.
+ */
+internal fun rowPrereleaseLabel(status: PackageStatus): String? = when {
+    status.installed != null && status.updateAvailable -> PRERELEASE.takeIf { status.offeredPrerelease }
+    status.installed != null -> PRERELEASE.takeIf { status.installedPrerelease }
+    status.needsSwitch -> PRERELEASE_ONLY
+    else -> PRERELEASE.takeIf { status.offeredPrerelease }
+}
+
+internal const val PRERELEASE = "Pre-release"
+internal const val PRERELEASE_ONLY = "Pre-release only"
+
+/**
+ * Marks a pre-release: a version that is still being tested, offered only where its package's switch is on.
+ * [detail] follows the mark, as an author follows [CommunityLabel]'s.
+ */
+@Composable
+internal fun PrereleaseLabel(modifier: Modifier = Modifier, label: String = PRERELEASE, detail: String = "") {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            label,
+            Modifier
+                .background(MaterialTheme.colorScheme.tertiaryContainer, RoundedCornerShape(10.dp))
+                .padding(horizontal = 8.dp, vertical = 1.dp),
+            color = MaterialTheme.colorScheme.onTertiaryContainer,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        if (detail.isNotEmpty()) {
+            Text(
+                detail,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

@@ -4,6 +4,7 @@ package com.nbtapps.store.ui.catalogue
 
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
+import com.nbtapps.store.data.InMemoryPrereleaseRepository
 import com.nbtapps.store.data.MemoryPairingKeys
 import com.nbtapps.store.data.PhoneIdentity
 import com.nbtapps.store.data.catalogue.CatalogueRepository
@@ -88,7 +89,7 @@ class CatalogueRefreshTest {
         JobRepository(headUnits, connector, identity, MemoryPairingKeys(), PackageStore(folder.newFolder("packages")), {}, scope, now = { 1234L })
     }
     private val viewModel by lazy {
-        CatalogueViewModel(catalogue, headUnits, jobs, idleUpdater(folder.newFolder("update"), scope), RUNNING)
+        CatalogueViewModel(catalogue, headUnits, jobs, idleUpdater(folder.newFolder("update"), scope), RUNNING, InMemoryPrereleaseRepository())
     }
 
     private val car = HeadUnit("car", "Car", listOf(TcpEndpoint("192.168.0.1", 7144)))

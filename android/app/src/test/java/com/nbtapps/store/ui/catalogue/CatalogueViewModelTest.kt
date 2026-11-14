@@ -4,6 +4,7 @@ package com.nbtapps.store.ui.catalogue
 
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
+import com.nbtapps.store.data.InMemoryPrereleaseRepository
 import com.nbtapps.store.data.MemoryPairingKeys
 import com.nbtapps.store.data.PhoneIdentity
 import com.nbtapps.store.data.catalogue.CatalogueRepository
@@ -103,9 +104,10 @@ class CatalogueViewModelTest {
     )
 
     private val repository = FakeCatalogueRepository(CatalogueState(index = index))
+    private val prereleases = InMemoryPrereleaseRepository()
     // Lazy so the ViewModel is created after the rule has installed the test Main dispatcher.
     private val updater by lazy { idleUpdater(folder.newFolder("update"), scope) }
-    private val viewModel by lazy { CatalogueViewModel(repository, headUnits, jobs, updater, RUNNING) }
+    private val viewModel by lazy { CatalogueViewModel(repository, headUnits, jobs, updater, RUNNING, prereleases) }
 
     private fun TestScope.collectUiState() {
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
@@ -141,7 +143,7 @@ class CatalogueViewModelTest {
     @Test
     fun `a failed load is reported and not shown as loaded`() = runTest {
         val failing = FakeCatalogueRepository(CatalogueState(error = "no network"))
-        val viewModel = CatalogueViewModel(failing, headUnits, jobs, updater, RUNNING)
+        val viewModel = CatalogueViewModel(failing, headUnits, jobs, updater, RUNNING, prereleases)
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
 
         assertFalse(viewModel.uiState.value.loaded)
@@ -220,7 +222,7 @@ class CatalogueViewModelTest {
             scope = scope,
         )
         val offering = FakeCatalogueRepository(CatalogueState(index = index.copy(app = newer)))
-        val viewModel = CatalogueViewModel(offering, headUnits, jobs, updater, RUNNING)
+        val viewModel = CatalogueViewModel(offering, headUnits, jobs, updater, RUNNING, prereleases)
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
 
         val card = requireNotNull(viewModel.uiState.value.appUpdate)
@@ -238,6 +240,31 @@ class CatalogueViewModelTest {
             }
         }
         assertEquals(body.toList(), installer.handed.single().toList())
+    }
+
+    @Test
+    fun `a package's pre-release switch decides the version the list offers, and the list follows it`() = runTest {
+        val rc = PackageVersion("1.1.0-rc.1", url = "https://example.invalid/rc", size = 1, sha256 = "22", manifestSha256 = "33")
+        val withPrerelease = index.copy(
+            packages = index.packages.map { if (it.id == "org.example.logs") it.copy(prereleases = listOf(rc)) else it } +
+                pkg("org.example.early", "Early Bird", "hmi").copy(versions = emptyList(), prereleases = listOf(rc)),
+        )
+        repository.catalogue.value = CatalogueState(index = withPrerelease)
+        collectUiState()
+
+        fun row(id: String) = viewModel.uiState.value.sections.flatMap { it.rows }.first { it.pkg.id == id }
+        assertEquals("1.0.0", row("org.example.logs").status?.offered?.version)
+        assertFalse(row("org.example.logs").status!!.offeredPrerelease)
+        // Out only in pre-releases: listed for everyone, waiting for its switch.
+        assertTrue(row("org.example.early").status!!.needsSwitch)
+
+        prereleases.set("org.example.logs", true)
+        assertEquals("1.1.0-rc.1", row("org.example.logs").status?.offered?.version)
+        assertTrue(row("org.example.logs").status!!.offeredPrerelease)
+        assertTrue(row("org.example.early").status!!.needsSwitch)
+
+        prereleases.set("org.example.logs", false)
+        assertEquals("1.0.0", row("org.example.logs").status?.offered?.version)
     }
 
     @Test

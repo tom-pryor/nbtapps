@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -22,12 +23,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -37,8 +43,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
+import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.model.CataloguePackage
-import com.nbtapps.store.model.PackageDetails
 import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.ui.headunits.HeadUnitIndicator
 
@@ -55,6 +61,8 @@ fun CataloguePackageScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val pkg = uiState.pkg
+    // The package whose pre-releases the user is being asked to turn on: this one, or one this one needs.
+    var asking by remember { mutableStateOf<PrereleaseAsk?>(null) }
 
     Scaffold(
         topBar = {
@@ -85,16 +93,34 @@ fun CataloguePackageScreen(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
+                val self = PrereleaseAsk(pkg.id, pkg.name, uiState.newest?.version.orEmpty())
                 Header(pkg)
                 if (pkg.community) CommunityCard(pkg, uiState.sourceName)
-                uiState.get?.let { get -> GetCard(get, onDownload = viewModel::download, onInstall = { onInstall(pkg.id, get.version.version) }) }
-                pkg.latest?.let { latest ->
-                    LatestVersionCard(latest)
-                    if (latest.riskFlags.isNotEmpty()) RiskCard(latest)
+                uiState.get?.let { get ->
+                    GetCard(
+                        get,
+                        onDownload = viewModel::download,
+                        onInstall = { onInstall(pkg.id, get.version.version) },
+                        onAskSwitch = { asking = self },
+                        onAsk = { asking = it },
+                    )
+                }
+                if (uiState.showsPrereleaseSwitch) {
+                    PrereleaseCard(
+                        agent = pkg.id == AGENT_PACKAGE_ID,
+                        on = uiState.prereleaseOn,
+                        // Turning it off takes nothing away: what is installed stays until a stable version above it.
+                        onSet = { on -> if (on) asking = self else viewModel.setPrerelease(pkg.id, false) },
+                    )
+                }
+                uiState.newest?.let { newest ->
+                    LatestVersionCard(newest, prerelease = pkg.isPrerelease(newest.version))
+                    if (newest.riskFlags.isNotEmpty()) RiskCard(newest)
                 }
                 if (uiState.dependencies.isNotEmpty()) DependenciesCard(uiState.dependencies, onOpenPackage)
-                DetailsSections(uiState.details, onRetry = viewModel::retryDetails)
-                if (pkg.versions.size > 1) VersionsCard(pkg.versions)
+                DetailsSections(uiState.details, pkg, onRetry = viewModel::retryDetails)
+                val versions = allVersions(pkg)
+                if (versions.size > 1) VersionsCard(versions)
                 Text(
                     listOfNotNull(pkg.id, uiState.sourceName).joinToString("\n"),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -102,6 +128,71 @@ fun CataloguePackageScreen(
                 )
             }
         }
+    }
+
+    asking?.let { ask ->
+        PrereleaseDialog(
+            ask,
+            onConfirm = {
+                viewModel.setPrerelease(ask.id, true)
+                asking = null
+            },
+            onDismiss = { asking = null },
+        )
+    }
+}
+
+/** The title of the question put before pre-releases of [ask]'s package are turned on. */
+internal fun prereleaseQuestion(ask: PrereleaseAsk): String = "Turn on pre-releases of ${ask.name}?"
+
+/**
+ * What the question says. The agent's own is the stronger: the agent takes no older version of itself, so a head
+ * unit that has a pre-release agent cannot be taken back from the app.
+ */
+internal fun prereleaseWarning(ask: PrereleaseAsk): String =
+    if (ask.id == AGENT_PACKAGE_ID) {
+        "Pre-release versions of the agent are still being tested and may not work as well. A head unit that has " +
+            "one can't be taken back to an older agent from the app: the only way back is to reinstall the agent " +
+            "from a USB stick. This applies to every head unit."
+    } else {
+        "Pre-release versions are still being tested and may not work as well. The newest version is then offered, " +
+            "pre-release or not, on every head unit. If you turn this off later, a head unit keeps what it has " +
+            "until a newer stable version is out."
+    }
+
+/** What the switch's card says under the switch. */
+internal fun prereleaseSwitchText(on: Boolean, agent: Boolean): String = when {
+    on -> "On for every head unit: the newest version is offered, pre-release or not. Turned off, a head unit " +
+        "keeps what it has until a newer stable version is out."
+    agent -> "Versions of the agent that are still being tested. The only way back from one is to reinstall the " +
+        "agent from a USB stick."
+    else -> "Versions that are still being tested, before everyone gets them. They may not work as well."
+}
+
+@Composable
+private fun PrereleaseDialog(ask: PrereleaseAsk, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(prereleaseQuestion(ask)) },
+        text = { Text(prereleaseWarning(ask)) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Turn on") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** The package's pre-release switch: on the phone, for every head unit, until it is turned off. */
+@Composable
+private fun PrereleaseCard(agent: Boolean, on: Boolean, onSet: (Boolean) -> Unit) {
+    Section("Pre-release versions") {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Offer pre-release versions", Modifier.weight(1f))
+            Switch(checked = on, onCheckedChange = onSet)
+        }
+        Text(
+            prereleaseSwitchText(on, agent),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -112,6 +203,7 @@ private fun Header(pkg: CataloguePackage) {
         Column {
             Text(pkg.name, style = MaterialTheme.typography.headlineSmall)
             if (pkg.community) CommunityLabel("")
+            if (pkg.prereleaseOnly) PrereleaseLabel(label = PRERELEASE_ONLY)
             Text(
                 listOf(pkg.author, categoryLabel(pkg.category)).filter { it.isNotEmpty() }.joinToString(" · "),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -138,9 +230,13 @@ private fun CommunityCard(pkg: CataloguePackage, sourceName: String?) {
     }
 }
 
-/** The way from the catalogue to the head unit: download to the phone at home, install in the car. */
+/**
+ * The way from the catalogue to the head unit: download to the phone at home, install in the car. A package out
+ * only in pre-releases asks for its switch first ([onAskSwitch]), and a version that needs another package's
+ * pre-release asks for that one's ([onAsk]).
+ */
 @Composable
-private fun GetCard(get: GetState, onDownload: () -> Unit, onInstall: () -> Unit) {
+private fun GetCard(get: GetState, onDownload: () -> Unit, onInstall: () -> Unit, onAskSwitch: () -> Unit, onAsk: (PrereleaseAsk) -> Unit) {
     val context = LocalContext.current
     Section(if (get.installedVersion != null) "Installed: ${get.installedVersion}" else "Get it") {
         get.installedAsOf?.let { seenAt ->
@@ -150,6 +246,20 @@ private fun GetCard(get: GetState, onDownload: () -> Unit, onInstall: () -> Unit
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (get.installedPrerelease) PrereleaseLabel(detail = "The installed version")
+        if (get.needsSwitch) {
+            if (get.installedVersion != null) {
+                Text("${get.headUnitName} has a pre-release of it. There is no stable version yet.")
+            } else {
+                Text(
+                    "Only pre-release versions of this package are out so far. To install it, turn on pre-release versions.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Button(onClick = onAskSwitch) { Text("Install") }
+            }
+            return@Section
+        }
+        if (get.offeredPrerelease && !get.upToDate) PrereleaseLabel(detail = "Version ${get.version.version}")
         val downloading = get.downloading
         when {
             downloading != null -> {
@@ -170,6 +280,10 @@ private fun GetCard(get: GetState, onDownload: () -> Unit, onInstall: () -> Unit
             }
             else -> Text("Version ${get.version.version} is on this phone, checked and ready to install.")
         }
+        get.asks.forEach { ask ->
+            Text("Needs ${ask.name} ${ask.version}, which is a pre-release.", style = MaterialTheme.typography.bodyMedium)
+            OutlinedButton(onClick = { onAsk(ask) }) { Text("Turn on pre-releases of ${ask.name}") }
+        }
         when {
             get.incompatible != null -> Text(get.incompatible, color = MaterialTheme.colorScheme.error)
             get.upToDate -> Text("${get.headUnitName} has this version or a newer one.")
@@ -187,8 +301,9 @@ private fun GetCard(get: GetState, onDownload: () -> Unit, onInstall: () -> Unit
 }
 
 @Composable
-private fun LatestVersionCard(version: PackageVersion) {
+private fun LatestVersionCard(version: PackageVersion, prerelease: Boolean) {
     Section("Version ${version.version}") {
+        if (prerelease) PrereleaseLabel()
         Text(versionFacts(version))
         version.agentRange?.let { Text("Needs agent ${rangeLabel(it)}") }
     }
@@ -225,7 +340,7 @@ private fun DependenciesCard(dependencies: List<DependencyRow>, onOpenPackage: (
 }
 
 @Composable
-private fun DetailsSections(state: DetailsState, onRetry: () -> Unit) {
+private fun DetailsSections(state: DetailsState, pkg: CataloguePackage, onRetry: () -> Unit) {
     when (state) {
         DetailsState.Loading -> Section("About") { CircularProgressIndicator() }
         is DetailsState.Failed -> Section("About") {
@@ -235,32 +350,42 @@ private fun DetailsSections(state: DetailsState, onRetry: () -> Unit) {
         is DetailsState.Loaded -> {
             val details = state.details
             if (details.description.isNotBlank()) Section("About") { Text(details.description) }
-            if (details.changelog.any { it.notes.isNotEmpty() }) ChangelogCard(details)
+            val rows = changelog(details, pkg)
+            if (rows.isNotEmpty()) ChangelogCard(rows)
         }
     }
 }
 
 @Composable
-private fun ChangelogCard(details: PackageDetails) {
+private fun ChangelogCard(rows: List<ChangelogRow>) {
     Section("What's new") {
-        details.changelog.filter { it.notes.isNotEmpty() }.forEach { entry ->
+        rows.forEach { row ->
             Column {
-                Text(entry.version, style = MaterialTheme.typography.titleSmall)
-                entry.notes.forEach { note -> Text("• $note", style = MaterialTheme.typography.bodyMedium) }
+                VersionTitle(row.entry.version, row.prerelease)
+                row.entry.notes.forEach { note -> Text("• $note", style = MaterialTheme.typography.bodyMedium) }
             }
         }
     }
 }
 
 @Composable
-private fun VersionsCard(versions: List<PackageVersion>) {
+private fun VersionsCard(versions: List<VersionRow>) {
     Section("All versions") {
-        versions.forEach { version ->
+        versions.forEach { row ->
             Column {
-                Text(version.version, style = MaterialTheme.typography.titleSmall)
-                Text(versionFacts(version), style = MaterialTheme.typography.bodyMedium)
+                VersionTitle(row.version.version, row.prerelease)
+                Text(versionFacts(row.version), style = MaterialTheme.typography.bodyMedium)
             }
         }
+    }
+}
+
+/** A version as a list's heading, with the pre-release label beside it where it is one. */
+@Composable
+private fun VersionTitle(version: String, prerelease: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(version, style = MaterialTheme.typography.titleSmall)
+        if (prerelease) PrereleaseLabel()
     }
 }
 
