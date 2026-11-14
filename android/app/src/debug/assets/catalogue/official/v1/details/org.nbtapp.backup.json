@@ -1,0 +1,17 @@
+{
+  "id": "org.nbtapp.backup",
+  "description": "Copies the settings of the installed packages to a USB stick, and puts them back from one. Not finished: it is offered only to those who ask for pre-releases, and it needs an agent that is itself a pre-release.\n\nIn the sample catalogue its program is a stand-in that does nothing.",
+  "homepage": "https://example.invalid/org.nbtapp.backup",
+  "screenshots": [],
+  "changelog": [],
+  "channels": {
+    "prerelease": [
+      {
+        "version": "0.1.0",
+        "notes": [
+          "First trial"
+        ]
+      }
+    ]
+  }
+}

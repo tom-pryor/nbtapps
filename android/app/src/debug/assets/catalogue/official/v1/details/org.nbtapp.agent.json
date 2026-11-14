@@ -10,5 +10,15 @@
         "Safer update of HMI plugins"
       ]
     }
-  ]
+  ],
+  "channels": {
+    "prerelease": [
+      {
+        "version": "2.1.0-beta.1",
+        "notes": [
+          "Trying a backup of packages' settings to a USB stick"
+        ]
+      }
+    ]
+  }
 }

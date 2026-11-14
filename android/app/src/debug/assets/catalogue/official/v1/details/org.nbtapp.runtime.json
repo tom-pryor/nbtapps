@@ -17,5 +17,15 @@
         "Reworked library layout; packages built for 1.x need rebuilding"
       ]
     }
-  ]
+  ],
+  "channels": {
+    "prerelease": [
+      {
+        "version": "2.2.0-beta.1",
+        "notes": [
+          "Trying a helper for text on the iDrive screen"
+        ]
+      }
+    ]
+  }
 }

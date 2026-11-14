@@ -4,7 +4,7 @@
     "id": "official",
     "name": "NBTApp sample catalogue (test keys)"
   },
-  "serial": 7,
+  "serial": 8,
   "generated": "2026-11-14T12:00:00Z",
   "packages": [
     {
@@ -28,7 +28,50 @@
           "depends": [],
           "flags": []
         }
-      ]
+      ],
+      "channels": {
+        "prerelease": [
+          {
+            "version": "2.1.0-beta.1",
+            "released": "2026-11-13",
+            "url": "https://example.invalid/packages/org.nbtapp.agent-2.1.0-beta.1.nbtpkg",
+            "size": 1507,
+            "sha256": "36e787b1f0f0f4e71bf710798b44bf3f6dbddb7f9870695e46ab2c763d7dcbc4",
+            "manifestSha256": "90e4b060ed9d2a8c6ef8691691b672e61511f63ddd810159e07f94d7f603ba54",
+            "requires": {
+              "agent": ">=1.1.0"
+            },
+            "depends": [],
+            "flags": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "org.nbtapp.backup",
+      "name": "Settings Backup",
+      "summary": "Saves the installed packages' settings to a USB stick",
+      "author": "NBTApp",
+      "category": "utilities",
+      "details": "details/org.nbtapp.backup.json",
+      "versions": [],
+      "channels": {
+        "prerelease": [
+          {
+            "version": "0.1.0",
+            "released": "2026-11-13",
+            "url": "https://example.invalid/packages/org.nbtapp.backup-0.1.0.nbtpkg",
+            "size": 727,
+            "sha256": "a4399abecb5f04a1033a602b13d628c6348892c745d6945b8956ad7020b64af2",
+            "manifestSha256": "f5124028f0687e1bf1534367f143c8b5d19522405b4356351fd14d1962591104",
+            "requires": {
+              "agent": ">=2.1.0-beta.1"
+            },
+            "depends": [],
+            "flags": []
+          }
+        ]
+      }
     },
     {
       "id": "org.nbtapp.btterm",
@@ -115,16 +158,16 @@
             "version": "1.3.0-beta.1",
             "released": "2026-11-13",
             "url": "https://example.invalid/packages/org.nbtapp.hello-1.3.0-beta.1.nbtpkg",
-            "size": 2003,
-            "sha256": "8f55c48c961889c5716e54b29d272d55da72b84b715ccb39926d3461f3b499a3",
-            "manifestSha256": "657388c17936e65f4807c34f6f8b4e409ba8d10bb0bf21a15eebb8e0409879d8",
+            "size": 2002,
+            "sha256": "2653d0fba30042956269d8337760f1b6719a27801265fd33cdae29fb70fd3bc9",
+            "manifestSha256": "a6ee02c3bd3c93489835717b310dc75d4b76995ca6cb527d1f7cbb3fb93571cf",
             "requires": {
               "agent": ">=1.0.0"
             },
             "depends": [
               {
                 "id": "org.nbtapp.runtime",
-                "version": ">=2.0.0 <3.0.0"
+                "version": ">=2.2.0-beta.1 <3.0.0"
               }
             ],
             "flags": [
@@ -303,7 +346,24 @@
           "depends": [],
           "flags": []
         }
-      ]
+      ],
+      "channels": {
+        "prerelease": [
+          {
+            "version": "2.2.0-beta.1",
+            "released": "2026-11-12",
+            "url": "https://example.invalid/packages/org.nbtapp.runtime-2.2.0-beta.1.nbtpkg",
+            "size": 978,
+            "sha256": "26c9b70a1727579b14d76290002eaccab7f64b4bdb287769854cd1177f151373",
+            "manifestSha256": "912f8ef7e35378a01dc0f413cb00742657c87baee085a12d1e3f50665c35b776",
+            "requires": {
+              "agent": ">=1.0.0"
+            },
+            "depends": [],
+            "flags": []
+          }
+        ]
+      }
     },
     {
       "id": "org.nbtapp.screencap",
