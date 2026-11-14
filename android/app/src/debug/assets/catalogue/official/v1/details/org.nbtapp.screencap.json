@@ -1,0 +1,17 @@
+{
+  "id": "org.nbtapp.screencap",
+  "description": "Saves a picture of what the iDrive screen shows into the package's data folder, for a bug report. Not finished: it is offered only to those who ask for pre-releases.\n\nIn the sample catalogue its program is a stand-in that does nothing.",
+  "homepage": "https://example.invalid/org.nbtapp.screencap",
+  "screenshots": [],
+  "changelog": [],
+  "channels": {
+    "prerelease": [
+      {
+        "version": "0.1.0",
+        "notes": [
+          "First trial"
+        ]
+      }
+    ]
+  }
+}
