@@ -6,10 +6,13 @@ import com.nbtapps.store.model.CatalogueIndex
 import com.nbtapps.store.model.CataloguePackage
 import com.nbtapps.store.model.CatalogueSourceInfo
 import com.nbtapps.store.model.InstalledPackage
+import com.nbtapps.store.model.JobResult
+import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.PackageDependency
 import com.nbtapps.store.model.PackageRequirements
 import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.model.RestartKind
+import com.nbtapps.store.model.StepResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -237,6 +240,52 @@ class PrereleaseTest {
         assertEquals(listOf("Log Viewer 0.9.0"), update.unblocks.map { it.label })
     }
 
+    /**
+     * Hello's pre-release needs both a pre-release agent and a pre-release runtime. The agent's and Hello's
+     * switches are on, the runtime's is off, and the head unit runs the stable agent.
+     */
+    private val waiting = CatalogueIndex(
+        schema = 1,
+        source = CatalogueSourceInfo("test", "Test"),
+        serial = 1,
+        packages = listOf(
+            pkg(AGENT_PACKAGE_ID, listOf(version("2.0.0", ">=1.1.0")), listOf(version("2.1.0-beta.1", ">=1.1.0")), name = "NBTApp agent"),
+            pkg("hello", listOf(version("1.2.0", ">=1.0.0", "runtime" to ">=2.0.0 <3.0.0")), listOf(version("1.3.0-beta.1", ">=2.1.0-beta.1", "runtime" to ">=2.2.0-beta.1 <3.0.0")), name = "Hello NBT"),
+            pkg("runtime", listOf(version("2.1.0")), listOf(version("2.2.0-beta.1")), name = "NBT Runtime"),
+        ),
+    )
+    private val waitingOn = setOf(AGENT_PACKAGE_ID, "hello")
+    private val waitingHas = listOf(has("hello", "1.2.0"), has("runtime", "2.1.0"))
+
+    @Test
+    fun `a version that waits for another package's pre-release is not what a newer agent brings`() {
+        // The card for the agent's pre-release: it brings nothing that can be had as the switches are.
+        val update = requireNotNull(agentUpdate(waiting, held("2.0.0", *waitingHas.toTypedArray()), waitingOn))
+        assertEquals("2.1.0-beta.1", update.version)
+        assertEquals(emptyList<Unblocked>(), update.unblocks)
+
+        // The job that updated the agent: nothing is now available, for the same reason.
+        val job = JobResult("1011121314151617", JobState.SUCCEEDED, listOf(StepResult("upgrade", AGENT_PACKAGE_ID, "2.1.0-beta.1", oldVersion = "2.0.0", result = "done")))
+        assertEquals(emptyList<Unblocked>(), unblockedBy(waiting, waitingHas, job, waitingOn))
+        // As the list has it on the new agent: Hello's pre-release asks for the runtime's, and is no update.
+        val after = requireNotNull(packageStatus(waiting, waiting.packages.first { it.id == "hello" }, held("2.1.0-beta.1", *waitingHas.toTypedArray()), waitingOn))
+        assertEquals(listOf(PrereleaseAsk("runtime", "NBT Runtime", "2.2.0-beta.1")), after.asks)
+        assertFalse(after.updateAvailable)
+
+        // With the runtime switched on as well, it is brought, in each.
+        val all = waitingOn + "runtime"
+        assertEquals(listOf("Hello NBT 1.3.0-beta.1"), unblockedBy(waiting, waitingHas, job, all).map { it.label })
+        assertEquals(listOf("Hello NBT 1.3.0-beta.1"), requireNotNull(agentUpdate(waiting, held("2.0.0", *waitingHas.toTypedArray()), all)).unblocks.map { it.label })
+    }
+
+    @Test
+    fun `a package out only in pre-releases is not what a newer agent brings while its switch is off`() {
+        val later = index.copy(packages = index.packages + pkg("later", emptyList(), listOf(version("0.1.0-beta.1", ">=1.1.0")), name = "Later"))
+
+        assertTrue(unblockedBy(later, emptyList(), "1.0.2", "1.1.0").none { it.id == "later" })
+        assertEquals(listOf("Later 0.1.0-beta.1"), unblockedBy(later, emptyList(), "1.0.2", "1.1.0", setOf("later")).filter { it.id == "later" }.map { it.label })
+    }
+
     // ---- the agent a version needs ----
 
     @Test
@@ -311,6 +360,87 @@ class PrereleaseTest {
         val below = resolve("radio", "1.0.0", installed = listOf(has("lib", "3.5.0")))
         assertEquals(listOf("lib"), below.unavailable.map { it.id })
         assertTrue(below.needsPrerelease.isEmpty())
+    }
+
+    // ---- a dependency only a pre-release agent runs ----
+
+    private val agentAsk = PrereleaseAsk(AGENT_PACKAGE_ID, "NBTApp agent", "1.2.0-rc.1")
+
+    /** Dependencies whose only versions in range need a newer agent than 1.0.2: a pre-release one, or a stable one. */
+    private val agentDeps = index.copy(
+        packages = index.packages + listOf(
+            pkg("fast", listOf(version("1.0.0", ">=1.2.0-rc.1")), name = "Fast Lib"),
+            pkg("usesfast", listOf(version("1.0.0", ">=1.0.0", "fast" to ">=1.0.0")), name = "Uses Fast"),
+            pkg("steady", listOf(version("1.0.0", ">=1.1.0")), name = "Steady Lib"),
+            pkg("usessteady", listOf(version("1.0.0", ">=1.0.0", "steady" to ">=1.0.0")), name = "Uses Steady"),
+            pkg("earlyfast", emptyList(), listOf(version("0.1.0-beta.1", ">=1.2.0-rc.1")), name = "Early Fast"),
+            pkg("usesearlyfast", listOf(version("1.0.0", ">=1.0.0", "earlyfast" to null)), name = "Uses Early Fast"),
+        ),
+    )
+
+    private fun agentDepStatus(id: String, head: Holdings, switchedOn: Set<String> = emptySet()) =
+        requireNotNull(packageStatus(agentDeps, agentDeps.packages.first { it.id == id }, head, switchedOn))
+
+    private fun agentDepResolve(id: String, agent: String, switchedOn: Set<String> = emptySet()): Resolver.Resolution {
+        val pkg = agentDeps.packages.first { it.id == id }
+        return Resolver.resolve(agentDeps, Resolver.Needed(pkg, pkg.latest!!), emptyList(), agent, switchedOn)
+    }
+
+    @Test
+    fun `a dependency that only a pre-release agent runs asks for the agent, as a version of its own would`() {
+        val status = agentDepStatus("usesfast", held("1.0.2"))
+        assertTrue(status.suits)
+        assertEquals(listOf(agentAsk), status.asks)
+        // The same question as the dependency's own page puts, installed by itself.
+        assertEquals(agentDepStatus("fast", held("1.0.2")).asks, status.asks)
+        val resolution = agentDepResolve("usesfast", "1.0.2")
+        assertTrue(resolution.unavailable.isEmpty())
+        assertEquals(listOf(Resolver.PrereleaseNeed(AGENT_PACKAGE_ID, "1.2.0-rc.1", "fast")), resolution.needsPrerelease)
+        assertEquals(listOf("usesfast 1.0.0"), resolution.names())
+        // Installed, it is no update while it waits.
+        assertFalse(agentDepStatus("usesfast", held("1.0.2", has("usesfast", "0.9.0"))).updateAvailable)
+
+        // On the pre-release agent nothing is asked, and the dependency comes along.
+        val there = agentDepResolve("usesfast", "1.2.0-rc.1")
+        assertTrue(there.needsPrerelease.isEmpty())
+        assertEquals(listOf("fast 1.0.0", "usesfast 1.0.0"), there.names())
+        assertTrue(agentDepStatus("usesfast", held("1.2.0-rc.1")).asks.isEmpty())
+    }
+
+    @Test
+    fun `a dependency that a newer stable agent runs is unavailable, and nothing is asked`() {
+        for (switchedOn in listOf(emptySet(), setOf(AGENT_PACKAGE_ID))) {
+            val resolution = agentDepResolve("usessteady", "1.0.2", switchedOn)
+            assertEquals("$switchedOn", listOf("steady"), resolution.unavailable.map { it.id })
+            assertTrue("$switchedOn", resolution.needsPrerelease.isEmpty())
+            assertTrue("$switchedOn", agentDepStatus("usessteady", held("1.0.2"), switchedOn).asks.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a dependency out only in a pre-release that only a pre-release agent runs asks for both`() {
+        val status = agentDepStatus("usesearlyfast", held("1.0.2"))
+        assertEquals(listOf(PrereleaseAsk("earlyfast", "Early Fast", "0.1.0-beta.1"), agentAsk), status.asks)
+        val resolution = agentDepResolve("usesearlyfast", "1.0.2")
+        assertTrue(resolution.unavailable.isEmpty())
+        assertEquals(
+            listOf(Resolver.PrereleaseNeed("earlyfast", "0.1.0-beta.1", "usesearlyfast"), Resolver.PrereleaseNeed(AGENT_PACKAGE_ID, "1.2.0-rc.1", "earlyfast")),
+            resolution.needsPrerelease,
+        )
+
+        // Its own switched on, the agent is still asked for.
+        assertEquals(listOf(agentAsk), agentDepStatus("usesearlyfast", held("1.0.2"), setOf("earlyfast")).asks)
+        // On the pre-release agent, only its own.
+        assertEquals(listOf(PrereleaseAsk("earlyfast", "Early Fast", "0.1.0-beta.1")), agentDepStatus("usesearlyfast", held("1.2.0-rc.1")).asks)
+    }
+
+    @Test
+    fun `the agent is asked for once, though the version and its dependency both need it`() {
+        val both = agentDeps.copy(packages = agentDeps.packages + pkg("fastest", listOf(version("1.0.0", ">=1.2.0-rc.1", "fast" to ">=1.0.0")), name = "Fastest"))
+        val status = requireNotNull(packageStatus(both, both.packages.last(), held("1.0.2")))
+
+        assertFalse(status.suits)
+        assertEquals(listOf(agentAsk), status.asks)
     }
 
     // ---- every switch off ----

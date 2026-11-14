@@ -22,7 +22,8 @@ object Resolver {
     /**
      * A dependency that only a pre-release of package [id] meets, while that package's switch is off: [version]
      * is the pre-release that would be taken, and [requiredBy] the package that needs it. The user is asked to
-     * switch [id] on; the app never takes a pre-release for a dependency by itself.
+     * switch [id] on; the app never takes a pre-release for a dependency by itself. For the agent's package,
+     * [requiredBy] is the dependency that only that pre-release of the agent runs.
      */
     data class PrereleaseNeed(val id: String, val version: String, val requiredBy: String)
 
@@ -31,7 +32,10 @@ object Resolver {
         val needed: List<Needed>,
         /** Dependencies the catalogue cannot satisfy for this head unit. */
         val unavailable: List<MissingDependency>,
-        /** Dependencies a pre-release would satisfy, were its package switched on. Not among [unavailable]. */
+        /**
+         * Dependencies a pre-release would satisfy, were its package switched on: their own, or the agent's where
+         * only a pre-release agent runs the version that would be taken. Not among [unavailable].
+         */
         val needsPrerelease: List<PrereleaseNeed> = emptyList(),
     )
 
@@ -41,7 +45,8 @@ object Resolver {
      * A dependency is left alone when an installed package satisfies it. Otherwise the highest version in
      * range is taken that suits [agentVersion] (any, if that is not known) and is not below what is installed,
      * of the dependency's [offeredVersions]: its pre-release versions count only where [switchedOn] has it. Where
-     * nothing but one of those would do, the dependency is in [Resolution.needsPrerelease].
+     * nothing but one of those would do, or only a version that a pre-release of the agent runs, the dependency
+     * is in [Resolution.needsPrerelease], with the agent's pre-release in the second case.
      */
     fun resolve(
         index: CatalogueIndex,
@@ -66,9 +71,9 @@ object Resolver {
                 val on = dependency.id in switchedOn
                 val pick = pkg?.let { pick(it, on, dependency.version, agentVersion, installedVersion) }
                 if (pkg == null || pick == null) {
-                    val prerelease = pkg?.takeIf { !on }?.let { pick(it, true, dependency.version, agentVersion, installedVersion) }
-                    if (prerelease != null) {
-                        needsPrerelease += PrereleaseNeed(dependency.id, prerelease.version, item.pkg.id)
+                    val needs = pkg?.let { prereleaseNeeds(index, it, on, dependency.version, item.pkg.id, agentVersion, installedVersion, switchedOn) }.orEmpty()
+                    if (needs.isNotEmpty()) {
+                        needsPrerelease += needs
                     } else {
                         unavailable += MissingDependency(dependency.id, dependency.version, item.pkg.id)
                     }
@@ -84,6 +89,35 @@ object Resolver {
         visit(target)
         chosen.remove(target.pkg.id)
         return Resolution(chosen.values.toList() + target, unavailable, needsPrerelease)
+    }
+
+    /**
+     * What would meet a dependency of [requiredBy] on [range] of [pkg], which nothing does as the switches
+     * [switchedOn] are: with [pkg]'s switch ([on]) off, one of its pre-releases that runs on [agentVersion]; or else
+     * the version it would take on any agent, where only a pre-release of the agent runs that
+     * ([agentPrereleaseFor]): the agent's pre-release, and [pkg]'s own as well where that version is one of its
+     * pre-releases. Empty where none of that would do: the dependency is then unavailable, as it is where a newer
+     * stable agent would run it, which is an update of the agent like any other.
+     */
+    private fun prereleaseNeeds(
+        index: CatalogueIndex,
+        pkg: CataloguePackage,
+        on: Boolean,
+        range: String?,
+        requiredBy: String,
+        agentVersion: String?,
+        installed: SemVer?,
+        switchedOn: Set<String>,
+    ): List<PrereleaseNeed> {
+        if (!on) pick(pkg, true, range, agentVersion, installed)?.let { return listOf(PrereleaseNeed(pkg.id, it.version, requiredBy)) }
+        val offered = pick(pkg, on, range, null, installed)
+        val candidate = offered ?: pick(pkg, true, range, null, installed) ?: return emptyList()
+        val agent = agentPrereleaseFor(index, candidate, agentVersion, switchedOn) ?: return emptyList()
+        return listOfNotNull(
+            PrereleaseNeed(pkg.id, candidate.version, requiredBy).takeIf { offered == null },
+            // Needed by the dependency, which waits for it.
+            PrereleaseNeed(AGENT_PACKAGE_ID, agent.version, pkg.id),
+        )
     }
 
     /**

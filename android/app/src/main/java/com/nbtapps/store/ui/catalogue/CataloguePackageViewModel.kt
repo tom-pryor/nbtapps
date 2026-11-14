@@ -17,8 +17,7 @@ import com.nbtapps.store.data.jobs.PrereleaseAsk
 import com.nbtapps.store.data.jobs.Resolver
 import com.nbtapps.store.data.jobs.holdings
 import com.nbtapps.store.data.jobs.offeredVersions
-import com.nbtapps.store.data.jobs.packageStatus
-import com.nbtapps.store.data.jobs.resolveOffered
+import com.nbtapps.store.data.jobs.resolvedStatus
 import com.nbtapps.store.data.packages.DownloadState
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
@@ -87,19 +86,12 @@ data class GetState(
     val needsSwitch: Boolean = false,
     /** The packages whose pre-releases [version] needs, with their switches off: dependencies first, then the agent. */
     val asks: List<PrereleaseAsk> = emptyList(),
-) {
     /**
-     * The offered version is what the head unit already has, or older than it. With [needsSwitch], whatever the
-     * head unit has: with the switch off no newer pre-release is offered.
+     * The head unit has [version] or a newer one, as the package's status says: see
+     * [PackageStatus.upToDate][com.nbtapps.store.data.jobs.PackageStatus.upToDate].
      */
-    val upToDate: Boolean
-        get() {
-            val installed = installedVersion?.let(SemVer::parseOrNull) ?: return false
-            if (needsSwitch) return true
-            val offered = SemVer.parseOrNull(version.version) ?: return false
-            return installed >= offered
-        }
-
+    val upToDate: Boolean = false,
+) {
     val canInstall: Boolean
         get() = stored && toDownload.isEmpty() && connected && incompatible == null && asks.isEmpty() && !needsSwitch && !upToDate
 }
@@ -193,12 +185,13 @@ private fun getState(
     head: Holdings?,
     switchedOn: Set<String>,
 ): GetState? {
-    // The asks are the status's, so that the list's row says what this page does.
-    val status = packageStatus(index, pkg, head, switchedOn) ?: return null
-    val version = status.offered
+    // The status is the list's, so that its row says what this page does. With no link, what the head unit had the
+    // last time decides what is worth downloading before the car.
     val agentVersion = head?.agentVersion
-    // With no link, what the head unit had the last time decides what is worth downloading before the car.
-    val resolution = resolveOffered(index, pkg, status, head, switchedOn)
+    val resolved = resolvedStatus(index, pkg, head?.installed.orEmpty(), agentVersion, switchedOn) ?: return null
+    val status = resolved.status
+    val resolution = resolved.resolution
+    val version = status.offered
     val toDownload = resolution?.needed.orEmpty().filter { needed -> stored.none { it.sha256 == needed.version.sha256 } }
     val states = toDownload.mapNotNull { downloads[it.version.sha256] }
     val running = states.filterIsInstance<DownloadState.Running>()
@@ -226,6 +219,7 @@ private fun getState(
         installedPrerelease = status.installedPrerelease,
         needsSwitch = status.needsSwitch,
         asks = status.asks,
+        upToDate = status.upToDate,
     )
 }
 

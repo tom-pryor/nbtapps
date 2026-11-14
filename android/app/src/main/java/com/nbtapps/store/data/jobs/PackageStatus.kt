@@ -144,28 +144,53 @@ fun packageStatus(
 /**
  * The status of [pkg] of [index] on the head unit of [holdings] (null when none is known), with what its offered
  * version waits for: the pre-releases of other packages it needs, whose switches among [switchedOn] are off
- * ([PackageStatus.asks]). The list, its counts, a package's page and the agent's card all take it from here.
+ * ([PackageStatus.asks]). The list, its counts, a package's page, the agent's card and what a newer agent brings
+ * all take it from here.
  */
-fun packageStatus(index: CatalogueIndex, pkg: CataloguePackage, holdings: Holdings?, switchedOn: Set<String> = emptySet()): PackageStatus? {
-    val status = packageStatus(pkg, holdings?.installed.orEmpty(), holdings?.agentVersion, switchedOn) ?: return null
-    val resolution = resolveOffered(index, pkg, status, holdings, switchedOn)
-    // The agent is asked for where no version suits the agent that runs, and a pre-release agent would run one.
-    val agent = if (status.suits || status.needsSwitch) null else agentPrereleaseFor(index, status.offered, holdings?.agentVersion, switchedOn)
-    val asks = resolution?.needsPrerelease.orEmpty().distinctBy { it.id }.map { PrereleaseAsk(it.id, nameOf(index, it.id), it.version) } +
-        listOfNotNull(agent?.let { PrereleaseAsk(AGENT_PACKAGE_ID, nameOf(index, AGENT_PACKAGE_ID), it.version) })
-    return status.copy(asks = asks)
+fun packageStatus(index: CatalogueIndex, pkg: CataloguePackage, holdings: Holdings?, switchedOn: Set<String> = emptySet()): PackageStatus? =
+    resolvedStatus(index, pkg, holdings?.installed.orEmpty(), holdings?.agentVersion, switchedOn)?.status
+
+/** A package's [PackageStatus], with the [Resolver.Resolution] of its offered version that its asks come from. */
+class ResolvedStatus(
+    val status: PackageStatus,
+    /**
+     * What installing [PackageStatus.offered] takes on the head unit: with no link, as it was the last time. Null
+     * for a version that waits for the package's own switch ([PackageStatus.needsSwitch]), of which nothing is
+     * worked out.
+     */
+    val resolution: Resolver.Resolution?,
+)
+
+/**
+ * The [packageStatus] of [pkg] of [index] on a head unit that has [installed] and runs agent [agentVersion], with
+ * the resolution it was worked out from, for a screen that shows what that takes as well.
+ */
+fun resolvedStatus(
+    index: CatalogueIndex,
+    pkg: CataloguePackage,
+    installed: List<InstalledPackage>,
+    agentVersion: String?,
+    switchedOn: Set<String>,
+): ResolvedStatus? {
+    val status = packageStatus(pkg, installed, agentVersion, switchedOn) ?: return null
+    if (status.needsSwitch) return ResolvedStatus(status, null)
+    val resolution = Resolver.resolve(index, Resolver.Needed(pkg, status.offered), installed, agentVersion, switchedOn)
+    return ResolvedStatus(status.copy(asks = prereleaseAsks(index, status.offered, resolution, agentVersion, switchedOn)), resolution)
 }
 
 /**
- * What installing the version [status] offers of [pkg] takes on the head unit of [holdings]: with no link, what
- * it had the last time. Null for a version that waits for the package's own switch, of which nothing is worked out.
+ * What [version] waits for on a head unit that runs agent [running], by its [resolution] there: the packages whose
+ * pre-releases it needs while their switches among [switchedOn] are off. Its dependencies' come first, then the
+ * agent's: where only a pre-release agent runs [version] itself ([agentPrereleaseFor]), or a dependency of it
+ * ([Resolver.Resolution.needsPrerelease]). Each package is asked for once. Empty where [version] can be installed
+ * as the switches are.
  */
-fun resolveOffered(index: CatalogueIndex, pkg: CataloguePackage, status: PackageStatus, holdings: Holdings?, switchedOn: Set<String>): Resolver.Resolution? =
-    if (status.needsSwitch) {
-        null
-    } else {
-        Resolver.resolve(index, Resolver.Needed(pkg, status.offered), holdings?.installed.orEmpty(), holdings?.agentVersion, switchedOn)
-    }
+fun prereleaseAsks(index: CatalogueIndex, version: PackageVersion, resolution: Resolver.Resolution, running: String?, switchedOn: Set<String>): List<PrereleaseAsk> {
+    val (agent, dependencies) = resolution.needsPrerelease.partition { it.id == AGENT_PACKAGE_ID }
+    val own = agentPrereleaseFor(index, version, running, switchedOn)
+    val needs = dependencies.map { it.id to it.version } + listOfNotNull(own?.let { AGENT_PACKAGE_ID to it.version }) + agent.map { it.id to it.version }
+    return needs.distinctBy { it.first }.map { (id, at) -> PrereleaseAsk(id, nameOf(index, id), at) }
+}
 
 private fun nameOf(index: CatalogueIndex, id: String): String = index.packages.find { it.id == id }?.name ?: id
 
@@ -214,6 +239,10 @@ data class Unblocked(
  * version that suits [older] and above the one on the head unit. A package that [older] runs no version of
  * counts, since it could not be installed at all. Installed packages come first, then by name. Each package is
  * judged by its [offeredVersions], as [switchedOn] has its switch.
+ *
+ * The version is the one the package's status ([resolvedStatus]) offers on [newer], so that this says what the
+ * list and the package's page will: one that waits for another package's pre-release ([PackageStatus.asks]), or
+ * for the package's own switch, is not brought within reach.
  */
 fun unblockedBy(
     index: CatalogueIndex,
@@ -224,8 +253,10 @@ fun unblockedBy(
 ): List<Unblocked> =
     index.packages.mapNotNull { pkg ->
         if (pkg.id == AGENT_PACKAGE_ID) return@mapNotNull null
+        val status = resolvedStatus(index, pkg, installed, newer, switchedOn)?.status ?: return@mapNotNull null
+        if (!status.suits || status.needsSwitch || status.asks.isNotEmpty()) return@mapNotNull null
+        val now = status.offered
         val versions = offeredVersions(pkg, switchedOn)
-        val now = versions.firstOrNull { Resolver.suits(it, newer) } ?: return@mapNotNull null
         val reach = SemVer.parseOrNull(now.version) ?: return@mapNotNull null
         val before = versions.firstOrNull { Resolver.suits(it, older) }?.let { SemVer.parseOrNull(it.version) }
         val have = installed.find { it.id == pkg.id }?.version

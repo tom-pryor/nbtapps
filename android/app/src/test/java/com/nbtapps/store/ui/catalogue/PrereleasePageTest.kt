@@ -175,6 +175,28 @@ class PrereleasePageTest {
     }
 
     @Test
+    fun `a dependency only a pre-release agent runs asks for the agent's switch, and is not reported missing`() {
+        val deps = index.copy(
+            packages = index.packages + listOf(
+                pkg("fast", "Fast Lib", listOf(version("1.0.0", ">=1.2.0-rc.1"))),
+                pkg("usesfast", "Uses Fast", listOf(version("1.0.0", ">=1.0.0", "fast" to ">=1.0.0"))),
+                pkg("steady", "Steady Lib", listOf(version("1.0.0", ">=1.1.0"))),
+                pkg("usessteady", "Uses Steady", listOf(version("1.0.0", ">=1.0.0", "steady" to ">=1.0.0"))),
+            ),
+        )
+        fun get(id: String) = requireNotNull(cataloguePackageUiState(CatalogueState(index = deps), id, DetailsState.Loading, emptyList(), emptyMap(), held("1.0.2"), emptySet()).get)
+
+        val fast = get("usesfast")
+        assertEquals(listOf(PrereleaseAsk(AGENT_PACKAGE_ID, "NBTApp agent", "1.2.0-rc.1")), fast.asks)
+        assertNull(fast.incompatible)
+        assertFalse(fast.canInstall)
+        // Where a newer stable agent would run it, as before: the catalogue has nothing that fits this agent.
+        val steady = get("usessteady")
+        assertTrue(steady.asks.isEmpty())
+        assertEquals("Needs steady, which this catalogue doesn't have in a version that fits.", steady.incompatible)
+    }
+
+    @Test
     fun `with every switch off a package with pre-releases is offered as it was before`() {
         val stripped = index.copy(packages = index.packages.map { it.copy(prereleases = emptyList()) })
         for (pkg in index.packages.filterNot { it.prereleaseOnly }) {

@@ -32,7 +32,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,8 +63,9 @@ fun CataloguePackageScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val pkg = uiState.pkg
-    // The package whose pre-releases the user is being asked to turn on: this one, or one this one needs.
-    var asking by remember { mutableStateOf<PrereleaseAsk?>(null) }
+    // The package whose pre-releases the user is being asked to turn on: this one, or one this one needs. Kept
+    // across a rotation, so that the question is still there.
+    var asking by rememberSaveable(stateSaver = AskSaver) { mutableStateOf<PrereleaseAsk?>(null) }
 
     Scaffold(
         topBar = {
@@ -142,6 +144,12 @@ fun CataloguePackageScreen(
         )
     }
 }
+
+/** A question that is open, as the screen's saved state keeps it: the package's id, name and version. */
+private val AskSaver = Saver<PrereleaseAsk?, ArrayList<String>>(
+    save = { ask -> ask?.let { arrayListOf(it.id, it.name, it.version) } },
+    restore = { saved -> PrereleaseAsk(saved[0], saved[1], saved[2]) },
+)
 
 /** The title of the question put before pre-releases of [ask]'s package are turned on. */
 internal fun prereleaseQuestion(ask: PrereleaseAsk): String = "Turn on pre-releases of ${ask.name}?"

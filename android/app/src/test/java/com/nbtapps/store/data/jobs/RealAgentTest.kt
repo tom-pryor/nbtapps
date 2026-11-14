@@ -31,6 +31,7 @@ import com.nbtapps.store.model.VersionRange
 import com.nbtapps.store.ui.catalogue.DetailsState
 import com.nbtapps.store.ui.catalogue.GetState
 import com.nbtapps.store.ui.catalogue.cataloguePackageUiState
+import com.nbtapps.store.ui.job.installPrep
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -334,11 +335,15 @@ class RealAgentTest {
     /** The page's download: each archive it says is still to come, put on the phone. */
     private suspend fun downloadFor(get: GetState) = get.toDownload.forEach { download(it.pkg.id, it.version.version) }
 
+    /** What the job screen takes for installing what the page offers, by the head unit as it is now. */
+    private fun prepFromPage(get: GetState, id: String, switchedOn: Set<String>) =
+        installPrep(index, index.packages.first { it.id == id }, get.version, connected().installed, connected().info.agentVersion, switchedOn)
+
     /** What the app does when the page's Install is pressed: the job screen's resolution, and its plan from what the phone holds. */
     private suspend fun planFromPage(get: GetState, id: String, switchedOn: Set<String>): Plan {
-        val pkg = index.packages.first { it.id == id }
-        val needed = Resolver.resolve(index, Resolver.Needed(pkg, get.version), connected().installed, connected().info.agentVersion, switchedOn).needed
-        val offers = needed.map { item -> requireNotNull(store.packages.value.find { it.sha256 == item.version.sha256 }) { "${item.pkg.id} is not on the phone" } }
+        val prep = prepFromPage(get, id, switchedOn)
+        assertNull("the job screen stops: ${prep.waiting}", prep.waiting)
+        val offers = prep.needed.map { item -> requireNotNull(store.packages.value.find { it.sha256 == item.version.sha256 }) { "${item.pkg.id} is not on the phone" } }
         return jobs.plan(listOf(InstallTarget(id, get.version.version)), emptyList(), offers).getOrThrow()
     }
 
@@ -374,8 +379,9 @@ class RealAgentTest {
         awaitInstalled("$hello 1.2.0", "$runtime 2.1.0", "$screencap 0.1.0")
 
         // Its pre-release switched on and the runtime's not: the one runtime that would do is a pre-release, which
-        // is asked for and not taken. The page will not install, the list counts no update, and the agent, offered
-        // what the app would offer, has nothing to meet the dependency with.
+        // is asked for and not taken. The page will not install, the list counts no update, and a job opened for it
+        // all the same stops on the phone. The agent, offered what the resolution has, would have nothing to meet
+        // the dependency with.
         val one = setOf(screencap, hello)
         val target = index.packages.first { it.id == hello }
         val beta = target.prereleases.first { it.version == "1.3.0-beta.1" }
@@ -390,7 +396,14 @@ class RealAgentTest {
         val status = requireNotNull(packageStatus(index, target, head(), one))
         assertFalse(status.updateAvailable)
         assertEquals(asking.asks, status.asks)
-        val refused = planFromPage(asking, hello, one)
+        val stopped = prepFromPage(asking, hello, one)
+        assertEquals(
+            "Needs NBT Runtime 2.2.0-beta.1, which is a pre-release. To install this version, turn on pre-release versions of NBT Runtime first.",
+            stopped.waiting,
+        )
+        assertTrue(stopped.needed.isEmpty())
+        val offers = resolution.needed.map { item -> requireNotNull(store.packages.value.find { it.sha256 == item.version.sha256 }) }
+        val refused = jobs.plan(listOf(InstallTarget(hello, beta.version)), emptyList(), offers).getOrThrow()
         assertFalse(refused.runnable)
         assertEquals(listOf(runtime), refused.missing.map { it.id })
         assertTrue(jobs.refresh().isSuccess)
