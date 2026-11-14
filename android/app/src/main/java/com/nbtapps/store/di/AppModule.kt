@@ -8,14 +8,17 @@ import androidx.datastore.dataStoreFile
 import com.nbtapps.store.data.AndroidPhoneBluetooth
 import com.nbtapps.store.data.BluetoothSppEchoClient
 import com.nbtapps.store.data.DataStoreHeadUnitRepository
+import com.nbtapps.store.data.DataStorePrereleaseRepository
 import com.nbtapps.store.data.FilePhoneIdentity
 import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.KeystorePairingKeys
 import com.nbtapps.store.data.PairingKeys
 import com.nbtapps.store.data.PhoneBluetooth
 import com.nbtapps.store.data.PhoneIdentity
+import com.nbtapps.store.data.PrereleaseRepository
 import com.nbtapps.store.data.SppEchoClient
 import com.nbtapps.store.data.headUnitStore
+import com.nbtapps.store.data.prereleaseStore
 import com.nbtapps.store.data.catalogue.CatalogueRepository
 import com.nbtapps.store.data.catalogue.CatalogueSource
 import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
@@ -82,6 +85,14 @@ abstract class AppModule {
         fun provideHeadUnitRepository(@ApplicationContext context: Context): HeadUnitRepository =
             DataStoreHeadUnitRepository(
                 headUnitStore(context.dataStoreFile("head-units.json"), CoroutineScope(SupervisorJob() + Dispatchers.IO)),
+            )
+
+        /** Which packages the user has switched on for pre-release versions, for every head unit. */
+        @Provides
+        @Singleton
+        fun providePrereleaseRepository(@ApplicationContext context: Context): PrereleaseRepository =
+            DataStorePrereleaseRepository(
+                prereleaseStore(context.dataStoreFile("prerelease-packages.json"), CoroutineScope(SupervisorJob() + Dispatchers.IO)),
             )
 
         @Provides
