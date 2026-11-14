@@ -65,14 +65,16 @@ class HeadUnitsViewModel @Inject constructor(
     }
 
     /**
-     * Adds the head unit described by [form]. Returns false and does nothing if the form is invalid. An address in
-     * it is dropped where this build has no TCP link.
+     * Adds the head unit described by [form], and returns its id. Returns null and does nothing if the form is
+     * invalid. An address in it is dropped where this build has no TCP link. The head unit is saved a moment
+     * later, not by the time this returns.
      */
-    fun addHeadUnit(form: HeadUnitForm): Boolean {
+    fun addHeadUnit(form: HeadUnitForm): String? {
         val checked = form.copy(takesAddress = form.takesAddress && takesAddress)
-        if (!checked.isValid) return false
-        viewModelScope.launch { repository.add(checked.toHeadUnit(UUID.randomUUID().toString())) }
-        return true
+        if (!checked.isValid) return null
+        val id = UUID.randomUUID().toString()
+        viewModelScope.launch { repository.add(checked.toHeadUnit(id)) }
+        return id
     }
 
     /** Removes the head unit, and the key it issued this phone when the two were paired. */

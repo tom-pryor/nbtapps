@@ -16,6 +16,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -44,15 +46,16 @@ class HeadUnitsViewModelTest {
     fun `adding a valid head unit shows it in the list`() = runTest {
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
 
-        assertTrue(viewModel.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22")))
+        val id = viewModel.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22"))
 
         val units = viewModel.uiState.value.headUnits
         assertEquals(listOf("Car"), units.map { it.name })
+        assertEquals("the id returned is the saved head unit's", units.single().id, id)
     }
 
     @Test
     fun `invalid head unit is not added`() = runTest {
-        assertFalse(viewModel.addHeadUnit(HeadUnitForm(name = "Car")))
+        assertNull(viewModel.addHeadUnit(HeadUnitForm(name = "Car")))
         assertTrue(repository.headUnits.first().isEmpty())
     }
 
@@ -64,11 +67,11 @@ class HeadUnitsViewModelTest {
 
     @Test
     fun `without a TCP link a head unit with only an address is not added, and an address beside the car is dropped`() = runTest {
-        assertFalse(serialOnly.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22")))
+        assertNull(serialOnly.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22")))
         assertTrue(repository.headUnits.first().isEmpty())
 
         val car = bluetooth.devices.first()
-        assertTrue(serialOnly.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22").withDevice(car)))
+        assertNotNull(serialOnly.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22").withDevice(car)))
         assertEquals(listOf(SerialEndpoint(car.address, car.name)), repository.headUnits.first().single().endpoints)
     }
 
@@ -104,7 +107,7 @@ class HeadUnitsViewModelTest {
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
         val car = viewModel.uiState.value.bluetooth.devices.first()
 
-        assertTrue(viewModel.addHeadUnit(HeadUnitForm().withDevice(car)))
+        assertNotNull(viewModel.addHeadUnit(HeadUnitForm().withDevice(car)))
 
         val unit = repository.headUnits.first().single()
         assertEquals("Test Car", unit.name)

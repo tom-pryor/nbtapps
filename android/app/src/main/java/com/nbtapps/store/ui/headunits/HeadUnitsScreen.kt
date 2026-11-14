@@ -2,9 +2,6 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.headunits
 
-import android.Manifest
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,7 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
-import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.DebugTools
 import com.nbtapps.store.R
@@ -44,14 +40,6 @@ fun HeadUnitsScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        viewModel.refreshBluetooth()
-    }
-    // Pairing a device or switching Bluetooth on happens outside the app.
-    LifecycleResumeEffect(Unit) {
-        viewModel.refreshBluetooth()
-        onPauseOrDispose {}
-    }
 
     HeadUnitsContent(
         uiState = uiState,
@@ -62,15 +50,12 @@ fun HeadUnitsScreen(
         onAddClick = { showAddDialog = true },
     )
 
-    if (showAddDialog) {
-        AddHeadUnitDialog(
-            bluetooth = uiState.bluetooth,
-            takesAddress = uiState.takesAddress,
-            onAllowBluetooth = { permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT) },
-            onDismiss = { showAddDialog = false },
-            onConfirm = { form -> if (viewModel.addHeadUnit(form)) showAddDialog = false },
-        )
-    }
+    AddHeadUnitFlow(
+        show = showAddDialog,
+        onDismiss = { showAddDialog = false },
+        onAdded = { showAddDialog = false },
+        viewModel = viewModel,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
