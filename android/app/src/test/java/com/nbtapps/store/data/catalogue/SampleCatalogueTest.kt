@@ -11,11 +11,13 @@ import com.nbtapps.store.data.jobs.Resolver
 import com.nbtapps.store.data.jobs.agentUpdate
 import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.PackageFormatException
+import com.nbtapps.store.model.CataloguePackage
 import com.nbtapps.store.model.RestartKind
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -53,14 +55,22 @@ class SampleCatalogueTest {
         assertFalse("the package key must not sign the index", Ed25519.verify(packageKey, rawIndex, signature))
     }
 
+    /** Every version [pkg] has, stable or pre-release. */
+    private fun allVersions(pkg: CataloguePackage) = pkg.versions + pkg.prereleases
+
     @Test
     fun `no package or version is dropped by the parser`() {
         val tree = Json.parseToJsonElement(rawIndex.decodeToString()).jsonObject
-        val published = listOf("packages", "community").flatMap { tree.getValue(it).jsonArray }
-            .sumOf { it.jsonObject.getValue("versions").jsonArray.size }
+        val packages = listOf("packages", "community").flatMap { tree.getValue(it).jsonArray }.map { it.jsonObject }
+        // Stable and pre-release, the same version once: a version in both lists is the stable one.
+        val published = packages.sumOf { pkg ->
+            val prerelease = pkg["channels"]?.jsonObject?.get("prerelease")?.jsonArray.orEmpty()
+            (pkg.getValue("versions").jsonArray + prerelease).map { it.jsonObject.getValue("version").jsonPrimitive.content }.distinct().size
+        }
 
         assertTrue(index.packages.isNotEmpty())
-        assertEquals(published, index.packages.sumOf { it.versions.size })
+        assertEquals(packages.size, index.packages.size)
+        assertEquals(published, index.packages.sumOf { allVersions(it).size })
     }
 
     @Test
@@ -83,7 +93,7 @@ class SampleCatalogueTest {
     fun `every listed archive is in the assets, verifies, and is what its entry says`() {
         val listed = HashSet<String>()
         for (pkg in index.packages) {
-            for (version in pkg.versions) {
+            for (version in allVersions(pkg)) {
                 val what = "${pkg.id} ${version.version}"
                 assertTrue(what, version.url.startsWith("https://"))
                 assertTrue(what, Hex.isSha256(version.sha256) && Hex.isSha256(version.manifestSha256))
@@ -151,7 +161,7 @@ class SampleCatalogueTest {
      */
     @Test
     fun `the sample's community package installs with the catalogue's signature, on an agent from 1_2_0`() {
-        val pkg = requireNotNull(index.packages.find { it.community }) { "no community package in the sample" }
+        val pkg = requireNotNull(index.packages.find { it.community && it.latest != null }) { "no community package in the sample" }
         val newest = requireNotNull(pkg.latest)
         val file = File(root, "packages/${newest.url.substringAfterLast('/')}")
         val signature = requireNotNull(Hex.decodeOrNull(requireNotNull(newest.signature), 64))

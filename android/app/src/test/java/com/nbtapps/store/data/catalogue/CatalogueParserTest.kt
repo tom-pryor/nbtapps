@@ -292,6 +292,187 @@ class CatalogueParserTest {
         assertTrue(parsed.packages.isEmpty())
     }
 
+    // ---- pre-release versions ----
+
+    private fun channels(prerelease: String) = """, "channels": { "prerelease": [$prerelease] }"""
+
+    @Test
+    fun `pre-release versions are read beside the stable ones, each list newest first`() {
+        val pkg = CatalogueParser.parseIndex(
+            index(
+                """{ "id": "a", "name": "A", "versions": [${version("1.0.0")}, ${version("1.1.0")}]
+                     ${channels("${version("1.2.0-rc.1")}, ${version("nightly")}, ${version("1.2.0-rc.2")}, ${version("1.1.5")}")} }""",
+            ),
+        ).packages.single()
+
+        assertEquals(listOf("1.1.0", "1.0.0"), pkg.versions.map { it.version })
+        // One that is not semver is dropped, as a stable one is; a pre-release need not have a pre-release part.
+        assertEquals(listOf("1.2.0-rc.2", "1.2.0-rc.1", "1.1.5"), pkg.prereleases.map { it.version })
+        assertEquals("1.1.0", pkg.latest?.version)
+        assertFalse(pkg.prereleaseOnly)
+    }
+
+    @Test
+    fun `an index without channels has no pre-release versions, and reads as it did before`() {
+        val pkg = CatalogueParser.parseIndex(index("""{ "id": "a", "name": "A", "versions": [${version("1.0.0")}] }""")).packages.single()
+
+        assertTrue(pkg.prereleases.isEmpty())
+        assertFalse(pkg.prereleaseOnly)
+        assertEquals(listOf("1.0.0"), pkg.versions.map { it.version })
+    }
+
+    @Test
+    fun `a malformed channels is ignored, and the package is kept with its stable versions`() {
+        val bad = listOf(
+            "\"channels\": 5",
+            "\"channels\": []",
+            "\"channels\": null",
+            "\"channels\": { \"prerelease\": {} }",
+            "\"channels\": { \"prerelease\": \"1.1.0-rc.1\" }",
+            "\"channels\": { \"prerelease\": [1, \"x\", {}] }",
+        )
+        for (channels in bad) {
+            val pkg = CatalogueParser.parseIndex(index("""{ "id": "a", "name": "A", "versions": [${version("1.0.0")}], $channels }""")).packages.single()
+            assertEquals(channels, listOf("1.0.0"), pkg.versions.map { it.version })
+            assertTrue(channels, pkg.prereleases.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a pre-release version that cannot be read is left out, and the rest are kept`() {
+        val pkg = CatalogueParser.parseIndex(
+            index(
+                """{ "id": "a", "name": "A", "versions": [${version("1.0.0")}]
+                     ${channels("""{ "version": "1.1.0-rc.1", "url": "https://example.invalid/x" }, ${version("1.1.0-rc.2")}""")} }""",
+            ),
+        ).packages.single()
+
+        assertEquals(listOf("1.1.0-rc.2"), pkg.prereleases.map { it.version })
+    }
+
+    @Test
+    fun `channels this app does not know are ignored`() {
+        val pkg = CatalogueParser.parseIndex(
+            index(
+                """{ "id": "a", "name": "A", "versions": [${version("1.0.0")}],
+                     "channels": { "nightly": [${version("1.1.0-n.1")}], "beta": "soon", "prerelease": [${version("1.1.0-rc.1")}] } }""",
+            ),
+        ).packages.single()
+
+        assertEquals(listOf("1.1.0-rc.1"), pkg.prereleases.map { it.version })
+
+        val only = CatalogueParser.parseIndex(
+            index("""{ "id": "a", "name": "A", "versions": [], "channels": { "nightly": [${version("1.1.0-n.1")}] } }"""),
+        )
+        assertTrue("a package with nothing but an unknown channel has no version", only.packages.isEmpty())
+    }
+
+    @Test
+    fun `a package with only pre-release versions is kept, and marked so`() {
+        val parsed = CatalogueParser.parseIndex(
+            index(
+                """
+                { "id": "a", "name": "A", "versions": [] ${channels(version("0.1.0-beta.1"))} },
+                { "id": "b", "name": "B", "versions": [] ${channels(version("nightly"))} }
+                """,
+            ),
+        )
+
+        val pkg = parsed.packages.single()
+        assertEquals("a", pkg.id)
+        assertTrue(pkg.prereleaseOnly)
+        assertNull(pkg.latest)
+        assertEquals(listOf("0.1.0-beta.1"), pkg.prereleases.map { it.version })
+    }
+
+    @Test
+    fun `a version in both lists counts as stable`() {
+        val pkg = CatalogueParser.parseIndex(
+            index(
+                """{ "id": "a", "name": "A", "versions": [${version("1.1.0")}, ${version("1.0.0")}]
+                     ${channels("${version("1.1.0")}, ${version("1.2.0-rc.1")}")} }""",
+            ),
+        ).packages.single()
+
+        assertEquals(listOf("1.1.0", "1.0.0"), pkg.versions.map { it.version })
+        assertEquals(listOf("1.2.0-rc.1"), pkg.prereleases.map { it.version })
+        assertFalse(pkg.isPrerelease("1.1.0"))
+        assertTrue(pkg.isPrerelease("1.2.0-rc.1"))
+    }
+
+    @Test
+    fun `a version is a pre-release when it is listed as one, or has a pre-release part`() {
+        val pkg = CatalogueParser.parseIndex(
+            index("""{ "id": "a", "name": "A", "versions": [${version("1.0.0")}] ${channels(version("1.1.0"))} }"""),
+        ).packages.single()
+
+        assertTrue(pkg.isPrerelease("1.1.0"))
+        assertFalse(pkg.isPrerelease("1.0.0"))
+        // Installed from elsewhere, or a pre-release the catalogue no longer lists.
+        assertTrue(pkg.isPrerelease("0.9.0-rc.1"))
+        assertFalse(pkg.isPrerelease("0.9.0"))
+        assertFalse(pkg.isPrerelease("not a version"))
+    }
+
+    @Test
+    fun `the source's own pre-release versions never carry a detached signature`() {
+        val pkg = CatalogueParser.parseIndex(
+            index("""{ "id": "a", "name": "A", "versions": [${version("1.0.0")}] ${channels(version("1.1.0-rc.1", """, "signature": "$sig""""))} }"""),
+        ).packages.single()
+
+        assertNull(pkg.prereleases.single().signature)
+    }
+
+    @Test
+    fun `community pre-release versions need the source's signature, as stable ones do`() {
+        fun signed(v: String) = version(v, """, "signature": "$sig"""")
+        val parsed = CatalogueParser.parseIndex(
+            indexWithCommunity(
+                listOf(
+                    """{ "id": "io.github.a.radio", "name": "R", "versions": [${signed("1.0.0")}]
+                         ${channels("${signed("1.1.0-rc.2")}, ${version("1.1.0-rc.3")}, ${version("1.1.0-rc.4", """, "signature": "${sig.drop(2)}"""")}")} }""",
+                    // Pre-release only, and signed.
+                    """{ "id": "io.github.a.early", "name": "E", "versions": [] ${channels(signed("0.1.0-alpha.1"))} }""",
+                    // Pre-release only, with nothing signed: nothing is left of it.
+                    """{ "id": "io.github.a.unsigned", "name": "U", "versions": [] ${channels(version("0.1.0-alpha.1"))} }""",
+                ).joinToString(","),
+            ),
+        )
+
+        assertEquals(listOf("org.example.app", "io.github.a.radio", "io.github.a.early"), parsed.packages.map { it.id })
+        val radio = parsed.packages[1]
+        assertEquals(listOf("1.1.0-rc.2"), radio.prereleases.map { it.version })
+        assertEquals(sig, radio.prereleases.single().signature)
+        assertTrue(radio.community)
+        val early = parsed.packages[2]
+        assertTrue(early.prereleaseOnly)
+        assertTrue(early.prereleases.single().detachedSignature)
+    }
+
+    @Test
+    fun `package details read the notes of pre-release versions apart from the rest`() {
+        val details = CatalogueParser.parseDetails(
+            """
+            { "id": "a", "description": "Long text",
+              "changelog": [{ "version": "1.0.0", "notes": ["First release"] }],
+              "channels": { "prerelease": [{ "version": "1.1.0-rc.1", "notes": ["Try this"] }, { "notes": 5 }], "nightly": [] } }
+            """.encodeToByteArray(),
+        )
+
+        assertEquals(listOf("1.0.0"), details.changelog.map { it.version })
+        assertEquals(listOf("1.1.0-rc.1"), details.prereleaseChangelog.map { it.version })
+        assertEquals(listOf("Try this"), details.prereleaseChangelog.single().notes)
+
+        // Without them, or with a channels that is malformed, there are none, and the rest is read.
+        for (channels in listOf("", """, "channels": 5""", """, "channels": { "prerelease": {} }""")) {
+            val plain = CatalogueParser.parseDetails("""{ "id": "a", "changelog": [{ "version": "1.0.0" }] $channels }""".encodeToByteArray())
+            assertEquals(channels, listOf("1.0.0"), plain.changelog.map { it.version })
+            assertTrue(channels, plain.prereleaseChangelog.isEmpty())
+        }
+        assertThrows(CatalogueFormatException::class.java) { CatalogueParser.parseDetails("[]".encodeToByteArray()) }
+        assertThrows(CatalogueFormatException::class.java) { CatalogueParser.parseDetails("{".encodeToByteArray()) }
+    }
+
     @Test
     fun `an index that is not an object is malformed`() {
         assertThrows(CatalogueFormatException::class.java) { CatalogueParser.parseIndex("[]".encodeToByteArray()) }

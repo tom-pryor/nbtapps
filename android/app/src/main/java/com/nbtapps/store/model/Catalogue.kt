@@ -66,7 +66,7 @@ data class CataloguePackage(
     val icon: String? = null,
     /** Path of the [PackageDetails] file, relative to the source's `v1/` folder. */
     val details: String? = null,
-    /** Newest first once the index has been through the parser. */
+    /** The stable versions, newest first once the index has been through the parser. Empty for a [prereleaseOnly] package. */
     val versions: List<PackageVersion> = emptyList(),
     /**
      * From an outside developer: published under the index's `community`, reviewed and countersigned by the
@@ -74,8 +74,33 @@ data class CataloguePackage(
      * from the file.
      */
     @Transient val community: Boolean = false,
+    /**
+     * The pre-release versions, newest first: the index's `channels.prerelease`, which is published apart from
+     * [versions] so that an app that knows no channels never offers one. None of them is also in [versions]. Set
+     * by the parser only; which of the two lists a head unit is offered from is the user's choice, per package
+     * (see [offeredVersions][com.nbtapps.store.data.jobs.offeredVersions]).
+     */
+    @Transient val prereleases: List<PackageVersion> = emptyList(),
 ) {
+    /** The newest stable version. */
     val latest: PackageVersion? get() = versions.firstOrNull()
+
+    /** Out only in pre-release versions so far: there is nothing to offer until the user asks for those. */
+    val prereleaseOnly: Boolean get() = versions.isEmpty() && prereleases.isNotEmpty()
+
+    /**
+     * Whether [version] of this package is a pre-release: one listed among [prereleases], or one whose version
+     * has a semver pre-release part (`1.2.0-rc.1`). A version installed before it was promoted to [versions] is
+     * stable once it is there, since a promotion moves the very same archive.
+     */
+    fun isPrerelease(version: String): Boolean {
+        val parsed = SemVer.parseOrNull(version) ?: return false
+        if (parsed.preRelease.isNotEmpty()) return true
+        return lists(prereleases, parsed) && !lists(versions, parsed)
+    }
+
+    private fun lists(versions: List<PackageVersion>, version: SemVer): Boolean =
+        versions.any { SemVer.parseOrNull(it.version)?.compareTo(version) == 0 }
 }
 
 @Serializable
@@ -165,7 +190,13 @@ data class PackageDetails(
     val description: String = "",
     val homepage: String? = null,
     val screenshots: List<String> = emptyList(),
+    /** What is new in each stable version. */
     val changelog: List<ChangelogEntry> = emptyList(),
+    /**
+     * What is new in each pre-release version: the file's `channels.prerelease`, published apart from
+     * [changelog] as the index publishes the versions. Set by the parser only.
+     */
+    @Transient val prereleaseChangelog: List<ChangelogEntry> = emptyList(),
 )
 
 @Serializable
