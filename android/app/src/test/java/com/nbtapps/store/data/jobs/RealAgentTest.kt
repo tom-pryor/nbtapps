@@ -8,6 +8,7 @@ import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.MemoryPairingKeys
 import com.nbtapps.store.data.PhoneIdentity
 import com.nbtapps.store.data.catalogue.CatalogueParser
+import com.nbtapps.store.data.catalogue.CatalogueState
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
@@ -27,6 +28,9 @@ import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RemoveTarget
 import com.nbtapps.store.model.TcpEndpoint
 import com.nbtapps.store.model.VersionRange
+import com.nbtapps.store.ui.catalogue.DetailsState
+import com.nbtapps.store.ui.catalogue.GetState
+import com.nbtapps.store.ui.catalogue.cataloguePackageUiState
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -176,7 +180,8 @@ class RealAgentTest {
 
     /** Puts a sample archive on the phone the way a download does: copied in, verified and checked against the index. */
     private suspend fun download(id: String, version: String): StoredPackage {
-        val entry = index.packages.first { it.id == id }.versions.first { it.version == version }
+        val pkg = index.packages.first { it.id == id }
+        val entry = (pkg.versions + pkg.prereleases).first { it.version == version }
         return File(sampleRoot, "packages/$id-$version.nbtpkg").inputStream().use {
             store.add(it, listOf(AgentVectors.packageKey), id to entry)
         }
@@ -316,6 +321,103 @@ class RealAgentTest {
             assertEquals("$id $version", JobState.SUCCEEDED, run(planInstall(id, version)).job.state)
         }
         await(jobs.connection, "seven packages") { (it as? ConnectionState.Connected)?.installed?.size == 7 }
+    }
+
+    /** What the head unit holds as the screens see it, over the open link. */
+    private suspend fun head() = requireNotNull(holdings(headUnits.headUnits.first(), jobs.connection.value))
+
+    /** What a package's page shows of getting [id], with the packages [switchedOn] for pre-releases. */
+    private suspend fun page(id: String, switchedOn: Set<String>) = requireNotNull(
+        cataloguePackageUiState(CatalogueState(index = index), id, DetailsState.Loading, store.packages.value, emptyMap(), head(), switchedOn).get,
+    )
+
+    /** The page's download: each archive it says is still to come, put on the phone. */
+    private suspend fun downloadFor(get: GetState) = get.toDownload.forEach { download(it.pkg.id, it.version.version) }
+
+    /** What the app does when the page's Install is pressed: the job screen's resolution, and its plan from what the phone holds. */
+    private suspend fun planFromPage(get: GetState, id: String, switchedOn: Set<String>): Plan {
+        val pkg = index.packages.first { it.id == id }
+        val needed = Resolver.resolve(index, Resolver.Needed(pkg, get.version), connected().installed, connected().info.agentVersion, switchedOn).needed
+        val offers = needed.map { item -> requireNotNull(store.packages.value.find { it.sha256 == item.version.sha256 }) { "${item.pkg.id} is not on the phone" } }
+        return jobs.plan(listOf(InstallTarget(id, get.version.version)), emptyList(), offers).getOrThrow()
+    }
+
+    /**
+     * Pre-releases out of the sample catalogue go onto the real agent the way the app offers them: a package's only
+     * once its switch is on, and one whose dependency only another package's pre-release meets only once that
+     * package's switch is on as well. Switched off again, what is installed counts as up to date.
+     */
+    @Test
+    fun `pre-releases install on the real agent as their switches allow, and stay up to date with them off`() = test {
+        val screencap = "org.nbtapp.screencap"
+        val hello = "org.nbtapp.hello"
+        val runtime = "org.nbtapp.runtime"
+        assertTrue(jobs.connect("bench").isSuccess)
+
+        // A package out only in a pre-release waits for its switch, and then installs as any other.
+        assertTrue(page(screencap, emptySet()).needsSwitch)
+        assertFalse(page(screencap, emptySet()).canInstall)
+        val capture = setOf(screencap)
+        downloadFor(page(screencap, capture))
+        val ready = page(screencap, capture)
+        assertEquals("0.1.0", ready.version.version)
+        assertTrue(ready.offeredPrerelease)
+        assertTrue(ready.canInstall)
+        assertEquals(JobState.SUCCEEDED, run(planFromPage(ready, screencap, capture)).job.state)
+        awaitInstalled("$screencap 0.1.0")
+
+        // Hello NBT's stable version, with the runtime it brings, and every switch off.
+        val stable = page(hello, emptySet())
+        assertEquals("1.2.0", stable.version.version)
+        downloadFor(stable)
+        assertEquals(JobState.SUCCEEDED, run(planFromPage(page(hello, emptySet()), hello, emptySet())).job.state)
+        awaitInstalled("$hello 1.2.0", "$runtime 2.1.0", "$screencap 0.1.0")
+
+        // Its pre-release switched on and the runtime's not: the one runtime that would do is a pre-release, which
+        // is asked for and not taken. The page will not install, the list counts no update, and the agent, offered
+        // what the app would offer, has nothing to meet the dependency with.
+        val one = setOf(screencap, hello)
+        val target = index.packages.first { it.id == hello }
+        val beta = target.prereleases.first { it.version == "1.3.0-beta.1" }
+        val resolution = Resolver.resolve(index, Resolver.Needed(target, beta), connected().installed, connected().info.agentVersion, one)
+        assertEquals(listOf(Resolver.PrereleaseNeed(runtime, "2.2.0-beta.1", hello)), resolution.needsPrerelease)
+        assertEquals(listOf(hello), resolution.needed.map { it.pkg.id })
+        downloadFor(page(hello, one))
+        val asking = page(hello, one)
+        assertEquals("1.3.0-beta.1", asking.version.version)
+        assertEquals(listOf(PrereleaseAsk(runtime, "NBT Runtime", "2.2.0-beta.1")), asking.asks)
+        assertFalse(asking.canInstall)
+        val status = requireNotNull(packageStatus(index, target, head(), one))
+        assertFalse(status.updateAvailable)
+        assertEquals(asking.asks, status.asks)
+        val refused = planFromPage(asking, hello, one)
+        assertFalse(refused.runnable)
+        assertEquals(listOf(runtime), refused.missing.map { it.id })
+        assertTrue(jobs.refresh().isSuccess)
+        assertEquals(listOf("$hello 1.2.0", "$runtime 2.1.0", "$screencap 0.1.0"), installedNow())
+
+        // Both switched on: both go on, the runtime ahead of what needs it.
+        val both = setOf(screencap, hello, runtime)
+        downloadFor(page(hello, both))
+        val update = page(hello, both)
+        assertTrue(update.asks.isEmpty())
+        assertTrue(update.canInstall)
+        assertTrue(requireNotNull(packageStatus(index, target, head(), both)).updateAvailable)
+        val plan = planFromPage(update, hello, both)
+        assertEquals(listOf("upgrade $runtime 2.2.0-beta.1", "upgrade $hello 1.3.0-beta.1"), plan.steps.map { "${it.action} ${it.id} ${it.version}" })
+        assertEquals(JobState.SUCCEEDED, run(plan).job.state)
+        awaitInstalled("$hello 1.3.0-beta.1", "$runtime 2.2.0-beta.1", "$screencap 0.1.0")
+
+        // Every switch off again: the pre-releases on the head unit are up to date, and none is an update.
+        for (id in listOf(screencap, hello, runtime)) {
+            val pkg = index.packages.first { it.id == id }
+            val off = requireNotNull(packageStatus(index, pkg, head(), emptySet()))
+            assertTrue(id, off.installedPrerelease)
+            assertTrue(id, off.upToDate)
+            assertFalse(id, off.updateAvailable)
+            assertTrue(id, page(id, emptySet()).upToDate)
+            assertFalse(id, page(id, emptySet()).canInstall)
+        }
     }
 
     /**
