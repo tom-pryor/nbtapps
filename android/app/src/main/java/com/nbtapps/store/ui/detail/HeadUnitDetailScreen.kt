@@ -51,6 +51,7 @@ import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.InstalledPackage
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.RiskFlag
+import com.nbtapps.store.ui.headunits.AutostartSetupCard
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -110,8 +111,20 @@ fun HeadUnitDetailScreen(
             uiState.profile?.let {
                 AgentCard(it, connected, uiState.restartError, viewModel::restart, onLogs = { onOpenLogs(AGENT_PACKAGE_ID) }.takeIf { uiState.logs })
             }
+            uiState.setup?.let { setup ->
+                AutostartSetupCard(
+                    step = setup.step,
+                    restartNeeded = uiState.restartNeeded,
+                    onRetry = viewModel::retrySetup,
+                    onRestart = viewModel::restartForSetup,
+                    onOpenJob = onOpenJob,
+                    onDismiss = viewModel::dismissSetup,
+                )
+            }
             uiState.autostart?.takeIf { connected }?.let { state ->
-                AutostartCard(state, uiState.autostartBusy, uiState.autostartError, viewModel::setAutostart, onOpenPackage)
+                // While the set-up runs, the switch is its to throw.
+                val busy = uiState.autostartBusy || uiState.setup?.running == true
+                AutostartCard(state, busy, uiState.autostartError, viewModel::setAutostart, onOpenPackage)
             }
             InstalledCard(uiState, connected, onUninstall, onOpenLogs)
         }

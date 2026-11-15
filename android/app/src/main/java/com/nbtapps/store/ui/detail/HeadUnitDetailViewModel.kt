@@ -9,6 +9,8 @@ import androidx.navigation.toRoute
 import com.nbtapps.store.data.BluetoothAccess
 import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.PhoneBluetooth
+import com.nbtapps.store.data.jobs.AutostartSetup
+import com.nbtapps.store.data.jobs.AutostartSetupState
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.JobView
@@ -18,6 +20,7 @@ import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.InstalledPackage
+import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.ui.navigation.HeadUnitDetailRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -86,6 +89,10 @@ data class HeadUnitDetailUiState(
     val autostartError: String? = null,
     /** There is a link to this head unit, and its agent can send log files: see [com.nbtapps.store.ui.logs.LogPullScreen]. */
     val logs: Boolean = false,
+    /** The set-up that has this head unit start the agent with the car, begun on pairing, if there is one: see [AutostartSetup]. */
+    val setup: AutostartSetupState? = null,
+    /** The agent says over the link to this head unit that iDrive has to restart. */
+    val restartNeeded: Boolean = false,
 )
 
 @HiltViewModel
@@ -95,6 +102,7 @@ class HeadUnitDetailViewModel @Inject constructor(
     private val jobs: JobRepository,
     private val connector: LinkConnector,
     private val bluetooth: PhoneBluetooth,
+    private val setup: AutostartSetup,
 ) : ViewModel() {
 
     private val headUnitId = savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId
@@ -109,7 +117,7 @@ class HeadUnitDetailViewModel @Inject constructor(
     private val local = MutableStateFlow(Local())
 
     val uiState: StateFlow<HeadUnitDetailUiState> =
-        combine(repository.headUnit(headUnitId), jobs.connection, jobs.job, local) { unit, connection, job, local ->
+        combine(repository.headUnit(headUnitId), jobs.connection, jobs.job, local, setup.state) { unit, connection, job, local, setup ->
             val connected = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == headUnitId }
             HeadUnitDetailUiState(
                 loaded = true,
@@ -131,6 +139,8 @@ class HeadUnitDetailViewModel @Inject constructor(
                 autostartBusy = local.autostartBusy,
                 autostartError = local.autostartError,
                 logs = connected?.files == true,
+                setup = setup?.takeIf { it.headUnitId == headUnitId },
+                restartNeeded = connected?.info?.restartNeeded == RestartKind.HMI,
             )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
 
@@ -165,6 +175,15 @@ class HeadUnitDetailViewModel @Inject constructor(
             local.update { it.copy(autostartBusy = false, autostartError = failure?.let { why -> why.message ?: "The head unit didn't answer" }) }
         }
     }
+
+    /** Runs the set-up for starting with the car again from the top, after it stopped short. */
+    fun retrySetup() = setup.retry()
+
+    /** Asks the agent to restart iDrive, once the set-up is done: see [AutostartSetup.restart]. */
+    fun restartForSetup() = setup.restart()
+
+    /** Hides the set-up's card, once it has ended. */
+    fun dismissSetup() = setup.dismiss()
 
     /** [kind] is `hmi` or `reboot`. */
     fun restart(kind: String) {
