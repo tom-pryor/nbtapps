@@ -282,7 +282,11 @@ class JobRepository(
     suspend fun connect(headUnitId: String): Result<Unit> {
         // What the user asks for takes the place of what the app was waiting to do by itself.
         stopRejoining()
-        return connectLock.withLock { attempt(headUnitId, rejoining = false) }
+        return connectLock.withLock {
+            // A wait that began while this one waited for the lock was not there to be ended above.
+            stopRejoining()
+            attempt(headUnitId, rejoining = false)
+        }
     }
 
     /**
@@ -366,7 +370,10 @@ class JobRepository(
         if (view != null && view.reconnecting && view.headUnitId == headUnitId) view.copy(reconnecting = false, linkLost = true) else view
     }
 
-    /** Ends the app's own wait to connect again, if there is one. */
+    /**
+     * Ends the app's own wait to connect again, if there is one. The wait is begun with [connectLock] held, so
+     * only a caller that holds it knows there is none; one that does not hold it ends a try that is under way.
+     */
     private fun stopRejoining() {
         rejoining?.cancel()
         rejoining = null
@@ -433,6 +440,8 @@ class JobRepository(
     suspend fun disconnect() {
         stopRejoining()
         connectLock.withLock {
+            // As in [connect]: a wait that began meanwhile ends here.
+            stopRejoining()
             drop("Disconnected")
             connectionState.value = ConnectionState.Disconnected
         }
