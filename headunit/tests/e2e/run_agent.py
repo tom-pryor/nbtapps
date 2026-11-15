@@ -12,7 +12,8 @@ runs here, and reaches the agent through the socket. It plays the phone: it offe
 the packages of a folder (the "stick") and serves them when the agent asks. The script drives a plan, an install
 with a dependency, an upgrade, an upgrade that fails and is undone, a fetch that the controller cancels, a fetch
 whose link drops and is resumed, removals, the logs of a package pulled (`nbtctl logs` and `nbtctl pull`, and once
-read off the local socket here, with Python's own inflate), and a restart of the agent, and after each looks at what
+read off the local socket here, with Python's own inflate), the checks of what was put on by hand and the fix of a
+made-up app (`nbtctl checks` and `nbtctl checks fix`), and a restart of the agent, and after each looks at what
 the agent says and at what is on disk. It also is a phone on the agent's debug TCP link, which the phone app on an emulator uses:
 refused until it is paired, paired by the code `nbtctl pair` prints, let in by `auth`, and forgotten again, and
 told with link.closing why its link closes when it is forgotten and when the agent stops.
@@ -492,6 +493,43 @@ def run():
         check(not os.path.exists(hello) and not os.path.exists(os.path.join(HU, "data", "org.nbtapp.hello")), "files were left behind")
         check(not os.path.exists(logger_tmp), "${tmp} was left behind")
 
+
+        # ---- the checks: nothing put on by hand, and then a made-up app that was, with a link in it to a file
+        # outside it
+        check(ok("checks") == "system-writable ok\naa-fix ok\n", "checks on a head unit with nothing by hand")
+        app, data, plugin = os.path.join(HU, "system", "opt", "aa"), os.path.join(HU, "system", "var", "opt", "aa"), os.path.join(HU, "plugins", "Demo")
+        outside = os.path.join(HU, "system", "outside.txt")
+        for folder in (os.path.join(app, "bin"), data, plugin):
+            os.makedirs(folder)
+        hand = {os.path.join(app, "bin", "demod"): b"#!/bin/sh\nsleep 600\n", os.path.join(data, "state.txt"): b"state\n",
+                os.path.join(plugin, "Demo.manifest"): b"<plugin><name>Demo</name><config><dependencies><pluginAppConnector>"
+                b"<id>210</id></pluginAppConnector></dependencies></config></plugin>\n",
+                outside: b"not the app's\n"}
+        for path, content in hand.items():
+            with open(path, "wb") as f:
+                f.write(content)
+        os.symlink(outside, os.path.join(app, "bin", "libdemo.so"))
+        listed = ok("checks", "--list")
+        # The plugin is moved into the app's folder, which stays for it; the rest is removed.
+        expected = sorted([os.path.join(app, "bin"), os.path.join(app, "bin", "demod"), os.path.join(app, "bin", "libdemo.so"),
+                           data, os.path.join(data, "state.txt")])
+        parked = os.path.join(app, "Demo.old")
+        check(listed == "system-writable ok\naa-fix problem 5\n  move %s to %s\n" % (plugin, parked) +
+              "".join("  %s\n" % p for p in expected), "checks --list", listed)
+        code, out = ctl("checks", "fix", "no-such-check")
+        check(code == 1 and "not-found" in out, "the fix of a check there is not", out)
+        check(ctl("checks", "frob")[0] == 2, "checks with a word it does not take")
+        out = ok("checks", "fix", "aa-fix")
+        check(out == "moved %s to %s\n" % (plugin, parked) + "".join("removed %s\n" % p for p in expected) +
+              "aa-fix ok\nrestart needed: hmi-restart\n", "checks fix aa-fix", out)
+        check(os.listdir(app) == ["Demo.old"] and os.listdir(parked) == ["Demo.manifest"], "what the fix leaves in the app's folder")
+        check(not os.path.lexists(data) and not os.path.lexists(plugin), "the app's files were left")
+        with open(outside, "rb") as f:
+            check(f.read() == b"not the app's\n", "the file the link led to")
+        os.remove(outside)
+        check("restartNeeded hmi-restart" in ok("info"), "the restart the fix leaves needed")
+        out = ok("checks", "fix", "aa-fix")
+        check(out == "aa-fix ok\n", "the same fix again", out)
 
         # ---- other requests
         code, out = ctl("call", "ping")

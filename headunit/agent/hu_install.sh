@@ -28,7 +28,8 @@
 # says how to. It writes over no version that is there and removes nothing. A version that is there already has
 # to be removed by hand first, with the agent stopped; the script says how. It starts nothing and stops nothing:
 # an agent that is running goes on as it is until it is stopped and its launcher started again. It refuses while
-# an update of the agent by the agent is under way (a file `trial` or `trial.started`).
+# an update of the agent by the agent is under way (a file `trial` or `trial.started`). Where /opt/aa is there, which
+# an app that was installed by hand leaves, it says so at the end and names the agent's check for it.
 #
 # It cannot sync what it wrote: a head unit has no sync. Leave the head unit on for a moment after it, or run it
 # again if the files are not there after a power down.
@@ -36,6 +37,7 @@
 # Written for the head unit's ksh and for sh, with the shell's own commands and mkdir, cp, chmod and mv.
 
 AGENT_HOME=${NBT_TEST_AGENT_HOME:-/var/opt/nbtapp/agent}     # override only for host tests
+HAND_APP=${NBT_TEST_HAND_APP:-/opt/aa}                       # the same
 
 case $0 in
     */*) SRC=${0%/*} ;;
@@ -101,3 +103,9 @@ echo "hu_install: To start it:  $AGENT_HOME/launcher &"
 echo "hu_install: Its log:      /tmp/nbtapp/log/agent.log, which a power down empties"
 echo "hu_install: Nothing starts it with the head unit. To have the iDrive plugin do that, once it has run well:"
 echo "hu_install:   echo on > $AGENT_HOME/autostart"
+
+# An app that was installed by hand, outside this system, keeps its files there. The agent's check aa-fix finds
+# it, and its fix moves its plugin aside and removes the rest when a person asks.
+if [ -d "$HAND_APP" ]; then
+    echo "hu_install: $HAND_APP is there: an app that was installed by hand. Once the agent runs, nbtctl checks (or the phone app) says what it holds, and nbtctl checks fix aa-fix moves its plugin aside and removes the rest"
+fi

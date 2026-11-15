@@ -232,6 +232,18 @@ bool HeadUnitPlatform::makeWritable(const std::string& path, std::string* error)
 
 bool HeadUnitPlatform::restoreReadOnly(std::string* error) {
     if (!remounted_) return true;
+    return putSystemReadOnly(error);
+}
+
+Platform::SystemState HeadUnitPlatform::systemState(std::string* error) const {
+    bool ro = false;
+    if (!readOnly(config_.systemMount, &ro, error)) return kSystemUnknown;
+    return ro ? kSystemReadOnly : kSystemWritable;
+}
+
+bool HeadUnitPlatform::remountedForStep() const { return remounted_ || fs::kindOf(markerPath()) != fs::kNone; }
+
+bool HeadUnitPlatform::putSystemReadOnly(std::string* error) {
     sync();
     std::string why;
     for (unsigned attempt = 0; attempt < config_.restoreAttempts; ++attempt) {

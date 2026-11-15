@@ -126,6 +126,14 @@ public:
     virtual bool restartHmi(std::string* error);
     virtual bool reboot(std::string* error);
 
+    // The system partition's read-only flag, as readOnly() gives it for systemMount.
+    virtual SystemState systemState(std::string* error) const;
+    // remounted(), or the marker in the run folder is there.
+    virtual bool remountedForStep() const;
+    // Runs the configured remountReadOnly as restoreReadOnly does, whoever made the partition writable, and
+    // checks that it helped. Afterwards nothing is left for restoreReadOnly to put back, and the marker is gone.
+    virtual bool putSystemReadOnly(std::string* error);
+
     // True from a remount by makeWritable until restoreReadOnly has put the partition back.
     bool remounted() const { return remounted_; }
     std::string markerPath() const { return config_.runDir + "/system-writable"; }

@@ -3,9 +3,10 @@
 #ifndef NBT_AGENT_PROGRAMS_HPP
 #define NBT_AGENT_PROGRAMS_HPP
 
-// Which programs are running, told by the file name of a process's executable. Two users: the gate, which names
-// the program that opens a serial node (spp_gate.hpp), and the agent, which has to know whether the program that
-// answers for a serial service is still there (serial_services.hpp).
+// Which programs are running, told by the file name of a process's executable. Three users: the gate, which names
+// the program that opens a serial node (spp_gate.hpp), the agent, which has to know whether the program that
+// answers for a serial service is still there (serial_services.hpp), and the checks, which stop the programs of an
+// app before its files are removed (checks.hpp): those are found by the folder their executable is in.
 //
 // A process is its executable: one that a shell runs from a script is the shell, not the script.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
@@ -13,6 +14,7 @@
 #include <string.h>
 
 #include <string>
+#include <vector>
 
 namespace nbt {
 
@@ -46,6 +48,21 @@ enum ProgramState {
 // passed over because their executable could not be read: with kProgramNotRunning, one of those could still be
 // the program.
 ProgramState programState(const std::string& name, const char* procDir = "/proc", unsigned* unnamed = 0);
+
+// A process, and the path of its executable as the system reports it, without a line end.
+struct RunningProgram {
+    long pid;
+    std::string path;
+    RunningProgram() : pid(0) {}
+};
+
+// The processes whose executable is in the folder `dir` or below it, by path: `dir` as it is given, or the path the
+// links in it lead to, since the system may report either. kProgramRunning with them in *out if there is one;
+// kProgramNotRunning if the processes could be listed and named and none is; kProgramUnknown, as programState
+// says, when nothing is known, and then a caller must not act as though no such process ran. *unnamed is as
+// there.
+ProgramState programsUnder(const std::string& dir, std::vector<RunningProgram>* out, const char* procDir = "/proc",
+                           unsigned* unnamed = 0);
 
 }  // namespace nbt
 

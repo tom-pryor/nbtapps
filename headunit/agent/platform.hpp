@@ -10,7 +10,10 @@
 // hu_probe.sh, beside this file, reads off a car is where the car's comes from. Nothing in this file touches one.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
+#include <errno.h>
+#include <signal.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include <string>
 #include <vector>
@@ -78,6 +81,33 @@ public:
     // the agent has, the folder that stands in for a head unit included: it is the machine's processes that are
     // asked about. A test gives its own answer.
     virtual ProgramState programState(const std::string& name) const { return nbt::programState(name); }
+    // The processes whose executable is in the folder `dir` or below it (programs.hpp), asked of the machine's
+    // processes in the same way.
+    virtual ProgramState programsUnder(const std::string& dir, std::vector<RunningProgram>* out) const {
+        return nbt::programsUnder(dir, out);
+    }
+    // Sends signal `number` to process `pid`. True if it was sent, or there is no such process any more. A test
+    // that gives its own answer to programsUnder gives its own here too, so that it signals no process it did not
+    // start.
+    virtual bool signalProcess(long pid, int number) { return kill((pid_t)pid, number) == 0 || errno == ESRCH; }
+
+    // The system partition as it is now, for the check that finds it left writable (checks.hpp).
+    enum SystemState {
+        kSystemNone,       // the question does not apply: the machine has no system partition the agent remounts
+        kSystemReadOnly,
+        kSystemWritable,
+        kSystemUnknown     // it could not be told; *error says why
+    };
+    virtual SystemState systemState(std::string* /*error*/) const { return kSystemNone; }
+    // True while the system partition is writable because makeWritable made it so and restoreReadOnly has not put
+    // it back yet, or because an agent that ended in the middle of that left its marker.
+    virtual bool remountedForStep() const { return false; }
+    // Puts the system partition back read-only now, whoever made it writable, and then asks the file system
+    // whether it is. False with *error saying why if it is not.
+    virtual bool putSystemReadOnly(std::string* error) {
+        if (error != 0) *error = "this machine has no system partition to remount";
+        return false;
+    }
 };
 
 }  // namespace nbt

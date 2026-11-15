@@ -32,6 +32,9 @@
 //                                          own) a controller may pull: size, time (UTC) and path, newest first
 //   pull    ID PATH --out FILE [--offset N] [--length N] [--none]
 //                                          one of them, into FILE: deflated on the link, or with --none as it is
+//   checks  [--list]                       the compatibility checks: what was put onto the head unit by hand; with
+//                                          --list, every folder each one would move and every path it would remove
+//   checks  fix ID                         runs that check, and its fix on what it found
 //   call METHOD [JSON]                     any request, the reply printed as it came
 //
 // `autostart` prints three lines: "autostart on" or "autostart off"; "available yes", or "available no" with the
@@ -40,6 +43,15 @@
 //
 // `pull` prints one line when the file is whole: "pulled N bytes, M on the link". A stream that ends short, does
 // not inflate, or that the agent ends with files.error leaves FILE as far as it came, says why, and exits with 1.
+//
+// `checks` prints a line for each check: its id and "ok", "unknown" and why, or "problem" and the number of paths
+// it would remove, and "no fix" where it has none. With --list each problem's line is followed, two spaces in, by
+// "move FROM to TO" for each folder it would move, and then by each path it would remove, all of them, a page at a
+// time. `checks fix ID` runs the check and, where it finds a problem, the fix with the token of what it found: a
+// line "moved FROM to TO" for each folder that was moved, "removed PATH" for each path that went, "left PATH" for
+// each that is still there and each folder that was not moved, "stopped NAME" for each program that was stopped,
+// then the check's id and the state it finds now, and "restart needed:" with the restart, unless none is. It exits
+// with 1 if the check still finds a problem, or finds nothing it can say.
 //
 // `pair` prints "code NNNNNN" as its first line, then one line when the window has closed: "paired", or
 // "not paired: " and the reason (wrong-code, expired, replaced). Its exit status is 0 only for "paired".
@@ -64,6 +76,7 @@
 #include <unistd.h>
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -557,6 +570,8 @@ int usage() {
             "  autostart [on|off]       whether the agent is started with the head unit; switch it on or off\n"
             "  logs    ID               the log files of a package (org.nbtapp.agent: the agent's own)\n"
             "  pull    ID PATH --out FILE [--offset N] [--length N] [--none]\n"
+            "  checks  [--list]         what was put onto the head unit by hand\n"
+            "  checks  fix ID           that check's fix, on the list it finds\n"
             "  call METHOD [JSON]\n"
             "The socket is $NBT_AGENT_SOCKET if --socket is not given"
 #ifdef __QNXNTO__
@@ -605,6 +620,52 @@ bool fetchKeys(Controller* c, std::vector<TrustedKey>* keys, int* status) {
         keys->push_back(key);
     }
     return true;
+}
+
+// Every path a check found: the ones in `first`, the check as checks.run gave it, and the pages after them. False
+// with *status if the agent refused a page or the link broke.
+bool checkPaths(Controller* c, const std::string& id, json::Value first, std::vector<std::string>* out, int* status) {
+    json::Value found = first.find("found"), more = first.find("more");
+    for (size_t i = 0; i < found.size(); ++i) out->push_back(found.at(i).isString() ? found.at(i).string() : std::string());
+    bool again = more.isBool() && more.boolean();
+    while (again) {
+        json::Writer w;
+        w.beginObject().key("id").string(id);
+        if (!out->empty()) w.key("after").string(out->back());
+        w.endObject();
+        Reply reply;
+        if (!c->call("checks.run", w.text(), &reply)) {
+            *status = 3;
+            return false;
+        }
+        if (!reply.ok) {
+            *status = refused("checks.run", reply);
+            return false;
+        }
+        json::Document doc;
+        doc.parse(reply.text, 0);
+        json::Value list = doc.root().find("checks");
+        if (list.size() != 1) break;
+        json::Value page = list.at(0).find("found"), next = list.at(0).find("more");
+        // A page with nothing in it ends the list, so that a list that changes under it is not asked for ever.
+        if (page.size() == 0) break;
+        for (size_t i = 0; i < page.size(); ++i) out->push_back(page.at(i).isString() ? page.at(i).string() : std::string());
+        again = next.isBool() && next.boolean();
+    }
+    return true;
+}
+
+// Each move of a list as a line: `prefix` FROM to TO.
+void printMoves(const char* prefix, json::Value moves) {
+    for (size_t i = 0; i < moves.size(); ++i) printf("%s%s to %s\n", prefix, text(moves.at(i), "from").c_str(), text(moves.at(i), "to").c_str());
+}
+
+// One check's line, as `checks` prints it.
+void printCheck(json::Value check) {
+    std::string id = text(check, "id"), state = text(check, "state");
+    if (state == "unknown") printf("%s unknown: %s\n", id.c_str(), text(check, "why").c_str());
+    else if (state == "problem") printf("%s problem %lld%s\n", id.c_str(), integer(check, "count"), check.find("fix").isObject() ? "" : " no fix");
+    else printf("%s %s\n", id.c_str(), state.c_str());
 }
 
 void printSteps(json::Value steps, bool withResult) {
@@ -677,7 +738,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> args;
     std::string from;
     std::vector<std::string> removes;
-    bool deleteData = false, events = false, all = false, uncompressed = false;
+    bool deleteData = false, events = false, all = false, uncompressed = false, listPaths = false;
     long long cancelAfter = -1, dropAfter = -1, offset = -1, length = -1;
     std::string out;
     for (int i = 1; i < argc; ++i) {
@@ -715,6 +776,8 @@ int main(int argc, char** argv) {
             events = true;
         } else if (arg == "--all") {
             all = true;
+        } else if (arg == "--list") {
+            listPaths = true;
         } else if (arg.compare(0, 2, "--") == 0) {
             return usage();
         } else {
@@ -908,6 +971,77 @@ int main(int argc, char** argv) {
         }
         printf("pulled %llu bytes, %llu on the link\n", (unsigned long long)c.pulledBytes(), (unsigned long long)c.pulledWire());
         return 0;
+    }
+
+    if (command == "checks") {
+        if (args.empty()) {
+            if (!c.call("checks.run", "{}", &reply)) return 3;
+            if (!reply.ok) return refused("checks.run", reply);
+            doc.parse(reply.text, 0);
+            json::Value list = doc.root().find("checks");
+            for (size_t i = 0; i < list.size(); ++i) {
+                printCheck(list.at(i));
+                if (!listPaths || text(list.at(i), "state") != "problem") continue;
+                printMoves("  move ", list.at(i).find("moves"));
+                std::vector<std::string> paths;
+                int status = 0;
+                if (!checkPaths(&c, text(list.at(i), "id"), list.at(i), &paths, &status)) return status;
+                for (size_t k = 0; k < paths.size(); ++k) printf("  %s\n", paths[k].c_str());
+            }
+            return 0;
+        }
+        if (args.size() != 2 || args[0] != "fix" || listPaths) return usage();
+        const std::string id = args[1];
+        json::Writer w;
+        w.beginObject().key("id").string(id).endObject();
+        if (!c.call("checks.run", w.text(), &reply)) return 3;
+        if (!reply.ok) return refused("checks.run", reply);
+        doc.parse(reply.text, 0);
+        json::Value list = doc.root().find("checks");
+        if (list.size() != 1) {
+            fprintf(stderr, "nbtctl: checks.run did not answer for %s alone\n", id.c_str());
+            return 1;
+        }
+        json::Value check = list.at(0), fix = check.find("fix");
+        std::string state = text(check, "state");
+        if (state != "problem" || !fix.isObject()) {
+            printCheck(check);
+            if (state == "problem") printf("%s\n", text(check, "detail").c_str());
+            return state == "ok" ? 0 : 1;
+        }
+        // The whole list, to say afterwards which of its paths went.
+        std::vector<std::string> paths;
+        int status = 0;
+        if (!checkPaths(&c, id, check, &paths, &status)) return status;
+        json::Writer f;
+        f.beginObject().key("id").string(id).key("token").string(text(fix, "token")).endObject();
+        Reply fixed;
+        if (!c.call("checks.fix", f.text(), &fixed)) return 3;
+        if (!fixed.ok) return refused("checks.fix", fixed);
+        json::Document result;
+        result.parse(fixed.text, 0);
+        json::Value r = result.root(), left = r.find("left"), stopped = r.find("stopped");
+        printMoves("moved ", r.find("moved"));
+        // The paths of the list that are left; a folder that was not moved is in `left` too, and is not one of them.
+        std::set<std::string> stayed;
+        for (size_t i = 0; i < left.size(); ++i) stayed.insert(left.at(i).isString() ? left.at(i).string() : std::string());
+        size_t listedStayed = 0;
+        for (size_t i = 0; i < paths.size(); ++i) listedStayed += stayed.count(paths[i]);
+        long long leftMore = integer(r, "leftMore");
+        if (leftMore == 0 && (long long)(paths.size() - listedStayed) == integer(r, "removed")) {
+            for (size_t i = 0; i < paths.size(); ++i) {
+                if (stayed.count(paths[i]) == 0) printf("removed %s\n", paths[i].c_str());
+            }
+        } else {
+            printf("removed %lld paths\n", integer(r, "removed"));
+        }
+        for (size_t i = 0; i < left.size(); ++i) printf("left %s\n", left.at(i).isString() ? left.at(i).string().c_str() : "");
+        if (leftMore > 0) printf("left %lld more\n", leftMore);
+        for (size_t i = 0; i < stopped.size(); ++i) printf("stopped %s\n", stopped.at(i).isString() ? stopped.at(i).string().c_str() : "");
+        printf("%s %s\n", id.c_str(), text(r, "state").c_str());
+        std::string restart = text(r, "restart");
+        if (!restart.empty() && restart != "none") printf("restart needed: %s\n", restart.c_str());
+        return text(r, "state") == "ok" ? 0 : 1;
     }
 
     if (command == "restart") {

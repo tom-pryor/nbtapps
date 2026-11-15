@@ -29,7 +29,6 @@ namespace {
 
 const size_t kMaxStepLog = 256u << 10;      // of one step, kept in memory and in the record
 const size_t kMaxLogFile = 256u << 10;      // <state>/install.log is rotated past this
-const size_t kMaxPluginFile = 4u << 20;     // a plugin manifest or UI description larger than this is not read
 const unsigned kVersionTimeoutSeconds = 20;  // for a new version of the agent to say which version it is
 const size_t kMaxVersionOutput = 1024;      // of what it prints, this much is read
 
@@ -1290,30 +1289,13 @@ bool InstallStep::checkHmiIds() {
 
     // Every folder the HMI loads plugins from counts, not only the one this package goes into.
     std::set<long> usedConnectors, usedFocus;
-    std::vector<std::string> folders;
-    std::vector<std::string> scanned = platform()->pluginScanDirs();
-    for (size_t s = 0; s < scanned.size(); ++s) {
-        std::vector<std::string> names;
-        if (!fs::listDir(scanned[s], &names, 0)) continue;
-        for (size_t i = 0; i < names.size(); ++i) folders.push_back(scanned[s] + "/" + names[i]);
-    }
+    std::vector<PluginFolder> folders;
+    scanPluginFolders(platform()->pluginScanDirs(), ours, &folders);
     for (size_t i = 0; i < folders.size(); ++i) {
-        const std::string& dir = folders[i];
-        std::vector<std::string> names;
-        if (!fs::isDir(dir) || !fs::listDir(dir, &names, 0)) continue;
-        for (size_t k = 0; k < names.size(); ++k) {
-            std::string path = dir + "/" + names[k];
-            if (!endsWith(names[k], ".manifest") || ours.count(path) != 0) continue;
-            std::string text, desc;
-            std::vector<long> found;
-            if (!fs::readFile(path, kMaxPluginFile, &text, 0)) continue;
-            readPluginManifest(text, &found, &desc);
-            usedConnectors.insert(found.begin(), found.end());
-            found.clear();
-            if (!startsWith(desc, "{pluginDir}/")) continue;
-            std::string descPath = dir + "/" + desc.substr(12);
-            if (ours.count(descPath) == 0 && fs::readFile(descPath, kMaxPluginFile, &text, 0)) readPluginDescription(text, &found);
-            usedFocus.insert(found.begin(), found.end());
+        for (size_t k = 0; k < folders[i].manifests.size(); ++k) {
+            const PluginManifest& found = folders[i].manifests[k];
+            usedConnectors.insert(found.connectorIds.begin(), found.connectorIds.end());
+            usedFocus.insert(found.focusIds.begin(), found.focusIds.end());
         }
     }
     for (size_t i = 0; i < connectors.size(); ++i) {

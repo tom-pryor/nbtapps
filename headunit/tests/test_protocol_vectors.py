@@ -276,6 +276,7 @@ CONSTANTS = {
     "capability.autostart": "name",
     "capability.detachedSignature": "name",
     "capability.files": "name",
+    "capability.checks": "name",
 }
 
 

@@ -41,6 +41,8 @@ const char* const kCapabilityDetachedSignature = "detached-signature";
 // A capability: this agent has files.list, files.fetch and files.cancel, and sends a controller the logs of an
 // installed package.
 const char* const kCapabilityFiles = "files";
+// A capability: this agent has checks.run and checks.fix, the compatibility checks (checks.hpp).
+const char* const kCapabilityChecks = "checks";
 
 }  // namespace nbt
 

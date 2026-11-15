@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "checks.hpp"
 #include "fsutil.hpp"
 #include "hex.hpp"
 #include "inflate.hpp"
@@ -765,23 +766,189 @@ void Agent::autostartSet(Session* s, int64_t id, const json::Value& params) {
     answer(s, id, autostartState());
 }
 
+// ---- the compatibility checks -------------------------------------------------------------------------------------
+
+namespace {
+
+// A string as JSON, for a list that is filled to the room a frame has.
+std::string jsonString(const std::string& text) {
+    json::Writer w;
+    w.string(text);
+    return w.text();
+}
+
+// What checks.run says of one check. A problem gets `count` of its paths from `from` on, which are JSON strings
+// already, and `more` if others follow them.
+std::string checkObject(const Check& c, const CheckFinding& f, const std::vector<std::string>& paths, size_t from,
+                        size_t count, bool more) {
+    json::Writer w;
+    w.beginObject().key("id").string(c.id).key("state").string(checkStateName(f.state));
+    if (f.state == kCheckUnknown) w.key("why").string(sanitizeUtf8(f.why, 0));
+    if (f.state == kCheckProblem) {
+        std::string detail = c.detail;
+        if (!f.why.empty()) detail += " " + f.why;
+        w.key("title").string(c.title).key("detail").string(sanitizeUtf8(detail, 0)).key("count").integer((int64_t)paths.size());
+        w.key("found").beginArray();
+        for (size_t i = from; i < from + count && i < paths.size(); ++i) w.raw(paths[i]);
+        // The moves are few (kCheckMaxMoves at most), and every page has them.
+        w.endArray().key("more").boolean(more).key("moves").beginArray();
+        for (size_t i = 0; i < f.moves.size(); ++i) {
+            w.beginObject().key("from").string(shownPath(f.moves[i].from)).key("to").string(shownPath(f.moves[i].to)).endObject();
+        }
+        w.endArray();
+        if (f.fixable) {
+            w.key("fix").beginObject().key("label").string(c.fixLabel).key("detail").string(c.fixDetail);
+            w.key("restart").string(c.restart).key("token").string(f.token).endObject();
+        }
+    }
+    w.endObject();
+    return w.text();
+}
+
+}  // namespace
+
+CheckContext Agent::checkContext() {
+    CheckContext context(platform_, &engine_.store());
+    context.stepRunning = inStep_ || job_.installing();
+    return context;
+}
+
+void Agent::checksRun(Session* s, int64_t id, const json::Value& params) {
+    json::Value which = params.find("id"), after = params.find("after");
+    if ((which.present() && !which.isString()) || (after.present() && (!after.isString() || !which.present()))) {
+        refuse(s, id, "bad-request", "checks.run takes the id of a check, and with it the last path it was given as after");
+        return;
+    }
+    if (inStep_) {
+        refuse(s, id, "busy", "a job is installing; what the checks look at is changing");
+        return;
+    }
+    std::vector<const Check*> asked;
+    if (which.present()) {
+        const Check* one = findCheck(which.string());
+        if (one == 0) {
+            refuse(s, id, "not-found", "this agent has no check " + sanitizeUtf8(which.string().substr(0, 64), 0));
+            return;
+        }
+        asked.push_back(one);
+    } else {
+        for (size_t i = 0; i < checkCount(); ++i) asked.push_back(&checkAt(i));
+    }
+    CheckContext context = checkContext();
+    std::vector<CheckFinding> found(asked.size());
+    std::vector<std::vector<std::string> > paths(asked.size());
+    std::vector<size_t> from(asked.size(), 0), count(asked.size(), 0);
+    std::string said;
+    for (size_t i = 0; i < asked.size(); ++i) {
+        runCheck(*asked[i], context, &found[i]);
+        for (size_t k = 0; k < found[i].entries.size(); ++k) {
+            std::string shown = shownPath(found[i].entries[k].path);
+            if (after.present() && shown <= after.string()) ++from[i];
+            paths[i].push_back(jsonString(shown));
+        }
+        said += std::string(i == 0 ? "" : ", ") + asked[i]->id + " " + checkStateName(found[i].state);
+        if (found[i].state == kCheckProblem) said += " (" + countOf(found[i].entries.size(), "path") + ")";
+    }
+    // What has to be said of each check comes first; the paths fill what room the link's frame has left, in the
+    // order of the checks. `more` is written as false here, which is the longer of the two.
+    size_t room = s->peer->maxFrame() > kEnvelopeRoom + 32 ? s->peer->maxFrame() - kEnvelopeRoom - 32 : 0;
+    size_t fixed = 14;   // {"checks":[]}
+    for (size_t i = 0; i < asked.size(); ++i) fixed += checkObject(*asked[i], found[i], paths[i], 0, 0, false).size() + 1;
+    size_t left = room > fixed ? room - fixed : 0;
+    for (size_t i = 0; i < asked.size(); ++i) {
+        for (size_t k = from[i]; k < paths[i].size() && paths[i][k].size() + 1 <= left; ++k) {
+            left -= paths[i][k].size() + 1;
+            ++count[i];
+        }
+        // Once one list is cut short, the ones after it wait for their own pages: the order stays as it is.
+        if (from[i] + count[i] < paths[i].size()) left = 0;
+    }
+    json::Writer w;
+    w.beginObject().key("checks").beginArray();
+    for (size_t i = 0; i < asked.size(); ++i) {
+        w.raw(checkObject(*asked[i], found[i], paths[i], from[i], count[i], from[i] + count[i] < paths[i].size()));
+    }
+    w.endArray().endObject();
+    note(linkName(s->number) + ": checks: " + said);
+    answer(s, id, w.text());
+}
+
+void Agent::checksFix(Session* s, int64_t id, const json::Value& params) {
+    json::Value which = params.find("id"), token = params.find("token");
+    if (!which.isString() || !token.isString() || !isHex(token.string(), 2 * kSha256Bytes)) {
+        refuse(s, id, "bad-request", "checks.fix takes the id of a check and the token of 64 hex characters that checks.run gave");
+        return;
+    }
+    if (s->role == "plugin") {
+        refuse(s, id, "forbidden", "a check's fix is asked for from a phone or with nbtctl, by a person who has seen what it removes");
+        return;
+    }
+    if (onTrial_) {
+        refuse(s, id, "busy", "this version of the agent is on trial, and changes nothing until it is confirmed");
+        return;
+    }
+    if (job_.active() || inStep_ || !pendingRestart_.empty()) {
+        refuse(s, id, "busy", pendingRestart_.empty() ? "a job is running" : "a restart is on its way");
+        return;
+    }
+    const Check* check = findCheck(which.string());
+    if (check == 0) {
+        refuse(s, id, "not-found", "this agent has no check " + sanitizeUtf8(which.string().substr(0, 64), 0));
+        return;
+    }
+    FixOutcome out;
+    const char* code = 0;
+    std::string message;
+    if (!fixCheck(*check, checkContext(), token.string(), &out, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    std::string stopped;
+    for (size_t i = 0; i < out.stopped.size(); ++i) stopped += (i == 0 ? "" : ", ") + out.stopped[i];
+    // The moves that were done: few, and every one of them is said.
+    json::Writer moved;
+    moved.beginArray();
+    for (size_t i = 0; i < out.moved.size(); ++i) {
+        moved.beginObject().key("from").string(shownPath(out.moved[i].from)).key("to").string(shownPath(out.moved[i].to)).endObject();
+    }
+    moved.endArray();
+    note(linkName(s->number) + ": the fix of the check " + check->id + ": " + countOf(out.moved.size(), "folder") + " moved, " +
+         countOf(out.removed, "path") + " removed, " +
+         number(out.left.size()) + " left" + (stopped.empty() ? std::string() : ", and stopped " + stopped) +
+         "; the check now finds: " + checkStateName(out.state) + ", restart needed: " + out.restart);
+    // The paths that are left, as many as the frame takes, and how many more there are.
+    size_t room = s->peer->maxFrame() > kEnvelopeRoom + 32 ? s->peer->maxFrame() - kEnvelopeRoom - 32 : 0;
+    json::Writer tail;
+    tail.beginObject().key("state").string(checkStateName(out.state)).key("removed").integer((int64_t)out.removed);
+    tail.key("moved").raw(moved.text()).key("leftMore").integer((int64_t)out.left.size()).key("stopped").beginArray();
+    for (size_t i = 0; i < out.stopped.size(); ++i) tail.string(sanitizeUtf8(out.stopped[i], 0));
+    tail.endArray().key("restart").string(out.restart).key("left").beginArray().endArray().endObject();
+    size_t free = room > tail.text().size() ? room - tail.text().size() : 0, shown = 0;
+    std::vector<std::string> left;
+    for (size_t i = 0; i < out.left.size(); ++i) {
+        std::string one = jsonString(out.left[i]);
+        if (one.size() + 1 > free) break;
+        free -= one.size() + 1;
+        left.push_back(one);
+        ++shown;
+    }
+    json::Writer w;
+    w.beginObject().key("state").string(checkStateName(out.state)).key("removed").integer((int64_t)out.removed);
+    w.key("moved").raw(moved.text()).key("left").beginArray();
+    for (size_t i = 0; i < left.size(); ++i) w.raw(left[i]);
+    w.endArray().key("leftMore").integer((int64_t)(out.left.size() - shown)).key("stopped").beginArray();
+    for (size_t i = 0; i < out.stopped.size(); ++i) w.string(sanitizeUtf8(out.stopped[i], 0));
+    w.endArray().key("restart").string(out.restart).endObject();
+    answer(s, id, w.text());
+}
+
 // ---- restartNeeded ------------------------------------------------------------------------------------------------
 
 // Whether an installed package still waits for a restart is kept in the run folder: a power cut clears that
 // folder, and it also is the restart.
-std::string Agent::restartNeeded() const {
-    std::string text;
-    if (!fs::readFile(platform_->runDir() + "/restart-needed", 64, &text, 0)) return "none";
-    if (text.compare(0, 8, "required") == 0) return "required";
-    if (text.compare(0, 11, "hmi-restart") == 0) return "hmi-restart";
-    return "none";
-}
+std::string Agent::restartNeeded() const { return restartMark(platform_->runDir()); }
 
-void Agent::raiseRestartNeeded(const std::string& need) {
-    std::string now = restartNeeded();
-    std::string both = strongerRestart(now, need);
-    if (both != now) fs::writeFile(platform_->runDir() + "/restart-needed", both + "\n", 0600, 0);
-}
+void Agent::raiseRestartNeeded(const std::string& need) { raiseRestartMark(platform_->runDir(), need); }
 
 void Agent::doRestart() {
     bool flushed = true;
@@ -856,6 +1023,8 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "files.cancel") filesCancel(s, id, params);
     else if (method == "autostart.get") autostartGet(s, id);
     else if (method == "autostart.set") autostartSet(s, id, params);
+    else if (method == "checks.run") checksRun(s, id, params);
+    else if (method == "checks.fix") checksFix(s, id, params);
     else refuse(s, id, "unsupported", "this agent has no method " + sanitizeUtf8(method.substr(0, 64), 0));
 }
 
@@ -916,9 +1085,9 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     w.beginObject().key("protocolMin").integer(kProtocolVersion).key("protocolMax").integer(kProtocolVersion);
     w.key("role").string("agent").key("headUnitId").string(headUnitId_).key("agentVersion").string(agentVersion_);
     // What this agent has beyond the protocol's first version: autostart.get and autostart.set, installs checked
-    // with the offer's signature, and the files of a package.
+    // with the offer's signature, the files of a package, and the compatibility checks.
     w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart);
-    w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).endArray().endObject();
+    w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks).endArray().endObject();
     // What `auth` signs: the two payloads as they travel. The reply's is what respond() sends for this result.
     const std::string& asked = peer->incoming();
     std::string reply = resultText(id, w.text());

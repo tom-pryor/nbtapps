@@ -28,7 +28,7 @@ so iDrive creates the menu row itself. Nothing in HmiMain3D is patched.
 | `tools/plugin_pkg.py` | Builds that package of `release/NbtApp/` (`make plugin-pkg`) and signs it for a release (`make plugin-release`) |
 | `tools/check.py` | `make check` |
 | `tools/make_icons.py`, `tools/update_stubs.sh` | Redraw the images; regenerate `stubs/*.syms` from a firmware dump |
-| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running) and `serial_services` (the serial services other programs register, and the removal of one whose program is gone). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
+| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running) and `serial_services` (the serial services other programs register, and the removal of one whose program is gone). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
 | `spec/` | Definitions shared with the Android app: `manifest.schema.json`; `json-profile.vectors`, the cases every JSON parser of the project must agree on; and `protocol/`, the frames every codec must build and refuse alike, one whole conversation with the agent, frame by frame, and `constants.txt`, the names and numbers both sides must hold alike |
 | `tools/nbtpkg.py` | Builds, signs and verifies `.nbtpkg` packages |
 | `tools/check_agent.py` | `make agent-check`: `release/agent/` is the head unit's kind of program, holds nothing of the test bench, and its `nbtagent` holds the official package key; and the agent's own package in `release/pkg/` is byte for byte what `tools/agent_pkg.py` makes of that folder |
@@ -747,8 +747,9 @@ nothing there:
   to be finished or undone, or staging holds files from before a power down. It reads the starter in place and
   the one in its own folder, and writes the starter only when they differ, which is once after an update that
   brought another one. While it runs it writes when a job
-  runs: what it fetches, what it installs or removes, and the job's record. A phone that connects, says hello and
-  asks what is installed causes no write.
+  runs: what it fetches, what it installs or removes, and the job's record. A phone that connects, says hello,
+  asks what is installed and has the checks run causes no write. A check's fix writes what it moves and removes,
+  and its lines in the install log.
 - **A version of the agent on trial** writes none of its state until a phone has confirmed it: the job's
   record, the journal and the install log stay as the version before left them, for that version to read if it
   comes back. The confirmation then writes `current`, the package's record and the job's.
@@ -759,6 +760,88 @@ nothing there:
 What an agent says is on the RAM disk and is gone after a power down; the copy above is the one exception. A
 try that a power down ends leaves no log, and that is how a try ends whose agent no phone could reach. To find
 out why, try the update again and read the log before the head unit is turned off.
+
+## Checks
+
+When an agent first comes to a head unit, there may be software on it that was put there by hand, outside this
+system, and that stands in the way of the head unit's own working. The agent has a small table of checks for it,
+built in (`agent/checks.hpp`). Each check is one definition: its id, its texts, a detect that reads and writes
+nothing, the fix where it has one, and the restart its fix leaves needed. A controller has the checks run, shows
+what they found, and asks for a check's fix once the user has said yes. An agent from 1.4.0 has them, and lists
+the capability `checks` in `hello`.
+
+| Check | What it finds | Its fix |
+|---|---|---|
+| `system-writable` | The system partition writable where no install step runs and the agent did not remount it: it was remounted by hand and not put back | Remounts it read-only with the configured command, and asks the file system whether it is. Nothing is listed, moved or removed. On a folder that stands in for a head unit the question does not apply, and the check finds nothing |
+| `aa-fix` | An app that was installed by hand: `/opt/aa` is there, or a plugin folder whose `<Name>.manifest` claims the connector id 210 and in which no installed package owns anything. It lists such a plugin folder to be moved, and everything in `/opt/aa` and `/var/opt/aa` to be removed | Stops the programs that run from `/opt/aa`. Moves the plugin's folder, whole, out of the plugin folder into `/opt/aa` as `<Name>.old`, or `<Name>.nbtappsold` where that is taken, and leaves it there, where the HMI no longer loads it. Then removes the rest as listed. The packet filter's configuration is not read or written: what that app changed there stays as it is. The HMI needs a restart |
+
+The plugin's folder is moved and not removed because the HMI may have the plugin loaded, and its files are not
+taken away under it. A folder directly in `/opt/aa` that is a real folder, not a link, and whose name ends in `.old`
+or `.nbtappsold` is parked: neither it nor anything in it is listed, moved or removed, and a check that finds
+nothing else says `ok`. `/opt/aa` itself is not listed for removal while it receives a plugin or holds a parked
+one.
+
+Every fix keeps to these rules:
+
+- It does what the user was shown and nothing else. A problem comes with a token, SHA-256 over the check's id, its
+  sorted list of paths with their kinds, and each move with its two ends; the controller sends it back with
+  `checks.fix`. The fix lists again, and refuses with `stale` if the token is not that of what the check finds now.
+  A file that came after the list stays, and so does its folder.
+- A move is one rename, to the destination the user was shown, and only within one file system: it is never a copy
+  and a removal. A move onto something that is there is not made, and the folder is reported as left. Where both
+  names are taken, where the plugin's folder is on another file system than `/opt/aa`, or where `/opt/aa` is a link
+  or a file, there is no fix. The moves come before any removal.
+- It removes one path at a time: a file or a link is unlinked by its full path, and a folder is removed only when
+  it is empty, the deepest first. Nothing is removed by a wildcard or with what it holds, and nothing is walked at
+  the time of the removal.
+- Nothing is followed through a link. A link is listed as a link and unlinked as one, and what it leads to stays;
+  a folder that is a link is not entered. A device, a socket or a fifo is never removed, and is reported as left.
+- The listing stays on the file system its root is on, goes four levels below a root at most, and holds 256 entries
+  at most; a check offers to move 8 plugin folders at most. Past a bound, on another file system, or with a name
+  that cannot be shown as text, the check is a problem with no fix, and its detail says why.
+- A path that an installed package's record owns is never listed, and neither is anything in the agent's own
+  folders: its state, staging and run folders, the agent's folder, and the folders of the packages' `${app}`,
+  `${data}` and `${tmp}`.
+- Programs come first. A program whose executable is in the check's folder is sent SIGTERM, and SIGKILL after 5
+  seconds; one that is still there a second later, or processes that cannot be read, end the fix before anything
+  is moved or removed. The restart mark is raised before the first change, the system partition is writable for
+  the moves and the removals only, and its folders go before it is put back read-only.
+- A fix that is cut off, by a power cut or a kill, is run again: the check lists what is left, with a new token,
+  and the fix goes on from there. A plugin that was moved is parked, and is not listed again. There is no journal.
+- Each move and each path a fix removes is a line in the install log, `install.log` in the state folder, and the
+  agent's log has a line for each fix: how many folders were moved, how many paths went, how many are left, and the
+  programs it stopped.
+
+The two messages, in full in `agent/agent.hpp`:
+
+```
+checks.run { "id"?, "after"? }   -> { "checks": [ { "id", "state": "ok" | "problem" | "unknown", ... } ] }
+checks.fix { "id", "token" }     -> { "state", "removed", "moved", "left", "leftMore", "stopped", "restart" }
+```
+
+A problem has `title`, `detail`, `count`, the paths it would remove in `found`, `more`, the folders it would move
+in `moves` (each with `from` and `to`), and `fix`, with its `label`, `detail`, `restart` and `token`, where there is
+one; `unknown` has `why`. A problem may have moves and no paths. With no `id` every check is answered, each with as
+many of its paths as the link's frame takes, and `more` where there are others: the controller asks for those with
+`id` and `after`, the last path it has, and gets the same token while nothing has changed. The moves are on every
+page whole. A fix answers the state the check finds afterwards, how many paths went, the moves it made, the paths
+that are left and the folders that were not moved, as far as the frame takes and how many more, and the restart
+that is needed. Both are refused before `auth`, like every other method. `checks.run` writes nothing, so it is
+answered on an agent on trial too, and refused with `busy` only while an install step runs. `checks.fix` is
+refused with `busy` while a job runs and on an agent on trial, with `forbidden` to the iDrive plugin, and with
+`not-found`, `stale`, `unsupported` (the check has no fix for what it finds) and `io-error` (what could not be read,
+or the program that did not end) as their names say.
+
+At the console:
+
+```sh
+nbtctl checks                     # a line for each check: its id and state, and for a problem the number of paths
+nbtctl checks --list              # and each folder it would move, and every one of those paths
+nbtctl checks fix aa-fix          # the check, then its fix: what was moved, what went, what is left, what was stopped
+```
+
+`nbtctl checks fix` exits with 1 while the check still finds a problem. `hu_install.sh` says in one line, at its
+end, when `/opt/aa` is there.
 
 ## Releasing the agent and the plugin
 

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #ifdef __QNXNTO__
@@ -99,6 +100,55 @@ ProgramState programState(const std::string& name, const char* procDir, unsigned
     closedir(dir);
     if (unnamed != 0) *unnamed = noName;
     if (found) return kProgramRunning;
+    return named != 0 ? kProgramNotRunning : kProgramUnknown;
+}
+
+namespace {
+
+// The path as the system reports it, without what ends the line of a text file.
+std::string trimmedPath(const std::string& path) {
+    size_t n = path.size();
+    while (n > 0 && (path[n - 1] == '\n' || path[n - 1] == '\r' || path[n - 1] == ' ')) --n;
+    return path.substr(0, n);
+}
+
+bool inside(const std::string& path, const std::string& dir) {
+    return !dir.empty() && path.size() > dir.size() && path.compare(0, dir.size(), dir) == 0 && path[dir.size()] == '/';
+}
+
+}  // namespace
+
+ProgramState programsUnder(const std::string& dir, std::vector<RunningProgram>* out, const char* procDir, unsigned* unnamed) {
+    out->clear();
+    if (unnamed != 0) *unnamed = 0;
+    std::string given = dir;
+    while (given.size() > 1 && given[given.size() - 1] == '/') given.erase(given.size() - 1);
+    std::string real;
+    char buffer[PATH_MAX + 1];
+    if (realpath(given.c_str(), buffer) != 0) real = buffer;
+    DIR* list = opendir(procDir);
+    if (list == 0) return kProgramUnknown;
+    unsigned named = 0, noName = 0;
+    struct dirent* entry;
+    while ((entry = readdir(list)) != 0) {
+        long pid = 0;
+        if (!isPid(entry->d_name, &pid)) continue;
+        std::string path = trimmedPath(exePathOf(pid, procDir));
+        if (path.empty()) {
+            ++noName;
+            continue;
+        }
+        ++named;
+        if (inside(path, given) || (!real.empty() && inside(path, real))) {
+            RunningProgram p;
+            p.pid = pid;
+            p.path = path;
+            out->push_back(p);
+        }
+    }
+    closedir(list);
+    if (unnamed != 0) *unnamed = noName;
+    if (!out->empty()) return kProgramRunning;
     return named != 0 ? kProgramNotRunning : kProgramUnknown;
 }
 

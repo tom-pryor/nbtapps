@@ -2,13 +2,16 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 // Host test for agent/programs.cpp: a program's name from a path, the three places a process's executable is read
 // from, and whether a program is running, against a folder of processes that this test makes. All names and
-// process numbers are invented. The last part asks this machine's own process list about the test itself.
+// process numbers are invented. Also which processes run from a folder. The last part asks this machine's own
+// process list about the test itself.
 //
 // usage: test_programs [work folder]     (default build/agent-host/work/programs)
 
 #include "../../agent/programs.hpp"
 
 #include <unistd.h>
+
+#include <vector>
 
 #include "../../agent/fsutil.hpp"
 #include "test_util.hpp"
@@ -84,11 +87,32 @@ int main(int argc, char** argv) {
     CHECK_IN(why, fs::removeTree(root + "/400", &why));
     CHECK(programState("radiod", proc) == kProgramNotRunning);
 
-    // 5. This machine's own list: the test finds itself, and not a program that does not exist.
+    // 5. The processes whose executable is in a folder: by the whole folder name, and below it, but not the
+    // folder's own path or a folder whose name only starts the same.
+    std::vector<RunningProgram> found;
+    CHECK(programsUnder("/opt/thing", &found, proc, &unnamed) == kProgramRunning && found.size() == 1);
+    CHECK(found[0].pid == 100 && found[0].path == "/opt/thing/bin/SomeProgram" && unnamed == 1);
+    CHECK(programsUnder("/opt/thing/", &found, proc) == kProgramRunning && found.size() == 1);
+    CHECK(programsUnder("/opt/thing/bin/SomeProgram", &found, proc) == kProgramNotRunning && found.empty());
+    CHECK(programsUnder("/opt/thin", &found, proc) == kProgramNotRunning && found.empty());
+    CHECK(programsUnder("/usr", &found, proc) == kProgramRunning && found.size() == 2 && found[0].pid + found[1].pid == 401);
+    CHECK(programsUnder("/nowhere", &found, proc) == kProgramNotRunning);
+    // And nothing is known where nothing could be named.
+    CHECK(programsUnder("/opt/thing", &found, (root + "/none").c_str()) == kProgramUnknown && found.empty());
+
+    // 6. This machine's own list: the test finds itself, and not a program that does not exist.
     std::string self = programName(exePathOf((long)getpid()).c_str());
     CHECK(!self.empty());
     CHECK_IN(self, programState(self) == kProgramRunning);
     CHECK(programState("no-such-program-" + self) == kProgramNotRunning);
+    // By its folder too, which may be given through a link.
+    std::string exe = exePathOf((long)getpid());
+    CHECK(programsUnder(fs::parentOf(exe), &found) == kProgramRunning);
+    bool me = false;
+    for (size_t i = 0; i < found.size(); ++i) me = me || found[i].pid == (long)getpid();
+    CHECK(me);
+    CHECK_IN(why, fs::makeLink(fs::parentOf(exe), root + "/through", &why));
+    CHECK(programsUnder(root + "/through", &found) == kProgramRunning);
 
     CHECK_IN(why, fs::removeTree(root, &why));
     printf("test_programs: ok\n");

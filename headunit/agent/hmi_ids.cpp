@@ -4,6 +4,8 @@
 
 #include "hmi_ids.hpp"
 
+#include "fsutil.hpp"
+
 namespace nbt {
 
 namespace {
@@ -184,5 +186,42 @@ void readPluginDescription(const std::string& xml, std::vector<long>* focusIds) 
 }
 
 bool builtInConnectorId(long id) { return id == 17 || id == 200; }
+
+void scanPluginFolders(const std::vector<std::string>& scanDirs, const std::set<std::string>& skip,
+                       std::vector<PluginFolder>* out) {
+    out->clear();
+    const std::string suffix = ".manifest";
+    for (size_t s = 0; s < scanDirs.size(); ++s) {
+        std::vector<std::string> names;
+        if (!fs::listDir(scanDirs[s], &names, 0)) continue;
+        for (size_t i = 0; i < names.size(); ++i) {
+            PluginFolder folder;
+            folder.dir = scanDirs[s] + "/" + names[i];
+            folder.name = names[i];
+            std::vector<std::string> files;
+            if (!fs::isDir(folder.dir) || !fs::listDir(folder.dir, &files, 0)) continue;
+            for (size_t k = 0; k < files.size(); ++k) {
+                const std::string& file = files[k];
+                PluginManifest m;
+                m.path = folder.dir + "/" + file;
+                if (file.size() < suffix.size() || file.compare(file.size() - suffix.size(), suffix.size(), suffix) != 0 ||
+                    skip.count(m.path) != 0) {
+                    continue;
+                }
+                std::string text, desc;
+                if (!fs::readFile(m.path, kMaxPluginFile, &text, 0)) continue;
+                readPluginManifest(text, &m.connectorIds, &desc);
+                if (desc.compare(0, 12, "{pluginDir}/") == 0) {
+                    std::string descPath = folder.dir + "/" + desc.substr(12);
+                    if (skip.count(descPath) == 0 && fs::readFile(descPath, kMaxPluginFile, &text, 0)) {
+                        readPluginDescription(text, &m.focusIds);
+                    }
+                }
+                folder.manifests.push_back(m);
+            }
+            out->push_back(folder);
+        }
+    }
+}
 
 }  // namespace nbt

@@ -17,6 +17,7 @@
 
 #include <stddef.h>
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,30 @@ void readPluginDescription(const std::string& xml, std::vector<long>* focusIds);
 
 // Connector ids of the apps built into the HMI, which are in use on every car.
 bool builtInConnectorId(long id);
+
+// A plugin manifest or UI description larger than this is not read.
+const size_t kMaxPluginFile = 4u << 20;
+
+// One <x>.manifest in a plugin folder: the connector ids it claims, and the focus ids of the UI description it
+// names with {pluginDir}/.
+struct PluginManifest {
+    std::string path;
+    std::vector<long> connectorIds, focusIds;
+};
+
+// A folder in one of the folders the HMI loads plugins from, and the manifests in it, sorted by name.
+struct PluginFolder {
+    std::string dir;     // <scan folder>/<name>
+    std::string name;
+    std::vector<PluginManifest> manifests;
+};
+
+// Every folder directly in one of `scanDirs`, or link that leads to one, with the ids its manifests claim. A
+// manifest whose path is in `skip` is passed over, and a UI description whose path is in it is not read: an install
+// step names there the files of the package it places, which are not another app's. A folder that cannot be
+// listed, and a file that cannot be read, are passed over too. It reads files and changes nothing.
+void scanPluginFolders(const std::vector<std::string>& scanDirs, const std::set<std::string>& skip,
+                       std::vector<PluginFolder>* out);
 
 }  // namespace nbt
 

@@ -795,7 +795,7 @@ def real_agent_started_wrongly(c):
 
 with open(os.path.join(ROOT, "agent", "version.hpp")) as _f:
     VERSION = re.search(r'^const char kAgentVersion\[\] = "(.*)";$', _f.read(), re.M).group(1)
-NEXT_VERSION = "1.4.0"      # what the image's nbtagent-next says it is: AGENT_NEXT_VERSION in the Makefile
+NEXT_VERSION = "1.5.0"      # what the image's nbtagent-next says it is: AGENT_NEXT_VERSION in the Makefile
 OLDER_STARTER = read(STARTER) + "# This line is the test's: the starter as a version before had it.\n"
 next_package = []           # the path of that version's package, once it is made
 
@@ -1033,7 +1033,8 @@ def make_stick(c, name, version, agent=FAKE_AGENT, leave_out=None):
 
 
 def install(c, stick):
-    return c.run(["sh", os.path.join(stick, "hu_install.sh")], env={"NBT_TEST_AGENT_HOME": c.home})
+    # The folder an app that was installed by hand would leave is the case's own: there only where a case makes it.
+    return c.run(["sh", os.path.join(stick, "hu_install.sh")], env={"NBT_TEST_AGENT_HOME": c.home, "NBT_TEST_HAND_APP": c.path("opt-aa")})
 
 
 def executable(path):
@@ -1070,6 +1071,27 @@ def install_and_start(c):
         check(c.status(newer) == 0 and c.home_file("current") == "1.3.0\n", "a newer version becomes the one to start")
         check(c.status(started) == 0 and c.starts() == ["1.3.0|--root|/somewhere"], "and the launcher starts it")
         check(sorted(os.listdir(c.home)) == ["1.2.3", "1.3.0", "current", "launcher"], "nothing else is left in the folder")
+        check("installed by hand" not in c.out(first), "a word of an app that was installed by hand, where none is", c.out(first))
+    return look
+
+
+@case
+def install_beside_an_app_installed_by_hand(c):
+    """Where /opt/aa is there, the install says so in one line at its end, names the agent's check for it, and
+    changes nothing of it."""
+    hand = c.path("opt-aa")
+    write(os.path.join(hand, "bin", "demod"), "#!/bin/sh\n", 0o755)
+    done = install(c, make_stick(c, "stick", "1.2.3\n"))
+
+    def look():
+        check(c.status(done) == 0 and c.err(done) == "", "the install", c.err(done))
+        lines = c.out(done).split("\n")[:-1]
+        check(lines[-1] == "hu_install: %s is there: an app that was installed by hand. Once the agent runs, nbtctl checks "
+                           "(or the phone app) says what it holds, and nbtctl checks fix aa-fix moves its plugin aside and removes the rest" % hand,
+              "the line about it, at the end", c.out(done))
+        check(len([l for l in lines if "installed by hand" in l]) == 1, "one line", c.out(done))
+        check(os.listdir(hand) == ["bin"] and os.listdir(os.path.join(hand, "bin")) == ["demod"], "its files are as they were")
+        check(c.home_file("current") == "1.2.3\n", "and the agent is installed")
     return look
 
 
@@ -1086,7 +1108,8 @@ def install_from_the_package(c):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(data)
-    done = c.run(["sh", os.path.join(stick, "payload", "hu_install.sh")], env={"NBT_TEST_AGENT_HOME": c.home})
+    done = c.run(["sh", os.path.join(stick, "payload", "hu_install.sh")],
+                 env={"NBT_TEST_AGENT_HOME": c.home, "NBT_TEST_HAND_APP": c.path("opt-aa")})
 
     def look():
         check(c.status(done) == 0 and c.err(done) == "", "the install from the package's payload folder", c.err(done))

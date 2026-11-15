@@ -36,6 +36,7 @@
 #include "../../agent/fsutil.hpp"
 #include "../../agent/host_platform.hpp"
 #include "../../agent/json.hpp"
+#include "../../agent/json_writer.hpp"
 #include "../../agent/sha256.hpp"
 #include "../../agent/utf8.hpp"
 #include "test_util.hpp"
@@ -718,10 +719,11 @@ static void testHello() {
     Parsed r(b.call(p, "hello", "{\"protocolMin\":1,\"protocolMax\":7,\"role\":\"cli\",\"maxFrame\":4096,\"capabilities\":[\"zstd\"],\"extra\":{\"a\":[1]}}"));
     CHECK(integer(r.result, "protocolMin") == 1 && integer(r.result, "protocolMax") == 1 && str(r.result, "role") == "agent");
     CHECK(str(r.result, "headUnitId") == kHeadUnitId && str(r.result, "agentVersion") == "1.0.0");
-    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 3 &&
+    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 4 &&
           r.result.find("capabilities").at(0).string() == kCapabilityAutostart &&
           r.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature &&
-          r.result.find("capabilities").at(2).string() == kCapabilityFiles);
+          r.result.find("capabilities").at(2).string() == kCapabilityFiles &&
+          r.result.find("capabilities").at(3).string() == kCapabilityChecks);
     CHECK(Parsed(b.call(p, "hello", kGoodHello)).code() == "bad-state");
     // Methods that are not there.
     const char* missing[] = {"job.frobnicate", "pairing.frobnicate", ""};
@@ -2850,6 +2852,11 @@ static std::string sessionText() {
     b.call(p, "source.remove", "{\"key\":\"" + toHex(gPackageKey.key, 32) + "\"}");
     b.call(p, "ping", "{}");
     b.call(p, "job.status", "{}");
+    // The checks, on a head unit whose system partition was left writable by hand: one problem, with nothing to
+    // list and a fix.
+    b.platform.systemWritable = 1;
+    b.call(p, "checks.run", "{}");
+    b.platform.systemWritable = -1;
     // A plan that cannot run, and one that can.
     b.call(p, "job.plan", planParams(kHello, "org.nbtapp.old", kHello));
     Parsed plan(b.call(p, "job.plan", planParams("org.nbtapp.runtime-2.1.0", "", "org.nbtapp.runtime-2.1.0")));
@@ -2900,7 +2907,9 @@ static std::string sessionText() {
            "# lines are what this agent sends when it is in the same state: a head unit with nothing installed, the\n"
            "# test key as its only package key, 500,000,000 bytes free everywhere, the head-unit id, plan ids, pairing\n"
            "# code, pairing key and nonce that the test's counter gives, and a clock that stands still, so\n"
-           "# job.progress comes only when something changes and no ping is due. The package is\n"
+           "# job.progress comes only when something changes and no ping is due. Before checks.run the test has the\n"
+           "# system partition stand as writable, as somebody's hand would leave it, so that one check finds a\n"
+           "# problem; the other finds nothing. The package is\n"
            "# tests/packages/runtime-2.1.0 as tests/make_packages.py builds it. Near the end the phone pulls the\n"
            "# agent's own log, a file of 40 lines the test writes, with files.list and files.fetch: the DATA frames\n"
            "# from the agent are one raw deflate stream (RFC 1951), as the zlib of the test bench's image makes it.\n\n"
@@ -2926,7 +2935,7 @@ static void testDetachedSignature() {
         Bench b("detached");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 3 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 4 &&
                                     hello.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature);
         // First the version before it, signed in the usual way: one key then verifies both, so the upgrade's key
         // matches the installed one.
@@ -2995,7 +3004,7 @@ static void testAutostart() {
         Bench b("autostart-nowhere", false, false, "1.1.0");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 3 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 4 &&
                                     hello.result.find("capabilities").at(0).string() == kCapabilityAutostart);
         Parsed state(b.call(p, "autostart.get", "{}"));
         CHECK(state.result.size() == 4 && !flag(state.result, "on") && !flag(state.result, "available"));
@@ -3357,6 +3366,229 @@ static void testFiles() {
     }
 }
 
+// ---- the compatibility checks -------------------------------------------------------------------------------------
+
+static std::string jsonString(const std::string& text) {
+    json::Writer w;
+    w.string(text);
+    return w.text();
+}
+
+// One check of a checks.run reply.
+static json::Value checkIn(const Parsed& r, const char* id) {
+    json::Value list = r.result.find("checks");
+    for (size_t i = 0; i < list.size(); ++i) {
+        if (str(list.at(i), "id") == id) return list.at(i);
+    }
+    CHECK_IN(id, false);
+    return json::Value();
+}
+
+static std::string fixParams(const std::string& id, const std::string& token) {
+    return "{\"id\":\"" + id + "\",\"token\":\"" + token + "\"}";
+}
+
+// A made-up app put on by hand, as tests/agent/test_checks.cpp has it: a program in /opt/aa, its data, and its
+// plugin Demo with the connector id 210.
+static void handApp(Bench& b) {
+    put(b.platform.systemPath("/opt/aa/bin/demod"), "#!/bin/sh\nsleep 600\n", 0755);
+    put(b.platform.systemPath("/var/opt/aa/state.txt"), "state\n");
+    put(b.platform.pluginsDir() + "/Demo/Demo.manifest",
+        "<plugin><name>Demo</name><config><dependencies><pluginAppConnector><id>210</id></pluginAppConnector></dependencies>"
+        "</config></plugin>\n");
+}
+
+// Asks for the checks on a step's first point.
+class ChecksMidStep : public CrashHook {
+public:
+    ChecksMidStep() : phone(0), run(0), fix(0), done(false) {}
+    virtual void point(const char*) {
+        if (done) return;
+        done = true;
+        run = phone->request("checks.run", "{}");
+        fix = phone->request("checks.fix", fixParams("aa-fix", std::string(64, 'a')));
+        phone->pump();
+    }
+    Phone* phone;
+    int64_t run, fix;
+    bool done;
+};
+
+static void testChecks() {
+    Bench b("checks");
+    Phone* p = b.phone();
+    // A head unit with nothing on it by hand: two checks, each of them ok and nothing more.
+    Parsed clean(b.call(p, "checks.run", "{}"));
+    json::Value list = clean.result.find("checks");
+    CHECK_IN(p->lastHeard, list.size() == 2 && str(list.at(0), "id") == "system-writable" && str(list.at(1), "id") == "aa-fix");
+    for (size_t i = 0; i < 2; ++i) CHECK_IN(p->lastHeard, str(list.at(i), "state") == "ok" && list.at(i).size() == 2);
+    // One check by its id.
+    Parsed one(b.call(p, "checks.run", "{\"id\":\"aa-fix\"}"));
+    CHECK(one.result.find("checks").size() == 1 && str(checkIn(one, "aa-fix"), "state") == "ok");
+    const char* bad[] = {"{\"id\":1}", "{\"after\":\"/x\"}", "{\"id\":\"aa-fix\",\"after\":2}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) CHECK_IN(bad[i], Parsed(b.call(p, "checks.run", bad[i])).code() == "bad-request");
+    CHECK(Parsed(b.call(p, "checks.run", "{\"id\":\"no-such-check\"}")).code() == "not-found");
+    const std::string token(64, 'a');
+    const char* badFix[] = {"{}", "{\"id\":\"aa-fix\"}", "{\"id\":\"aa-fix\",\"token\":\"abc\"}", "{\"id\":2,\"token\":\"\"}"};
+    for (size_t i = 0; i < sizeof badFix / sizeof badFix[0]; ++i) CHECK_IN(badFix[i], Parsed(b.call(p, "checks.fix", badFix[i])).code() == "bad-request");
+    CHECK(Parsed(b.call(p, "checks.fix", fixParams("no-such-check", token))).code() == "not-found");
+    // A fix of nothing, with the token of nothing, is no fault and changes nothing.
+    std::string none = checkToken("aa-fix", std::vector<CheckEntry>());
+    Parsed nothing(b.call(p, "checks.fix", fixParams("aa-fix", none)));
+    CHECK_IN(p->lastHeard, str(nothing.result, "state") == "ok" && integer(nothing.result, "removed") == 0 && str(nothing.result, "restart") == "none");
+    CHECK(Parsed(b.call(p, "checks.fix", fixParams("aa-fix", token))).code() == "stale");
+
+    // Each of the two finds a problem.
+    b.platform.systemWritable = 1;
+    handApp(b);
+    Parsed problems(b.call(p, "checks.run", "{}"));
+    {
+        json::Value system = checkIn(problems, "system-writable"), app = checkIn(problems, "aa-fix");
+        CHECK_IN(p->lastHeard, str(app, "state") == "problem" && integer(app, "count") == 4 && app.find("found").size() == 4);
+        CHECK(app.find("found").at(0).string() == b.platform.systemPath("/opt/aa/bin") && !app.find("blocks").present());
+        CHECK(app.find("more").isBool() && !app.find("more").boolean());
+        // The plugin is to be moved, not removed.
+        json::Value moves = app.find("moves");
+        CHECK_IN(p->lastHeard, moves.size() == 1 && moves.at(0).size() == 2 && str(moves.at(0), "from") == b.platform.pluginsDir() + "/Demo" &&
+                                   str(moves.at(0), "to") == b.platform.systemPath("/opt/aa/Demo.old"));
+        json::Value fix = app.find("fix");
+        CHECK(fix.size() == 4 && !str(fix, "label").empty() && has(str(fix, "detail"), "packet filter") && str(fix, "restart") == "hmi-restart");
+        CHECK(has(str(fix, "detail"), ".old") && str(fix, "token").size() == 64 && !str(app, "title").empty() && !str(app, "detail").empty());
+        CHECK(str(system, "state") == "problem" && integer(system, "count") == 0 && system.find("found").size() == 0);
+        CHECK(system.find("moves").isArray() && system.find("moves").size() == 0 && str(system.find("fix"), "restart") == "none");
+        CHECK(str(system.find("fix"), "token") == checkToken("system-writable", std::vector<CheckEntry>()));
+    }
+    // The plugin is refused the fix; a phone may run the checks.
+    Phone* plugin = b.connect();
+    CHECK(Parsed(b.call(plugin, "hello", kPluginHello)).result.isObject());
+    CHECK(Parsed(b.call(plugin, "checks.run", "{}")).result.isObject());
+    CHECK(Parsed(b.call(plugin, "checks.fix", fixParams("system-writable", str(checkIn(problems, "system-writable").find("fix"), "token")))).code() == "forbidden");
+    CHECK(b.platform.systemWritable == 1);
+    // A phone that has not done auth gets neither.
+    Phone* stranger = b.greeted("3", 4096, "serial");
+    CHECK(Parsed(b.call(stranger, "checks.run", "{}")).code() == "unauthenticated");
+    CHECK(Parsed(b.call(stranger, "checks.fix", fixParams("aa-fix", token))).code() == "unauthenticated");
+
+    // On a serial link the paths are paged to fit its frame, and the pages add up to the list, with one token.
+    for (int i = 0; i < 60; ++i) put(b.platform.systemPath("/opt/aa/data/a-file-with-a-rather-long-name-of-its-own-" + num(i)), "x\n");
+    Phone* far = b.phone("2", 4096, "serial");
+    int64_t asked = far->request("checks.run", "{}");
+    b.settle();
+    std::string first = far->reply(asked);
+    CHECK_IN(first, first.size() <= 4096);
+    Parsed page(first);
+    json::Value app = checkIn(page, "aa-fix");
+    CHECK_IN(first, str(app, "state") == "problem" && integer(app, "count") == 65 && app.find("more").boolean());
+    CHECK_IN(first, app.find("moves").size() == 1 && str(checkIn(page, "system-writable"), "state") == "problem");
+    std::string appToken = str(app.find("fix"), "token");
+    std::vector<std::string> paths;
+    for (size_t i = 0; i < app.find("found").size(); ++i) paths.push_back(app.find("found").at(i).string());
+    for (int pages = 0; pages < 20; ++pages) {
+        asked = far->request("checks.run", "{\"id\":\"aa-fix\",\"after\":" + jsonString(paths.back()) + "}");
+        b.settle();
+        std::string text = far->reply(asked);
+        CHECK_IN(text, text.size() <= 4096);
+        Parsed next(text);
+        json::Value more = checkIn(next, "aa-fix");
+        CHECK_IN(text, next.result.find("checks").size() == 1 && str(more.find("fix"), "token") == appToken && more.find("found").size() > 0);
+        CHECK_IN(text, more.find("moves").size() == 1);
+        for (size_t i = 0; i < more.find("found").size(); ++i) paths.push_back(more.find("found").at(i).string());
+        if (!more.find("more").boolean()) break;
+    }
+    CHECK_IN(num((long long)paths.size()), paths.size() == 65);
+    for (size_t i = 1; i < paths.size(); ++i) CHECK_IN(paths[i], paths[i - 1] < paths[i]);
+
+    // The fixes, from the phone on the serial link. The partition's, which the plugin was refused.
+    Parsed remounted(b.call(far, "checks.fix", fixParams("system-writable", str(checkIn(page, "system-writable").find("fix"), "token"))));
+    CHECK(str(remounted.result, "state") == "ok" && b.platform.systemWritable == 0 && str(remounted.result, "restart") == "none");
+    // The app's: with a stale token first, as when something came since the list.
+    put(b.platform.systemPath("/opt/aa/data/late"), "x\n");
+    CHECK(Parsed(b.call(far, "checks.fix", fixParams("aa-fix", appToken))).code() == "stale" && fs::kindOf(b.platform.systemPath("/opt/aa/bin/demod")) == fs::kFile);
+    std::string fresh = str(checkIn(Parsed(b.call(far, "checks.run", "{\"id\":\"aa-fix\"}")), "aa-fix").find("fix"), "token");
+    Parsed removed(b.call(far, "checks.fix", fixParams("aa-fix", fresh)));
+    CHECK_IN(far->lastHeard, str(removed.result, "state") == "ok" && integer(removed.result, "removed") == 66 && removed.result.find("left").size() == 0);
+    CHECK(integer(removed.result, "leftMore") == 0 && removed.result.find("stopped").size() == 0 && str(removed.result, "restart") == "hmi-restart");
+    json::Value moved = removed.result.find("moved");
+    CHECK_IN(far->lastHeard, moved.size() == 1 && str(moved.at(0), "from") == b.platform.pluginsDir() + "/Demo" &&
+                                 str(moved.at(0), "to") == b.platform.systemPath("/opt/aa/Demo.old"));
+    CHECK(str(Parsed(b.call(far, "info.get", "{}")).result, "restartNeeded") == "hmi-restart");
+    CHECK(fs::kindOf(b.platform.systemPath("/opt/aa/Demo.old/Demo.manifest")) == fs::kFile && fs::kindOf(b.platform.pluginsDir() + "/Demo") == fs::kNone);
+    CHECK(fs::kindOf(b.platform.systemPath("/opt/aa/bin")) == fs::kNone && fs::kindOf(b.platform.systemPath("/var/opt/aa")) == fs::kNone);
+    Parsed after(b.call(far, "checks.run", "{}"));
+    for (size_t i = 0; i < 2; ++i) CHECK_IN(far->lastHeard, str(after.result.find("checks").at(i), "state") == "ok");
+
+    // What a fix cannot remove is left, as many paths as the frame takes, and how many more there are.
+    for (int i = 0; i < 60; ++i) {
+        std::string pipe = b.platform.systemPath("/opt/aa/pipes/a-pipe-that-no-fix-removes-" + num(i));
+        CHECK(fs::makeDirs(fs::parentOf(pipe), 0) && mkfifo(pipe.c_str(), 0600) == 0);
+    }
+    fresh = str(checkIn(Parsed(b.call(far, "checks.run", "{\"id\":\"aa-fix\"}")), "aa-fix").find("fix"), "token");
+    asked = far->request("checks.fix", fixParams("aa-fix", fresh));
+    b.settle();
+    std::string leftText = far->reply(asked);
+    Parsed leftOver(leftText);
+    CHECK_IN(leftText, leftText.size() <= 4096 && str(leftOver.result, "state") == "problem" && integer(leftOver.result, "removed") == 0);
+    CHECK_IN(leftText, leftOver.result.find("left").size() > 0 && integer(leftOver.result, "leftMore") > 0 &&
+                           leftOver.result.find("left").size() + integer(leftOver.result, "leftMore") == 61);
+    CHECK(leftOver.result.find("moved").size() == 0);
+
+    // Past a bound there is no fix to give.
+    for (int i = 0; i < 300; ++i) put(b.platform.systemPath("/opt/aa/many/" + num(i)), "x\n");
+    Parsed capped(b.call(p, "checks.run", "{\"id\":\"aa-fix\"}"));
+    json::Value big = checkIn(capped, "aa-fix");
+    CHECK_IN(p->lastHeard, str(big, "state") == "problem" && !big.find("fix").present() && has(str(big, "detail"), "too much here to remove safely"));
+    CHECK(Parsed(b.call(p, "checks.fix", fixParams("aa-fix", checkToken("aa-fix", std::vector<CheckEntry>())))).code() == "stale");
+
+    // A record that cannot be read: nothing can be said of what it owns, and no fix runs.
+    put(b.platform.stateDir() + "/installed/org.nbtapp.broken/record.json", "{}");
+    Parsed unknown(b.call(p, "checks.run", "{}"));
+    CHECK_IN(p->lastHeard, str(checkIn(unknown, "aa-fix"), "state") == "unknown" && !str(checkIn(unknown, "aa-fix"), "why").empty());
+    CHECK(str(checkIn(unknown, "system-writable"), "state") == "ok");
+    CHECK(Parsed(b.call(p, "checks.fix", fixParams("aa-fix", none))).code() == "io-error");
+}
+
+// What is busy: an install step, a job, and an agent on trial.
+static void testChecksBusy() {
+    {
+        Bench b("checks-busy");
+        Phone* p = b.phone();
+        handApp(b);
+        ChecksMidStep mid;
+        mid.phone = p;
+        std::string planId = planOk(b, p, kRuntime, "", kRuntime);
+        b.agent.engine().setCrashHook(&mid);
+        p->events.clear();
+        startJob(b, p, planId);
+        b.agent.engine().setCrashHook(0);
+        CHECK(mid.done && outcome(p) == "succeeded done");
+        CHECK(Parsed(p->reply(mid.run)).code() == "busy" && Parsed(p->reply(mid.fix)).code() == "busy");
+        // A job that waits for its archives: the checks may be run, and no fix.
+        std::string planId2 = planOk(b, p, kHello, "", kHello);
+        p->serve = false;
+        startJob(b, p, planId2);
+        CHECK(Parsed(b.call(p, "checks.run", "{}")).result.isObject());
+        std::string token = str(checkIn(Parsed(b.call(p, "checks.run", "{\"id\":\"aa-fix\"}")), "aa-fix").find("fix"), "token");
+        CHECK(Parsed(b.call(p, "checks.fix", fixParams("aa-fix", token))).code() == "busy");
+        CHECK(fs::kindOf(b.platform.systemPath("/opt/aa/bin/demod")) == fs::kFile);
+    }
+    // An agent on trial runs the checks, and changes nothing.
+    {
+        Bench t("checks-trial", false, false, "1.2.0");
+        makeHome(t.root, "1.1.0");
+        put(t.root + "/agent/1.2.0/nbtagent", "#!/bin/sh\n", 0755);
+        put(t.root + "/agent/launcher", "#!/bin/sh\n", 0755);
+        put(t.root + "/agent/trial.started", "1.2.0\n");
+    }
+    Bench t("checks-trial", true, false, "1.2.0");
+    handApp(t);
+    Phone* q = t.connect();
+    CHECK(Parsed(t.call(q, "hello", kGoodHello)).result.isObject() && t.agent.onTrial());
+    Parsed run(t.call(q, "checks.run", "{}"));
+    std::string token = str(checkIn(run, "aa-fix").find("fix"), "token");
+    CHECK(Parsed(t.call(q, "checks.fix", fixParams("aa-fix", token))).code() == "busy" && t.agent.onTrial());
+    CHECK(fs::kindOf(t.platform.systemPath("/opt/aa/bin/demod")) == fs::kFile);
+}
+
 static void testSession(const std::string& path) {
     std::string now = sessionText(), before = testutil::readFile(path);
     if (now != before) {
@@ -3416,6 +3648,8 @@ int main(int argc, char** argv) {
     testDetachedSignature();
     testAutostart();
     testFiles();
+    testChecks();
+    testChecksBusy();
     testSession(session);
     fs::removeTree(gWork, 0);
     printf("test_agent: ok\n");

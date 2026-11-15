@@ -28,6 +28,9 @@
 //                                   as DATA frames from the agent, deflated or as it is
 //   files.cancel                    ends that stream; answered after the last of its frames the agent sends
 //   files.error                     the agent's event that such a stream cannot go on
+//   checks.run                      the compatibility checks (checks.hpp): what was put onto the head unit by hand
+//                                   and stands in the way, each with what it found, a page at a time
+//   checks.fix                      a check's fix, with the token of the lists the user was shown
 //   job.progress, job.log, job.done the agent's events, to every controller
 //   link.closing                    the agent's event to a phone whose link it is about to end; the last thing it
 //                                   says on that link
@@ -116,6 +119,24 @@
 // request came, a piece at a time, and sends a stream's next frames only while less than two frames' worth waits
 // to be written on its link: the link's other messages, `ping` and its answer among them, wait behind two frames
 // at most. With `deflate` the frames carry one raw deflate stream (RFC 1951) of the file's bytes.
+//
+// The checks (checks.hpp). checks.run writes nothing, so it is answered on an agent on trial too, and refused with
+// `busy` only while an install step runs. Every check is in its answer, or with `id` the one; a problem lists what
+// it found to remove, as many paths as the link's frame takes, with `more` when there are others, and the
+// controller asks for those with `id` and `after`, the last path it has. The folders it would move, in `moves`, are
+// few and come whole on every page. A problem may have moves and no paths. checks.fix changes the head unit: it is refused with
+// `busy` while a job runs and on an agent on trial, and with `forbidden` to the iDrive plugin. It holds the agent's
+// one thread while it stops a program, for a few seconds at most.
+//
+//   checks.run { "id"?, "after"? }  -> { "checks": [ { "id", "state": "ok" }
+//                                                   | { "id", "state": "unknown", "why" }
+//                                                   | { "id", "state": "problem", "title", "detail", "count",
+//                                                       "found": [paths], "more",
+//                                                       "moves": [ { "from", "to" } ],
+//                                                       "fix"?: { "label", "detail", "restart", "token" } } ] }
+//   checks.fix { "id", "token" }    -> { "state", "removed", "moved": [ { "from", "to" } ], "left": [paths],
+//                                        "leftMore", "stopped": [names], "restart" }
+// `removed` counts the paths that were removed; a folder that was not moved has its `from` in `left`.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdint.h>
@@ -125,6 +146,7 @@
 #include <string>
 #include <vector>
 
+#include "checks.hpp"
 #include "engine.hpp"
 #include "job.hpp"
 #include "link.hpp"
@@ -403,6 +425,10 @@ private:
     bool streamsWaiting() const;
     // Ends a session's files stream. `how` is for the log; with `error` the controller is told files.error.
     void endOutgoing(Session* s, const std::string& how, const std::string& error);
+    // The compatibility checks: see the top of this file, and checks.hpp.
+    void checksRun(Session* s, int64_t id, const json::Value& params);
+    void checksFix(Session* s, int64_t id, const json::Value& params);
+    CheckContext checkContext();
     void autostartGet(Session* s, int64_t id);
     void autostartSet(Session* s, int64_t id, const json::Value& params);
     // Whether something would start the agent with the head unit here if it were asked to. If not: the error's

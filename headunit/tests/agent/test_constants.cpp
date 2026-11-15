@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
     code["capability.autostart"] = kCapabilityAutostart;
     code["capability.detachedSignature"] = kCapabilityDetachedSignature;
     code["capability.files"] = kCapabilityFiles;
+    code["capability.checks"] = kCapabilityChecks;
 
     for (std::map<std::string, std::string>::const_iterator it = code.begin(); it != code.end(); ++it) {
         CHECK_IN(path + " has no " + it->first, file.count(it->first) != 0);

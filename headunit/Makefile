@@ -132,6 +132,7 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 #   phones       the paired phones and their pairing keys, on disk
 #   agent_home   the agent's own folder: its versions, and the files that say which one the launcher starts
 #   log_files    the files a controller may pull: the logs a package's manifest names, and the agent's own
+#   checks       the compatibility checks: what was put onto a head unit by hand, and its removal, a path at a time
 # One static library, one test program per tests/agent/test_*.cpp, and two programs: nbtagent (the agent: on a
 # folder that stands in for the head unit, and in the build for the head unit also on the head unit itself) and
 # nbtctl (a command-line controller, and a package source from a folder). `make agent-test` builds all of it into a Docker image and runs it there: the engine runs packages'
@@ -144,7 +145,7 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/store.cpp agent/hmi_ids.cpp agent/engine.cpp agent/frame.cpp agent/link.cpp agent/peer.cpp \
                agent/planner.cpp agent/job.cpp agent/agent.cpp agent/hu_platform.cpp agent/dsi_client.cpp \
                agent/spp_service.cpp agent/spp_gate.cpp agent/serial_link.cpp agent/programs.cpp \
-               agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp
+               agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp agent/checks.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 # src/*.hpp: test_plugin runs the plugin's screens about phones, which are headers, against an agent, and
@@ -225,7 +226,7 @@ $(AGENT_HOST)/nbtctl: agent/nbtctl.cpp $(AGENT_HOST)/libnbtagent.a $(AGENT_HDRS)
 # The same nbtagent, built to say that it is a later version (agent/version.hpp), so that an update of the agent
 # by the agent can be run from end to end: tests/e2e/run_launcher.py makes a package of this program, as the
 # version it says it is. Test bench only, like the options above.
-AGENT_NEXT_VERSION = 1.4.0
+AGENT_NEXT_VERSION = 1.5.0
 $(AGENT_HOST)/nbtagent-next: agent/nbtagent.cpp $(AGENT_HOST)/libnbtagent.a $(AGENT_HDRS) $(BUILD)/version
 	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_TEST_KEYS -DNBT_DEBUG_TCP -DNBT_TEST_AGENT_VERSION='"$(AGENT_NEXT_VERSION)"' \
 	    -DNBT_APP_VERSION='"$(VERSION)"' -o $@ $< $(AGENT_HOST)/libnbtagent.a -lz
@@ -246,6 +247,7 @@ run-agent-test_hu_platform: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)/hu
 run-agent-test_serial: TEST_ARGS = $(BENCH_WORK)/serial
 run-agent-test_programs: TEST_ARGS = $(BENCH_WORK)/programs
 run-agent-test_serial_services: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
+run-agent-test_checks: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
 
 run-agent-%: bench-image
 	@echo [TEST] agent/$*
@@ -253,7 +255,7 @@ run-agent-%: bench-image
 
 # The package reader and the engine are tested against the packages the Python tool builds.
 run-agent-test_package run-agent-test_engine run-agent-test_agent run-agent-test_hu_platform \
-run-agent-test_serial_services run-agent-test_embedded_keys: $(TESTDATA)
+run-agent-test_serial_services run-agent-test_embedded_keys run-agent-test_checks: $(TESTDATA)
 
 $(TESTDATA): tests/make_packages.py tools/nbtpkg.py tools/plugin_pkg.py tools/agent_pkg.py spec/manifest.schema.json \
              plugin/NbtApp.manifest plugin/NbtApp.xml plugin/package/manifest.json.in \

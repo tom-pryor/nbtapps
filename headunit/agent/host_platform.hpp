@@ -27,7 +27,7 @@ namespace nbt {
 class HostPlatform : public Platform {
 public:
     explicit HostPlatform(const std::string& root)
-        : hmiRestarts(0), reboots(0), fakeFree(-1), reserve(64u << 10), root_(root), writable_(false) {}
+        : hmiRestarts(0), reboots(0), fakeFree(-1), reserve(64u << 10), systemWritable(-1), root_(root), writable_(false) {}
 
     // Makes the folders a head unit would already have.
     bool prepare(std::string* error) const {
@@ -90,6 +90,24 @@ public:
         return true;
     }
 
+    // A folder has no system partition to ask about, unless a test says how it stands: `systemWritable`.
+    virtual SystemState systemState(std::string* error) const {
+        if (systemWritable < 0) return kSystemNone;
+        if (systemWritable > 1) {
+            if (error != 0) *error = "a test says the system partition cannot be asked";
+            return kSystemUnknown;
+        }
+        return systemWritable == 1 || writable_ ? kSystemWritable : kSystemReadOnly;
+    }
+    virtual bool remountedForStep() const { return writable_; }
+    virtual bool putSystemReadOnly(std::string* error) {
+        if (!can(noRemount, error)) return false;
+        remounts.push_back("ro");
+        writable_ = false;
+        if (systemWritable == 1) systemWritable = 0;
+        return true;
+    }
+
     bool onSystem(const std::string& path) const {
         return path.compare(0, root_.size() + 9, root_ + "/plugins/") == 0 || path == root_ + "/plugins" ||
                path.compare(0, root_.size() + 8, root_ + "/system/") == 0 || path == root_ + "/system";
@@ -102,6 +120,11 @@ public:
     uint64_t reserve;                    // bytes kept free everywhere: 64 KiB unless a test sets another figure
     std::vector<std::string> morePluginDirs;   // further folders the HMI is taken to load plugins from
     std::string noHmiRestart, noReboot;  // not empty: this machine cannot do that restart, and this is why
+    // How the system partition stands, for the checks (checks.hpp): below 0, the question does not apply here,
+    // which is the default; 0, read-only; 1, writable by somebody's hand, until putSystemReadOnly; 2, it cannot
+    // be told.
+    int systemWritable;
+    std::string noRemount;               // not empty: putSystemReadOnly fails, and this is why
 
 private:
     static bool can(const std::string& refusal, std::string* error) {
