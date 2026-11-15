@@ -4,6 +4,7 @@ package com.nbtapps.store.di
 
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import androidx.datastore.dataStoreFile
 import com.nbtapps.store.data.AndroidPhoneBluetooth
 import com.nbtapps.store.data.BluetoothSppEchoClient
@@ -36,6 +37,7 @@ import com.nbtapps.store.data.update.PackageManagerApkInspector
 import com.nbtapps.store.data.update.SessionApkInstaller
 import com.nbtapps.store.data.update.installedApp
 import com.nbtapps.store.service.ServiceJobKeeper
+import com.nbtapps.store.ui.pairrequest.ElapsedClock
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -79,6 +81,10 @@ abstract class AppModule {
         @Singleton
         @ApplicationScope
         fun provideApplicationScope(): CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+        /** Since the phone started, its sleep included: the same in every process of the app. */
+        @Provides
+        fun provideElapsedClock(): ElapsedClock = ElapsedClock(SystemClock::elapsedRealtime)
 
         @Provides
         @Singleton
