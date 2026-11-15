@@ -45,6 +45,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!--
+            Takes a pairing code that another app on the phone hands over, so the user does not type it: see
+            docs/pairing-code-handover.md. Any app may send one, and nothing is connected until the user taps
+            Pair. One instance, in the app's own task: a second code goes to the screen that is open.
+        -->
+        <activity
+            android:name=".ui.pairrequest.PairRequestActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="com.nbtapps.store.action.PAIR_HEAD_UNIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <!-- Android's answer to an update the app handed it. Only the system reaches it, through a pending intent. -->
         <receiver
             android:name=".data.update.InstallResultReceiver"
