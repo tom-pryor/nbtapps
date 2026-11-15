@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-package com.nbtapps.store.ui.job
+package com.nbtapps.store.data.jobs
 
-import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
-import com.nbtapps.store.data.jobs.PrereleaseAsk
 import com.nbtapps.store.model.CatalogueIndex
 import com.nbtapps.store.model.CataloguePackage
 import com.nbtapps.store.model.CatalogueSourceInfo

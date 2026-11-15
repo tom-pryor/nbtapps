@@ -31,7 +31,6 @@ import com.nbtapps.store.model.VersionRange
 import com.nbtapps.store.ui.catalogue.DetailsState
 import com.nbtapps.store.ui.catalogue.GetState
 import com.nbtapps.store.ui.catalogue.cataloguePackageUiState
-import com.nbtapps.store.ui.job.installPrep
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
