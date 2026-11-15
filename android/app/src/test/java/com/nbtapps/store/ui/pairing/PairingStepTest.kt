@@ -3,6 +3,7 @@
 package com.nbtapps.store.ui.pairing
 
 import com.nbtapps.store.data.jobs.ConnectionState
+import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.TcpEndpoint
@@ -30,6 +31,24 @@ class PairingStepTest {
         assertEquals(PairingStep.Paired, pairingStep("car", connected("car")))
         assertEquals(PairingStep.NoLink(null), pairingStep("car", ConnectionState.Disconnected))
         assertEquals(PairingStep.NoLink("No route to the car"), pairingStep("car", ConnectionState.Failed("car", "No route to the car")))
+    }
+
+    @Test
+    fun `the agent's capability decides whether starting with the car is offered`() {
+        val with = listOf("files", ProtocolConstants.CAPABILITY_AUTOSTART)
+        assertEquals(
+            PairingStep.EnterCode(stale = false, autostart = true),
+            pairingStep("car", ConnectionState.NeedsPairing("car", tcp, stale = false, capabilities = with)),
+        )
+        assertEquals(
+            PairingStep.EnterCode(stale = true, autostart = true),
+            pairingStep("car", ConnectionState.NeedsPairing("car", tcp, stale = true, capabilities = with)),
+        )
+        // An agent from before the switch has nothing to set up.
+        assertEquals(
+            PairingStep.EnterCode(stale = false, autostart = false),
+            pairingStep("car", ConnectionState.NeedsPairing("car", tcp, stale = false, capabilities = listOf("files"))),
+        )
     }
 
     @Test

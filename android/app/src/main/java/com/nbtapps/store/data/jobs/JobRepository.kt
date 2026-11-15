@@ -95,6 +95,11 @@ sealed interface ConnectionState {
         val endpoint: Endpoint,
         /** The phone had a key for this head unit, and the head unit no longer takes it: its phones were forgotten. */
         val stale: Boolean,
+        /**
+         * What the agent listed in its `hello` as its capabilities, as in [Connected.capabilities]: what it can do
+         * is known before the phone is paired, though it does none of it until then.
+         */
+        val capabilities: List<String> = emptyList(),
     ) : ConnectionState
 
     /** The last attempt failed, or the link was lost. [reason] is for the user. */
@@ -706,7 +711,7 @@ class JobRepository(
             if (e.code != "unauthenticated") throw e
             val waiting = Unpaired(next, unit, endpoint, hello)
             unpaired = waiting
-            connectionState.value = ConnectionState.NeedsPairing(unit.id, endpoint, stale || forgottenBy == unit.id)
+            connectionState.value = ConnectionState.NeedsPairing(unit.id, endpoint, stale || forgottenBy == unit.id, hello.capabilities)
             scope.launch { attend(waiting) }
             return false
         }

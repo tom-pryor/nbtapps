@@ -28,8 +28,12 @@ sealed interface PairingStep {
     /** A link is being opened. */
     data object Connecting : PairingStep
 
-    /** The link is up and the agent waits for the code. [stale]: it knew this phone once and no longer does. */
-    data class EnterCode(val stale: Boolean) : PairingStep
+    /**
+     * The link is up and the agent waits for the code. [stale]: it knew this phone once and no longer does.
+     * [autostart]: the agent has the switch that has it start with the car, so the screen offers to set that up
+     * once the phone is paired.
+     */
+    data class EnterCode(val stale: Boolean, val autostart: Boolean = false) : PairingStep
 
     /** The agent takes this phone: it is paired, now or from before. */
     data object Paired : PairingStep
@@ -56,7 +60,11 @@ data class PairingUiState(
 
 /** The step for the head unit [headUnitId] when the app's link stands as [connection] says. A link to another head unit is none to this one. */
 internal fun pairingStep(headUnitId: String, connection: ConnectionState): PairingStep = when (connection) {
-    is ConnectionState.NeedsPairing -> if (connection.headUnitId == headUnitId) PairingStep.EnterCode(connection.stale) else PairingStep.NoLink(null)
+    is ConnectionState.NeedsPairing -> if (connection.headUnitId == headUnitId) {
+        PairingStep.EnterCode(connection.stale, autostart = ProtocolConstants.CAPABILITY_AUTOSTART in connection.capabilities)
+    } else {
+        PairingStep.NoLink(null)
+    }
     is ConnectionState.Connected -> if (connection.headUnitId == headUnitId) PairingStep.Paired else PairingStep.NoLink(null)
     is ConnectionState.Connecting -> if (connection.headUnitId == headUnitId) PairingStep.Connecting else PairingStep.NoLink(null)
     is ConnectionState.Failed -> PairingStep.NoLink(connection.reason.takeIf { connection.headUnitId == headUnitId })

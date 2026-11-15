@@ -309,6 +309,16 @@ class JobRepositoryTest {
     }
 
     @Test
+    fun `a link held for pairing says what the agent can do, from its hello`() = test {
+        guarded()
+        connector.onConnect = { it.capabilities = """["autostart","files"]""" }
+
+        assertTrue(jobs.connect("car").exceptionOrNull() is PairingNeeded)
+
+        assertEquals(ConnectionState.NeedsPairing("car", overTcp, stale = false, capabilities = listOf("autostart", "files")), jobs.connection.value)
+    }
+
+    @Test
     fun `a phone with no key is held at needs pairing, and the code from the car's screen pairs it`() = test {
         val phones = guarded()
 

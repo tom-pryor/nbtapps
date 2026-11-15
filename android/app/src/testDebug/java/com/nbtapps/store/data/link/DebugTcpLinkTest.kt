@@ -147,7 +147,10 @@ class DebugTcpLinkTest {
 
             // The agent answers `hello` and nothing more: this phone is not one it knows.
             assertTrue(jobs.connect("bench").exceptionOrNull() is PairingNeeded)
-            assertEquals(ConnectionState.NeedsPairing("bench", TcpEndpoint("127.0.0.1", port), stale = false), jobs.connection.value)
+            val waiting = jobs.connection.value as ConnectionState.NeedsPairing
+            assertEquals(ConnectionState.NeedsPairing("bench", TcpEndpoint("127.0.0.1", port), stale = false), waiting.copy(capabilities = emptyList()))
+            // What the agent can do is known before the phone is paired, from its `hello`.
+            assertTrue(waiting.capabilities.toString(), ProtocolConstants.CAPABILITY_AUTOSTART in waiting.capabilities)
             // Nobody has opened "Pair a phone" on the car.
             assertEquals("forbidden", (jobs.pair("123456").exceptionOrNull() as AgentRefusal).code)
 
@@ -193,7 +196,10 @@ class DebugTcpLinkTest {
             assertEquals(AgentText.closing(LinkClosing.FORGOTTEN), forgotten.reason)
             assertEquals(emptySet<String>(), keys.headUnitIds)
             assertTrue(jobs.connect("bench").exceptionOrNull() is PairingNeeded)
-            assertEquals(ConnectionState.NeedsPairing("bench", TcpEndpoint("127.0.0.1", port), stale = true), jobs.connection.value)
+            assertEquals(
+                ConnectionState.NeedsPairing("bench", TcpEndpoint("127.0.0.1", port), stale = true),
+                (jobs.connection.value as ConnectionState.NeedsPairing).copy(capabilities = emptyList()),
+            )
 
             // And it pairs again as it did the first time.
             assertTrue(jobs.pair(carScreen.pairingCode()).isSuccess)
