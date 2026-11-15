@@ -18,7 +18,8 @@ import dagger.hilt.android.AndroidEntryPoint
 /**
  * Where another app hands this one a pairing code: see docs/pairing-code-handover.md. An intent that is not such a
  * request closes it at once. Once the phone is paired the app's own screens open, and this one closes; the link
- * it made stays up for them.
+ * it made stays up for them. With the box ticked that has the car start the agent with it, the screen stays instead,
+ * to show how that goes, and the app's screens open when the user asks.
  */
 @AndroidEntryPoint
 class PairRequestActivity : ComponentActivity() {

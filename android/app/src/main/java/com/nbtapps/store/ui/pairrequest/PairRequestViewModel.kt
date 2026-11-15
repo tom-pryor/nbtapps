@@ -7,12 +7,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.jobs.AgentRefusal
+import com.nbtapps.store.data.jobs.AutostartSetup
+import com.nbtapps.store.data.jobs.AutostartStep
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.PairingNeeded
 import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.HeadUnit
+import com.nbtapps.store.model.RestartKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -77,6 +80,15 @@ data class PairRequestUiState(
     /** How long the code is still good for, in milliseconds, or null if the other app did not say. */
     val remainingMs: Long? = null,
     val step: PairRequestStep = PairRequestStep.Prompt,
+    /**
+     * The box that has the car set up to start the agent with it once the phone is paired, ticked to begin with.
+     * With it ticked the screen stays once the phone is paired, to show how that goes.
+     */
+    val enableAutostart: Boolean = true,
+    /** The set-up for the chosen car, if there is one: see [AutostartSetup]. */
+    val setup: AutostartStep? = null,
+    /** The agent says over the link to the chosen car that iDrive has to restart. */
+    val restartNeeded: Boolean = false,
 ) {
     val canPair: Boolean get() = step == PairRequestStep.Prompt && chosen != null && code != null
 
@@ -119,6 +131,9 @@ internal fun pairRequestRefusal(code: String, name: String): String = when (code
  * link, which the agent holds open waiting for it ([ConnectionState.NeedsPairing]). A phone the agent already
  * takes is paired already, and nothing is sent.
  *
+ * A box, ticked to begin with, has the car set up to start the agent with it ([AutostartSetup]) once the phone is
+ * paired, now or from before. Nothing is known of the agent before Pair, so the box is always shown.
+ *
  * The code and its deadline are kept in the saved state, so a rotation or a restart of the process neither loses
  * the request nor starts its countdown again.
  */
@@ -127,6 +142,7 @@ class PairRequestViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
     headUnits: HeadUnitRepository,
     private val jobs: JobRepository,
+    private val setup: AutostartSetup,
     @ApplicationScope private val appScope: CoroutineScope,
     private val clock: ElapsedClock,
 ) : ViewModel() {
@@ -146,6 +162,7 @@ class PairRequestViewModel @Inject constructor(
     private val code = savedStateHandle.getStateFlow<String?>(CODE, null)
     private val deadline = savedStateHandle.getStateFlow<Long?>(DEADLINE, null)
     private val picked = savedStateHandle.getStateFlow<String?>(PICKED, null)
+    private val enableAutostart = savedStateHandle.getStateFlow(ENABLE_AUTOSTART, true)
 
     /** The clock's time, read again each time the countdown's shown second changes. Null with no deadline. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -168,7 +185,7 @@ class PairRequestViewModel @Inject constructor(
         units?.let { it to chosenHeadUnit(it, picked, connection) }
     }
 
-    val uiState: StateFlow<PairRequestUiState> =
+    private val pairing: Flow<PairRequestUiState> =
         combine(chosen, code, deadline, now, step) { units, code, deadline, now, step ->
             val remaining = if (deadline != null && now != null) (deadline - now).coerceAtLeast(0L) else null
             PairRequestUiState(
@@ -179,6 +196,16 @@ class PairRequestViewModel @Inject constructor(
                 remainingMs = remaining,
                 // The code runs out while the user looks at it: there is nothing to tap Pair for then.
                 step = if (step == PairRequestStep.Prompt && remaining == 0L) PairRequestStep.TimeUp else step,
+            )
+        }
+
+    val uiState: StateFlow<PairRequestUiState> =
+        combine(pairing, enableAutostart, setup.state, jobs.connection) { state, enable, setup, connection ->
+            val id = state.chosen?.id
+            state.copy(
+                enableAutostart = enable,
+                setup = setup?.takeIf { it.headUnitId == id }?.step,
+                restartNeeded = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == id }?.info?.restartNeeded == RestartKind.HMI,
             )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), PairRequestUiState())
 
@@ -194,6 +221,18 @@ class PairRequestViewModel @Inject constructor(
         savedStateHandle[DEADLINE] = next.expiresInMs?.let { clock.millis() + it }
         step.value = PairRequestStep.Prompt
     }
+
+    /** Ticks or clears the box that has the car set up to start the agent with it. Only on the prompt, where it is shown. */
+    fun setEnableAutostart(on: Boolean) {
+        if (step.value != PairRequestStep.Prompt) return
+        savedStateHandle[ENABLE_AUTOSTART] = on
+    }
+
+    /** Runs the set-up again from the top, after it stopped short. */
+    fun retrySetup() = setup.retry()
+
+    /** Asks the agent to restart iDrive, once the set-up is done: see [AutostartSetup.restart]. */
+    fun restartIdrive() = setup.restart()
 
     /** The user picks the car, among several saved. */
     fun choose(headUnitId: String) {
@@ -243,7 +282,7 @@ class PairRequestViewModel @Inject constructor(
         val mine = request
         val connection = jobs.connection.value
         when {
-            connection is ConnectionState.Connected && connection.headUnitId == unit.id -> step.value = PairRequestStep.AlreadyPaired(unit.name)
+            connection is ConnectionState.Connected && connection.headUnitId == unit.id -> paired(PairRequestStep.AlreadyPaired(unit.name), unit)
             connection is ConnectionState.NeedsPairing && connection.headUnitId == unit.id -> send(unit, mine)
             else -> {
                 step.value = PairRequestStep.Connecting
@@ -252,7 +291,7 @@ class PairRequestViewModel @Inject constructor(
                     if (mine != request) return@launch
                     val failure = result.exceptionOrNull()
                     when {
-                        failure == null -> step.value = PairRequestStep.AlreadyPaired(unit.name)
+                        failure == null -> paired(PairRequestStep.AlreadyPaired(unit.name), unit)
                         failure is PairingNeeded -> send(unit, mine)
                         else -> step.value = PairRequestStep.NoLink(failure.message ?: "The head unit couldn't be reached")
                     }
@@ -276,13 +315,21 @@ class PairRequestViewModel @Inject constructor(
         appScope.launch {
             val result = jobs.pair(code)
             if (mine != request) return@launch
-            val failure = result.exceptionOrNull()
-            step.value = when (failure) {
-                null -> PairRequestStep.Paired(unit.name)
-                is AgentRefusal -> PairRequestStep.Refused(pairRequestRefusal(failure.code, unit.name))
-                else -> PairRequestStep.NoLink(failure.message ?: "The phone couldn't be paired")
+            when (val failure = result.exceptionOrNull()) {
+                null -> paired(PairRequestStep.Paired(unit.name), unit)
+                is AgentRefusal -> step.value = PairRequestStep.Refused(pairRequestRefusal(failure.code, unit.name))
+                else -> step.value = PairRequestStep.NoLink(failure.message ?: "The phone couldn't be paired")
             }
         }
+    }
+
+    /**
+     * The phone is paired with [unit], as [done] says: now, or from before. With the box ticked the car is set up to
+     * start the agent with it, before the step is shown, so the screen that stays for it has the set-up to show.
+     */
+    private fun paired(done: PairRequestStep, unit: HeadUnit) {
+        if (enableAutostart.value) setup.begin(unit.id)
+        step.value = done
     }
 
     private fun timeUp(): Boolean = deadline.value?.let { clock.millis() >= it } ?: false
@@ -295,6 +342,9 @@ class PairRequestViewModel @Inject constructor(
 
         /** The car the user picked, or the one Pair was tapped for. */
         const val PICKED = "picked"
+
+        /** Whether the box that has the car start the agent with it is ticked. */
+        const val ENABLE_AUTOSTART = "enableAutostart"
 
         /** How long a car added here is waited for to be saved. */
         const val SAVE_WAIT_MS = 10_000L

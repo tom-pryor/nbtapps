@@ -42,14 +42,19 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.ui.headunits.AddHeadUnitFlow
+import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.EnableAutostartBox
 
 /**
  * Pairs this phone with a car by a code another app handed over. It shows the code, asks which car it is for, or
  * for the car to be added, and on Pair connects and sends it. The code cannot be changed here: one the agent
  * refuses, or one that runs out, is replaced by a new one from the app that sent it.
  *
- * [onPaired] is told once the agent has taken the code, [onOpenApp] when the user opens the app from here, and
- * [onClose] when the user is done with the screen.
+ * With the box that has the car start the agent with it ticked, the screen stays once the phone is paired and shows
+ * how setting that up goes, until the user opens the app or closes it.
+ *
+ * [onPaired] is told once the agent has taken the code, where the box is cleared; [onOpenApp] when the user opens
+ * the app from here, and [onClose] when the user is done with the screen.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,7 +70,7 @@ fun PairRequestScreen(
     val step = uiState.step
     // The state is collected only while the screen is started, so the app is not opened from behind another.
     LaunchedEffect(step) {
-        if (step is PairRequestStep.Paired) onPaired(step.name)
+        if (step is PairRequestStep.Paired && !uiState.enableAutostart) onPaired(step.name)
     }
 
     Scaffold(
@@ -97,18 +102,26 @@ fun PairRequestScreen(
                         code = code,
                         uiState = uiState,
                         onChoose = viewModel::choose,
+                        onEnableAutostart = viewModel::setEnableAutostart,
                         onPair = viewModel::pair,
                         onAdd = { adding = true },
                     )
                     PairRequestStep.Connecting -> Working("Connecting to $name…")
                     PairRequestStep.Pairing -> Working("Pairing with $name…")
-                    is PairRequestStep.Paired -> Text("Paired with ${step.name}.", style = MaterialTheme.typography.titleMedium)
+                    is PairRequestStep.Paired -> {
+                        Text("Paired with ${step.name}.", style = MaterialTheme.typography.titleMedium)
+                        if (uiState.enableAutostart) {
+                            Setup(uiState, viewModel)
+                            Button(onClick = onOpenApp) { Text("Open NBTApps") }
+                        }
+                    }
                     is PairRequestStep.AlreadyPaired -> {
                         Text("This phone is already paired with ${step.name}.", style = MaterialTheme.typography.titleMedium)
                         Text(
                             "There was nothing to send the code for.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (uiState.enableAutostart) Setup(uiState, viewModel)
                         Button(onClick = onOpenApp) { Text("Open NBTApps") }
                     }
                     is PairRequestStep.NoLink -> {
@@ -148,11 +161,25 @@ fun PairRequestScreen(
 
 private const val NEW_CODE = "Get a new code from the app that sent this one."
 
+/** How setting the car up to start the agent with it goes, once the phone is paired. */
+@Composable
+private fun Setup(uiState: PairRequestUiState, viewModel: PairRequestViewModel) {
+    uiState.setup?.let { setup ->
+        AutostartSetupCard(
+            step = setup,
+            restartNeeded = uiState.restartNeeded,
+            onRetry = viewModel::retrySetup,
+            onRestart = viewModel::restartIdrive,
+        )
+    }
+}
+
 @Composable
 private fun Prompt(
     code: String,
     uiState: PairRequestUiState,
     onChoose: (String) -> Unit,
+    onEnableAutostart: (Boolean) -> Unit,
     onPair: () -> Unit,
     onAdd: () -> Unit,
 ) {
@@ -172,6 +199,8 @@ private fun Prompt(
     when {
         units.isEmpty() -> {
             Text("Add your car to pair it.")
+            // Adding the car goes straight on to pairing, so the box is here too.
+            EnableAutostartBox(uiState.enableAutostart, onEnableAutostart)
             Button(onClick = onAdd) { Text("Add your car") }
             return
         }
@@ -183,6 +212,7 @@ private fun Prompt(
             }
         }
     }
+    EnableAutostartBox(uiState.enableAutostart, onEnableAutostart)
     Button(onClick = onPair, enabled = uiState.canPair) { Text("Pair") }
     TextButton(onClick = onAdd) { Text("A different car…") }
 }

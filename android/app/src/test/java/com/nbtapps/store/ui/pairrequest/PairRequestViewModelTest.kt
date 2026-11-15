@@ -3,25 +3,35 @@
 package com.nbtapps.store.ui.pairrequest
 
 import androidx.lifecycle.SavedStateHandle
+import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
+import com.nbtapps.store.data.InMemoryPrereleaseRepository
 import com.nbtapps.store.data.MemoryPairingKeys
 import com.nbtapps.store.data.PhoneIdentity
+import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
+import com.nbtapps.store.data.catalogue.FileCatalogueSource
+import com.nbtapps.store.data.jobs.AutostartSetup
+import com.nbtapps.store.data.jobs.AutostartStep
 import com.nbtapps.store.data.jobs.ConnectionState
+import com.nbtapps.store.data.jobs.FakeAgent
 import com.nbtapps.store.data.jobs.FakeConnector
 import com.nbtapps.store.data.jobs.FakePhones
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.TcpEndpoint
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -71,8 +81,26 @@ class PairRequestViewModelTest {
         override suspend fun id() = phoneId
         override val name = "Pixel 9"
     }
+    private val store by lazy { PackageStore(folder.newFolder("packages")) }
     private val jobs by lazy {
-        JobRepository(headUnits, gated, identity, keys, PackageStore(folder.newFolder("packages")), {}, scope, shareDir = folder.newFolder("share"))
+        JobRepository(headUnits, gated, identity, keys, store, {}, scope, shareDir = folder.newFolder("share"))
+    }
+    private val setup by lazy {
+        val source = FileCatalogueSource(null, AgentVectors.file("packages/good"))
+        AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+    }
+
+    /** Whether the stand-in car starts the agent with it. */
+    private val on = AtomicBoolean(false)
+
+    /** An agent with the switch, and the iDrive plugin there to do the starting. */
+    private fun switchable(agent: FakeAgent) {
+        agent.capabilities = """["autostart"]"""
+        agent.handlers["autostart.get"] = { """{"on":${on.get()},"available":true,"starts":0}""" }
+        agent.handlers["autostart.set"] = { params ->
+            on.set(params.getValue("on").jsonPrimitive.content == "true")
+            """{"on":${on.get()},"available":true,"starts":0}"""
+        }
     }
 
     @Volatile
@@ -95,7 +123,7 @@ class PairRequestViewModelTest {
         }
     }
 
-    private fun viewModel(state: SavedStateHandle = SavedStateHandle()) = PairRequestViewModel(state, headUnits, jobs, scope, clock)
+    private fun viewModel(state: SavedStateHandle = SavedStateHandle()) = PairRequestViewModel(state, headUnits, jobs, setup, scope, clock)
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; last was ${flow.value}")
@@ -396,5 +424,93 @@ class PairRequestViewModelTest {
         headUnits.add(car)
 
         assertEquals(PairRequestStep.Paired("Test car"), viewModel.awaitStep("paired") { it is PairRequestStep.Paired }.step)
+    }
+
+    // ---- starting with the car ----
+
+    private fun sets(): Int = connector.agents.sumOf { it.requestsOf("autostart.set").size }
+
+    @Test
+    fun `with the box ticked, as it is to begin with, the car is set up to start the agent once the phone is paired`() = test {
+        phones.code = "420042"
+        connector.onConnect = ::switchable
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", null))
+        assertTrue(viewModel.awaitStep("the prompt") { it == PairRequestStep.Prompt }.enableAutostart)
+
+        viewModel.pair()
+
+        viewModel.awaitStep("paired") { it is PairRequestStep.Paired }
+        val done = await(viewModel.uiState, "the set-up done") { it.setup is AutostartStep.Done }
+        assertEquals(AutostartStep.Done(changed = true), done.setup)
+        assertEquals(PairRequestStep.Paired("Test car"), done.step)
+        assertEquals("car", setup.state.value?.headUnitId)
+        assertTrue(on.get())
+    }
+
+    @Test
+    fun `with the box cleared, pairing sets nothing up`() = test {
+        phones.code = "420042"
+        connector.onConnect = ::switchable
+        val state = SavedStateHandle()
+        val viewModel = viewModel(state)
+        viewModel.handle(PairRequest("420042", null))
+        viewModel.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+        viewModel.setEnableAutostart(false)
+        // Kept in the saved state, as the code is.
+        assertFalse(await(viewModel(state).uiState, "the box cleared") { it.loaded && !it.enableAutostart }.enableAutostart)
+
+        viewModel.pair()
+
+        val paired = viewModel.awaitStep("paired") { it is PairRequestStep.Paired }
+        assertFalse(paired.enableAutostart)
+        assertNull(paired.setup)
+        assertNull(setup.state.value)
+        assertEquals(0, sets())
+    }
+
+    @Test
+    fun `a phone paired already has the car set up as well, over a new link and over the one there is`() = test {
+        keys.put(agentId, phones.pair(phoneId))
+        connector.onConnect = ::switchable
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", null))
+
+        viewModel.pair()
+
+        viewModel.awaitStep("already paired") { it is PairRequestStep.AlreadyPaired }
+        assertEquals(AutostartStep.Done(changed = true), await(viewModel.uiState, "the set-up done") { it.setup is AutostartStep.Done }.setup)
+
+        // Again, with the link up: the set-up runs again, and finds nothing to change.
+        val again = viewModel()
+        again.handle(PairRequest("135790", null))
+        again.pair()
+        again.awaitStep("already paired") { it is PairRequestStep.AlreadyPaired }
+        assertEquals(AutostartStep.Done(changed = false), await(again.uiState, "the set-up done") { it.setup == AutostartStep.Done(changed = false) }.setup)
+        assertEquals(1, connector.agents.size)
+        assertEquals(1, sets())
+    }
+
+    @Test
+    fun `a request replaced while its connect was under way sets nothing up when the connect ends`() = test {
+        keys.put(agentId, phones.pair(phoneId))
+        connector.onConnect = ::switchable
+        val gate = CompletableDeferred<Unit>().also { gated.gate = it }
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("111111", null))
+        viewModel.pair()
+        viewModel.awaitStep("connecting") { it == PairRequestStep.Connecting }
+
+        viewModel.handle(PairRequest("222222", null))
+        viewModel.awaitStep("the prompt again") { it == PairRequestStep.Prompt }
+        gated.gate = null
+        gate.complete(Unit)
+        await(jobs.connection, "the link up") { it is ConnectionState.Connected }
+        // The connect returns a moment after the link is shown up, and its end is dropped then.
+        delay(300)
+
+        assertEquals(PairRequestStep.Prompt, viewModel.uiState.value.step)
+        assertNull(setup.state.value)
+        assertEquals(0, sets())
     }
 }
