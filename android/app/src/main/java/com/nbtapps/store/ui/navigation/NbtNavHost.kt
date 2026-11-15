@@ -142,7 +142,7 @@ fun NbtNavHost(startOnHeadUnits: Boolean, navController: NavHostController = rem
                 LogPullScreen(onBack = { navController.popBackStack() })
             }
             composable<PairingRoute> {
-                PairingScreen(onBack = { navController.popBackStack() })
+                PairingScreen(onBack = { navController.popBackStack() }, onOpenJob = { navController.navigate(JobRoute()) })
             }
             composable<JobRoute> {
                 JobScreen(

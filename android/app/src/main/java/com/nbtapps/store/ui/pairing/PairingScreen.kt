@@ -36,15 +36,20 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.model.AgentText
+import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.EnableAutostartBox
 
 /**
  * Pairs this phone with a head unit. It says where on the car's screen the code is shown and takes the code;
- * with no link to the head unit it offers to open one, since the code goes over it.
+ * with no link to the head unit it offers to open one, since the code goes over it. Where the agent can be started
+ * with the car, a box offers that, and once the phone is paired the screen shows how setting it up goes.
+ * [onOpenJob] leads to the job screen, for the install of the iDrive plugin.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PairingScreen(
     onBack: () -> Unit,
+    onOpenJob: () -> Unit,
     viewModel: PairingViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -75,13 +80,22 @@ fun PairingScreen(
                 name == null -> Text("Head unit not found.")
                 else -> when (val step = uiState.step) {
                     PairingStep.Connecting -> Working("Connecting to the agent…")
-                    is PairingStep.EnterCode -> CodeEntry(name, step.stale, uiState, viewModel::setCode, viewModel::pair)
+                    is PairingStep.EnterCode -> CodeEntry(name, step, uiState, viewModel::setCode, viewModel::setEnableAutostart, viewModel::pair)
                     PairingStep.Paired -> {
                         Text("This phone is paired with $name.", style = MaterialTheme.typography.titleMedium)
                         Text(
                             "It stays paired until its phones are forgotten on the car's screen, or $name is removed from this app.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        uiState.setup?.let { setup ->
+                            AutostartSetupCard(
+                                step = setup,
+                                restartNeeded = uiState.restartNeeded,
+                                onRetry = viewModel::retrySetup,
+                                onRestart = viewModel::restartIdrive,
+                                onOpenJob = onOpenJob,
+                            )
+                        }
                         Button(onClick = onBack) { Text("Done") }
                     }
                     is PairingStep.NoLink -> {
@@ -98,12 +112,13 @@ fun PairingScreen(
 @Composable
 private fun CodeEntry(
     name: String,
-    stale: Boolean,
+    step: PairingStep.EnterCode,
     uiState: PairingUiState,
     onCode: (String) -> Unit,
+    onEnableAutostart: (Boolean) -> Unit,
     onPair: () -> Unit,
 ) {
-    if (stale) {
+    if (step.stale) {
         Text("$name no longer knows this phone: its paired phones were forgotten on the car. Pair it again to go on.")
     } else {
         Text("$name wants this phone paired before the app can do anything on it. It is done once.")
@@ -128,6 +143,7 @@ private fun CodeEntry(
         keyboardActions = KeyboardActions(onDone = { onPair() }),
         modifier = Modifier.fillMaxWidth(),
     )
+    if (step.autostart) EnableAutostartBox(uiState.enableAutostart, onEnableAutostart, enabled = !uiState.working)
     if (uiState.working) {
         Working("Pairing…")
     } else {

@@ -45,10 +45,14 @@ class PairingStepTest {
             pairingStep("car", ConnectionState.NeedsPairing("car", tcp, stale = true, capabilities = with)),
         )
         // An agent from before the switch has nothing to set up.
-        assertEquals(
-            PairingStep.EnterCode(stale = false, autostart = false),
-            pairingStep("car", ConnectionState.NeedsPairing("car", tcp, stale = false, capabilities = listOf("files"))),
-        )
+        val without = pairingStep("car", ConnectionState.NeedsPairing("car", tcp, stale = false, capabilities = listOf("files")))
+        assertEquals(PairingStep.EnterCode(stale = false, autostart = false), without)
+
+        // Pairing goes on to the set-up only with the box shown and ticked.
+        assertTrue(setsUpAutostart(ticked = true, PairingStep.EnterCode(stale = false, autostart = true)))
+        assertFalse(setsUpAutostart(ticked = false, PairingStep.EnterCode(stale = false, autostart = true)))
+        assertFalse(setsUpAutostart(ticked = true, without))
+        assertFalse(setsUpAutostart(ticked = true, PairingStep.Paired))
     }
 
     @Test
