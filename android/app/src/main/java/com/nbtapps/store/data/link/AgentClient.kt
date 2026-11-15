@@ -7,6 +7,9 @@ import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.crypto.newSha256
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.Autostart
+import com.nbtapps.store.model.Check
+import com.nbtapps.store.model.CheckFixResult
+import com.nbtapps.store.model.CheckList
 import com.nbtapps.store.model.FileArea
 import com.nbtapps.store.model.FileFetch
 import com.nbtapps.store.model.FileListing
@@ -322,6 +325,73 @@ class AgentClient(
         peer.endStream(stream)
     }
 
+    /**
+     * Runs the agent's checks, or with [id] that one, and returns each as a whole: every path it found, where the
+     * agent sent them a page at a time. Only an agent that lists [ProtocolConstants.CAPABILITY_CHECKS] has them.
+     *
+     * A list that is cut short, or one whose paths waited for a page of their own, is asked for page by page with
+     * the check's id and the last path received. The list may change on the head unit meanwhile: a page whose token
+     * is not that of the check's first page has the check read again from its start, a few times at most.
+     *
+     * @throws RemoteException with `busy` while an install step runs, `not-found` for an id the agent has no check of.
+     */
+    suspend fun checksRun(id: String? = null): List<Check> {
+        val first = call<CheckList>("checks.run", buildJsonObject { id?.let { put("id", it) } }).checks
+        if (id != null && first.any { it.id != id }) throw ProtocolException(UNREADABLE)
+        return first.map { check -> if (check.more) wholeCheck(check) else check }
+    }
+
+    /**
+     * [check] with the rest of its list, read page by page. A check that came with none of its paths is read from
+     * its start, and its first page is the one the others are held to: a page with another token or count means
+     * the list changed, and the check is read from its start again.
+     */
+    private suspend fun wholeCheck(check: Check): Check {
+        var head = if (check.found.isEmpty()) onePage(check.id, after = null) else check
+        var restarts = 0
+        while (true) {
+            val paths = ArrayList(head.found)
+            var page = head
+            var same = true
+            while (page.more && same) {
+                val next = onePage(check.id, after = paths.lastOrNull())
+                same = next.problem && next.fix?.token == head.fix?.token && next.count == head.count
+                if (same) {
+                    // A page that claims more and brings nothing would never end.
+                    if (next.found.isEmpty() && next.more) throw ProtocolException(UNREADABLE)
+                    paths += next.found
+                    page = next
+                }
+            }
+            if (same) return head.copy(found = paths, more = false)
+            if (++restarts > CHECK_RESTARTS) throw ProtocolException("The head unit's files kept changing while they were read. Try again.")
+            head = onePage(check.id, after = null)
+        }
+    }
+
+    /** One page of the check [id]: from its start, or after the path [after]. */
+    private suspend fun onePage(id: String, after: String?): Check {
+        val page = call<CheckList>("checks.run", buildJsonObject {
+            put("id", id)
+            after?.let { put("after", it) }
+        }).checks.singleOrNull()
+        if (page == null || page.id != id) throw ProtocolException(UNREADABLE)
+        return page
+    }
+
+    /**
+     * Runs the fix of the check [id], with the [token] of the list the user was shown, and returns what it did. A
+     * fix changes the head unit: it is asked for only once the user has said yes to that list.
+     *
+     * @throws RemoteException with `stale` when the list is no longer the one [token] is of: the check is run
+     *   again and the new list shown. With `busy` while a job runs, `not-found` for an unknown check,
+     *   `unsupported` where the check has no fix for what it finds, `io-error` where it could not be done.
+     */
+    suspend fun checksFix(id: String, token: String): CheckFixResult = call("checks.fix", buildJsonObject {
+        put("id", id)
+        put("token", token)
+    })
+
     private fun planIdParams(planId: String) = buildJsonObject { put("planId", planId) }
 
     private fun jobOf(result: JsonObject): JobSnapshot? = (result["job"] as? JsonObject)?.let { decode(it) }
@@ -343,6 +413,11 @@ class AgentClient(
 
         /** A proof of `auth`: an HMAC-SHA256. */
         private const val PROOF_BYTES = 32
+
+        private const val UNREADABLE = "The head unit sent an answer this app can't read"
+
+        /** How many times a check whose list changed while it was read page by page is read again from its start. */
+        private const val CHECK_RESTARTS = 3
         private val AGENT_LABEL = "nbt-auth-1".encodeToByteArray()
         private val PHONE_LABEL = "nbt-auth-2".encodeToByteArray()
 

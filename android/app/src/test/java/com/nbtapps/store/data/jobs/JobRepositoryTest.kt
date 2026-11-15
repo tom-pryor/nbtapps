@@ -15,14 +15,19 @@ import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.AutostartReason
+import com.nbtapps.store.model.CheckMove
+import com.nbtapps.store.model.CheckProblem
+import com.nbtapps.store.model.CheckState
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.HeadUnit
+import com.nbtapps.store.model.HeadUnitChecks
 import com.nbtapps.store.model.InstallTarget
 import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.LinkClosing
 import com.nbtapps.store.model.PackageNeed
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RemoveTarget
+import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
 import java.io.IOException
@@ -1192,5 +1197,214 @@ class JobRepositoryTest {
         delay(300)
         assertEquals(3, connector.agents.size)
         assertTrue(jobs.connection.value is ConnectionState.NeedsPairing)
+    }
+
+    // ---- the compatibility checks ----------------------------------------------------------------------------------
+
+    private val demoFiles = listOf("/opt/demo/bin/demod", "/opt/demo/etc/demo.conf", "/var/opt/demo/state")
+    private val demoMove = "/net/plugins/Demo" to "/opt/demo/Demo.old"
+
+    /** What the head unit's checks find, on every link to it; and every agent from here on lists [capabilities]. */
+    private fun withChecks(capabilities: String = """["checks"]"""): FakeChecks {
+        val shared = FakeChecks()
+        connector.onConnect = { agent ->
+            agent.capabilities = capabilities
+            agent.checks = shared
+        }
+        return shared
+    }
+
+    /** What is kept with the head unit once the checks have been answered. */
+    private suspend fun kept(): HeadUnitChecks =
+        withTimeoutOrNull(10_000) { headUnits.headUnit("car").first { it?.checks != null }?.checks }
+            ?: throw AssertionError("the checks were never kept")
+
+    @Test
+    fun `the checks run by themselves once for a head unit, and not again on the next link`() = test {
+        val checks = withChecks()
+        checks.add(FakeCheck("aa-fix", demoFiles, moves = listOf(demoMove)))
+
+        assertTrue(jobs.connect("car").isSuccess)
+        val found = kept()
+        assertEquals(1234L, found.checkedAt)
+        val problem = found.problems.single()
+        assertEquals("aa-fix", problem.id)
+        assertEquals(demoFiles, problem.paths)
+        assertEquals(listOf(CheckMove("/net/plugins/Demo", "/opt/demo/Demo.old")), problem.moves)
+        assertEquals("Remove them", problem.fix?.label)
+        assertTrue(problem.changesFiles)
+        assertEquals(found, jobs.ensureChecked())
+
+        jobs.disconnect()
+        assertTrue(jobs.connect("car").isSuccess)
+        assertEquals(found, jobs.ensureChecked())
+        delay(200)
+        assertEquals(1, checks.runs.get())
+    }
+
+    @Test
+    fun `a head unit where all is well keeps an empty list, so the checks do not run again`() = test {
+        val checks = withChecks()
+
+        assertTrue(jobs.connect("car").isSuccess)
+        assertEquals(emptyList<CheckProblem>(), kept().problems)
+        jobs.disconnect()
+        assertTrue(jobs.connect("car").isSuccess)
+        jobs.ensureChecked()
+        assertEquals(1, checks.runs.get())
+    }
+
+    @Test
+    fun `an agent without the checks is asked nothing of them, and nothing is kept`() = test {
+        withChecks(capabilities = """["autostart"]""")
+
+        assertTrue(jobs.connect("car").isSuccess)
+        assertNull(jobs.ensureChecked())
+        delay(200)
+        assertTrue(connector.agent.requestsOf("checks.run").isEmpty())
+        assertNull(headUnits.headUnit("car").first()?.checks)
+        assertTrue(jobs.recheck().isFailure)
+        assertTrue(jobs.runCheck("aa-fix").isFailure)
+        assertTrue(jobs.fixCheck("aa-fix", "00".repeat(32)).isFailure)
+        assertTrue(connector.agent.requestsOf("checks.fix").isEmpty())
+    }
+
+    @Test
+    fun `the checks wait while a job is followed, and run once it has ended`() = test {
+        val checks = withChecks()
+        checks.add(FakeCheck("aa-fix", demoFiles))
+        val inner = connector.onConnect
+        connector.onConnect = { agent ->
+            inner(agent)
+            agent.handlers["job.status"] = { """{"job":${job("installing", 4, ""","phase":"files"""")},"events":[],"more":false}""" }
+        }
+
+        assertTrue(jobs.connect("car").isSuccess)
+        assertNull(jobs.ensureChecked())
+        delay(200)
+        assertEquals(0, checks.runs.get())
+        assertNull(headUnits.headUnit("car").first()?.checks)
+
+        connector.agent.event("job.done", 5, done)
+        assertEquals("aa-fix", kept().problems.single().id)
+    }
+
+    @Test
+    fun `a run that fails keeps nothing, and the next link tries again`() = test {
+        val checks = withChecks()
+        checks.add(FakeCheck("aa-fix", demoFiles))
+        checks.refuseRun = "busy"
+
+        assertTrue(jobs.connect("car").isSuccess)
+        assertNull(jobs.ensureChecked())
+        assertNull(headUnits.headUnit("car").first()?.checks)
+
+        checks.refuseRun = null
+        jobs.disconnect()
+        assertTrue(jobs.connect("car").isSuccess)
+        assertEquals("aa-fix", kept().problems.single().id)
+    }
+
+    @Test
+    fun `a problem put aside stays aside, and checking again by hand brings it back`() = test {
+        val checks = withChecks()
+        checks.add(FakeCheck("system-writable", emptyList(), fixLabel = "Make it read-only again", restart = "none"))
+        checks.add(FakeCheck("aa-fix", demoFiles))
+        assertTrue(jobs.connect("car").isSuccess)
+        assertEquals(listOf("system-writable", "aa-fix"), kept().problems.map { it.id })
+
+        jobs.dismissCheck("car", "aa-fix")
+        val aside = requireNotNull(headUnits.headUnit("car").first()?.checks)
+        assertEquals(listOf("system-writable"), aside.open.map { it.id })
+        assertTrue(aside.problem("aa-fix")!!.dismissed)
+
+        // The partition was put back meanwhile, by other means.
+        checks.problems.remove("system-writable")
+        val again = jobs.recheck().getOrThrow()
+        assertEquals(listOf("aa-fix"), again.open.map { it.id })
+        assertEquals(again, headUnits.headUnit("car").first()?.checks)
+        assertEquals(2, checks.runs.get())
+    }
+
+    @Test
+    fun `one check is run whole with its token, and what is kept for it is brought up to date`() = test {
+        val checks = withChecks()
+        val problem = FakeCheck("aa-fix", demoFiles)
+        checks.add(problem)
+        assertTrue(jobs.connect("car").isSuccess)
+        kept()
+
+        problem.found = demoFiles + "/opt/demo/lib/libdemo.so"
+        checks.pageSize = 2
+        val check = jobs.runCheck("aa-fix").getOrThrow()
+
+        assertEquals((demoFiles + "/opt/demo/lib/libdemo.so").sorted(), check.found)
+        assertEquals(checks.token("aa-fix", check.found), check.fix?.token)
+        assertEquals(check.found, headUnits.headUnit("car").first()?.checks?.problem("aa-fix")?.paths)
+    }
+
+    @Test
+    fun `a fix that leaves nothing drops the problem, and the restart it needs is read`() = test {
+        val checks = withChecks()
+        checks.add(FakeCheck("aa-fix", demoFiles, moves = listOf(demoMove)))
+        assertTrue(jobs.connect("car").isSuccess)
+        kept()
+        val token = jobs.runCheck("aa-fix").getOrThrow().fix!!.token
+
+        val result = jobs.fixCheck("aa-fix", token).getOrThrow()
+
+        assertEquals(CheckState.OK, result.state)
+        assertEquals(3, result.removed)
+        assertEquals(listOf(CheckMove("/net/plugins/Demo", "/opt/demo/Demo.old")), result.moved)
+        assertEquals(listOf("aa-fix" to token), checks.fixes)
+        assertEquals(emptyList<CheckProblem>(), headUnits.headUnit("car").first()?.checks?.problems)
+        assertEquals(RestartKind.HMI, (jobs.connection.value as ConnectionState.Connected).info.restartNeeded)
+    }
+
+    @Test
+    fun `a problem with only a folder to move aside changes files, and one with neither does not`() = test {
+        val checks = withChecks()
+        checks.add(FakeCheck("aa-fix", emptyList(), moves = listOf(demoMove)))
+        checks.add(FakeCheck("system-writable", emptyList(), fixLabel = "Make it read-only again", restart = "none"))
+        assertTrue(jobs.connect("car").isSuccess)
+
+        val found = kept()
+
+        assertTrue(found.problem("aa-fix")!!.changesFiles)
+        assertFalse(found.problem("system-writable")!!.changesFiles)
+    }
+
+    @Test
+    fun `a fix that leaves something keeps the problem, with the list as the check finds it now`() = test {
+        val checks = withChecks()
+        checks.add(FakeCheck("aa-fix", demoFiles))
+        checks.leaves["aa-fix"] = listOf("/var/opt/demo/state")
+        assertTrue(jobs.connect("car").isSuccess)
+        kept()
+        val token = jobs.runCheck("aa-fix").getOrThrow().fix!!.token
+
+        val result = jobs.fixCheck("aa-fix", token).getOrThrow()
+
+        assertEquals(CheckState.PROBLEM, result.state)
+        assertEquals(listOf("/var/opt/demo/state"), result.left)
+        assertEquals(listOf("/var/opt/demo/state"), headUnits.headUnit("car").first()?.checks?.problem("aa-fix")?.paths)
+    }
+
+    @Test
+    fun `a fix with the token of a list that has changed is refused as stale, and nothing is removed`() = test {
+        val checks = withChecks()
+        val problem = FakeCheck("aa-fix", demoFiles)
+        checks.add(problem)
+        assertTrue(jobs.connect("car").isSuccess)
+        kept()
+        val token = jobs.runCheck("aa-fix").getOrThrow().fix!!.token
+        problem.found = demoFiles + "/opt/demo/new"
+
+        val failure = jobs.fixCheck("aa-fix", token).exceptionOrNull() as AgentRefusal
+
+        assertEquals("stale", failure.code)
+        assertEquals(AgentText.check("stale"), failure.message)
+        assertEquals(demoFiles + "/opt/demo/new", problem.found)
+        assertEquals(demoFiles, headUnits.headUnit("car").first()?.checks?.problem("aa-fix")?.paths)
     }
 }

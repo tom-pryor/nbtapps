@@ -335,3 +335,87 @@ data class FileFetch(
     /** One of [FileCompress]'s: what was asked for. */
     val compress: String,
 )
+
+/** What a check finds: the `state` of [Check] and of [CheckFixResult]. */
+object CheckState {
+    /** Nothing is in the way. */
+    const val OK = "ok"
+
+    /** Something is: [Check] says what, and lists what it found. */
+    const val PROBLEM = "problem"
+
+    /** The check could not tell, for the reason in [Check.why]. */
+    const val UNKNOWN = "unknown"
+}
+
+/**
+ * What a check's fix does, offered with a problem it can fix. [token] is good for the list the check found when it
+ * was answered, and for nothing else: `checks.fix` is refused with `stale` once the list is another.
+ */
+@Serializable
+data class CheckFix(
+    /** The fix's button, in a few words. */
+    val label: String,
+    /** What the fix does, and what it leaves. */
+    val detail: String = "",
+    /** One of [RestartKind]'s: what is needed once it has changed something. */
+    val restart: String = RestartKind.NONE,
+    val token: String,
+)
+
+/**
+ * One check of `checks.run`: what was put onto the head unit by hand, outside this system, and stands in the way
+ * of a package or of the head unit. Only an agent that lists the capability `checks` has checks. The texts are the
+ * agent's own, in English.
+ */
+@Serializable
+data class Check(
+    val id: String,
+    /** One of [CheckState]'s. */
+    val state: String,
+    /** With [state] unknown: why the check could not tell. */
+    val why: String? = null,
+    /** With [state] problem: the problem in a few words, and what it is and why it matters. */
+    val title: String = "",
+    val detail: String = "",
+    /** How many paths the check found that its fix removes, of which [found] holds a page. */
+    val count: Int = 0,
+    val found: List<String> = emptyList(),
+    /** More paths follow [found]: they are asked for with the check's id and the last path received. */
+    val more: Boolean = false,
+    /**
+     * The folders its fix moves aside whole, and where to, which it does not remove: every one, on every page. A
+     * problem may have these and no paths to remove.
+     */
+    val moves: List<CheckMove> = emptyList(),
+    /** Absent where the check has no fix for what it found: [detail] then says why. */
+    val fix: CheckFix? = null,
+) {
+    val problem: Boolean get() = state == CheckState.PROBLEM
+}
+
+/** A folder a check's fix moves aside whole, from [from] to [to], and leaves there. */
+@Serializable
+data class CheckMove(val from: String, val to: String)
+
+/** The result of `checks.run`. */
+@Serializable
+data class CheckList(val checks: List<Check> = emptyList())
+
+/** The result of `checks.fix`: what the fix did, and what the check finds afterwards. */
+@Serializable
+data class CheckFixResult(
+    /** One of [CheckState]'s: what the check finds now. Still a problem where something was left. */
+    val state: String,
+    /** How many paths of the list were removed: the folders moved aside are not among them. */
+    val removed: Int = 0,
+    /** The folders that were moved aside. One that was not is in [left] by where it was. */
+    val moved: List<CheckMove> = emptyList(),
+    /** Paths of the list that are still there, as many as the link's frame took, and how many more there are. */
+    val left: List<String> = emptyList(),
+    val leftMore: Int = 0,
+    /** The file names of the programs that were stopped first. */
+    val stopped: List<String> = emptyList(),
+    /** One of [RestartKind]'s: what the fix left needed. */
+    val restart: String = RestartKind.NONE,
+)

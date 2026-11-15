@@ -16,15 +16,20 @@ import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.serialUnavailable
+import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.HeadUnit
+import com.nbtapps.store.model.HeadUnitChecks
 import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.InstalledPackage
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.SerialEndpoint
+import com.nbtapps.store.ui.headunits.CheckFixFlow
+import com.nbtapps.store.ui.headunits.CheckFixStep
 import com.nbtapps.store.ui.navigation.HeadUnitDetailRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -93,30 +98,55 @@ data class HeadUnitDetailUiState(
     val setup: AutostartSetupState? = null,
     /** The agent says over the link to this head unit that iDrive has to restart. */
     val restartNeeded: Boolean = false,
+    /** What the agent's checks found on this head unit, as it is kept with it. Null until they have been answered. */
+    val checks: HeadUnitChecks? = null,
+    /** There is a link to this head unit, and its agent has the checks: they can be run and fixed from here. */
+    val canCheck: Boolean = false,
+    /** The checks are being run again by hand. */
+    val checking: Boolean = false,
+    /** Why running them again failed. */
+    val checkError: String? = null,
+    /** The confirmation of a check's fix that is open, if one is. */
+    val fix: CheckFixStep? = null,
 )
 
 @HiltViewModel
-class HeadUnitDetailViewModel @Inject constructor(
-    savedStateHandle: SavedStateHandle,
+class HeadUnitDetailViewModel internal constructor(
+    private val headUnitId: String,
     private val repository: HeadUnitRepository,
     private val jobs: JobRepository,
     private val connector: LinkConnector,
     private val bluetooth: PhoneBluetooth,
     private val setup: AutostartSetup,
+    appScope: CoroutineScope,
 ) : ViewModel() {
 
-    private val headUnitId = savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId
+    @Inject
+    constructor(
+        savedStateHandle: SavedStateHandle,
+        repository: HeadUnitRepository,
+        jobs: JobRepository,
+        connector: LinkConnector,
+        bluetooth: PhoneBluetooth,
+        setup: AutostartSetup,
+        @ApplicationScope appScope: CoroutineScope,
+    ) : this(savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope)
 
     private data class Local(
         val serial: SerialStatus? = null,
         val restartError: String? = null,
         val autostartBusy: Boolean = false,
         val autostartError: String? = null,
+        val checking: Boolean = false,
+        val checkError: String? = null,
     )
 
     private val local = MutableStateFlow(Local())
 
-    val uiState: StateFlow<HeadUnitDetailUiState> =
+    /** The confirmation of a check's fix: it is the app's, so a fix goes on when the screen is left. */
+    private val fixes = CheckFixFlow(jobs, appScope)
+
+    private val page =
         combine(repository.headUnit(headUnitId), jobs.connection, jobs.job, local, setup.state) { unit, connection, job, local, setup ->
             val connected = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == headUnitId }
             HeadUnitDetailUiState(
@@ -141,8 +171,16 @@ class HeadUnitDetailViewModel @Inject constructor(
                 logs = connected?.files == true,
                 setup = setup?.takeIf { it.headUnitId == headUnitId },
                 restartNeeded = connected?.info?.restartNeeded == RestartKind.HMI,
+                checks = unit?.checks,
+                canCheck = connected?.checks == true,
+                checking = local.checking,
+                checkError = local.checkError,
             )
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
+        }
+
+    val uiState: StateFlow<HeadUnitDetailUiState> =
+        combine(page, fixes.state) { page, fix -> page.copy(fix = fix) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
 
     /**
      * Reads what the phone's Bluetooth says of the head unit's serial endpoint: when the screen comes up, on
@@ -186,6 +224,42 @@ class HeadUnitDetailViewModel @Inject constructor(
 
     /** Hides the set-up's card, once it has ended. */
     fun dismissSetup() = setup.dismiss(headUnitId)
+
+    /** Runs the agent's checks again, by hand: what they find takes the place of what was kept, put aside or not. */
+    fun recheck() {
+        if (local.value.checking) return
+        viewModelScope.launch {
+            local.update { it.copy(checking = true, checkError = null) }
+            val failure = jobs.recheck().exceptionOrNull()
+            local.update { it.copy(checking = false, checkError = failure?.let { why -> why.message ?: "The head unit didn't answer" }) }
+        }
+    }
+
+    /** Opens the confirmation of the fix of the check [id], which reads the check again first. */
+    fun openFix(id: String) {
+        val problem = uiState.value.checks?.problem(id) ?: return
+        fixes.open(id, problem.title)
+    }
+
+    /**
+     * The fix's button on the set-up's card, where it asks about a check: the same confirmation, whose yes goes to
+     * the set-up.
+     */
+    fun openSetupRemoval() = fixes.openForSetup(setup, headUnitId)
+
+    /** Skip on the set-up's card: see [AutostartSetup.skipRemoval]. */
+    fun skipSetupRemoval() = setup.skipRemoval()
+
+    fun confirmFix() = fixes.confirm()
+
+    fun retryFix() = fixes.retry()
+
+    fun closeFix() = fixes.close()
+
+    /** Puts the problem of the check [id] aside: it is no longer shown here, until the checks are run again by hand. */
+    fun dismissCheck(id: String) {
+        viewModelScope.launch { jobs.dismissCheck(headUnitId, id) }
+    }
 
     /** [kind] is `hmi` or `reboot`. */
     fun restart(kind: String) {

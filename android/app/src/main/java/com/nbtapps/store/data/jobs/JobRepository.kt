@@ -25,9 +25,14 @@ import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
+import com.nbtapps.store.model.Check
+import com.nbtapps.store.model.CheckFixResult
+import com.nbtapps.store.model.CheckProblem
+import com.nbtapps.store.model.CheckState
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.FileListing
 import com.nbtapps.store.model.HeadUnit
+import com.nbtapps.store.model.HeadUnitChecks
 import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.Hello
 import com.nbtapps.store.model.InstallTarget
@@ -83,6 +88,9 @@ sealed interface ConnectionState {
     ) : ConnectionState {
         /** The agent can send log files: [JobRepository.listLogs] and [JobRepository.startPull]. */
         val files: Boolean get() = ProtocolConstants.CAPABILITY_FILES in capabilities
+
+        /** The agent has the compatibility checks: [JobRepository.ensureChecked] and the calls after it. */
+        val checks: Boolean get() = ProtocolConstants.CAPABILITY_CHECKS in capabilities
     }
 
     /**
@@ -241,6 +249,9 @@ class JobRepository(
     private var pulling: Job? = null
 
     private val connectLock = Mutex()
+
+    /** Held while the checks are run or a fix is: one at a time, so they run by themselves once. */
+    private val checksLock = Mutex()
 
     /** The link in use: one the agent tells this phone things over. */
     @Volatile
@@ -497,6 +508,133 @@ class JobRepository(
         } catch (e: RemoteException) {
             // It listed the capability and will not say: shown as an agent without the switch, and the link stands.
             null
+        }
+    }
+
+    /**
+     * What the agent's compatibility checks found on the connected head unit: what is kept with it, or, where
+     * nothing is kept yet and its agent lists [ProtocolConstants.CAPABILITY_CHECKS], what they find now, which is
+     * then kept. So they run by themselves once for a head unit, on the first link on which they can be answered;
+     * after that only by hand ([recheck]).
+     *
+     * Null where nothing is kept and they cannot be run now: no link, an agent without them, a job that runs (the
+     * agent answers `busy` then), or a run that failed. Nothing is kept then, and the next link tries again.
+     */
+    suspend fun ensureChecked(): HeadUnitChecks? = checksLock.withLock {
+        val current = session ?: return@withLock null
+        val connected = connectionState.value as? ConnectionState.Connected ?: return@withLock null
+        headUnits.headUnit(connected.headUnitId).first()?.checks?.let { return@withLock it }
+        if (!connected.checks || jobRunsOn(connected.headUnitId)) return@withLock null
+        try {
+            runAll(current, connected.headUnitId)
+        } catch (e: RemoteException) {
+            null
+        } catch (e: IOException) {
+            null
+        }
+    }
+
+    /**
+     * Runs the checks on the connected head unit again, by hand, and keeps what they find in place of what was
+     * kept. A problem the user put aside that is still there is shown again.
+     */
+    suspend fun recheck(): Result<HeadUnitChecks> = checksLock.withLock {
+        checksSession { current, connected -> runAll(current, connected.headUnitId) }
+    }
+
+    /**
+     * Runs the check [id] on the connected head unit now, and returns it whole, with the token of the list it
+     * found: what a fix is confirmed against. What is kept for it is brought up to date.
+     */
+    suspend fun runCheck(id: String): Result<Check> = checksLock.withLock {
+        checksSession { current, connected ->
+            val check = current.client.checksRun(id).single()
+            if (session === current) keepCheck(connected.headUnitId, check)
+            check
+        }
+    }
+
+    /**
+     * Runs the fix of the check [id] with the [token] of the list the user confirmed. What is kept is brought up
+     * to date: a check that finds nothing now is dropped, and one that still finds something is run again, so its
+     * new list is kept. Then what the head unit holds is read again, since a fix leaves a restart needed and may
+     * change what the agent says of starting with the car.
+     *
+     * A refusal is an [AgentRefusal] in the app's words ([AgentText.check]). With `stale` the list is no longer
+     * the one the token is of: the caller runs the check again and shows the user the new list.
+     */
+    suspend fun fixCheck(id: String, token: String): Result<CheckFixResult> {
+        val result = checksLock.withLock {
+            checksSession { current, connected ->
+                val outcome = current.client.checksFix(id, token)
+                if (outcome.state == CheckState.PROBLEM) {
+                    // The agent's answer holds only what fits its frame: the list is read again, whole.
+                    val again = try {
+                        current.client.checksRun(id).single()
+                    } catch (e: RemoteException) {
+                        null
+                    }
+                    if (again != null && session === current) keepCheck(connected.headUnitId, again)
+                } else if (session === current) {
+                    dropCheck(connected.headUnitId, id)
+                }
+                outcome
+            }
+        }
+        if (result.isSuccess) refresh()
+        return result
+    }
+
+    /** Puts aside the problem of the check [id] on the head unit [headUnitId]: it is no longer shown, until [recheck]. */
+    suspend fun dismissCheck(headUnitId: String, id: String) {
+        headUnits.update(headUnitId) { unit ->
+            val kept = unit.checks ?: return@update unit
+            unit.copy(checks = kept.copy(problems = kept.problems.map { if (it.id == id) it.copy(dismissed = true) else it }))
+        }
+    }
+
+    /** A job on [headUnitId] is running, or being followed: the checks wait for it. */
+    private fun jobRunsOn(headUnitId: String): Boolean = jobState.value?.let { it.headUnitId == headUnitId && !it.ended } == true
+
+    /** Runs every check over [current] and keeps what they find with [headUnitId], none of it put aside. */
+    private suspend fun runAll(current: AgentSession, headUnitId: String): HeadUnitChecks {
+        val checks = HeadUnitChecks(now(), current.client.checksRun().mapNotNull { CheckProblem.of(it) })
+        if (session === current) headUnits.update(headUnitId) { it.copy(checks = checks) }
+        return checks
+    }
+
+    /** Keeps [check] as it was found now, with whether it was put aside; a check that found nothing is dropped. */
+    private suspend fun keepCheck(headUnitId: String, check: Check) = headUnits.update(headUnitId) { unit ->
+        val kept = unit.checks ?: HeadUnitChecks(now())
+        val was = kept.problem(check.id)
+        val problem = CheckProblem.of(check, dismissed = was?.dismissed == true)
+        val problems = when {
+            problem == null -> kept.problems.filter { it.id != check.id }
+            was == null -> kept.problems + problem
+            else -> kept.problems.map { if (it.id == check.id) problem else it }
+        }
+        unit.copy(checks = kept.copy(problems = problems))
+    }
+
+    private suspend fun dropCheck(headUnitId: String, id: String) = headUnits.update(headUnitId) { unit ->
+        val kept = unit.checks ?: return@update unit
+        unit.copy(checks = kept.copy(problems = kept.problems.filter { it.id != id }))
+    }
+
+    /**
+     * [block] over the link to the connected head unit, on an agent that has the checks. A refusal comes out in
+     * the words of [AgentText.check].
+     */
+    private suspend fun <T> checksSession(block: suspend (AgentSession, ConnectionState.Connected) -> T): Result<T> {
+        val current = session ?: return Result.failure(IOException(NOT_CONNECTED))
+        val connected = connectionState.value as? ConnectionState.Connected ?: return Result.failure(IOException(NOT_CONNECTED))
+        if (!connected.checks) return Result.failure(IOException(NO_CHECKS))
+        return try {
+            Result.success(block(current, connected))
+        } catch (e: RemoteException) {
+            Result.failure(AgentRefusal(e.code, AgentText.check(e.code)))
+        } catch (e: IOException) {
+            Result.failure(e)
         }
     }
 
@@ -772,6 +910,8 @@ class JobRepository(
             refresh()
         }
         scope.launch { pump(next, unit.id, requireNotNull(hello.headUnitId)) }
+        // Once for a head unit, and not waited for: see [ensureChecked].
+        scope.launch { ensureChecked() }
     }
 
     /** Publishes what the agent reported, and keeps it with the head unit for when the phone is not in the car. */
@@ -843,6 +983,8 @@ class JobRepository(
                 current.blobs.jobEnded()
                 held = null
                 refresh()
+                // Checks that waited for the job, if any did.
+                scope.launch { ensureChecked() }
             }
         }
         val reason = current.ended.await()
@@ -916,6 +1058,7 @@ class JobRepository(
         const val NOT_CONNECTED = "Not connected to a head unit"
         const val NO_DETACHED_SIGNATURE = "This head unit's agent can't install community packages. Update the agent first."
         const val NO_FILES = "This head unit's agent can't send log files. Update the agent first."
+        const val NO_CHECKS = "This head unit's agent has no checks. Update the agent first."
         const val PULL_BUSY = "Wait for the install to finish, then try again."
 
         /** The time in a ZIP's name: the phone's own, as the user reads it. */

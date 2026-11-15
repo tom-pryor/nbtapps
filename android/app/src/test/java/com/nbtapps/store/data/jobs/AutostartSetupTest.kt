@@ -585,6 +585,251 @@ class AutostartSetupTest {
         assertEquals(null, setup.state.value)
     }
 
+    // ---- what the checks found, last ----
+
+    private val demoFiles = listOf("/opt/demo/bin/demod", "/opt/demo/etc/demo.conf", "/var/opt/demo/state")
+
+    /** An app installed by hand: its fix moves its plugin folder aside and removes the rest. */
+    private fun demo() = FakeCheck(
+        "aa-fix",
+        demoFiles,
+        title = "An app that was installed by hand",
+        moves = listOf("/net/plugins/Demo" to "/opt/demo/Demo.old"),
+    )
+
+    /** The stand-in head unit's checks find [problems], on every link to it, whose agent lists `checks`. */
+    private fun withChecks(vararg problems: FakeCheck): FakeChecks {
+        val shared = FakeChecks()
+        problems.forEach(shared::add)
+        connector.onConnect = { agent ->
+            withSwitch(agent)
+            agent.capabilities = """["autostart","checks"]"""
+            agent.checks = shared
+        }
+        return shared
+    }
+
+    private suspend fun asked(what: String = "the question", predicate: (AutostartStep.AskRemoval) -> Boolean = { true }): AutostartStep.AskRemoval =
+        await(setup.state, what) { (it?.step as? AutostartStep.AskRemoval)?.let(predicate) == true }!!.step as AutostartStep.AskRemoval
+
+    /** What the confirmation does before it hands the yes over: the check is read again, for its list and token. */
+    private suspend fun shownToken(id: String): String = jobs.runCheck(id).getOrThrow().fix!!.token
+
+    @Test
+    fun `the plugin is installed and the agent switched on first, and what was installed by hand is asked about last`() = test {
+        catalogueWith("1.0.0")
+        val checks = withChecks(demo())
+        assertTrue(jobs.connect("car").isSuccess)
+
+        setup.begin("car")
+
+        // The install has to finish before the question comes.
+        installing()
+        assertTrue(checks.fixes.isEmpty())
+        finishJob("1.0.0")
+        val question = asked()
+        assertTrue(question.switchedOn)
+        assertTrue(bench.on)
+        assertEquals("aa-fix", question.problem.id)
+        assertEquals(demoFiles, question.problem.paths)
+        assertEquals(1, question.problem.moves.size)
+        assertTrue(setup.state.value!!.running)
+        val token = shownToken("aa-fix")
+        // An answer about another check answers nothing.
+        setup.confirmRemoval("system-writable", token)
+        assertTrue(setup.state.value?.step is AutostartStep.AskRemoval)
+
+        setup.confirmRemoval("aa-fix", token)
+
+        assertEquals(AutostartStep.Done(changed = true, moved = 1, removed = 3), ended())
+        assertEquals(listOf("aa-fix" to token), checks.fixes)
+        assertEquals(1, plans.get())
+        assertEquals("hmi-restart", (jobs.connection.value as ConnectionState.Connected).info.restartNeeded)
+        assertEquals(emptyList<String>(), headUnits.headUnit("car").first()?.checks?.problems?.map { it.id })
+        // Nothing is asked once the set-up has ended.
+        setup.skipRemoval()
+        assertEquals(AutostartStep.Done(changed = true, moved = 1, removed = 3), setup.state.value?.step)
+    }
+
+    @Test
+    fun `where the agent starts with the car already, the question follows the checks at once`() = test {
+        bench.plugin = "1.0.0"
+        bench.on = true
+        withChecks(demo())
+        assertTrue(jobs.connect("car").isSuccess)
+
+        setup.begin("car")
+
+        assertTrue(!asked().switchedOn)
+        assertEquals(0, plans.get())
+        setup.confirmRemoval("aa-fix", shownToken("aa-fix"))
+        assertEquals(AutostartStep.Done(changed = false, moved = 1, removed = 3), ended())
+        assertEquals(emptyList<String>(), sets())
+    }
+
+    @Test
+    fun `skip leaves it all as it is, and the set-up ends done with it still on the head unit's page`() = test {
+        bench.plugin = "1.0.0"
+        val checks = withChecks(demo())
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        asked()
+
+        setup.skipRemoval()
+
+        assertEquals(AutostartStep.Done(changed = true), ended())
+        assertTrue(checks.fixes.isEmpty())
+        assertTrue(bench.on)
+        assertEquals(false, headUnits.headUnit("car").first()?.checks?.problem("aa-fix")?.dismissed)
+    }
+
+    @Test
+    fun `a set-up that stops before the end asks nothing, and the head unit's page keeps what was found`() = test {
+        withChecks(demo())
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+
+        // No catalogue: the plugin cannot be installed.
+        val stopped = ended() as AutostartStep.Failed
+        assertTrue(stopped.reason, stopped.reason.startsWith("The catalogue couldn't be loaded."))
+        assertEquals(listOf("aa-fix"), headUnits.headUnit("car").first()?.checks?.open?.map { it.id })
+
+        // Retry, once the catalogue is there, ends with the question.
+        catalogueWith("1.0.0")
+        setup.retry()
+        installing()
+        finishJob("1.0.0")
+        assertEquals("aa-fix", asked().problem.id)
+    }
+
+    @Test
+    fun `a list that changed since it was shown is asked about again, and then put right`() = test {
+        bench.plugin = "1.0.0"
+        val problem = demo()
+        val checks = withChecks(problem)
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        asked()
+        val old = shownToken("aa-fix")
+        problem.found = demoFiles + "/opt/demo/lib/libdemo.so"
+
+        setup.confirmRemoval("aa-fix", old)
+
+        val again = asked("the question about the new list") { it.changed }
+        assertEquals(4, again.problem.paths.size)
+        assertTrue(again.switchedOn)
+        val token = shownToken("aa-fix")
+        setup.confirmRemoval("aa-fix", token)
+        assertEquals(AutostartStep.Done(changed = true, moved = 1, removed = 4), ended())
+        assertEquals(listOf(old, token), checks.fixes.map { it.second })
+    }
+
+    @Test
+    fun `a fix that fails ends the set-up done, with why, since the agent starts with the car by then`() = test {
+        bench.plugin = "1.0.0"
+        val checks = withChecks(demo())
+        checks.refuseFix["aa-fix"] = "io-error"
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        asked()
+
+        setup.confirmRemoval("aa-fix", shownToken("aa-fix"))
+
+        assertEquals(AutostartStep.Done(changed = true, fixFailed = AgentText.check("io-error")), ended())
+        assertTrue(bench.on)
+        assertEquals(listOf("aa-fix"), headUnits.headUnit("car").first()?.checks?.open?.map { it.id })
+    }
+
+    @Test
+    fun `a link lost while the set-up asks is noticed when the user answers, and the set-up is done all the same`() = test {
+        bench.plugin = "1.0.0"
+        withChecks(demo())
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        asked()
+        val token = shownToken("aa-fix")
+
+        connector.agent.drop()
+        await(jobs.connection, "the link lost") { it is ConnectionState.Failed }
+        // It waits as long as it takes.
+        assertTrue(setup.state.value?.step is AutostartStep.AskRemoval)
+
+        setup.confirmRemoval("aa-fix", token)
+        val done = ended() as AutostartStep.Done
+        assertTrue(done.changed)
+        assertTrue(done.fixFailed.orEmpty(), done.fixFailed.orEmpty().startsWith("The app lost its link to the head unit"))
+    }
+
+    @Test
+    fun `a problem put aside is not asked about, and nor is one whose fix changes no files`() = test {
+        bench.plugin = "1.0.0"
+        val checks = withChecks(demo(), FakeCheck("system-writable", emptyList(), fixLabel = "Make it read-only again", restart = "none"))
+        assertTrue(jobs.connect("car").isSuccess)
+        assertEquals(2, requireNotNull(jobs.ensureChecked()).problems.size)
+        jobs.dismissCheck("car", "aa-fix")
+
+        setup.begin("car")
+
+        assertEquals(AutostartStep.Done(changed = true), ended())
+        assertTrue(checks.fixes.isEmpty())
+    }
+
+    @Test
+    fun `a problem with only a folder to move aside is asked about`() = test {
+        bench.plugin = "1.0.0"
+        withChecks(FakeCheck("aa-fix", emptyList(), moves = listOf("/net/plugins/Demo" to "/opt/demo/Demo.old")))
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+
+        assertTrue(asked().problem.paths.isEmpty())
+        setup.confirmRemoval("aa-fix", shownToken("aa-fix"))
+        assertEquals(AutostartStep.Done(changed = true, moved = 1), ended())
+    }
+
+    @Test
+    fun `an agent without the checks is set up as before, and asked nothing of them`() = test {
+        bench.plugin = "1.0.0"
+        assertTrue(jobs.connect("car").isSuccess)
+
+        setup.begin("car")
+
+        assertEquals(AutostartStep.Done(changed = true), ended())
+        assertTrue(connector.agents.all { it.requestsOf("checks.run").isEmpty() })
+    }
+
+    @Test
+    fun `a fix that leaves something ends the set-up done, with a word that something is still there`() = test {
+        bench.plugin = "1.0.0"
+        val checks = withChecks(demo())
+        checks.leaves["aa-fix"] = listOf("/var/opt/demo/state", "/net/plugins/Demo")
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        asked()
+
+        setup.confirmRemoval("aa-fix", shownToken("aa-fix"))
+
+        assertEquals(AutostartStep.Done(changed = true, moved = 0, removed = 2, left = true), ended())
+        val kept = headUnits.headUnit("car").first()?.checks?.problem("aa-fix")
+        assertEquals(listOf("/var/opt/demo/state"), kept?.paths)
+        assertEquals(1, kept?.moves?.size)
+    }
+
+    @Test
+    fun `a second begin while the set-up asks leaves the question as it is`() = test {
+        bench.plugin = "1.0.0"
+        val checks = withChecks(demo())
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        val first = asked()
+
+        setup.begin("car")
+
+        assertEquals(first, setup.state.value?.step)
+        setup.confirmRemoval("aa-fix", shownToken("aa-fix"))
+        assertEquals(AutostartStep.Done(changed = true, moved = 1, removed = 3), ended())
+        assertEquals(1, checks.fixes.size)
+    }
+
     private companion object {
         const val PLUGIN = "org.nbtapp.plugin"
     }

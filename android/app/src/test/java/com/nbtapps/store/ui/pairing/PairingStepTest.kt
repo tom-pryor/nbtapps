@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.pairing
 
+import com.nbtapps.store.data.jobs.AutostartStep
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.model.AgentInfo
@@ -81,6 +82,17 @@ class PairingStepTest {
         assertTrue(waiting.copy(code = "951120").canPair)
         assertFalse(waiting.copy(code = "951120", working = true).canPair)
         assertFalse(waiting.copy(code = "951120", step = PairingStep.NoLink(null)).canPair)
+    }
+
+    @Test
+    fun `what the checks found is pointed to once paired, where no set-up asks about it, and Done is not held`() {
+        val paired = PairingUiState(loaded = true, headUnitName = "Car", step = PairingStep.Paired, openChecks = 2)
+        assertTrue(paired.showsChecks)
+        assertFalse(paired.copy(openChecks = 0).showsChecks)
+        // A set-up that runs or is shown asks about them itself.
+        assertFalse(paired.copy(setup = AutostartStep.Checking).showsChecks)
+        assertFalse(paired.copy(setup = AutostartStep.Done(changed = true)).showsChecks)
+        assertFalse(paired.copy(step = PairingStep.EnterCode(stale = false)).showsChecks)
     }
 
     @Test

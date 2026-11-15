@@ -43,7 +43,10 @@ import com.nbtapps.store.R
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.ui.headunits.AddHeadUnitFlow
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.CheckFixDialog
+import com.nbtapps.store.ui.headunits.ChecksLine
 import com.nbtapps.store.ui.headunits.EnableAutostartBox
+import com.nbtapps.store.ui.headunits.checksLine
 
 /**
  * Pairs this phone with a car by a code another app handed over. It shows the code, asks which car it is for, or
@@ -54,7 +57,8 @@ import com.nbtapps.store.ui.headunits.EnableAutostartBox
  * how setting that up goes, until the user opens the app or closes it.
  *
  * [onPaired] is told once the agent has taken the code, where the box is cleared; [onOpenApp] when the user opens
- * the app from here, and [onClose] when the user is done with the screen.
+ * the app from here, [onOpenHeadUnit] when the user opens the car's page in it, for what its checks found, and
+ * [onClose] when the user is done with the screen.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,6 +66,7 @@ fun PairRequestScreen(
     viewModel: PairRequestViewModel,
     onPaired: (String) -> Unit,
     onOpenApp: () -> Unit,
+    onOpenHeadUnit: (String) -> Unit,
     onClose: () -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -112,6 +117,7 @@ fun PairRequestScreen(
                         Text("Paired with ${step.name}.", style = MaterialTheme.typography.titleMedium)
                         if (uiState.enableAutostart) {
                             Setup(uiState, viewModel)
+                            Checks(uiState, step.name, onOpenHeadUnit)
                             Button(onClick = onOpenApp) { Text("Open NBTApps") }
                         }
                     }
@@ -122,6 +128,7 @@ fun PairRequestScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         if (uiState.enableAutostart) Setup(uiState, viewModel)
+                        Checks(uiState, step.name, onOpenHeadUnit)
                         Button(onClick = onOpenApp) { Text("Open NBTApps") }
                     }
                     is PairRequestStep.NoLink -> {
@@ -149,6 +156,10 @@ fun PairRequestScreen(
         }
     }
 
+    uiState.fix?.let { fix ->
+        CheckFixDialog(fix, onConfirm = viewModel::confirmRemoval, onRetry = viewModel::retryRemoval, onClose = viewModel::closeRemoval)
+    }
+
     AddHeadUnitFlow(
         show = adding,
         onDismiss = { adding = false },
@@ -170,8 +181,17 @@ private fun Setup(uiState: PairRequestUiState, viewModel: PairRequestViewModel) 
             restartNeeded = uiState.restartNeeded,
             onRetry = viewModel::retrySetup,
             onRestart = viewModel::restartIdrive,
+            onRemove = viewModel::openRemoval,
+            onSkip = viewModel::skipRemoval,
         )
     }
+}
+
+/** The line that leads to the car's page, where its checks found something and no set-up asks about it. */
+@Composable
+private fun Checks(uiState: PairRequestUiState, name: String, onOpenHeadUnit: (String) -> Unit) {
+    val id = uiState.chosen?.id ?: return
+    if (uiState.showsChecks) ChecksLine(checksLine(uiState.openChecks, name)) { onOpenHeadUnit(id) }
 }
 
 @Composable

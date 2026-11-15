@@ -11,6 +11,8 @@ import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.AutostartReason
 import com.nbtapps.store.model.CatalogueIndex
+import com.nbtapps.store.model.CheckProblem
+import com.nbtapps.store.model.CheckState
 import com.nbtapps.store.model.CataloguePackage
 import com.nbtapps.store.model.InstallTarget
 import com.nbtapps.store.model.InstalledPackage
@@ -20,6 +22,7 @@ import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.VersionRange
 import java.io.IOException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -105,8 +108,19 @@ private const val NOT_IN_CATALOGUE = "The catalogue doesn't have the iDrive plug
 
 /** Where setting up one head unit to start the agent with the car stands: see [AutostartSetup]. */
 sealed interface AutostartStep {
-    /** What the agent says of it is being looked at. */
+    /** What the agent says of it is being looked at, and what its checks found. */
     data object Checking : AutostartStep
+
+    /**
+     * The agent starts with the car, and last the checks found [problem] on the head unit, whose fix changes files:
+     * the set-up waits for the fix's own button ([AutostartSetup.confirmRemoval], once what it changes has
+     * been shown and confirmed) or Skip ([AutostartSetup.skipRemoval]). [changed]: the files changed since the list
+     * the user was shown last. [switchedOn]: the set-up switched the agent on, as in [Done.changed].
+     */
+    data class AskRemoval(val problem: CheckProblem, val changed: Boolean = false, val switchedOn: Boolean = false) : AutostartStep
+
+    /** The user confirmed what the fix of [problem] changes, and it runs. [switchedOn]: as in [AskRemoval]. */
+    data class Removing(val problem: CheckProblem, val switchedOn: Boolean = false) : AutostartStep
 
     /** The iDrive plugin is being downloaded to the phone. */
     data object Downloading : AutostartStep
@@ -118,10 +132,20 @@ sealed interface AutostartStep {
     data object SwitchingOn : AutostartStep
 
     /**
-     * The agent starts with the car. [changed]: the set-up switched it on, and may have installed the plugin; false
-     * where it did so already. [restartError]: why the last ask to restart iDrive was refused.
+     * The agent starts with the car, and the questions about what was installed by hand are answered. [changed]: the
+     * set-up switched it on, and may have installed the plugin; false where it did so already. [moved] and
+     * [removed]: how many folders the fixes the user confirmed moved aside, and how many paths they removed. [left]:
+     * a fix left something, which the head unit's page shows. [fixFailed]: why a fix could not be done, which the
+     * head unit's page still has. [restartError]: why the last ask to restart iDrive was refused.
      */
-    data class Done(val changed: Boolean, val restartError: String? = null) : AutostartStep
+    data class Done(
+        val changed: Boolean,
+        val moved: Int = 0,
+        val removed: Int = 0,
+        val left: Boolean = false,
+        val fixFailed: String? = null,
+        val restartError: String? = null,
+    ) : AutostartStep
 
     /** iDrive was asked to restart, and took it. The app does not connect again by itself. */
     data object Restarting : AutostartStep
@@ -144,6 +168,14 @@ data class AutostartSetupState(val headUnitId: String, val step: AutostartStep) 
  * installs the iDrive plugin where the agent says it is wanting ([autostartPlan]), without showing the plan, since
  * the user's tick is the consent, and then switches it on. The order is the agent's: it refuses to be switched on
  * until the plugin is there, and it never restarts iDrive itself, which is the user's to ask for ([restart]).
+ *
+ * The agent's checks are run first ([JobRepository.ensureChecked]), since the agent does not answer them while a
+ * step installs. Once the agent starts with the car, what they found whose fix changes files is put to the user,
+ * last, one check at a time, in the agent's order ([AutostartStep.AskRemoval]): the tick is no consent to change
+ * anything there. The set-up waits for the answer as long as it takes. The fix runs once the user has seen what it
+ * moves aside and removes and said yes to it; Skip leaves it all as it is. Neither undoes what the set-up did, and
+ * nor does a fix that fails or leaves something: the agent starts with the car by then. One restart at the end
+ * covers the plugin and the fix. A set-up that stops before the questions asks none; the head unit's page has them.
  *
  * It runs on the app's scope, so it goes on when the screen that began it is left, and it is kept in memory only:
  * a process that is stopped forgets it. Where it stands is [state], for one head unit at a time.
@@ -174,6 +206,21 @@ class AutostartSetup(
 
     /** Rises with each run, so one that was replaced publishes nothing more. */
     private var generation = 0
+
+    /** What the user answers to [AutostartStep.AskRemoval]. */
+    private sealed interface Answer {
+        /** Remove, with the token of the list the user said yes to; null where the check finds nothing now. */
+        data class Remove(val token: String?) : Answer
+
+        data object Skip : Answer
+    }
+
+    /** The question that is open: of the run [generation], about the check [id]. */
+    private class Question(val generation: Int, val id: String) {
+        val answer = CompletableDeferred<Answer>()
+    }
+
+    private var question: Question? = null
 
     /**
      * Sets up the head unit [headUnitId] from the top. A set-up that is under way for it already is left to go on;
@@ -218,6 +265,27 @@ class AutostartSetup(
     }
 
     /**
+     * Answers Remove to the question about the check [id], once the user has seen its list and said yes to it:
+     * [token] is that list's, or null where the check finds nothing now. Does nothing unless the set-up that runs
+     * asks just that.
+     */
+    fun confirmRemoval(id: String, token: String?) = answer(id, Answer.Remove(token))
+
+    /** Answers Skip to the question that is open, if there is one: the files stay. */
+    fun skipRemoval() {
+        synchronized(lock) { question?.id }?.let { answer(it, Answer.Skip) }
+    }
+
+    private fun answer(id: String, answer: Answer) {
+        synchronized(lock) {
+            val open = question ?: return
+            if (open.generation != generation || open.id != id) return
+            question = null
+            open.answer.complete(answer)
+        }
+    }
+
+    /**
      * Forgets a set-up that has ended: with [headUnitId], only that head unit's. One that is under way goes on. It
      * is what the user's Hide does, and what follows where the set-up no longer says how things stand: the phone
      * was paired again without it, or the switch was thrown by hand.
@@ -236,10 +304,11 @@ class AutostartSetup(
      */
     private fun startRun(headUnitId: String, fresh: Boolean = false) {
         work?.cancel()
+        question = null
         val mine = ++generation
         current.value = AutostartSetupState(headUnitId, AutostartStep.Checking)
         work = scope.launch {
-            val end = run(headUnitId, fresh) { step -> publish(mine, step) }
+            val end = run(headUnitId, fresh, mine) { step -> publish(mine, step) }
             publish(mine, end)
         }
     }
@@ -261,18 +330,91 @@ class AutostartSetup(
         AutostartStep.Failed(if (connectedTo(headUnitId) == null) LINK_LOST else failure?.message ?: otherwise)
 
     /**
-     * The set-up of [headUnitId] from the top, telling [show] each step as it is reached; returns how it ended.
-     * With [fresh] it goes by what the agent says now, where otherwise it goes by what the link last read.
+     * The set-up of [headUnitId] from the top, as the run [mine], telling [show] each step as it is reached; returns
+     * how it ended. With [fresh] it goes by what the agent says now, where otherwise it goes by what the link last read.
      */
-    private suspend fun run(headUnitId: String, fresh: Boolean, show: (AutostartStep) -> Unit): AutostartStep {
+    private suspend fun run(headUnitId: String, fresh: Boolean, mine: Int, show: (AutostartStep) -> Unit): AutostartStep {
         // A refresh that fails leaves what was read before, or no link, which the next line sees.
         if (fresh && connectedTo(headUnitId) != null) jobs.refresh()
         val connected = connectedTo(headUnitId) ?: return AutostartStep.Failed(NO_LINK)
-        return when (val plan = autostartPlan(connected.autostart)) {
+        // Before the install: the agent does not run the checks while a step installs.
+        jobs.ensureChecked()
+        val end = when (val plan = autostartPlan(connected.autostart)) {
             AutostartPlan.AlreadyOn -> AutostartStep.Done(changed = false)
             AutostartPlan.SwitchOn -> switchOn(headUnitId, show)
             is AutostartPlan.CannotBe -> AutostartStep.Failed(plan.reason)
             is AutostartPlan.InstallFirst -> install(headUnitId, connected, plan.needs, show) ?: settle(headUnitId) ?: switchOn(headUnitId, show)
+        }
+        if (end !is AutostartStep.Done) return end
+        // Last, the questions, as they are kept now; asked for again, in case the first run was refused.
+        var done: AutostartStep.Done = end
+        for (problem in jobs.ensureChecked()?.open.orEmpty().filter { it.changesFiles }) {
+            done = removal(headUnitId, problem, done, mine, show) ?: return done
+            if (done.fixFailed != null) break
+        }
+        return done
+    }
+
+    /**
+     * Puts [problem] to the user, as the run [mine], with the set-up [done] as far as it went, and does what the
+     * answer says. Returns [done] with what the fix did added, or with why it could not be done; null where the run
+     * was replaced meanwhile. Nothing here fails the set-up: the agent starts with the car by now.
+     */
+    private suspend fun removal(
+        headUnitId: String,
+        problem: CheckProblem,
+        done: AutostartStep.Done,
+        mine: Int,
+        show: (AutostartStep) -> Unit,
+    ): AutostartStep.Done? {
+        var asked = problem
+        var changed = false
+        while (true) {
+            val answer = ask(mine, AutostartStep.AskRemoval(asked, changed, done.changed), show) ?: return null
+            val token = when (answer) {
+                Answer.Skip -> return done
+                is Answer.Remove -> answer.token ?: return done
+            }
+            show(AutostartStep.Removing(asked, done.changed))
+            if (connectedTo(headUnitId) == null) return done.copy(fixFailed = FIX_LINK_LOST)
+            val result = jobs.fixCheck(asked.id, token)
+            val failure = result.exceptionOrNull()
+            if (failure is AgentRefusal && failure.code == "stale") {
+                // The list changed since the user saw it: it is read again, and the user is asked about the new one.
+                val again = jobs.runCheck(asked.id).getOrElse { return done.copy(fixFailed = fixFailure(headUnitId, it)) }
+                asked = CheckProblem.of(again) ?: return done
+                changed = true
+                continue
+            }
+            if (failure != null) return done.copy(fixFailed = fixFailure(headUnitId, failure))
+            val outcome = result.getOrThrow()
+            return done.copy(
+                moved = done.moved + outcome.moved.size,
+                removed = done.removed + outcome.removed,
+                left = done.left || outcome.state == CheckState.PROBLEM,
+            )
+        }
+    }
+
+    /** Why a fix could not be done, for [Done.fixFailed][AutostartStep.Done.fixFailed]. */
+    private fun fixFailure(headUnitId: String, failure: Throwable): String =
+        if (connectedTo(headUnitId) == null) FIX_LINK_LOST else failure.message ?: "The head unit didn't answer."
+
+    /**
+     * Shows [step] as the question of the run [mine] and waits for the answer. Null where the run was replaced
+     * meanwhile, which then publishes nothing more.
+     */
+    private suspend fun ask(mine: Int, step: AutostartStep.AskRemoval, show: (AutostartStep) -> Unit): Answer? {
+        val open = Question(mine, step.problem.id)
+        synchronized(lock) {
+            if (mine != generation) return null
+            question = open
+        }
+        show(step)
+        try {
+            return open.answer.await()
+        } finally {
+            synchronized(lock) { if (question === open) question = null }
         }
     }
 
@@ -386,5 +528,8 @@ class AutostartSetup(
     private companion object {
         const val NO_LINK = "The app has no link to the head unit. Connect to it, then retry."
         const val LINK_LOST = "The app lost its link to the head unit. Connect again, then retry."
+
+        /** Why a fix could not be done when the link was gone: the agent starts with the car by then. */
+        const val FIX_LINK_LOST = "The app lost its link to the head unit before it could put this right."
     }
 }

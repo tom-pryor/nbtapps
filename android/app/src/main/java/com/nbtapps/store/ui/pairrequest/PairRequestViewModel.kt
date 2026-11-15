@@ -16,6 +16,8 @@ import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.RestartKind
+import com.nbtapps.store.ui.headunits.CheckFixFlow
+import com.nbtapps.store.ui.headunits.CheckFixStep
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -89,7 +91,18 @@ data class PairRequestUiState(
     val setup: AutostartStep? = null,
     /** The agent says over the link to the chosen car that iDrive has to restart. */
     val restartNeeded: Boolean = false,
+    /** How many problems the agent's checks found on the chosen car that are not put aside, as is kept with it. */
+    val openChecks: Int = 0,
+    /** The confirmation of what the set-up asks to remove, while it is open. */
+    val fix: CheckFixStep? = null,
 ) {
+    /**
+     * The line that leads to the car's page for what its checks found: once the phone is paired, where no set-up
+     * runs or is shown, which would ask about them itself.
+     */
+    val showsChecks: Boolean
+        get() = (step is PairRequestStep.Paired || step is PairRequestStep.AlreadyPaired) && setup == null && openChecks > 0
+
     val canPair: Boolean get() = step == PairRequestStep.Prompt && chosen != null && code != null
 
     /** A failed connect can be tried again while the code is still good. */
@@ -199,13 +212,18 @@ class PairRequestViewModel @Inject constructor(
             )
         }
 
+    /** The confirmation of what the set-up asks to remove: the set-up runs the fix once the user has said yes. */
+    private val fixes = CheckFixFlow(jobs, appScope)
+
     val uiState: StateFlow<PairRequestUiState> =
-        combine(pairing, enableAutostart, setup.state, jobs.connection) { state, enable, setup, connection ->
+        combine(pairing, enableAutostart, setup.state, jobs.connection, fixes.state) { state, enable, setup, connection, fix ->
             val id = state.chosen?.id
             state.copy(
                 enableAutostart = enable,
                 setup = setup?.takeIf { it.headUnitId == id }?.step,
                 restartNeeded = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == id }?.info?.restartNeeded == RestartKind.HMI,
+                openChecks = state.chosen?.checks?.open?.size ?: 0,
+                fix = fix,
             )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), PairRequestUiState())
 
@@ -233,6 +251,21 @@ class PairRequestViewModel @Inject constructor(
 
     /** Asks the agent to restart iDrive, once the set-up is done: see [AutostartSetup.restart]. */
     fun restartIdrive() = setup.restart()
+
+    /** The fix's button on the set-up's card: what it moves aside and removes, to be confirmed. */
+    fun openRemoval() {
+        val id = chosenHeadUnit(saved.value.orEmpty(), picked.value, jobs.connection.value)?.id ?: return
+        fixes.openForSetup(setup, id)
+    }
+
+    /** Skip on the set-up's card: see [AutostartSetup.skipRemoval]. */
+    fun skipRemoval() = setup.skipRemoval()
+
+    fun confirmRemoval() = fixes.confirm()
+
+    fun retryRemoval() = fixes.retry()
+
+    fun closeRemoval() = fixes.close()
 
     /** The user picks the car, among several saved. */
     fun choose(headUnitId: String) {

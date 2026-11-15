@@ -66,6 +66,134 @@ class FakePhones {
 }
 
 /**
+ * A problem one of a [FakeChecks]' checks finds. [found] is what its fix removes, and [moves] the folders it moves
+ * aside, from and to; [fixLabel] null for a check that has no fix for it. The paths are made up: nothing here is a
+ * real head unit's.
+ */
+class FakeCheck(
+    val id: String,
+    @Volatile var found: List<String>,
+    val title: String = "Something was put onto the head unit by hand",
+    val detail: String = "It stands in the way.",
+    @Volatile var moves: List<Pair<String, String>> = emptyList(),
+    val fixLabel: String? = "Remove them",
+    val fixDetail: String = "Removes what was listed, a path at a time.",
+    val restart: String = "hmi-restart",
+)
+
+/**
+ * What a [FakeAgent]'s checks find, and what its fixes did: `checks.run` and `checks.fix` as the agent has them,
+ * with a token over each list. It outlives a link, as the head unit's files do, so a test gives the same one to
+ * every agent of a connector. With no problems, which is how it starts, every check is ok.
+ */
+class FakeChecks {
+    /** The checks, in the order the agent answers them. */
+    @Volatile
+    var ids = listOf("system-writable", "aa-fix")
+
+    /** The problems there are, by check id. A check with none is ok. */
+    val problems = ConcurrentHashMap<String, FakeCheck>()
+
+    /** The paths one answer of `checks.run` holds at most, as the link's frame bounds them. Null for all. */
+    @Volatile
+    var pageSize: Int? = null
+
+    /** The code `checks.run` is refused with, or null to answer. */
+    @Volatile
+    var refuseRun: String? = null
+
+    /** The code the fix of a check is refused with, by its id, after the token has been compared. */
+    val refuseFix = ConcurrentHashMap<String, String>()
+
+    /**
+     * The paths a fix leaves, by check id: those of its list that are still there afterwards, and the folders it
+     * could not move aside, by where they are.
+     */
+    val leaves = ConcurrentHashMap<String, List<String>>()
+
+    /** Called after each answer of `checks.run`, as a head unit's files may change between two pages. */
+    @Volatile
+    var afterRun: () -> Unit = {}
+
+    /** How many `checks.run` requests were answered, on every link. */
+    val runs = AtomicInteger()
+
+    /** Every fix asked for, on every link: the check's id and the token sent. */
+    val fixes = CopyOnWriteArrayList<Pair<String, String>>()
+
+    fun add(problem: FakeCheck) {
+        problems[problem.id] = problem
+    }
+
+    /** The token of [paths] and [moves] for the check [id]: as the agent's, a hash over all, so another list has another. */
+    fun token(id: String, paths: List<String>, moves: List<Pair<String, String>> = emptyList()): String =
+        Hex.encode(newSha256().digest((id + "\n" + paths.sorted().joinToString("\n") + "\n" + moves.joinToString("\n")).encodeToByteArray()))
+
+    private fun token(problem: FakeCheck) = token(problem.id, problem.found, problem.moves)
+
+    private fun moves(moves: List<Pair<String, String>>) = moves.joinToString(",", "[", "]") { """{"from":"${it.first}","to":"${it.second}"}""" }
+
+    /** The answer of `checks.run` with [params]. */
+    fun run(params: JsonObject): String {
+        refuseRun?.let { throw Refusal(it) }
+        val one = params["id"]?.jsonPrimitive?.content
+        val after = params["after"]?.jsonPrimitive?.content
+        if (one != null && one !in ids) throw Refusal("not-found")
+        var room = pageSize ?: Int.MAX_VALUE
+        val answer = (if (one != null) listOf(one) else ids).joinToString(",", """{"checks":[""", "]}") { id ->
+            val problem = problems[id] ?: return@joinToString """{"id":"$id","state":"ok"}"""
+            val all = problem.found.sorted()
+            val from = if (after == null) all else all.filter { it > after }
+            val page = from.take(room)
+            room -= page.size
+            // Once one list is cut short, the ones after it wait for their own pages.
+            if (page.size < from.size) room = 0
+            val fix = problem.fixLabel?.let { label ->
+                ""","fix":{"label":"$label","detail":"${problem.fixDetail}","restart":"${problem.restart}","token":"${token(problem)}"}"""
+            }.orEmpty()
+            """{"id":"$id","state":"problem","title":"${problem.title}","detail":"${problem.detail}","count":${all.size},""" +
+                """"found":${page.joinToString(",", "[", "]") { "\"$it\"" }},"more":${page.size < from.size},""" +
+                """"moves":${moves(problem.moves)}$fix}"""
+        }
+        runs.incrementAndGet()
+        afterRun()
+        return answer
+    }
+
+    /** The answer of `checks.fix` with [params]; [agent] is the one asked, whose restart mark a fix raises. */
+    fun fix(params: JsonObject, agent: FakeAgent): String {
+        val id = params["id"]?.jsonPrimitive?.content ?: throw Refusal("bad-request")
+        val token = params["token"]?.jsonPrimitive?.content ?: throw Refusal("bad-request")
+        fixes += id to token
+        if (id !in ids) throw Refusal("not-found")
+        val problem = problems[id] ?: return if (token == token(id, emptyList())) FIXED else throw Refusal("stale")
+        if (problem.fixLabel == null) throw Refusal("unsupported")
+        if (token != token(problem)) throw Refusal("stale")
+        refuseFix[id]?.let { throw Refusal(it) }
+        val leaving = leaves[id].orEmpty()
+        val left = leaving.filter { it in problem.found }
+        val stayed = problem.moves.filter { it.first in leaving }
+        val moved = problem.moves - stayed.toSet()
+        val removed = problem.found.size - left.size
+        if (left.isEmpty() && stayed.isEmpty()) {
+            problems.remove(id)
+        } else {
+            problem.found = left
+            problem.moves = stayed
+        }
+        if (problem.restart != "none") agent.restartNeeded = problem.restart
+        val state = if (left.isEmpty() && stayed.isEmpty()) "ok" else "problem"
+        val notMoved = stayed.map { it.first }
+        return """{"state":"$state","removed":$removed,"moved":${moves(moved)},"left":${(notMoved + left).joinToString(",", "[", "]") { "\"$it\"" }},""" +
+            """"leftMore":0,"stopped":["demod"],"restart":"${problem.restart}"}"""
+    }
+
+    private companion object {
+        const val FIXED = """{"state":"ok","removed":0,"moved":[],"left":[],"leftMore":0,"stopped":[],"restart":"none"}"""
+    }
+}
+
+/**
  * A stand-in for the head-unit agent that answers what a test tells it to. It speaks real frames over a
  * [MemoryLink], so the app's whole stack runs against it; what it lacks is any behaviour of its own. Each
  * request is handled on a thread of its own, so a handler may itself fetch a blob from the phone.
@@ -116,6 +244,10 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
     @Volatile
     var capabilities = "[]"
 
+    /** What `checks.run` finds and `checks.fix` removes: see [FakeChecks]. Nothing is found unless a test says so. */
+    @Volatile
+    var checks = FakeChecks()
+
     /** The log files `files.list` gives and `files.fetch` sends, by package id, newest first. */
     val logs = ConcurrentHashMap<String, List<FakeLog>>()
 
@@ -163,6 +295,8 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
         handlers["packages.list"] = { """{"packages":$installed,"more":false}""" }
         handlers["job.status"] = { """{"events":[],"more":false}""" }
         handlers["ping"] = { "{}" }
+        handlers["checks.run"] = { params -> checks.run(params) }
+        handlers["checks.fix"] = { params -> checks.fix(params, this) }
         handlers["files.list"] = { params ->
             val files = logs[params["package"]?.jsonPrimitive?.content] ?: throw Refusal("not-found")
             files.joinToString(",", """{"files":[""", """],"more":false}""") { """{"path":"${it.path}","size":${it.bytes.size},"modified":${it.modified}}""" }

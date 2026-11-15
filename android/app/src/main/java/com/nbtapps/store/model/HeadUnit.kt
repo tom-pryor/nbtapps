@@ -22,6 +22,75 @@ data class HeadUnit(
     val headUnitId: String? = null,
     /** What the agent last reported, so the catalogue can be checked against this head unit at home. */
     val profile: HeadUnitProfile? = null,
+    /**
+     * What the agent's compatibility checks found, the one time they were run by themselves, and since then by
+     * hand. Null until they have been answered: before the first link to an agent that has them.
+     */
+    val checks: HeadUnitChecks? = null,
+)
+
+/** What the agent's checks found on a head unit: see [HeadUnit.checks]. */
+@Serializable
+data class HeadUnitChecks(
+    /** When they were answered, in milliseconds since the epoch. */
+    val checkedAt: Long,
+    /** The checks that found a problem, in the agent's order. Empty where all is well. */
+    val problems: List<CheckProblem> = emptyList(),
+) {
+    /** The problems the user has not put aside. */
+    val open: List<CheckProblem> get() = problems.filter { !it.dismissed }
+
+    fun problem(id: String): CheckProblem? = problems.firstOrNull { it.id == id }
+}
+
+/**
+ * A problem one check found, as it is kept with the head unit: the agent's own texts, and what it listed then. The
+ * fix's token is not kept: it is good only for the list of the moment, so the check is run again before a fix. One
+ * kept by an earlier version has no moves, and the packages it stood in the way of are no longer read.
+ */
+@Serializable
+data class CheckProblem(
+    /** The check's id, such as `aa-fix`. */
+    val id: String,
+    val title: String,
+    val detail: String,
+    /** The paths its fix removes, every one, as the agent showed them. Empty for a check that lists nothing. */
+    val paths: List<String> = emptyList(),
+    /** The folders its fix moves aside whole and leaves there. */
+    val moves: List<CheckMove> = emptyList(),
+    /** Its fix, if it has one for what it found. */
+    val fix: CheckProblemFix? = null,
+    /** The user put it aside. Running the checks again by hand brings it back. */
+    val dismissed: Boolean = false,
+) {
+    /** Its fix changes files: it removes paths or moves folders aside, which are listed, and confirmed. */
+    val changesFiles: Boolean get() = fix != null && (paths.isNotEmpty() || moves.isNotEmpty())
+
+    companion object {
+        /** [check], as it is kept; null for one that found no problem. */
+        fun of(check: Check, dismissed: Boolean = false): CheckProblem? = if (!check.problem) {
+            null
+        } else {
+            CheckProblem(
+                id = check.id,
+                title = check.title,
+                detail = check.detail,
+                paths = check.found,
+                moves = check.moves,
+                fix = check.fix?.let { CheckProblemFix(it.label, it.detail, it.restart) },
+                dismissed = dismissed,
+            )
+        }
+    }
+}
+
+/** A check's fix as it is kept: what its button says and what it does. */
+@Serializable
+data class CheckProblemFix(
+    val label: String,
+    val detail: String = "",
+    /** One of [RestartKind]'s. */
+    val restart: String = RestartKind.NONE,
 )
 
 /** One way to reach a head unit's agent. */

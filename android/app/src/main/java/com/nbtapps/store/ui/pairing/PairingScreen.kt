@@ -37,19 +37,24 @@ import com.nbtapps.store.R
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.CheckFixDialog
+import com.nbtapps.store.ui.headunits.ChecksLine
 import com.nbtapps.store.ui.headunits.EnableAutostartBox
+import com.nbtapps.store.ui.headunits.checksLine
 
 /**
  * Pairs this phone with a head unit. It says where on the car's screen the code is shown and takes the code;
  * with no link to the head unit it offers to open one, since the code goes over it. Where the agent can be started
  * with the car, a box offers that, and once the phone is paired the screen shows how setting it up goes.
- * [onOpenJob] leads to the job screen, for the install of the iDrive plugin.
+ * [onOpenJob] leads to the job screen, for the install of the iDrive plugin; [onOpenHeadUnit] to the head unit's
+ * page, for what its checks found.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PairingScreen(
     onBack: () -> Unit,
     onOpenJob: () -> Unit,
+    onOpenHeadUnit: (String) -> Unit,
     viewModel: PairingViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -93,9 +98,12 @@ fun PairingScreen(
                                 restartNeeded = uiState.restartNeeded,
                                 onRetry = viewModel::retrySetup,
                                 onRestart = viewModel::restartIdrive,
+                                onRemove = viewModel::openRemoval,
+                                onSkip = viewModel::skipRemoval,
                                 onOpenJob = onOpenJob,
                             )
                         }
+                        if (uiState.showsChecks) ChecksLine(checksLine(uiState.openChecks, name)) { onOpenHeadUnit(viewModel.headUnitId) }
                         Button(onClick = onBack) { Text("Done") }
                     }
                     is PairingStep.NoLink -> {
@@ -106,6 +114,10 @@ fun PairingScreen(
                 }
             }
         }
+    }
+
+    uiState.fix?.let { step ->
+        CheckFixDialog(step, onConfirm = viewModel::confirmRemoval, onRetry = viewModel::retryRemoval, onClose = viewModel::closeRemoval)
     }
 }
 

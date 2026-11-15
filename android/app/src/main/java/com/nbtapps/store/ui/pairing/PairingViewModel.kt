@@ -14,6 +14,8 @@ import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.RestartKind
+import com.nbtapps.store.ui.headunits.CheckFixFlow
+import com.nbtapps.store.ui.headunits.CheckFixStep
 import com.nbtapps.store.ui.navigation.PairingRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -63,8 +65,18 @@ data class PairingUiState(
     val setup: AutostartStep? = null,
     /** The agent says over the link to this head unit that iDrive has to restart. */
     val restartNeeded: Boolean = false,
+    /** How many problems the agent's checks found on this head unit that are not put aside, as is kept with it. */
+    val openChecks: Int = 0,
+    /** The confirmation of what the set-up asks to remove, while it is open. */
+    val fix: CheckFixStep? = null,
 ) {
     val canPair: Boolean get() = step is PairingStep.EnterCode && code.length == ProtocolConstants.PAIRING_CODE_DIGITS && !working
+
+    /**
+     * The line that leads to the head unit's page for what its checks found: once the phone is paired, where no
+     * set-up runs or is shown, which would ask about them itself.
+     */
+    val showsChecks: Boolean get() = step == PairingStep.Paired && setup == null && openChecks > 0
 }
 
 /** The step for the head unit [headUnitId] when the app's link stands as [connection] says. A link to another head unit is none to this one. */
@@ -106,7 +118,8 @@ class PairingViewModel @Inject constructor(
     @ApplicationScope private val appScope: CoroutineScope,
 ) : ViewModel() {
 
-    private val headUnitId = savedStateHandle.toRoute<PairingRoute>().headUnitId
+    /** This app's id of the head unit being paired with. */
+    val headUnitId = savedStateHandle.toRoute<PairingRoute>().headUnitId
 
     private val enableAutostart = savedStateHandle.getStateFlow(ENABLE_AUTOSTART, true)
 
@@ -114,7 +127,10 @@ class PairingViewModel @Inject constructor(
 
     private val local = MutableStateFlow(Local())
 
-    val uiState: StateFlow<PairingUiState> =
+    /** The confirmation of what the set-up asks to remove: the set-up runs the fix once the user has said yes. */
+    private val fixes = CheckFixFlow(jobs, appScope)
+
+    private val page =
         combine(headUnits.headUnit(headUnitId), jobs.connection, local, enableAutostart, setup.state) { unit, connection, local, enable, setup ->
             PairingUiState(
                 loaded = true,
@@ -126,8 +142,13 @@ class PairingViewModel @Inject constructor(
                 enableAutostart = enable,
                 setup = setup?.takeIf { it.headUnitId == headUnitId }?.step,
                 restartNeeded = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == headUnitId }?.info?.restartNeeded == RestartKind.HMI,
+                openChecks = unit?.checks?.open?.size ?: 0,
             )
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), PairingUiState())
+        }
+
+    val uiState: StateFlow<PairingUiState> =
+        combine(page, fixes.state) { page, fix -> page.copy(fix = fix) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), PairingUiState())
 
     /** Ticks or clears the box that has the head unit set up to start the agent with the car. */
     fun setEnableAutostart(on: Boolean) {
@@ -167,6 +188,18 @@ class PairingViewModel @Inject constructor(
 
     /** Asks the agent to restart iDrive, once the set-up is done: see [AutostartSetup.restart]. */
     fun restartIdrive() = setup.restart()
+
+    /** The fix's button on the set-up's card: what it moves aside and removes, to be confirmed. */
+    fun openRemoval() = fixes.openForSetup(setup, headUnitId)
+
+    /** Skip on the set-up's card: see [AutostartSetup.skipRemoval]. */
+    fun skipRemoval() = setup.skipRemoval()
+
+    fun confirmRemoval() = fixes.confirm()
+
+    fun retryRemoval() = fixes.retry()
+
+    fun closeRemoval() = fixes.close()
 
     private companion object {
         /** Whether the box is ticked. */

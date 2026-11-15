@@ -12,6 +12,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
@@ -79,9 +80,17 @@ private val topLevelDestinations = listOf(
 /**
  * The app's screens. It opens on the catalogue, or when [startOnHeadUnits], on the head units list; the value must
  * not change while the app runs, since the screens are stacked on the one it opened on.
+ *
+ * [headUnitToOpen], when it is not null, is the head unit whose page another screen of the app asked to be shown, as
+ * the screen for a handed-over pairing code does: the page is opened, and [onHeadUnitOpened] told.
  */
 @Composable
-fun NbtNavHost(startOnHeadUnits: Boolean, navController: NavHostController = rememberNavController()) {
+fun NbtNavHost(
+    startOnHeadUnits: Boolean,
+    navController: NavHostController = rememberNavController(),
+    headUnitToOpen: String? = null,
+    onHeadUnitOpened: () -> Unit = {},
+) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
     val currentTopLevel = topLevelDestinations.find { currentDestination?.hasRoute(it.route::class) == true }
@@ -96,6 +105,19 @@ fun NbtNavHost(startOnHeadUnits: Boolean, navController: NavHostController = rem
     val openHeadUnit = { id: String -> navController.navigate(HeadUnitDetailRoute(id)) }
     val addHeadUnit = { openTopLevel(HeadUnitsRoute) }
     val pairHeadUnit = { id: String -> navController.navigate(PairingRoute(id)) }
+    // From the pairing screen: back to the head unit's page where it was opened from there, or to the page in its place.
+    val headUnitAfterPairing = { id: String ->
+        navController.popBackStack()
+        val below = navController.currentBackStackEntry?.takeIf { it.destination.hasRoute(HeadUnitDetailRoute::class) }
+        if (below?.toRoute<HeadUnitDetailRoute>()?.headUnitId != id) navController.navigate(HeadUnitDetailRoute(id))
+    }
+    LaunchedEffect(headUnitToOpen) {
+        if (headUnitToOpen != null) {
+            val top = navController.currentBackStackEntry?.takeIf { it.destination.hasRoute(HeadUnitDetailRoute::class) }
+            if (top?.toRoute<HeadUnitDetailRoute>()?.headUnitId != headUnitToOpen) navController.navigate(HeadUnitDetailRoute(headUnitToOpen))
+            onHeadUnitOpened()
+        }
+    }
 
     Scaffold(
         bottomBar = {
@@ -142,7 +164,11 @@ fun NbtNavHost(startOnHeadUnits: Boolean, navController: NavHostController = rem
                 LogPullScreen(onBack = { navController.popBackStack() })
             }
             composable<PairingRoute> {
-                PairingScreen(onBack = { navController.popBackStack() }, onOpenJob = { navController.navigate(JobRoute()) })
+                PairingScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenJob = { navController.navigate(JobRoute()) },
+                    onOpenHeadUnit = headUnitAfterPairing,
+                )
             }
             composable<JobRoute> {
                 JobScreen(

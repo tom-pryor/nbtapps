@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store
 
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.view.View
@@ -23,6 +24,7 @@ import com.nbtapps.store.ui.navigation.StartViewModel
 import com.nbtapps.store.ui.theme.NbtAppTheme
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
@@ -35,8 +37,13 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var updater: AppUpdater
 
+    /** The head unit whose page the intent asked for ([EXTRA_HEAD_UNIT]), until it has been opened. */
+    private val headUnitToOpen = MutableStateFlow<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // A page that was opened stays open across a rotation: the intent is not taken again.
+        if (savedInstanceState == null) headUnitToOpen.value = intent.getStringExtra(EXTRA_HEAD_UNIT)
         // The theme is dark on every phone, so the bars' icons are light even when the phone is in light mode.
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
@@ -45,11 +52,20 @@ class MainActivity : ComponentActivity() {
         setContent {
             NbtAppTheme {
                 val startOnHeadUnits by start.startOnHeadUnits.collectAsStateWithLifecycle()
-                startOnHeadUnits?.let { NbtNavHost(startOnHeadUnits = it) }
+                val toOpen by headUnitToOpen.collectAsStateWithLifecycle()
+                startOnHeadUnits?.let {
+                    NbtNavHost(startOnHeadUnits = it, headUnitToOpen = toOpen, onHeadUnitOpened = { headUnitToOpen.value = null })
+                }
             }
         }
         holdFirstFrameUntilStartIsKnown()
         openUpdateConfirmations()
+    }
+
+    /** The app's screens brought up again, as the screen for a handed-over pairing code does: maybe for a head unit's page. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.getStringExtra(EXTRA_HEAD_UNIT)?.let { headUnitToOpen.value = it }
     }
 
     override fun onResume() {
@@ -74,6 +90,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    companion object {
+        /** This app's id of a head unit whose page is opened, over whatever screen shows. */
+        const val EXTRA_HEAD_UNIT = "com.nbtapps.store.extra.HEAD_UNIT"
     }
 
     /**

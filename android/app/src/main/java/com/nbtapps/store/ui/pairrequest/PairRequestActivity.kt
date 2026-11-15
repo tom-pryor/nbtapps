@@ -47,7 +47,8 @@ class PairRequestActivity : ComponentActivity() {
                         Toast.makeText(this, "Paired with $name", Toast.LENGTH_SHORT).show()
                         openApp()
                     },
-                    onOpenApp = ::openApp,
+                    onOpenApp = { openApp() },
+                    onOpenHeadUnit = { id -> openApp(headUnitId = id) },
                     onClose = ::finish,
                 )
             }
@@ -65,9 +66,15 @@ class PairRequestActivity : ComponentActivity() {
         viewModel.handle(request)
     }
 
-    /** The app's own screens, as they stand: an instance there is already is brought up, not a second made. */
-    private fun openApp() {
-        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+    /**
+     * The app's own screens, as they stand: an instance there is already is brought up, not a second made. With
+     * [headUnitId], that head unit's page is opened over them.
+     */
+    private fun openApp(headUnitId: String? = null) {
+        val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        headUnitId?.let { intent.putExtra(MainActivity.EXTRA_HEAD_UNIT, it) }
+        startActivity(intent)
         finish()
     }
+
 }

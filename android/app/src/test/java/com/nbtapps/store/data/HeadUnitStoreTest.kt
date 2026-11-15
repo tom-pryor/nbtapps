@@ -2,8 +2,12 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.data
 
+import com.nbtapps.store.model.CheckMove
+import com.nbtapps.store.model.CheckProblem
+import com.nbtapps.store.model.CheckProblemFix
 import com.nbtapps.store.model.FreeSpace
 import com.nbtapps.store.model.HeadUnit
+import com.nbtapps.store.model.HeadUnitChecks
 import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.InstalledPackage
 import com.nbtapps.store.model.SerialEndpoint
@@ -84,6 +88,41 @@ class HeadUnitStoreTest {
         assertEquals("000102030405060708090a0b0c0d0e0f", saved?.headUnitId)
         assertEquals(profile, saved?.profile)
         assertEquals(car.endpoints, saved?.endpoints)
+    }
+
+    @Test
+    fun `what the checks found is kept with the head unit, and one saved before there were checks loads without`() = runTest {
+        val checks = HeadUnitChecks(
+            checkedAt = 1_794_000_000_000,
+            problems = listOf(
+                CheckProblem(
+                    id = "aa-fix",
+                    title = "An app that was installed by hand",
+                    detail = "It stands in the way.",
+                    paths = listOf("/opt/demo/bin/demod"),
+                    moves = listOf(CheckMove("/plugins/Demo", "/opt/demo/Demo.old")),
+                    fix = CheckProblemFix("Remove it", "Removes what was listed.", "hmi-restart"),
+                    dismissed = true,
+                ),
+            ),
+        )
+        opened { first ->
+            first.add(car)
+            first.update("one") { it.copy(checks = checks) }
+        }
+        assertEquals(checks, opened { it.headUnit("one").first() }?.checks)
+
+        file.writeText("""[{"id":"one","name":"Car","endpoints":[]}]""")
+        assertNull(opened { it.headUnit("one").first() }?.checks)
+
+        // As the version before moves wrote it: with the packages a problem stood in the way of, and no moves.
+        file.writeText(
+            """[{"id":"one","name":"Car","endpoints":[],"checks":{"checkedAt":1,"problems":[{"id":"aa-fix","title":"T",""" +
+                """"detail":"D","paths":["/opt/demo/bin/demod"],"blocks":["org.nbtapp.plugin"],"fix":{"label":"L"}}]}}]""",
+        )
+        val older = requireNotNull(opened { it.headUnit("one").first() }?.checks?.problem("aa-fix"))
+        assertEquals(emptyList<CheckMove>(), older.moves)
+        assertEquals(listOf("/opt/demo/bin/demod"), older.paths)
     }
 
     @Test

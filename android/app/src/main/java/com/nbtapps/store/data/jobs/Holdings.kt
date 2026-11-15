@@ -45,6 +45,8 @@ data class Holdings(
     val restartNeeded: String,
     /** When this was read, in milliseconds since the epoch. */
     val seenAt: Long,
+    /** How many problems the agent's checks found on it that the user has not put aside, as is kept with it. */
+    val openChecks: Int = 0,
 )
 
 /**
@@ -55,6 +57,7 @@ fun holdings(units: List<HeadUnit>, connection: ConnectionState): Holdings? {
     val unit = selectedHeadUnit(units, connection) ?: return null
     val connected = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == unit.id }
     val profile = unit.profile
+    val openChecks = unit.checks?.open?.size ?: 0
     return when {
         connected != null -> Holdings(
             headUnitId = unit.id,
@@ -65,6 +68,7 @@ fun holdings(units: List<HeadUnit>, connection: ConnectionState): Holdings? {
             restartNeeded = connected.info.restartNeeded,
             // The profile is written with the same reading; it is absent only for the moment before that.
             seenAt = profile?.seenAt ?: 0,
+            openChecks = openChecks,
         )
         profile != null -> Holdings(
             headUnitId = unit.id,
@@ -74,6 +78,7 @@ fun holdings(units: List<HeadUnit>, connection: ConnectionState): Holdings? {
             installed = profile.installed,
             restartNeeded = RestartKind.NONE,
             seenAt = profile.seenAt,
+            openChecks = openChecks,
         )
         else -> null
     }

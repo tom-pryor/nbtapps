@@ -79,4 +79,11 @@ object ProtocolConstants {
      * package, those its manifest names in `logs`, and its own. An agent that does not list it has none to send.
      */
     const val CAPABILITY_FILES = "files"
+
+    /**
+     * A capability: the agent has `checks.run` and `checks.fix`. It looks for what was put onto the head unit by
+     * hand, outside this system, and stands in the way of a package or of the head unit, and removes it when the
+     * phone asks, with the token of the list the user was shown. An agent that does not list it has no checks.
+     */
+    const val CAPABILITY_CHECKS = "checks"
 }

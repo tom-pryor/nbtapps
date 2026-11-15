@@ -15,6 +15,8 @@ import com.nbtapps.store.data.jobs.AutostartSetup
 import com.nbtapps.store.data.jobs.AutostartStep
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.FakeAgent
+import com.nbtapps.store.data.jobs.FakeCheck
+import com.nbtapps.store.data.jobs.FakeChecks
 import com.nbtapps.store.data.jobs.FakeConnector
 import com.nbtapps.store.data.jobs.FakePhones
 import com.nbtapps.store.data.jobs.JobRepository
@@ -522,5 +524,26 @@ class PairRequestViewModelTest {
         assertEquals(PairRequestStep.Prompt, viewModel.uiState.value.step)
         assertNull(setup.state.value)
         assertEquals(0, sets())
+    }
+
+    @Test
+    fun `with the box cleared, what the checks found is pointed to once the phone is paired`() = test {
+        keys.put(agentId, phones.pair(phoneId))
+        val checks = FakeChecks().apply { add(FakeCheck("aa-fix", listOf("/opt/demo/bin/demod"))) }
+        connector.onConnect = { agent ->
+            agent.capabilities = """["checks"]"""
+            agent.checks = checks
+        }
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", null))
+        viewModel.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+        viewModel.setEnableAutostart(false)
+
+        viewModel.pair()
+
+        val line = await(viewModel.uiState, "the line") { it.showsChecks }
+        assertEquals(PairRequestStep.AlreadyPaired("Test car"), line.step)
+        assertEquals(1, line.openChecks)
+        assertNull(line.setup)
     }
 }

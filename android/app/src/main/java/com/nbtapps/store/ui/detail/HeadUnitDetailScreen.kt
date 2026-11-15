@@ -33,6 +33,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -46,12 +49,18 @@ import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
+import com.nbtapps.store.model.CheckProblem
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.InstalledPackage
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.RiskFlag
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.CheckFixDialog
+import com.nbtapps.store.ui.headunits.Moves
+import com.nbtapps.store.ui.headunits.Paths
+import com.nbtapps.store.ui.headunits.movesHeading
+import com.nbtapps.store.ui.headunits.removesHeading
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -111,12 +120,18 @@ fun HeadUnitDetailScreen(
             uiState.profile?.let {
                 AgentCard(it, connected, uiState.restartError, viewModel::restart, onLogs = { onOpenLogs(AGENT_PACKAGE_ID) }.takeIf { uiState.logs })
             }
+            // While the set-up runs, the problems it is about are its to ask.
+            if (uiState.setup?.running != true) {
+                ChecksCard(uiState, connected, viewModel::openFix, viewModel::dismissCheck, viewModel::recheck)
+            }
             uiState.setup?.let { setup ->
                 AutostartSetupCard(
                     step = setup.step,
                     restartNeeded = uiState.restartNeeded,
                     onRetry = viewModel::retrySetup,
                     onRestart = viewModel::restartForSetup,
+                    onRemove = viewModel::openSetupRemoval,
+                    onSkip = viewModel::skipSetupRemoval,
                     onOpenJob = onOpenJob,
                     onDismiss = viewModel::dismissSetup,
                 )
@@ -127,6 +142,110 @@ fun HeadUnitDetailScreen(
                 AutostartCard(state, busy, uiState.autostartError, viewModel::setAutostart, onOpenPackage)
             }
             InstalledCard(uiState, connected, onUninstall, onOpenLogs)
+        }
+    }
+
+    uiState.fix?.let { step ->
+        CheckFixDialog(step, onConfirm = viewModel::confirmFix, onRetry = viewModel::retryFix, onClose = viewModel::closeFix)
+    }
+}
+
+/** Whether the checks' card has anything to show: problems that are not put aside, or a link to check again over. */
+internal fun showsChecks(uiState: HeadUnitDetailUiState, connected: Boolean): Boolean =
+    uiState.checks?.open?.isNotEmpty() == true || (connected && uiState.canCheck)
+
+/** What the checks' card says where they found nothing, and where all they found was put aside. */
+internal const val CHECKS_CLEAR = "Nothing put onto the head unit by hand is in the way."
+internal const val CHECKS_ASIDE = "What the checks found is put aside. Check again shows it once more."
+
+/**
+ * What the card says, on the button that shows them, of the [moves] folders a problem's fix moves aside and the
+ * [paths] paths it removes.
+ */
+internal fun listLabel(moves: Int, paths: Int, shown: Boolean): String {
+    if (shown) return "Hide the list"
+    val move = when (moves) {
+        0 -> null
+        1 -> "1 folder to move aside"
+        else -> "$moves folders to move aside"
+    }
+    val remove = when (paths) {
+        0 -> null
+        1 -> "1 path to remove"
+        else -> "$paths paths to remove"
+    }
+    return "Show the " + listOfNotNull(move, remove).joinToString(" and ")
+}
+
+/**
+ * What the agent's checks found on the head unit and the user has not put aside: for each, the agent's own title and
+ * detail, what it found, its fix where it has one, and Dismiss. A fix needs a link to this head unit; Check again
+ * runs them all once more, and brings back what was put aside.
+ */
+@Composable
+private fun ChecksCard(
+    uiState: HeadUnitDetailUiState,
+    connected: Boolean,
+    onFix: (String) -> Unit,
+    onDismiss: (String) -> Unit,
+    onRecheck: () -> Unit,
+) {
+    if (!showsChecks(uiState, connected)) return
+    val checks = uiState.checks
+    val canFix = connected && uiState.canCheck
+    Section("Checks") {
+        when {
+            checks == null -> Text(
+                "The head unit hasn't been checked yet for what was put onto it by hand.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            checks.open.isEmpty() -> Text(
+                if (checks.problems.isEmpty()) CHECKS_CLEAR else CHECKS_ASIDE,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        checks?.open?.forEach { problem -> ProblemRow(problem, canFix, onFix, onDismiss) }
+        if (checks?.open?.any { it.fix != null } == true && !canFix) {
+            Text(
+                "Connect to the agent on this head unit to put these right.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (canFix) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onRecheck, enabled = !uiState.checking) { Text("Check again") }
+                if (uiState.checking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            }
+        }
+        uiState.checkError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    }
+}
+
+@Composable
+private fun ProblemRow(problem: CheckProblem, canFix: Boolean, onFix: (String) -> Unit, onDismiss: (String) -> Unit) {
+    var shown by rememberSaveable(problem.id) { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(problem.title, style = MaterialTheme.typography.titleSmall)
+        Text(problem.detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (problem.paths.isNotEmpty() || problem.moves.isNotEmpty()) {
+            TextButton(onClick = { shown = !shown }) { Text(listLabel(problem.moves.size, problem.paths.size, shown)) }
+            if (shown) {
+                if (problem.moves.isNotEmpty()) {
+                    Text(movesHeading(problem.moves.size), style = MaterialTheme.typography.bodyMedium)
+                    Moves(problem.moves)
+                }
+                if (problem.paths.isNotEmpty()) {
+                    Text(removesHeading(problem.paths.size), style = MaterialTheme.typography.bodyMedium)
+                    Paths(problem.paths)
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            problem.fix?.let { fix -> Button(onClick = { onFix(problem.id) }, enabled = canFix) { Text("${fix.label}…") } }
+            TextButton(onClick = { onDismiss(problem.id) }) { Text("Dismiss") }
         }
     }
 }

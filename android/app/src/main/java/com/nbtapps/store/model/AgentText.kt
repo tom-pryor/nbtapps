@@ -41,6 +41,17 @@ object AgentText {
         else -> request(code)
     }
 
+    /** For the `error` of `checks.run` and `checks.fix`. */
+    fun check(code: String): String = when (code) {
+        "stale" -> "The files on the head unit changed since they were listed. Look at the new list."
+        "busy" -> "The head unit is busy with a job. Try again once it has finished."
+        "not-found" -> "The head unit's agent doesn't have that check"
+        "unsupported" -> "The head unit's agent can't remove these by itself"
+        "io-error" -> "The head unit couldn't remove everything: a file couldn't be read, or a program wouldn't stop"
+        "forbidden" -> "The head unit doesn't allow that from here"
+        else -> request(code)
+    }
+
     /** Where on the car's screen a phone is paired: what the agent repo's plugin calls its menu and the row in it. */
     const val PAIR_ON_CAR = "On the car's screen, open NBTApp (in the Media/Radio menu) and choose Pair a phone."
 

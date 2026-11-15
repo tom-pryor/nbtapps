@@ -8,6 +8,7 @@ import android.content.Intent
 import android.provider.Settings
 import android.text.format.DateUtils
 import android.text.format.Formatter
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -73,6 +74,7 @@ import com.nbtapps.store.data.update.AppUpdateOffer
 import com.nbtapps.store.data.update.UpdateState
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.ui.headunits.HeadUnitIndicator
+import com.nbtapps.store.ui.headunits.checksLine
 
 /**
  * The catalogue's packages, against the head unit the app is working with: which of them it has, in which
@@ -127,7 +129,10 @@ private fun CatalogueContent(
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (unit != null) {
                 AgentText.restart(unit.restartNeeded)?.let { need ->
-                    RestartBanner("$need what was installed on ${unit.name}.", onOpenHeadUnit = { onOpenHeadUnit(unit.headUnitId) })
+                    HeadUnitBanner("$need what was installed on ${unit.name}.", R.drawable.ic_restart, onOpenHeadUnit = { onOpenHeadUnit(unit.headUnitId) })
+                }
+                if (unit.openChecks > 0) {
+                    HeadUnitBanner(checksLine(unit.openChecks, unit.name), R.drawable.ic_head_unit, onOpenHeadUnit = { onOpenHeadUnit(unit.headUnitId) })
                 }
             }
             OutlinedTextField(
@@ -394,9 +399,12 @@ private fun SavedListLine(unit: Holdings) {
     }
 }
 
-/** The connected head unit still has to restart for something that was installed; its own screen has the buttons. */
+/**
+ * Something on the head unit wants the user: it still has to restart for something that was installed, or its
+ * checks found something in the way. Its own screen has the buttons.
+ */
 @Composable
-private fun RestartBanner(text: String, onOpenHeadUnit: () -> Unit) {
+private fun HeadUnitBanner(text: String, @DrawableRes icon: Int, onOpenHeadUnit: () -> Unit) {
     Surface(
         color = MaterialTheme.colorScheme.tertiaryContainer,
         contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -407,7 +415,7 @@ private fun RestartBanner(text: String, onOpenHeadUnit: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Icon(painterResource(R.drawable.ic_restart), contentDescription = null, Modifier.size(20.dp))
+            Icon(painterResource(icon), contentDescription = null, Modifier.size(20.dp))
             Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
             TextButton(
                 onClick = onOpenHeadUnit,

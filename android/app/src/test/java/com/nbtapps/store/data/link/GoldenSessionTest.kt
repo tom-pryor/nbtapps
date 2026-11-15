@@ -9,6 +9,7 @@ import com.nbtapps.store.data.json.StrictJson
 import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.VerifiedPackage
 import com.nbtapps.store.model.AgentText
+import com.nbtapps.store.model.CheckState
 import com.nbtapps.store.model.FileCompress
 import com.nbtapps.store.model.InstallTarget
 import com.nbtapps.store.model.JobState
@@ -16,6 +17,7 @@ import com.nbtapps.store.model.LinkClosing
 import com.nbtapps.store.model.Offer
 import com.nbtapps.store.model.PlanRequest
 import com.nbtapps.store.model.RemoveTarget
+import com.nbtapps.store.model.RestartKind
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.zip.Inflater
@@ -230,6 +232,15 @@ class GoldenSessionTest {
                 val idle = client.status()
                 assertNull(idle.job)
                 assertTrue(idle.events.isEmpty())
+
+                // The checks, all in one answer: the stand-in for a head unit has its system partition writable.
+                val checks = client.checksRun()
+                assertEquals(listOf("system-writable", "aa-fix"), checks.map { it.id })
+                assertEquals(listOf(CheckState.PROBLEM, CheckState.OK), checks.map { it.state })
+                val writable = checks[0]
+                assertTrue(writable.found.isEmpty() && !writable.more && writable.moves.isEmpty())
+                assertEquals(RestartKind.NONE, writable.fix?.restart)
+                assertEquals(64, writable.fix?.token?.length)
 
                 // A plan that cannot run: a dependency nobody offered, and a removal of something not installed.
                 session.blobs.offer(blobs(helloFile, hello))

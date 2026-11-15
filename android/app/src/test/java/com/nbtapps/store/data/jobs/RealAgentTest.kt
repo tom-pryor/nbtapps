@@ -23,6 +23,7 @@ import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.AutostartReason
+import com.nbtapps.store.model.CheckState
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.InstallTarget
@@ -30,6 +31,7 @@ import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RemoveTarget
+import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.TcpEndpoint
 import com.nbtapps.store.model.VersionRange
 import com.nbtapps.store.ui.catalogue.DetailsState
@@ -547,6 +549,109 @@ class RealAgentTest {
         assertEquals(listOf("org.nbtapp.plugin 1.0.0"), installedNow())
         assertEquals(Autostart(on = true, available = true), connected().autostart)
         assertTrue(File(home, "autostart").isFile)
+    }
+
+    /** The file [path] under the bench's root, with [text] in it and its folders made. */
+    private fun put(path: String, text: String) = File(root, path).apply {
+        parentFile?.mkdirs()
+        writeText(text)
+    }
+
+    /**
+     * What was put onto the stand-in head unit by hand, as the agent's own tests lay it out under a root: a made-up
+     * app in /opt/aa and /var/opt/aa, with its plugin folder Demo, whose manifest claims the connector id 210.
+     */
+    private fun handInstall() {
+        put("system/opt/aa/bin/demod", "#!/bin/sh\n")
+        put("system/opt/aa/etc/demo.conf", "on\n")
+        put("system/var/opt/aa/state.txt", "state\n")
+        put(
+            "plugins/Demo/Demo.manifest",
+            "<?xml version=\"1.0\"?>\n<plugin><name>Demo</name><config><dependencies><pluginAppConnector><id>210</id>" +
+                "</pluginAppConnector></dependencies><parameters><DescFile>{pluginDir}/Demo.xml</DescFile></parameters></config></plugin>\n",
+        )
+        put("plugins/Demo/Demo.xml", "<pluginApps/>\n")
+        put("plugins/Demo/libDemo.so", "not a library\n")
+    }
+
+    /**
+     * The real agent's check finds what was put on by hand, refuses a fix whose list has changed, and on the list
+     * that was confirmed moves the plugin's folder aside whole into /opt/aa, where it stays, and removes the rest.
+     * The check finds nothing afterwards.
+     */
+    @Test
+    fun `the real agent's check finds an app installed by hand, and its fix moves the plugin aside and removes the rest`() = test {
+        handInstall()
+        assertTrue(jobs.connect("bench").isSuccess)
+        val kept = requireNotNull(jobs.ensureChecked())
+        // On a folder that stands in for a head unit the system partition is never writable.
+        val app = kept.open.single()
+        assertEquals("aa-fix", app.id)
+        assertTrue(app.changesFiles)
+        assertEquals(1, app.moves.size)
+        assertTrue(app.moves.toString(), app.moves.single().from.endsWith("/plugins/Demo"))
+        assertTrue(app.moves.toString(), app.moves.single().to.endsWith("/system/opt/aa/Demo.old"))
+        assertTrue(app.paths.toString(), app.paths.any { it.endsWith("/system/opt/aa/bin/demod") })
+        assertTrue(app.paths.toString(), app.paths.any { it.endsWith("/system/var/opt/aa/state.txt") })
+        assertTrue(app.paths.toString(), app.paths.none { it.contains("/plugins/Demo") })
+        assertEquals(RestartKind.HMI, app.fix?.restart)
+
+        // A file that came after the list was shown is not removed, and nor is anything else.
+        val shown = jobs.runCheck("aa-fix").getOrThrow()
+        put("system/opt/aa/etc/new.conf", "new\n")
+        assertEquals("stale", (jobs.fixCheck("aa-fix", shown.fix!!.token).exceptionOrNull() as AgentRefusal).code)
+        assertTrue(File(root, "system/opt/aa/bin/demod").isFile)
+        assertTrue(File(root, "plugins/Demo/Demo.manifest").isFile)
+        assertEquals(RestartKind.NONE, connected().info.restartNeeded)
+
+        val check = jobs.runCheck("aa-fix").getOrThrow()
+        val fixed = jobs.fixCheck("aa-fix", check.fix!!.token).getOrThrow()
+        assertEquals(CheckState.OK, fixed.state)
+        assertEquals(check.found.size, fixed.removed)
+        assertEquals(check.moves, fixed.moved)
+        assertTrue(fixed.left.isEmpty())
+        assertFalse(File(root, "plugins/Demo").exists())
+        assertTrue(File(root, "system/opt/aa/Demo.old/Demo.manifest").isFile)
+        assertFalse(File(root, "system/opt/aa/bin").exists())
+        assertFalse(File(root, "system/var/opt/aa").exists())
+        assertEquals(emptyList<String>(), headUnits.headUnit("bench").first()?.checks?.problems?.map { it.id })
+        assertEquals(RestartKind.HMI, connected().info.restartNeeded)
+        // The folder moved aside is parked: the check does not find it again.
+        assertEquals(emptyList<String>(), jobs.recheck().getOrThrow().problems.map { it.id })
+    }
+
+    /**
+     * Pairing with the box ticked, on a head unit with an app installed by hand: the set-up installs the plugin and
+     * switches the agent on, then asks about the app, puts it right once confirmed, and leaves one restart to ask for.
+     */
+    @Test
+    fun `the set-up installs the plugin and switches the real agent on first, then puts right what was installed by hand`() = test {
+        handInstall()
+        assertTrue(jobs.connect("bench").isSuccess)
+        val home = withLauncher()
+        val setup = autostartSetup()
+
+        setup.begin("bench")
+
+        val asked = await(setup.state, "the question") { it?.step is AutostartStep.AskRemoval }!!.step as AutostartStep.AskRemoval
+        assertTrue(asked.switchedOn)
+        assertEquals("aa-fix", asked.problem.id)
+        // By now the plugin is there and the agent starts with the car, and nothing of the app has changed.
+        assertEquals(listOf("org.nbtapp.plugin 1.0.0"), installedNow())
+        assertEquals(Autostart(on = true, available = true), connected().autostart)
+        assertTrue(File(home, "autostart").isFile)
+        assertTrue(File(root, "plugins/Demo/Demo.manifest").isFile)
+        assertEquals(RestartKind.HMI, connected().info.restartNeeded)
+
+        // What the confirmation does: the list as it is now, and its token.
+        val check = jobs.runCheck("aa-fix").getOrThrow()
+        setup.confirmRemoval("aa-fix", check.fix!!.token)
+
+        assertEquals(AutostartStep.Done(changed = true, moved = 1, removed = check.found.size), setup.ended())
+        assertFalse(File(root, "plugins/Demo").exists())
+        assertTrue(File(root, "system/opt/aa/Demo.old").isDirectory)
+        assertTrue(File(root, "plugins/NbtApp/NbtApp.manifest").isFile)
+        assertEquals(RestartKind.HMI, connected().info.restartNeeded)
     }
 
     /** Builds and signs a package too large to cross a slowed link at once, with the agent repo's tool and test key. */
