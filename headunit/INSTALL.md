@@ -110,8 +110,8 @@ cat /tmp/nbtapp/log/agent.log
 
 `nbtctl info` prints the head unit's profile; if it says there is no agent, read the log for the reason.
 
-Until step 7 the agent does not start by itself. After any restart of the head unit, start it again with the
-same command, or from iDrive once the plugin is installed (step 6).
+Until step 6 is done the agent does not start by itself. After any restart of the head unit before then,
+start it again with the same command.
 
 ## 4. Install the app on the phone
 
@@ -139,26 +139,36 @@ screen offers it.
    /var/opt/nbtapp/agent/1.3.0/nbtctl pair
    ```
 
-   It prints `code NNNNNN`. Type the six digits into the app within two minutes and tap **Pair**. `nbtctl`
-   prints `paired`. Three wrong codes close the window for 30 seconds; run the command again for a new code.
+   It prints `code NNNNNN`. Type the six digits into the app within two minutes. Leave **Enable autostart**
+   ticked, which is how it starts, and tap **Pair**. `nbtctl` prints `paired`. Three wrong codes close the
+   window for 30 seconds; run the command again for a new code.
 
 Pairing is done once per phone. The head unit's page now shows the agent's version and what is installed.
 
-## 6. Install the iDrive plugin
+## 6. The iDrive plugin, and starting with the car
 
 The plugin is the **NBTApp** entry in iDrive's Media/Radio menu. It starts the agent with the car, and gives
 the car's screen **Start the agent** and **Pair a phone**.
 
-1. In the app's catalogue, open **NBTApp iDrive plugin** (`org.nbtapp.plugin`) and install it.
-2. The install ends with a restart of iDrive. On NBT Evo this restarts the whole head unit, and the agent
-   stops with it: the app loses its connection, which is expected.
-3. Once iDrive is back, start the agent from the car's screen: **NBTApp**, then **Start the agent**, then
-   **Start it now**. Wait for **Started. A phone can connect now**. Starting it again over SSH, as in step 3,
-   does the same.
-4. In the app, tap **Connect again**. The plugin now shows as installed.
+With **Enable autostart** ticked, the app sets this up by itself once the phone is paired. The pairing
+screen shows a card, **Start with the car**, that says where it stands:
+
+1. **Getting the iDrive plugin…**: the app downloads the plugin (`org.nbtapp.plugin`) from the catalogue,
+   which needs the phone's internet connection.
+2. **Installing the iDrive plugin…**: the agent installs it. **Show progress** opens the job.
+3. **Switching on…**, and then **The agent now starts with the car.**
+4. iDrive loads the plugin only when it starts, so the card offers **Restart iDrive now**. On NBT Evo this
+   restarts the whole head unit, and the agent stops with it: the app loses its connection, which is
+   expected.
+5. Once iDrive is back, wait 15 seconds for the plugin to start the agent, and tap **Connect to the agent**
+   on the head unit's page. The plugin now shows as installed.
+
+The set-up goes on if you leave the pairing screen; the head unit's page shows the same card. If it stops,
+the card says why and offers **Retry**, which carries on from where it stopped. A head unit that has the
+plugin already is only switched on: the plugin is not updated for this.
 
 If you copied the plugin onto this car by hand before, the install fails with `stock-mismatch`. Move the old
-folder aside once and install again. In a shell on `hu-omap` (step 2):
+folder aside once and tap **Retry**. In a shell on `hu-omap` (step 2):
 
 ```sh
 /bin/mount -u -o rw /fs/sda0
@@ -166,10 +176,20 @@ mv /opt/hmi/ID5/data/ro/Plugins/NbtApp /opt/NbtApp.old
 /bin/mount -u -o ro /fs/sda0
 ```
 
-## 7. Start the agent with the car
+## 7. The same by hand
 
-On the head unit's page in the app, switch on **Start the agent when the car starts**. From the next start
-of the head unit, the plugin starts the agent about 15 seconds after iDrive comes up.
+Skip this step if step 6 ended with **The agent now starts with the car.** It is for a phone that was paired
+with **Enable autostart** cleared.
+
+1. In the app's catalogue, open **NBTApp iDrive plugin** (`org.nbtapp.plugin`) and install it.
+2. On the head unit's page in the app, switch on **Start the agent when the car starts**. If the switch
+   cannot be turned on, the card says why. Usually the plugin is missing or too old, and the card links to
+   it.
+3. Restart iDrive from the job's page, **Restart iDrive now**, and connect again as in step 6.
+
+If iDrive was restarted before the switch was on, nothing starts the agent afterwards. Start it from the
+car's screen: **NBTApp**, then **Start the agent**, then **Start it now**, and wait for **Started. A phone
+can connect now**. Starting it again over SSH, as in step 3, does the same. Then connect and switch on.
 
 The same switch over SSH:
 
@@ -177,8 +197,7 @@ The same switch over SSH:
 /var/opt/nbtapp/agent/1.3.0/nbtctl autostart on
 ```
 
-If the switch cannot be turned on, the card says why. Usually the plugin is missing or too old, and the card
-links to it.
+From the next start of the head unit, the plugin starts the agent about 15 seconds after iDrive comes up.
 
 ## 8. Check it works
 
@@ -200,6 +219,7 @@ From now on:
 | `hu_install: version 1.3.0 is there already` | The script never writes over an installed version. Stop the agent (`slay nbtagent`), remove that version (`rm -rf /var/opt/nbtapp/agent/1.3.0`) and run the script again |
 | `hu_install: an update of the agent was begun and is not finished` | Start the agent (step 3) and let it finish the update, then try again |
 | The app cannot connect | Check the agent runs: **NBTApp**, **Start the agent** on the car's screen, or `nbtctl info` over SSH. Read `/tmp/nbtapp/log/agent.log` |
+| The **Start with the car** card stopped with a reason | Put right what it names (the phone's internet connection, the link to the head unit) and tap **Retry**. Or do step 7 by hand |
 | The agent no longer starts with the car | After three starts in a row in which the agent did not keep running for five minutes, the plugin stops trying. The card in the app says so; tap **Have the car try again**. Over SSH: `rm /var/opt/nbtapp/agent/autostart.boots` |
 | The phone connects but nothing arrives | A link the phone held open long after the agent closed it can leave the car's Bluetooth serial stuck until the head unit restarts. Restart the head unit |
 | **Pair a phone** on the car's screen shows no code | Get one over SSH: `nbtctl pair`, as in step 5 |
