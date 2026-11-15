@@ -23,6 +23,7 @@ import com.nbtapps.store.data.prereleaseStore
 import com.nbtapps.store.data.catalogue.CatalogueRepository
 import com.nbtapps.store.data.catalogue.CatalogueSource
 import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
+import com.nbtapps.store.data.jobs.AutostartSetup
 import com.nbtapps.store.data.jobs.JobKeeper
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.link.AndroidSerialRadio
@@ -167,5 +168,17 @@ abstract class AppModule {
             @ApplicationScope scope: CoroutineScope,
             @ApplicationContext context: Context,
         ): JobRepository = JobRepository(headUnits, connector, identity, keys, store, keeper, scope, shareDir = File(context.cacheDir, "share"))
+
+        /** Setting a head unit up to start the agent with the car, which goes on when the pairing screen is left. */
+        @Provides
+        @Singleton
+        fun provideAutostartSetup(
+            jobs: JobRepository,
+            catalogue: CatalogueRepository,
+            store: PackageStore,
+            downloader: PackageDownloader,
+            prereleases: PrereleaseRepository,
+            @ApplicationScope scope: CoroutineScope,
+        ): AutostartSetup = AutostartSetup(jobs, catalogue, store, downloader, prereleases, scope)
     }
 }
