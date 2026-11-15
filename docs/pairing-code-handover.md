@@ -43,7 +43,9 @@ startActivity(intent)
 - The screen has a box, **Enable autostart**, ticked to begin with. With it ticked, once the phone is paired, now
   or from before, NBTApps sets the head unit up to start the agent with the car: it installs the iDrive plugin
   where the head unit lacks it and switches the start on. The screen stays open and shows how that goes, and the
-  user opens NBTApps from it. With the box cleared, a successful pairing opens NBTApps' main screen at once.
+  user opens NBTApps from it. Last, where the agent finds an app that was installed on the head unit by hand,
+  the screen asks the user about it: nothing is moved or removed until the user has seen the list and
+  confirmed it. With the box cleared, a successful pairing opens NBTApps' main screen at once.
   The box is the user's: the request cannot set it.
 - If the agent refuses the code, or the countdown runs out first, the user is told to get a new code from the app
   that sent this one. The code cannot be changed on that screen.
