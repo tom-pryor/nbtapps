@@ -5,16 +5,20 @@ package com.nbtapps.store.data.jobs
 import com.nbtapps.store.AgentBench
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
+import com.nbtapps.store.data.InMemoryPrereleaseRepository
 import com.nbtapps.store.data.MemoryPairingKeys
 import com.nbtapps.store.data.PhoneIdentity
 import com.nbtapps.store.data.catalogue.CatalogueParser
 import com.nbtapps.store.data.catalogue.CatalogueState
+import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
+import com.nbtapps.store.data.catalogue.FileCatalogueSource
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.logs.LogPullRequest
 import com.nbtapps.store.data.logs.LogPullState
 import com.nbtapps.store.data.packages.PackageArchive
+import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.model.Autostart
@@ -474,6 +478,75 @@ class RealAgentTest {
         assertTrue(jobs.setAutostart(false).isSuccess)
         assertEquals(Autostart(on = false, available = true), connected().autostart)
         assertFalse(File(home, "autostart").exists())
+    }
+
+    /** The set-up the pairing screens begin, over the sample catalogue as the debug build has it, which it loads itself. */
+    private fun autostartSetup(): AutostartSetup {
+        val source = FileCatalogueSource(File(sampleRoot, "v1"), File(sampleRoot, "packages"))
+        return AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+    }
+
+    private suspend fun AutostartSetup.ended(): AutostartStep =
+        requireNotNull(await(state, "the set-up to end") { it?.ended == true }).step
+
+    /** Puts a starter in the agent's folder, as an install on a car leaves one, and has the app read the switch again. */
+    private suspend fun withLauncher(): File {
+        val home = File(root, "agent").apply { mkdirs() }
+        File(home, "launcher").writeText("#!/bin/sh\n")
+        assertTrue(jobs.refresh().isSuccess)
+        return home
+    }
+
+    /**
+     * What ticking the box on a pairing screen leads to: the agent lacks the plugin, the set-up downloads the one
+     * the catalogue offers, installs it with no plan shown, and switches the agent on. Begun again it changes
+     * nothing, and iDrive is restarted when the user asks.
+     */
+    @Test
+    fun `the set-up has the real agent start with the head unit, installing the plugin first`() = test {
+        assertTrue(jobs.connect("bench").isSuccess)
+        val home = withLauncher()
+        assertEquals(AutostartReason.PLUGIN_MISSING, connected().autostart?.reason)
+        val setup = autostartSetup()
+
+        setup.begin("bench")
+
+        assertEquals(AutostartStep.Done(changed = true), setup.ended())
+        assertEquals(listOf("org.nbtapp.plugin 1.0.0"), installedNow())
+        assertEquals(Autostart(on = true, available = true), connected().autostart)
+        assertTrue(File(home, "autostart").isFile)
+        assertTrue("the plugin is on the phone now", store.find("org.nbtapp.plugin", "1.0.0") != null)
+        assertEquals("hmi-restart", connected().info.restartNeeded)
+        val planned = jobs.job.value?.planId
+
+        setup.begin("bench")
+
+        assertEquals(AutostartStep.Done(changed = false), setup.ended())
+        assertEquals(planned, jobs.job.value?.planId)
+        assertTrue(File(home, "autostart").isFile)
+
+        setup.restart()
+
+        assertEquals(AutostartStep.Restarting, await(setup.state, "the restart asked for") { it?.step == AutostartStep.Restarting }?.step)
+    }
+
+    /** A plugin from before the versions that start the agent is updated to the one the catalogue offers, and then switched on. */
+    @Test
+    fun `the set-up updates a plugin too old to start the real agent`() = test {
+        assertTrue(jobs.connect("bench").isSuccess)
+        val old = AgentVectors.file("packages/good/org.nbtapp.plugin-0.9.0.nbtpkg").inputStream().use { store.add(it, listOf(AgentVectors.packageKey)) }
+        assertEquals(JobState.SUCCEEDED, run(jobs.plan(listOf(InstallTarget(old.id, old.version)), emptyList(), listOf(old)).getOrThrow()).job.state)
+        awaitInstalled("org.nbtapp.plugin 0.9.0")
+        val home = withLauncher()
+        assertEquals(AutostartReason.PLUGIN_TOO_OLD, connected().autostart?.reason)
+
+        val setup = autostartSetup()
+        setup.begin("bench")
+
+        assertEquals(AutostartStep.Done(changed = true), setup.ended())
+        assertEquals(listOf("org.nbtapp.plugin 1.0.0"), installedNow())
+        assertEquals(Autostart(on = true, available = true), connected().autostart)
+        assertTrue(File(home, "autostart").isFile)
     }
 
     /** Builds and signs a package too large to cross a slowed link at once, with the agent repo's tool and test key. */
