@@ -48,4 +48,13 @@ class PairRequestTest {
         assertNull(pairRequestOf("123456", "90000"))
         assertNull(pairRequestOf("123456", 90.0))
     }
+
+    @Test
+    fun `the code is shown in two groups, and the time left in minutes and seconds rounded up`() {
+        assertEquals("004 217", grouped("004217"))
+        assertEquals("2:00", countdown(120_000))
+        assertEquals("1:05", countdown(64_001))
+        assertEquals("0:01", countdown(1))
+        assertEquals("0:00", countdown(0))
+    }
 }
