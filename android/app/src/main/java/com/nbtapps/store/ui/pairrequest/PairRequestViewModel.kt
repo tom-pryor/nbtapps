@@ -328,7 +328,8 @@ class PairRequestViewModel @Inject constructor(
      * start the agent with it, before the step is shown, so the screen that stays for it has the set-up to show.
      */
     private fun paired(done: PairRequestStep, unit: HeadUnit) {
-        if (enableAutostart.value) setup.begin(unit.id)
+        // A set-up from an earlier pairing says nothing of this one.
+        if (enableAutostart.value) setup.begin(unit.id) else setup.dismiss(unit.id)
         step.value = done
     }
 

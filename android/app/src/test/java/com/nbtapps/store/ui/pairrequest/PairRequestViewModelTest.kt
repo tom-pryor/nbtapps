@@ -489,6 +489,16 @@ class PairRequestViewModelTest {
         assertEquals(AutostartStep.Done(changed = false), await(again.uiState, "the set-up done") { it.setup == AutostartStep.Done(changed = false) }.setup)
         assertEquals(1, connector.agents.size)
         assertEquals(1, sets())
+
+        // And once more with the box cleared: the set-up from before says nothing of this pairing, and goes.
+        val cleared = viewModel()
+        cleared.handle(PairRequest("246802", null))
+        cleared.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+        cleared.setEnableAutostart(false)
+        cleared.pair()
+        cleared.awaitStep("already paired") { it is PairRequestStep.AlreadyPaired }
+        assertNull(setup.state.value)
+        assertEquals(1, sets())
     }
 
     @Test

@@ -188,13 +188,14 @@ class AutostartSetup(
 
     /**
      * Runs the set-up there was again, from the top: where the plugin went in the last time, it goes straight on to
-     * the switch. Nothing happens while one is under way.
+     * the switch. The agent is asked first how things stand, so that what was put right on the head unit since is
+     * seen. Nothing happens while one is under way.
      */
     fun retry() {
         synchronized(lock) {
             val last = current.value ?: return
             if (work?.isActive == true) return
-            startRun(last.headUnitId)
+            startRun(last.headUnitId, fresh = true)
         }
     }
 
@@ -216,20 +217,29 @@ class AutostartSetup(
         }
     }
 
-    /** Forgets a set-up that has ended. One that is under way goes on. */
-    fun dismiss() {
+    /**
+     * Forgets a set-up that has ended: with [headUnitId], only that head unit's. One that is under way goes on. It
+     * is what the user's Hide does, and what follows where the set-up no longer says how things stand: the phone
+     * was paired again without it, or the switch was thrown by hand.
+     */
+    fun dismiss(headUnitId: String? = null) {
         synchronized(lock) {
-            if (current.value?.ended == true && work?.isActive != true) current.value = null
+            val last = current.value ?: return
+            if (headUnitId != null && last.headUnitId != headUnitId) return
+            if (last.ended && work?.isActive != true) current.value = null
         }
     }
 
-    /** Begins a run for [headUnitId] in place of whatever there was. Call with [lock] held. */
-    private fun startRun(headUnitId: String) {
+    /**
+     * Begins a run for [headUnitId] in place of whatever there was. [fresh]: the agent is asked how things stand
+     * before anything else. Call with [lock] held.
+     */
+    private fun startRun(headUnitId: String, fresh: Boolean = false) {
         work?.cancel()
         val mine = ++generation
         current.value = AutostartSetupState(headUnitId, AutostartStep.Checking)
         work = scope.launch {
-            val end = run(headUnitId) { step -> publish(mine, step) }
+            val end = run(headUnitId, fresh) { step -> publish(mine, step) }
             publish(mine, end)
         }
     }
@@ -250,8 +260,13 @@ class AutostartSetup(
     private fun failed(headUnitId: String, failure: Throwable?, otherwise: String): AutostartStep.Failed =
         AutostartStep.Failed(if (connectedTo(headUnitId) == null) LINK_LOST else failure?.message ?: otherwise)
 
-    /** The set-up of [headUnitId] from the top, telling [show] each step as it is reached; returns how it ended. */
-    private suspend fun run(headUnitId: String, show: (AutostartStep) -> Unit): AutostartStep {
+    /**
+     * The set-up of [headUnitId] from the top, telling [show] each step as it is reached; returns how it ended.
+     * With [fresh] it goes by what the agent says now, where otherwise it goes by what the link last read.
+     */
+    private suspend fun run(headUnitId: String, fresh: Boolean, show: (AutostartStep) -> Unit): AutostartStep {
+        // A refresh that fails leaves what was read before, or no link, which the next line sees.
+        if (fresh && connectedTo(headUnitId) != null) jobs.refresh()
         val connected = connectedTo(headUnitId) ?: return AutostartStep.Failed(NO_LINK)
         return when (val plan = autostartPlan(connected.autostart)) {
             AutostartPlan.AlreadyOn -> AutostartStep.Done(changed = false)

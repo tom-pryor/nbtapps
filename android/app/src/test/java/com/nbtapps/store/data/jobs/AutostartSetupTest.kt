@@ -554,6 +554,37 @@ class AutostartSetupTest {
         assertEquals(1, plans.get())
     }
 
+    @Test
+    fun `Retry asks the agent again, and sees what was put right on the head unit since`() = test {
+        bench.launcher = false
+        bench.plugin = "1.0.0"
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        assertEquals(AutostartStep.Failed(AgentText.autostartReason(AutostartReason.NO_LAUNCHER)), ended())
+
+        // Put right on the head unit, over no link of the app's: what the app last read still says otherwise.
+        bench.launcher = true
+        setup.retry()
+
+        assertEquals(AutostartStep.Done(changed = true), ended())
+        assertTrue(bench.on)
+    }
+
+    @Test
+    fun `a set-up that has ended is forgotten for its own head unit, and not for another`() = test {
+        bench.on = true
+        bench.plugin = "1.0.0"
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        assertEquals(AutostartStep.Done(changed = false), ended())
+
+        setup.dismiss("another")
+        assertEquals("car", setup.state.value?.headUnitId)
+
+        setup.dismiss("car")
+        assertEquals(null, setup.state.value)
+    }
+
     private companion object {
         const val PLUGIN = "org.nbtapp.plugin"
     }

@@ -169,6 +169,8 @@ class HeadUnitDetailViewModel @Inject constructor(
      */
     fun setAutostart(on: Boolean) {
         if (local.value.autostartBusy) return
+        // The set-up's card says how the set-up left things, which the switch now changes by hand.
+        setup.dismiss(headUnitId)
         viewModelScope.launch {
             local.update { it.copy(autostartBusy = true, autostartError = null) }
             val failure = jobs.setAutostart(on).exceptionOrNull()
@@ -183,7 +185,7 @@ class HeadUnitDetailViewModel @Inject constructor(
     fun restartForSetup() = setup.restart()
 
     /** Hides the set-up's card, once it has ended. */
-    fun dismissSetup() = setup.dismiss()
+    fun dismissSetup() = setup.dismiss(headUnitId)
 
     /** [kind] is `hmi` or `reboot`. */
     fun restart(kind: String) {

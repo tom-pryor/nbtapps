@@ -150,7 +150,8 @@ class PairingViewModel @Inject constructor(
         local.update { it.copy(working = true, error = null) }
         appScope.launch {
             val result = jobs.pair(code)
-            if (result.isSuccess && autostart) setup.begin(headUnitId)
+            // A set-up from an earlier pairing says nothing of this one.
+            if (result.isSuccess) if (autostart) setup.begin(headUnitId) else setup.dismiss(headUnitId)
             // A code that was wrong is not typed over: it is cleared for the next one.
             local.update { Local(error = result.exceptionOrNull()?.let { it.message ?: "The phone couldn't be paired" }) }
         }
