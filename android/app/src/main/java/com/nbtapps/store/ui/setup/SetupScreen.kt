@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nbtapps.store.ui.headunits.CheckFixDialog
 
 /**
  * The set-up for a new user, one page at a time, as [setupStep] decides: whether the agent is on the car, picking
@@ -61,6 +62,23 @@ fun SetupScreen(
             onEnableAutostart = viewModel::setEnableAutostart,
             onPair = viewModel::pair,
         )
-        else -> SetupFrame(number = setupStepNumber(uiState.step), count = uiState.stepCount, onBack = back, onSkip = skip) {}
+        SetupStep.StartWithCar -> StartWithCarPage(
+            uiState,
+            onSkip = skip,
+            onRetry = viewModel::retrySetup,
+            onRestart = viewModel::restartIdrive,
+            onRemove = viewModel::openRemoval,
+            onSkipRemoval = viewModel::skipRemoval,
+            onMoveOn = viewModel::moveOn,
+        )
+        SetupStep.Done -> DonePage(
+            uiState,
+            onBrowse = onBrowse,
+            onOpenHeadUnit = { uiState.headUnitId?.let(onOpenHeadUnit) ?: onLeave() },
+        )
+    }
+
+    uiState.fix?.let { step ->
+        CheckFixDialog(step, onConfirm = viewModel::confirmRemoval, onRetry = viewModel::retryRemoval, onClose = viewModel::closeRemoval)
     }
 }
