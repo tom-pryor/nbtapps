@@ -5,6 +5,7 @@ package com.nbtapps.store.data.link
 import com.nbtapps.store.data.crypto.sha256Hex
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.LinkClosing
+import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -49,9 +50,10 @@ class SerialSessionTest {
         pingAfterMs: Long = 600_000,
         silenceMs: Long = 1_800_000,
         capacity: Int = Int.MAX_VALUE,
+        now: () -> Long = ::monotonicMillis,
     ): Pair<AgentSession, AgentEnd> {
         val (phone, other) = MemoryLink.pair(capacity, kind)
-        return AgentSession(phone, scope, pingAfterMs = pingAfterMs, silenceMs = silenceMs).also { sessions += it } to AgentEnd(other)
+        return AgentSession(phone, scope, pingAfterMs = pingAfterMs, silenceMs = silenceMs, now = now).also { sessions += it } to AgentEnd(other)
     }
 
     private suspend fun CoroutineScope.greet(session: AgentSession, agent: AgentEnd, agentFrame: Int = 4096): JsonObject {
@@ -265,5 +267,98 @@ class SerialSessionTest {
         val (session, agent) = session(pingAfterMs = 150, silenceMs = 450, capacity = 1)
         greet(session, agent)
         assertEquals("The head unit stopped answering", withTimeout(10_000) { session.ended.await() })
+    }
+
+    // A link that has been silent too long: the phone slept, or its process was frozen, with the link open. The clock
+    // is the test's, and stands still unless the test moves it.
+
+    /** A clock that a test sets by hand. */
+    private class Clock {
+        @Volatile
+        var millis = 1_000L
+        val read: () -> Long = { millis }
+    }
+
+    @Test
+    fun `a ping that comes after the silence allowed gets no answer, and the link ends with a reason to show`() = test {
+        val clock = Clock()
+        // The times a serial link has. The keep-alive's own waits are on the test's clock, which does not move by itself.
+        val (session, agent) = session(pingAfterMs = 10_000, silenceMs = 30_000, now = clock.read)
+        greet(session, agent)
+
+        // The phone was away for 31 s. The agent's ping waited in the link meanwhile, and is read only now; unless the
+        // keep-alive looked first, ended the link, and left the ping nowhere to go. Either way nothing answers it.
+        clock.millis += 31_000
+        try {
+            agent.send("""{"id":7,"method":"ping","params":{}}""")
+        } catch (e: IOException) {
+            // The phone's end was closed already.
+        }
+
+        assertTrue("the phone wrote into a link the agent had given up", agent.closedByPhone())
+        assertEquals(WENT_SILENT, session.ended.await())
+        assertFalse(session.peer.isOpen)
+    }
+
+    @Test
+    fun `a ping that comes inside the silence allowed is answered as before`() = test {
+        val clock = Clock()
+        val (session, agent) = session(pingAfterMs = 10_000, silenceMs = 30_000, now = clock.read)
+        greet(session, agent)
+
+        clock.millis += 29_000
+        agent.send("""{"id":7,"method":"ping","params":{}}""")
+
+        // The keep-alive may ping the agent first: 29 s quiet is past the time for that.
+        var message = agent.message()
+        while (message["method"].toString() == "\"ping\"") message = agent.message()
+        assertEquals("""{"id":7,"result":{}}""", message.toString())
+        assertTrue(session.peer.isOpen)
+    }
+
+    @Test
+    fun `nothing the app asks goes out after the silence allowed, and the link ends`() = test {
+        val clock = Clock()
+        val (session, agent) = session(pingAfterMs = 10_000, silenceMs = 30_000, now = clock.read)
+        greet(session, agent)
+
+        clock.millis += 31_000
+        val failure = try {
+            session.peer.request("info.get")
+            null
+        } catch (e: LinkClosedException) {
+            e.message
+        }
+
+        assertEquals(WENT_SILENT, failure)
+        assertTrue(agent.closedByPhone())
+        assertEquals(WENT_SILENT, session.ended.await())
+    }
+
+    @Test
+    fun `the keep-alive after a long gap ends the link without a ping first`() = test {
+        val clock = Clock()
+        // Short times, so the keep-alive looks again in a moment of real time; its clock is the test's.
+        val (session, agent) = session(pingAfterMs = 150, silenceMs = 450, now = clock.read)
+        greet(session, agent)
+
+        // Before the first ping is due, the clock jumps far past the silence: the phone slept.
+        clock.millis += 60_000
+
+        assertTrue("the phone wrote into a link the agent had given up", agent.closedByPhone())
+        assertEquals(WENT_SILENT, session.ended.await())
+    }
+
+    @Test
+    fun `no other kind of link is held to the silence`() = test {
+        val clock = Clock()
+        val (session, agent) = session("tcp", now = clock.read)
+        greet(session, agent)
+
+        clock.millis += 600_000
+        agent.send("""{"id":7,"method":"ping","params":{}}""")
+
+        assertEquals("""{"id":7,"result":{}}""", agent.message().toString())
+        assertTrue(session.peer.isOpen)
     }
 }

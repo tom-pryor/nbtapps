@@ -237,6 +237,12 @@ class JobRepository(
     private val keeper: JobKeeper,
     private val scope: CoroutineScope,
     private val now: () -> Long = System::currentTimeMillis,
+    /**
+     * A clock in milliseconds that only goes forward, and goes on while the phone sleeps and while the process is
+     * frozen: what a link's keep-alive and its silence are measured on, and the app's own waits to connect again.
+     * `SystemClock.elapsedRealtime` in the app.
+     */
+    private val clock: () -> Long = ::monotonicMillis,
     private val greeting: Greeting = Greeting(),
     private val rejoin: Rejoin = Rejoin(),
     /**
@@ -506,7 +512,7 @@ class JobRepository(
      * the wait.
      */
     private suspend fun rejoin(headUnitId: String) {
-        val began = monotonicMillis()
+        val began = clock()
         delay(rejoin.firstAfterMs)
         var failure: String
         while (true) {
@@ -518,7 +524,7 @@ class JobRepository(
             if (result.isSuccess) return
             if (result.exceptionOrNull() is PairingNeeded) return lost(headUnitId)
             failure = result.exceptionOrNull()?.message.orEmpty()
-            if (monotonicMillis() - began + rejoin.pauseMs >= rejoin.giveUpAfterMs) break
+            if (clock() - began + rejoin.pauseMs >= rejoin.giveUpAfterMs) break
             delay(rejoin.pauseMs)
         }
         connectLock.withLock {
@@ -948,7 +954,7 @@ class JobRepository(
         var attempt = 0
         while (true) {
             attempt++
-            val next = AgentSession(connector.connect(endpoint), scope).also(holding)
+            val next = AgentSession(connector.connect(endpoint), scope, now = clock).also(holding)
             val last = next.kind != Link.SERIAL || attempt >= greeting.serialTries
             val failure = try {
                 val hello = withTimeoutOrNull(if (last) greeting.timeoutMs else greeting.retryTimeoutMs) {

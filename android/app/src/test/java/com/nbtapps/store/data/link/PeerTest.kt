@@ -4,6 +4,7 @@ package com.nbtapps.store.data.link
 
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -340,5 +341,43 @@ class PeerTest {
         assertEquals("\"not-found\"", (reply["error"] as JsonObject)["code"].toString())
         assertNull(reply["result"])
         assertTrue(session.peer.isOpen)
+    }
+
+    @Test
+    fun `with a silence set, what comes after a longer gap is not handled, nothing is written, and the link ends`() = test {
+        // A peer by itself, with no keep-alive to race it, on a clock the test moves by hand.
+        val clock = AtomicLong(1_000)
+        val (phone, other) = MemoryLink.pair()
+        val handled = AtomicInteger()
+        val peer = Peer(
+            phone,
+            dialled = true,
+            handler = object : PeerHandler {
+                override suspend fun onRequest(peer: Peer, id: Long, method: String, params: JsonObject) {
+                    handled.incrementAndGet()
+                    peer.respond(id, JsonObject(emptyMap()))
+                }
+
+                override suspend fun onEvent(peer: Peer, name: String, seq: Long?, params: JsonObject) = Unit
+            },
+            now = clock::get,
+        )
+        peer.silenceMs = 30_000
+        val ended = async { peer.run() }
+        val end = AgentEnd(other)
+
+        // Inside the silence: answered.
+        clock.addAndGet(29_000)
+        end.send("""{"id":1,"method":"ping","params":{}}""")
+        end.expectMagic()
+        assertEquals("""{"id":1,"result":{}}""", end.message().toString())
+
+        // A gap of 31 s: the ping is not handled, and the next thing the agent's end reads is the link's end.
+        clock.addAndGet(31_000)
+        end.send("""{"id":2,"method":"ping","params":{}}""")
+
+        assertTrue("the phone wrote into a link the agent had given up", end.closedByPhone())
+        assertEquals(WENT_SILENT, ended.await())
+        assertEquals(1, handled.get())
     }
 }

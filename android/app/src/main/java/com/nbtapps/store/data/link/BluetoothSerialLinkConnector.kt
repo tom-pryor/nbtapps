@@ -74,6 +74,7 @@ class BluetoothSerialLinkConnector(
     private val radio: SerialRadio,
     private val windowMillis: Long = CONNECT_WINDOW_MILLIS,
     private val pauseMillis: Long = CONNECT_PAUSE_MILLIS,
+    /** The clock [windowMillis] is measured on: `SystemClock.elapsedRealtime` in the app, which goes on while the phone sleeps. */
     private val now: () -> Long = ::monotonicMillis,
     private val io: CoroutineDispatcher = Dispatchers.IO,
 ) : LinkConnector {

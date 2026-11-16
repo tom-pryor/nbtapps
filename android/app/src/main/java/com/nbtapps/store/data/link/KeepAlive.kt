@@ -8,10 +8,13 @@ package com.nbtapps.store.data.link
  *
  *  - With nothing heard for [pingAfterMs], a `ping` goes out, and another each time as long passes with nothing
  *    heard still.
- *  - With nothing heard for [silenceMs], and those pings sent, the link is ended.
+ *  - With nothing heard for [silenceMs], the link is ended. Its pings have gone out by then, unless this side was
+ *    held up: the phone slept, or its process was frozen. Then none goes out late: silent that long, the other side
+ *    has given the link up by its own rule, and anything written to it now would only wait in the link.
  *  - Anything that arrives counts as heard, not only the answer to a ping.
  *
- * It holds no clock and sends nothing: [step] is told the time and says what is due.
+ * It holds no clock and sends nothing: [step] is told the time and says what is due. The time has to go on while
+ * the phone sleeps, or a long sleep would look short.
  */
 class KeepAlive(
     private val pingAfterMs: Long,
@@ -26,8 +29,11 @@ class KeepAlive(
         /** Send a `ping` now. */
         data object Ping : Step
 
-        /** End the link: nothing has been heard for [silentMs], pings included. */
-        data class Close(val silentMs: Long) : Step
+        /**
+         * End the link: nothing has been heard for [silentMs], pings included. [pinged]: the pings went out, and none
+         * was answered; otherwise this side was held up for longer than the silence allowed, and sent nothing.
+         */
+        data class Close(val silentMs: Long, val pinged: Boolean = true) : Step
     }
 
     private var heardMs = startMs
@@ -43,10 +49,9 @@ class KeepAlive(
             pings = 0
         }
         val silent = nowMs - heardMs
+        if (silent >= silenceMs) return Step.Close(silent, pinged = pings >= silenceMs / pingAfterMs - 1)
         val wait = maxOf(pingAfterMs - silent, pingAfterMs - (nowMs - pingedMs))
-        if (wait > 0) return Step.Wait(wait)
-        // The pings must have gone out as well: silence alone may be this side's own doing, not the other's.
-        if (silent >= silenceMs && pings >= silenceMs / pingAfterMs - 1) return Step.Close(silent)
+        if (wait > 0) return Step.Wait(minOf(wait, silenceMs - silent))
         pingedMs = nowMs
         pings++
         return Step.Ping

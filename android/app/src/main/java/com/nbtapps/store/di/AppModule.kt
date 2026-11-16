@@ -164,7 +164,8 @@ abstract class AppModule {
         /** Every build has it. Who may use the link is settled over it, by `auth` with a pairing key. */
         @Provides
         @Singleton
-        fun provideSerialLinkConnector(radio: AndroidSerialRadio): BluetoothSerialLinkConnector = BluetoothSerialLinkConnector(radio)
+        fun provideSerialLinkConnector(radio: AndroidSerialRadio, clock: ElapsedClock): BluetoothSerialLinkConnector =
+            BluetoothSerialLinkConnector(radio, now = clock::millis)
 
         @Provides
         @Singleton
@@ -178,8 +179,11 @@ abstract class AppModule {
             @ApplicationScope scope: CoroutineScope,
             @ApplicationContext context: Context,
             foreground: AppForeground,
+            clock: ElapsedClock,
         ): JobRepository = JobRepository(
             headUnits, connector, identity, keys, store, keeper, scope,
+            // A link's silence counts the time the phone slept and the time the process was frozen.
+            clock = clock::millis,
             shareDir = File(context.cacheDir, "share"),
             foreground = foreground,
         )

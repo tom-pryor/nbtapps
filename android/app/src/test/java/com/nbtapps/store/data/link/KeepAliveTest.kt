@@ -61,13 +61,11 @@ class KeepAliveTest {
     }
 
     @Test
-    fun `silence that no ping has tested does not end the link`() {
+    fun `a link silent for longer than allowed is ended at once, with no late ping first`() {
         val rule = rule()
-        // This side was held up for 45 s and sent nothing meanwhile: the other side gets its two pings first.
-        assertEquals(Step.Ping, rule.step(start + 45_000, start))
-        assertEquals(Step.Wait(10_000), rule.step(start + 45_000, start))
-        assertEquals(Step.Ping, rule.step(start + 55_000, start))
-        assertEquals(Step.Close(65_000), rule.step(start + 65_000, start))
+        // This side was held up for 45 s, asleep or frozen, and sent nothing meanwhile: the other side has given the
+        // link up by now, and a ping would only wait in the link.
+        assertEquals(Step.Close(45_000, pinged = false), rule.step(start + 45_000, start))
     }
 
     @Test
@@ -75,10 +73,21 @@ class KeepAliveTest {
         val rule = rule()
         assertEquals(Step.Ping, rule.step(start + 10_000, start))
         assertEquals(Step.Ping, rule.step(start + 20_000, start))
-        // Heard at 25 s, then this side was held up until 60 s: 35 s of silence, and no ping has tested it yet.
-        assertEquals(Step.Ping, rule.step(start + 60_000, start + 25_000))
-        assertEquals(Step.Ping, rule.step(start + 70_000, start + 25_000))
-        assertEquals(Step.Close(55_000), rule.step(start + 80_000, start + 25_000))
+        // Heard at 25 s: the count starts over, and so does the wait for the first ping.
+        assertEquals(Step.Wait(5_000), rule.step(start + 30_000, start + 25_000))
+        assertEquals(Step.Ping, rule.step(start + 35_000, start + 25_000))
+        // Then this side was held up until 60 s: 35 s of silence, and only one of its pings went out.
+        assertEquals(Step.Close(35_000, pinged = false), rule.step(start + 60_000, start + 25_000))
+    }
+
+    @Test
+    fun `the wait never runs past the moment the silence is up`() {
+        // A silence that is not a whole number of ping times: after the second ping the wait is the 5 s that are left.
+        val quiet = KeepAlive(pingAfterMs = 10_000, silenceMs = 25_000, startMs = 0)
+        assertEquals(Step.Ping, quiet.step(10_000, 0))
+        assertEquals(Step.Ping, quiet.step(20_000, 0))
+        assertEquals(Step.Wait(5_000), quiet.step(20_000, 0))
+        assertEquals(Step.Close(25_000), quiet.step(25_000, 0))
     }
 
     @Test

@@ -69,6 +69,11 @@ interface PeerHandler {
  *    framing error. There is no resync: the phone connects again.
  *  - A DATA frame from the agent is taken only for a stream the phone asked for with [requestStream], which
  *    the answer to that request names. Any other closes the link, as one after a stream's last frame does.
+ *  - With [silenceMs], a link on which nothing has been heard for longer than that has been given up by the other
+ *    side, which keeps the same rule ([KeepAlive]). The bytes that come after such a gap are not read, and nothing
+ *    is written: the link is closed at once, with [WENT_SILENT] as the reason. That is how a phone whose process was
+ *    frozen, or that slept, finds its link on waking: the agent's pings and its `link.closing` wait in the socket,
+ *    and an answer to them would go into a link the agent no longer serves, ahead of every later link's bytes.
  *
  * [run] reads until the link ends. Everything else may be called from any coroutine; frames go out whole and
  * in the order the calls were made.
@@ -79,9 +84,19 @@ class Peer(
     private val dialled: Boolean,
     private val handler: PeerHandler,
     private val io: CoroutineDispatcher = Dispatchers.IO,
-    /** A clock in milliseconds that only goes forward; only differences are used. */
+    /**
+     * A clock in milliseconds that only goes forward, and goes on while the phone sleeps and while the process is
+     * frozen; only differences are used.
+     */
     private val now: () -> Long = ::monotonicMillis,
 ) {
+    /**
+     * The silence after which the other side has given the link up, as a serial link has it once `hello` is done.
+     * Null, as it starts, for no such rule.
+     */
+    @Volatile
+    var silenceMs: Long? = null
+
     /** The largest payload either side sends on this link: 65,536 until `hello` lowers it. */
     @Volatile
     var maxFrame: Int = FrameCodec.MAX_PAYLOAD
@@ -132,7 +147,14 @@ class Peer(
                     close("The head unit closed the link")
                     break
                 }
-                if (count > 0) heardAt = now()
+                if (count > 0) {
+                    val at = now()
+                    if (wentSilent(at)) {
+                        close(WENT_SILENT)
+                        break
+                    }
+                    heardAt = at
+                }
                 var offset = 0
                 while (magicSeen < FrameCodec.MAGIC.size && offset < count) {
                     if (buffer[offset] != FrameCodec.MAGIC[magicSeen]) throw FrameException("the link did not open with the magic bytes")
@@ -276,6 +298,8 @@ class Peer(
 
     private suspend fun send(bytes: ByteArray) {
         writeLock.withLock {
+            // Whatever wants to write, after such a gap the other side is not there to read it.
+            if (wentSilent(now())) close(WENT_SILENT)
             closeReason?.let { throw LinkClosedException(it) }
             // A frame goes out whole or the link is done: a caller that is cancelled must not leave half of one.
             val sent = withContext(io + NonCancellable) {
@@ -298,6 +322,9 @@ class Peer(
             if (!sent) throw LinkClosedException(closeReason ?: "The link to the head unit was lost")
         }
     }
+
+    /** Whether nothing had been heard for longer than [silenceMs] by [at], so that the link is given up. */
+    private fun wentSilent(at: Long): Boolean = silenceMs?.let { limit -> at - heardAt > limit } == true
 
     private suspend fun handleMessage(payload: ByteArray) {
         val root = try {
@@ -359,7 +386,16 @@ class Peer(
 /** The highest stream number: streams are numbered from 1, in the frame header's 16 bits. */
 private const val MAX_STREAM = 65_535L
 
-/** Milliseconds on a clock that is never set back. */
+/**
+ * Why a link is ended that was silent for longer than the other side allows ([Peer]'s `silenceMs`): for the user,
+ * who connects again.
+ */
+const val WENT_SILENT = "The link was silent for too long, and the head unit has let it go. Connect again."
+
+/**
+ * Milliseconds on a clock that is never set back. It stops while the phone is in deep sleep, so the app gives its
+ * links `SystemClock.elapsedRealtime` in its place; this one is what the JVM's unit tests have.
+ */
 internal fun monotonicMillis(): Long = System.nanoTime() / 1_000_000
 
 internal fun JsonElement?.integerOrNull(): Long? = (this as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull

@@ -25,12 +25,15 @@ import kotlinx.serialization.json.JsonObject
  * One open link to a head unit's agent, with everything that runs on it: the peer that reads it, the client
  * that asks, the blob server that answers, and the job events as they arrive.
  *
- * A Bluetooth serial link ([Link.SERIAL]) differs in two ways, both set by the agent repo's
+ * A Bluetooth serial link ([Link.SERIAL]) differs in three ways, all set by the agent repo's
  * `spec/protocol/constants.txt`:
  *
  *  - `hello` offers frames of 4,096 bytes at most, so a message never waits long behind a DATA frame.
  *  - Once `hello` is done the link is kept alive: see [KeepAlive]. A car that has gone out of range is found
  *    that way, since a serial link does not always say when it has ended.
+ *  - A link on which nothing has been heard for longer than the silence allowed is one the agent has given up:
+ *    nothing more is written to it, and it is ended as soon as that is seen, by the keep-alive or by the first
+ *    bytes that arrive ([Peer]). The clock counts the time the phone slept and the time the process was frozen.
  *
  * The agent keeps to the same rule, and during a long part of an install step it serves no link. If that lasts
  * longer than the silence allowed, this side ends the link; the install finishes on the head unit all the same,
@@ -49,7 +52,10 @@ class AgentSession(
     /** A serial link's keep-alive times. A test shortens them. */
     private val pingAfterMs: Long = ProtocolConstants.SERIAL_PING_AFTER_MS,
     private val silenceMs: Long = ProtocolConstants.SERIAL_SILENCE_MS,
-    /** A clock in milliseconds that only goes forward. */
+    /**
+     * A clock in milliseconds that only goes forward, and goes on while the phone sleeps and while the process is
+     * frozen: `SystemClock.elapsedRealtime` in the app.
+     */
     private val now: () -> Long = ::monotonicMillis,
 ) : PeerHandler {
     val kind: String = link.kind
@@ -60,7 +66,11 @@ class AgentSession(
     val client = AgentClient(
         peer,
         offeredFrame = if (serial) ProtocolConstants.SERIAL_MAX_FRAME else FrameCodec.MAX_PAYLOAD,
-        onHello = { greeted.complete(Unit) },
+        onHello = {
+            // From here the agent keeps the same rule on its side: see [Peer.silenceMs].
+            if (serial) peer.silenceMs = silenceMs
+            greeted.complete(Unit)
+        },
     )
     val blobs = BlobServer(scope, io)
 
@@ -126,13 +136,14 @@ class AgentSession(
     /** Pings the link when it is quiet and ends it when it stays silent. It starts with `hello`, as the agent's does. */
     private suspend fun watch() = coroutineScope {
         greeted.await()
-        val rule = KeepAlive(pingAfterMs, silenceMs, now())
+        // From the answer to `hello`, which is when the agent was last heard.
+        val rule = KeepAlive(pingAfterMs, silenceMs, peer.heardAt)
         while (peer.isOpen) {
             when (val step = rule.step(now(), peer.heardAt)) {
                 is KeepAlive.Step.Wait -> delay(step.millis)
                 // Not waited for here: its answer shows as bytes heard, and a write that is stuck must not stop the count.
                 KeepAlive.Step.Ping -> launch { ping() }
-                is KeepAlive.Step.Close -> peer.close("The head unit stopped answering")
+                is KeepAlive.Step.Close -> peer.close(if (step.pinged) "The head unit stopped answering" else WENT_SILENT)
             }
         }
     }
