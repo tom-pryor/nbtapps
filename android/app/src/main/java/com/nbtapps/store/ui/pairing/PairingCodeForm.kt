@@ -56,9 +56,9 @@ internal data class HelpLine(val text: String, val command: Boolean = false)
 
 /**
  * Taking the code from the car's screen, wherever the app pairs the phone by one: where on the car the code is
- * shown, the field to type it in, the autostart box under Advanced where [offersAutostart], and Pair, or while the
- * code is with the agent a line that says so. Last, a row that opens help for a car whose screen has no entry to pair
- * a phone from yet: the code can then be had over SSH.
+ * shown, the field to type it in, and under it a row that opens help for a car whose screen has no entry to pair a
+ * phone from yet, as the code can then be had over SSH. Then the autostart box under Advanced where
+ * [offersAutostart], and last Pair, or while the code is with the agent a line that says so.
  *
  * [entry] is the code and how handing it over goes, from [CodePairing]; [onCode] is told what the user types, and
  * [onPair] the tap of Pair or the keyboard's Done. [enableAutostart] and [onEnableAutostart] are the box's. The
@@ -95,6 +95,7 @@ fun PairingCodeForm(
             keyboardActions = KeyboardActions(onDone = { onPair() }),
             modifier = Modifier.fillMaxWidth(),
         )
+        NoEntryHelp()
         if (offersAutostart) AdvancedAutostart(enableAutostart, onEnableAutostart, enabled = !entry.working)
         if (entry.working) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -104,7 +105,6 @@ fun PairingCodeForm(
         } else {
             Button(onClick = onPair, enabled = entry.complete) { Text("Pair") }
         }
-        NoEntryHelp()
     }
 }
 
