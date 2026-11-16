@@ -9,6 +9,7 @@ import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.PhoneBluetooth
 import com.nbtapps.store.data.jobs.AgentRefusal
 import com.nbtapps.store.data.jobs.AutostartSetup
+import com.nbtapps.store.data.jobs.AutostartSetupState
 import com.nbtapps.store.data.jobs.AutostartStep
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
@@ -116,8 +117,8 @@ data class PairRequestUiState(
      * With it ticked the screen stays once the phone is paired, to show how that goes.
      */
     val enableAutostart: Boolean = true,
-    /** The set-up for the chosen car, if there is one: see [AutostartSetup]. */
-    val setup: AutostartStep? = null,
+    /** The set-up for the chosen car, if there is one, with the stages it went through: see [AutostartSetup]. */
+    val setupRun: AutostartSetupState? = null,
     /** The agent says over the link to the chosen car that iDrive has to restart. */
     val restartNeeded: Boolean = false,
     /** How many problems the agent's checks found on the chosen car that are not put aside, as is kept with it. */
@@ -125,6 +126,9 @@ data class PairRequestUiState(
     /** The confirmation of what the set-up asks to remove, while it is open. */
     val fix: CheckFixStep? = null,
 ) {
+    /** Where the set-up for the chosen car stands, if there is one. */
+    val setup: AutostartStep? get() = setupRun?.step
+
     /** The name of the car the code goes to: [device]'s while [picking], else [chosen]'s. Null with neither. */
     val carName: String? get() = if (picking) device?.name else chosen?.name
 
@@ -299,7 +303,7 @@ class PairRequestViewModel @Inject constructor(
             val id = state.chosen?.id
             state.copy(
                 enableAutostart = enable,
-                setup = setup?.takeIf { it.headUnitId == id }?.step,
+                setupRun = setup?.takeIf { it.headUnitId == id },
                 restartNeeded = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == id }?.info?.restartNeeded == RestartKind.HMI,
                 openChecks = state.chosen?.checks?.open?.size ?: 0,
                 fix = fix,

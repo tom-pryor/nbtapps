@@ -2,26 +2,36 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.pairrequest
 
+import androidx.annotation.DrawableRes
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -33,10 +43,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
@@ -44,19 +58,26 @@ import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.PairedDevice
 import com.nbtapps.store.ui.headunits.AddHeadUnitFlow
 import com.nbtapps.store.ui.headunits.AdvancedAutostart
-import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.AutostartChecklist
 import com.nbtapps.store.ui.headunits.CarPickerFlow
 import com.nbtapps.store.ui.headunits.CheckFixDialog
 import com.nbtapps.store.ui.headunits.ChecksLine
 import com.nbtapps.store.ui.headunits.checksLine
+import com.nbtapps.store.ui.setup.CardRow
+import com.nbtapps.store.ui.setup.MutedText
+import com.nbtapps.store.ui.setup.PageTitle
+import com.nbtapps.store.ui.setup.SectionHeading
+import com.nbtapps.store.ui.setup.StatusRow
 
 /**
- * Pairs this phone with a car by a code another app handed over. It shows the code, asks which car it is for, or
- * for the car to be added, and on Pair connects and sends it. The code cannot be changed here: one the agent
- * refuses, or one that runs out, is replaced by a new one from the app that sent it.
+ * Pairs this phone with a car by a code another app handed over. Every page that still has the code shows it on a
+ * card, with how long it is good for. The prompt asks which car it is for: a saved one, or one of the phone's paired
+ * devices ([CarPickerFlow]), which Pair adds to the app; on Pair the screen connects and sends the code, showing
+ * how that goes. The code cannot be changed here: one the agent refuses, or one that runs out, is replaced by a new
+ * one from the app that sent it.
  *
  * With the box that has the car start the agent with it ticked, the screen stays once the phone is paired and shows
- * how setting that up goes, until the user opens the app or closes it.
+ * how setting that up goes ([AutostartChecklist]), until the user opens the app or closes it.
  *
  * [onPaired] is told once the agent has taken the code, where the box is cleared; [onOpenApp] when the user opens
  * the app from here, [onOpenHeadUnit] when the user opens the car's page in it, for what its checks found, and
@@ -86,76 +107,55 @@ fun PairRequestScreen(
                 title = { Text("Pair this phone") },
                 navigationIcon = {
                     IconButton(onClick = onClose) {
-                        Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = "Close")
+                        Icon(painterResource(R.drawable.ic_close), contentDescription = "Close")
                     }
                 },
             )
         },
     ) { padding ->
-        Column(
-            Modifier
-                .padding(padding)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            val code = uiState.code
+        Box(Modifier.padding(padding).fillMaxSize()) {
+            if (!uiState.loaded || uiState.code == null) {
+                CircularProgressIndicator(Modifier.align(Alignment.Center))
+                return@Box
+            }
             val name = uiState.carName ?: "the car"
-            when {
-                !uiState.loaded || code == null -> CircularProgressIndicator()
-                else -> when (step) {
-                    PairRequestStep.Prompt -> Prompt(
-                        code = code,
-                        uiState = uiState,
-                        onChoose = viewModel::choose,
-                        onPickDifferent = viewModel::pickDifferent,
-                        onPickDevice = viewModel::pickDevice,
-                        onEnableAutostart = viewModel::setEnableAutostart,
-                        onPair = viewModel::pair,
-                        onAddByAddress = { adding = true },
-                    )
-                    PairRequestStep.Connecting -> Working("Connecting to $name…")
-                    PairRequestStep.Pairing -> Working("Pairing with $name…")
-                    is PairRequestStep.Paired -> {
-                        Text("Paired with ${step.name}.", style = MaterialTheme.typography.titleMedium)
-                        if (uiState.enableAutostart) {
-                            Setup(uiState, viewModel)
-                            Checks(uiState, step.name, onOpenHeadUnit)
-                            Button(onClick = onOpenApp) { Text("Open NBTApps") }
-                        }
-                    }
-                    is PairRequestStep.AlreadyPaired -> {
-                        Text("This phone is already paired with ${step.name}.", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "There was nothing to send the code for.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        if (uiState.enableAutostart) Setup(uiState, viewModel)
-                        Checks(uiState, step.name, onOpenHeadUnit)
-                        Button(onClick = onOpenApp) { Text("Open NBTApps") }
-                    }
-                    is PairRequestStep.NoLink -> {
-                        Text("The code couldn't go to $name: the app has no link to it.", style = MaterialTheme.typography.titleMedium)
-                        Text(step.reason, color = MaterialTheme.colorScheme.error)
-                        if (!uiState.canRetry) Text(NEW_CODE)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (uiState.canRetry) Button(onClick = viewModel::pair) { Text("Retry") }
-                            OutlinedButton(onClick = onClose) { Text("Close") }
-                        }
-                    }
-                    is PairRequestStep.Refused -> {
-                        Text("The code didn't pair this phone.", style = MaterialTheme.typography.titleMedium)
-                        Text(step.message, color = MaterialTheme.colorScheme.error)
-                        Text(NEW_CODE)
-                        OutlinedButton(onClick = onClose) { Text("Close") }
-                    }
-                    PairRequestStep.TimeUp -> {
-                        Text("The code has run out.", style = MaterialTheme.typography.titleMedium)
-                        Text(NEW_CODE)
-                        OutlinedButton(onClick = onClose) { Text("Close") }
-                    }
-                }
+            when (step) {
+                PairRequestStep.Prompt -> Prompt(
+                    uiState = uiState,
+                    onChoose = viewModel::choose,
+                    onPickDifferent = viewModel::pickDifferent,
+                    onPickDevice = viewModel::pickDevice,
+                    onEnableAutostart = viewModel::setEnableAutostart,
+                    onPair = viewModel::pair,
+                    onAddByAddress = { adding = true },
+                    onCancel = onClose,
+                )
+                PairRequestStep.Connecting, PairRequestStep.Pairing -> Sending(uiState, name, onCancel = onClose)
+                is PairRequestStep.Paired -> Done(
+                    uiState = uiState,
+                    title = "Paired with ${step.name}",
+                    text = PAIRED_TEXT,
+                    name = step.name,
+                    viewModel = viewModel,
+                    onOpenApp = onOpenApp,
+                    onOpenHeadUnit = onOpenHeadUnit,
+                )
+                is PairRequestStep.AlreadyPaired -> Done(
+                    uiState = uiState,
+                    title = "This phone is already paired with ${step.name}.",
+                    text = "There was nothing to send the code for.",
+                    name = step.name,
+                    viewModel = viewModel,
+                    onOpenApp = onOpenApp,
+                    onOpenHeadUnit = onOpenHeadUnit,
+                )
+                PairRequestStep.TimeUp, is PairRequestStep.NoLink, is PairRequestStep.Refused -> Failed(
+                    uiState = uiState,
+                    name = uiState.carName,
+                    onRetry = viewModel::pair,
+                    onClose = onClose,
+                    onOpenApp = onOpenApp,
+                )
             }
         }
     }
@@ -176,33 +176,88 @@ fun PairRequestScreen(
     }
 }
 
-private const val NEW_CODE = "Get a new code from the app that sent this one."
-
-/** How setting the car up to start the agent with it goes, once the phone is paired. */
+/** A page of the screen: [content], which scrolls, and [buttons] at the bottom, which do not. */
 @Composable
-private fun Setup(uiState: PairRequestUiState, viewModel: PairRequestViewModel) {
-    uiState.setup?.let { setup ->
-        AutostartSetupCard(
-            step = setup,
-            restartNeeded = uiState.restartNeeded,
-            onRetry = viewModel::retrySetup,
-            onRestart = viewModel::restartIdrive,
-            onRemove = viewModel::openRemoval,
-            onSkip = viewModel::skipRemoval,
+private fun Page(buttons: @Composable ColumnScope.() -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        Column(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            content = content,
+        )
+        Column(
+            Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 16.dp, top = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            content = buttons,
         )
     }
 }
 
-/** The line that leads to the car's page, where its checks found something and no set-up asks about it. */
+/**
+ * The code's card ([codeCard]): "Code" over the code, large and in monospace, and on the right "Good for" over the
+ * countdown in a chip, where there is one. A code that has run out is struck through, with "Ran out" in its chip.
+ */
 @Composable
-private fun Checks(uiState: PairRequestUiState, name: String, onOpenHeadUnit: (String) -> Unit) {
-    val id = uiState.chosen?.id ?: return
-    if (uiState.showsChecks) ChecksLine(checksLine(uiState.openChecks, name)) { onOpenHeadUnit(id) }
+private fun CodeCardView(card: CodeCard, fullCode: String) {
+    val colors = MaterialTheme.colorScheme
+    Card(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Code", style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
+                Text(
+                    card.code,
+                    // Read out digit by digit, and said to have run out where it has.
+                    modifier = Modifier.semantics {
+                        contentDescription = fullCode.toList().joinToString(" ") + if (card.ranOut) ", ran out" else ""
+                    },
+                    style = MaterialTheme.typography.headlineLarge.copy(
+                        fontFamily = FontFamily.Monospace,
+                        textDecoration = if (card.ranOut) TextDecoration.LineThrough else null,
+                    ),
+                    color = if (card.ranOut) colors.onSurfaceVariant else colors.onSurface,
+                )
+            }
+            when {
+                card.ranOut -> Chip("Ran out", colors.surfaceContainerHighest, colors.onSurfaceVariant)
+                card.countdown != null -> Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Good for", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                    Chip(card.countdown, colors.tertiary, colors.onTertiary, monospace = true)
+                }
+            }
+        }
+    }
 }
 
 @Composable
+private fun Chip(text: String, container: Color, content: Color, monospace: Boolean = false) {
+    Surface(color = container, contentColor = content, shape = RoundedCornerShape(8.dp)) {
+        Text(
+            text,
+            Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.labelLarge.copy(fontFamily = if (monospace) FontFamily.Monospace else null),
+        )
+    }
+}
+
+/** The code's card for [uiState], where the page has one. */
+@Composable
+private fun Code(uiState: PairRequestUiState) {
+    val code = uiState.code ?: return
+    codeCard(uiState)?.let { CodeCardView(it, code) }
+}
+
+/**
+ * The prompt: the code, which car it goes to, the autostart box, and Pair. With head units saved they are offered
+ * first, with "A different car…" that opens the picker; with none, the picker is there at once. In a build that
+ * reaches a head unit at a network address, the add dialog is offered too.
+ */
+@Composable
 private fun Prompt(
-    code: String,
     uiState: PairRequestUiState,
     onChoose: (String) -> Unit,
     onPickDifferent: () -> Unit,
@@ -210,63 +265,210 @@ private fun Prompt(
     onEnableAutostart: (Boolean) -> Unit,
     onPair: () -> Unit,
     onAddByAddress: () -> Unit,
+    onCancel: () -> Unit,
 ) {
-    Text(
-        "Another app sent pairing code ${grouped(code)}",
-        style = MaterialTheme.typography.titleMedium,
-        modifier = Modifier.semantics { contentDescription = "Another app sent pairing code $code" },
-    )
-    uiState.remainingMs?.let { remaining ->
-        Text(
-            "It is good for another ${countdown(remaining)}.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
     val units = uiState.headUnits
-    when {
-        units.isEmpty() -> Text("Pair this phone with which car?")
-        units.size == 1 && !uiState.picking -> Text("Pair this phone with ${units.single().name}?")
-        else -> {
-            Text("Pair this phone with which car?")
-            Column(Modifier.selectableGroup()) {
-                units.forEach { unit -> CarChoice(unit, selected = unit == uiState.chosen) { onChoose(unit.id) } }
+    Page(
+        buttons = {
+            Button(onClick = onPair, Modifier.fillMaxWidth(), enabled = uiState.canPair) {
+                Text(pairLabel(uiState.carName))
+            }
+            if (uiState.takesAddress) {
+                TextButton(onClick = onAddByAddress, Modifier.fillMaxWidth()) { Text("Use a network address") }
+            }
+            TextButton(onClick = onCancel, Modifier.fillMaxWidth()) { Text("Cancel") }
+        },
+    ) {
+        Code(uiState)
+        MutedText(promptLead(anySaved = units.isNotEmpty()))
+        PageTitle("Which car?")
+        when {
+            units.isEmpty() -> Unit
+            // While a device is picked instead, the saved cars stay there to go back to.
+            units.size == 1 && !uiState.picking -> SavedCar(units.single())
+            else -> Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.selectableGroup()) {
+                    units.forEachIndexed { index, unit ->
+                        if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        SavedCarChoice(unit, selected = unit == uiState.chosen) { onChoose(unit.id) }
+                    }
+                }
             }
         }
+        if (uiState.picking) {
+            if (units.isNotEmpty()) SectionHeading("The cars paired with this phone")
+            CarPickerFlow(
+                selected = uiState.device?.address,
+                onPick = { onPickDevice(it, false) },
+                onPickDefault = { onPickDevice(it, true) },
+                compact = true,
+            )
+        } else {
+            TextButton(onClick = onPickDifferent) { Text("A different car…") }
+        }
+        if (uiState.device != null && uiState.newCar) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (uiState.prePicked) MutedText(PICKED_FOR_YOU)
+                MutedText(ADDED_ON_PAIR)
+            }
+        }
+        AdvancedAutostart(uiState.enableAutostart, onEnableAutostart)
     }
-    if (uiState.picking) {
-        CarPickerFlow(
-            selected = uiState.device?.address,
-            onPick = { onPickDevice(it, false) },
-            onPickDefault = { onPickDevice(it, true) },
-            compact = true,
-        )
-    }
-    AdvancedAutostart(uiState.enableAutostart, onEnableAutostart)
-    Button(onClick = onPair, enabled = uiState.canPair) { Text("Pair") }
-    if (units.isNotEmpty() && !uiState.picking) TextButton(onClick = onPickDifferent) { Text("A different car…") }
-    if (uiState.takesAddress) TextButton(onClick = onAddByAddress) { Text("Use a network address") }
 }
 
+/** The only saved car, named. */
 @Composable
-private fun CarChoice(unit: HeadUnit, selected: Boolean, onClick: () -> Unit) {
+private fun SavedCar(unit: HeadUnit) {
+    Card(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Icon(painterResource(R.drawable.ic_head_unit), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(unit.name, style = MaterialTheme.typography.bodyLarge)
+        }
+    }
+}
+
+/** One of several saved cars, as a radio choice. */
+@Composable
+private fun SavedCarChoice(unit: HeadUnit, selected: Boolean, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
+            .heightIn(min = 56.dp)
             .selectable(selected = selected, onClick = onClick, role = Role.RadioButton)
-            .padding(vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        Icon(painterResource(R.drawable.ic_head_unit), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(unit.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
         RadioButton(selected = selected, onClick = null)
-        Text(unit.name, Modifier.padding(start = 8.dp))
     }
 }
 
+/** Connecting and Pairing: the code, and how the link and the code go ([pairingRows]). */
 @Composable
-private fun Working(text: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-        Text(text)
+private fun Sending(uiState: PairRequestUiState, name: String, onCancel: () -> Unit) {
+    Page(buttons = { TextButton(onClick = onCancel, Modifier.fillMaxWidth()) { Text("Cancel") } }) {
+        Code(uiState)
+        PageTitle("Pairing with $name")
+        MutedText("Keep the phone in the car, with the ignition on.")
+        Column {
+            pairingRows(uiState.step, uiState.newCar, name).forEach { StatusRow(it.mark, it.text, note = it.note) }
+        }
+        Card(Modifier.fillMaxWidth()) {
+            Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+                Icon(painterResource(R.drawable.ic_info), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(STAY_HERE, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+/**
+ * Paired, now or from before: a tick by [title], [text], and with the box ticked the set-up to start the agent with
+ * the car on a card, wired as on the car's page. "Open NBTApps" opens the app's screens.
+ */
+@Composable
+private fun Done(
+    uiState: PairRequestUiState,
+    title: String,
+    text: String,
+    name: String,
+    viewModel: PairRequestViewModel,
+    onOpenApp: () -> Unit,
+    onOpenHeadUnit: (String) -> Unit,
+) {
+    // With the box cleared the app's screens open at once: there is nothing to stay for.
+    val stays = uiState.enableAutostart || uiState.step is PairRequestStep.AlreadyPaired
+    Page(
+        buttons = {
+            if (stays) OutlinedButton(onClick = onOpenApp, Modifier.fillMaxWidth()) { Text("Open NBTApps") }
+        },
+    ) {
+        TitleWithMark(R.drawable.ic_check, title, failed = false)
+        MutedText(text)
+        val setup = uiState.setupRun
+        if (uiState.enableAutostart && setup != null) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Start with the car", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+                    AutostartChecklist(
+                        setup = setup,
+                        restartNeeded = uiState.restartNeeded,
+                        onRetry = viewModel::retrySetup,
+                        onRestart = viewModel::restartIdrive,
+                        onRemove = viewModel::openRemoval,
+                        onSkip = viewModel::skipRemoval,
+                    )
+                }
+            }
+            if (offersRestart(setup, uiState.restartNeeded)) {
+                Text(RESTART_LOSES_LINKS, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            MutedText(GOES_ON)
+        }
+        val id = uiState.chosen?.id
+        if (id != null && uiState.showsChecks) ChecksLine(checksLine(uiState.openChecks, name)) { onOpenHeadUnit(id) }
+    }
+}
+
+/**
+ * The code did not pair the phone ([failedPage]): it ran out, the agent refused it, or there was no link. The code,
+ * a failed mark by the title, what happened, and where the car is saved that it stays. Retry where the code can still
+ * go, else Close.
+ */
+@Composable
+private fun Failed(uiState: PairRequestUiState, name: String?, onRetry: () -> Unit, onClose: () -> Unit, onOpenApp: () -> Unit) {
+    val page = failedPage(uiState, name) ?: return
+    Page(
+        buttons = {
+            if (page.retry) {
+                Button(onClick = onRetry, Modifier.fillMaxWidth()) { Text("Retry") }
+                TextButton(onClick = onClose, Modifier.fillMaxWidth()) { Text("Close") }
+            } else {
+                Button(onClick = onClose, Modifier.fillMaxWidth()) { Text("Close") }
+                TextButton(onClick = onOpenApp, Modifier.fillMaxWidth()) { Text("Open NBTApps") }
+            }
+        },
+    ) {
+        Code(uiState)
+        TitleWithMark(R.drawable.ic_error, page.title, failed = true)
+        if (page.error) {
+            Text(page.message, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.error)
+            if (!page.retry) MutedText(NEW_CODE)
+        } else {
+            MutedText(page.message)
+        }
+        val car = uiState.chosen
+        if (car != null && carStays(uiState)) {
+            Card(Modifier.fillMaxWidth()) {
+                CardRow("${car.name} stays in NBTApps", "It is picked already when the next code comes.")
+            }
+        }
+    }
+}
+
+/** A page's title with a large mark beside it: a tick, or, where [failed], the error sign. */
+@Composable
+private fun TitleWithMark(@DrawableRes icon: Int, title: String, failed: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Box(
+            Modifier.size(48.dp).background(if (failed) colors.errorContainer else colors.primaryContainer, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painterResource(icon),
+                contentDescription = null,
+                Modifier.size(28.dp),
+                tint = if (failed) colors.onErrorContainer else colors.onPrimaryContainer,
+            )
+        }
+        PageTitle(title, Modifier.weight(1f))
     }
 }
 
