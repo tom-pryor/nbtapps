@@ -5,7 +5,6 @@ package com.nbtapps.store.ui.setup
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.AgentVectors
-import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.FakePhoneBluetooth
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.InMemoryPrereleaseRepository
@@ -37,6 +36,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -44,6 +44,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -55,12 +57,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 
 /** The set-up for a new user, against a stand-in agent over the app's real job repository and set-up. */
+@OptIn(ExperimentalCoroutinesApi::class)
 class SetupViewModelTest {
 
+    /**
+     * The view model's own connect runs on the main dispatcher, and a connect over Bluetooth serial waits between
+     * its tries: here the main dispatcher runs at once and waits in real time, as the app's does.
+     */
     @get:Rule
-    val mainDispatcherRule = MainDispatcherRule()
+    val mainDispatcherRule = object : TestWatcher() {
+        override fun starting(description: Description) = Dispatchers.setMain(Dispatchers.Unconfined)
+
+        override fun finished(description: Description) = Dispatchers.resetMain()
+    }
 
     @get:Rule
     val folder = TemporaryFolder()
@@ -134,7 +147,7 @@ class SetupViewModelTest {
         SetupViewModel(state, headUnits, jobs, setup, phone, choice, tcp, scope).also { made += it }
 
     private suspend fun <T> await(flow: Flow<T>, what: String, predicate: (T) -> Boolean): T =
-        withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what")
+        withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; the link was ${jobs.connection.value}; last was ${(flow as? kotlinx.coroutines.flow.StateFlow<*>)?.value}")
 
     private suspend fun SetupViewModel.awaitStep(what: String, predicate: (SetupStep) -> Boolean): SetupUiState =
         await(uiState, what) { predicate(it.step) }
@@ -263,6 +276,22 @@ class SetupViewModelTest {
         assertNull("nothing was set up", done.setup)
         assertEquals(0, phones.issued.get())
         assertEquals(4, done.stepCount)
+    }
+
+    @Test
+    fun `a key the car no longer takes shows the Pair page as stale, and the code pairs the phone anew`() = test {
+        keys.put(agentId, phones.pair(phoneId))
+        phones.forgetAll()
+        phones.code = "000042"
+        val viewModel = viewModel()
+        viewModel.pickTheCar()
+
+        assertEquals(SetupStep.Pair(stale = true, offersAutostart = false), viewModel.awaitStep("pair") { it is SetupStep.Pair }.step)
+        viewModel.setCode("000042")
+        viewModel.pair()
+
+        viewModel.awaitPage(SetupStep.Done)
+        assertEquals(1, phones.issued.get())
     }
 
     @Test

@@ -113,6 +113,10 @@ fun PairingScreen(
     }
 }
 
+/** What a screen that pairs the phone says where the head unit [name] no longer takes the phone's key. */
+internal fun staleKeyText(name: String): String =
+    "$name no longer knows this phone: its paired phones were forgotten on the car. Pair it again to go on."
+
 /** Why the phone is to be paired, then the code's form: see [PairingCodeForm]. */
 @Composable
 private fun CodeStep(
@@ -124,7 +128,7 @@ private fun CodeStep(
     onPair: () -> Unit,
 ) {
     if (step.stale) {
-        Text("$name no longer knows this phone: its paired phones were forgotten on the car. Pair it again to go on.")
+        Text(staleKeyText(name))
     } else {
         Text("$name wants this phone paired before the app can do anything on it. It is done once.")
     }

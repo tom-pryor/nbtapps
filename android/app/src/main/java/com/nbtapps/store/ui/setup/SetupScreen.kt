@@ -52,6 +52,15 @@ fun SetupScreen(
             onPickAnother = viewModel::pickAnother,
             onRefresh = viewModel::refreshBluetooth,
         )
+        is SetupStep.Pair -> PairPage(
+            uiState,
+            step,
+            onBack = back,
+            onSkip = skip,
+            onCode = viewModel::setCode,
+            onEnableAutostart = viewModel::setEnableAutostart,
+            onPair = viewModel::pair,
+        )
         else -> SetupFrame(number = setupStepNumber(uiState.step), count = uiState.stepCount, onBack = back, onSkip = skip) {}
     }
 }

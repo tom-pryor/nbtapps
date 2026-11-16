@@ -423,7 +423,8 @@ class SetupViewModel @Inject constructor(
             false
         }
         is SetupStep.Pair -> {
-            backFromPair()
+            // A code that is with the agent is let finish: the link it goes over is not ended under it.
+            if (!codes.state.value.working) backFromPair()
             false
         }
         SetupStep.Done -> true
