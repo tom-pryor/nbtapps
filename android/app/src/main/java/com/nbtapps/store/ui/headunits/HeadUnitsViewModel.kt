@@ -65,16 +65,18 @@ class HeadUnitsViewModel @Inject constructor(
     }
 
     /**
-     * Adds the head unit described by [form], and returns its id. Returns null and does nothing if the form is
-     * invalid. An address in it is dropped where this build has no TCP link. The head unit is saved a moment
-     * later, not by the time this returns.
+     * Adds the head unit described by [form], and tells [onAdded] its id once it is saved. Returns false and does
+     * nothing if the form is invalid. An address in it is dropped where this build has no TCP link.
+     *
+     * A car picked that is saved already is not added again: [onAdded] gets the id of the head unit that has it, which
+     * is left as it is, and the rest of the form is not used ([HeadUnitRepository.addUnlessSaved]).
      */
-    fun addHeadUnit(form: HeadUnitForm): String? {
+    fun addHeadUnit(form: HeadUnitForm, onAdded: (String) -> Unit = {}): Boolean {
         val checked = form.copy(takesAddress = form.takesAddress && takesAddress)
-        if (!checked.isValid) return null
-        val id = UUID.randomUUID().toString()
-        viewModelScope.launch { repository.add(checked.toHeadUnit(id)) }
-        return id
+        if (!checked.isValid) return false
+        val unit = checked.toHeadUnit(UUID.randomUUID().toString())
+        viewModelScope.launch { onAdded(repository.addUnlessSaved(unit)) }
+        return true
     }
 
     /** Removes the head unit, and the key it issued this phone when the two were paired. */

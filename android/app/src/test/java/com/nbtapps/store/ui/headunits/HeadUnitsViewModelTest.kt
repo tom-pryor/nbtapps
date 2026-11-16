@@ -16,8 +16,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -46,16 +44,17 @@ class HeadUnitsViewModelTest {
     fun `adding a valid head unit shows it in the list`() = runTest {
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
 
-        val id = viewModel.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22"))
+        var id: String? = null
+        assertTrue(viewModel.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22")) { id = it })
 
         val units = viewModel.uiState.value.headUnits
         assertEquals(listOf("Car"), units.map { it.name })
-        assertEquals("the id returned is the saved head unit's", units.single().id, id)
+        assertEquals("the id told is the saved head unit's", units.single().id, id)
     }
 
     @Test
     fun `invalid head unit is not added`() = runTest {
-        assertNull(viewModel.addHeadUnit(HeadUnitForm(name = "Car")))
+        assertFalse(viewModel.addHeadUnit(HeadUnitForm(name = "Car")) { error("not added") })
         assertTrue(repository.headUnits.first().isEmpty())
     }
 
@@ -67,11 +66,11 @@ class HeadUnitsViewModelTest {
 
     @Test
     fun `without a TCP link a head unit with only an address is not added, and an address beside the car is dropped`() = runTest {
-        assertNull(serialOnly.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22")))
+        assertFalse(serialOnly.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22")))
         assertTrue(repository.headUnits.first().isEmpty())
 
         val car = bluetooth.devices.first()
-        assertNotNull(serialOnly.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22").withDevice(car)))
+        assertTrue(serialOnly.addHeadUnit(HeadUnitForm("Car", "192.168.1.1", "22").withDevice(car)))
         assertEquals(listOf(SerialEndpoint(car.address, car.name)), repository.headUnits.first().single().endpoints)
     }
 
@@ -107,11 +106,35 @@ class HeadUnitsViewModelTest {
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
         val car = viewModel.uiState.value.bluetooth.devices.first()
 
-        assertNotNull(viewModel.addHeadUnit(HeadUnitForm().withDevice(car)))
+        assertTrue(viewModel.addHeadUnit(HeadUnitForm().withDevice(car)))
 
         val unit = repository.headUnits.first().single()
         assertEquals("Test Car", unit.name)
         assertEquals(listOf(SerialEndpoint("00:11:22:33:44:55", "Test Car")), unit.endpoints)
+    }
+
+    @Test
+    fun `a car that is saved already is not added again, whatever else the form says`() = runTest {
+        val car = bluetooth.devices.first()
+        var first: String? = null
+        viewModel.addHeadUnit(HeadUnitForm().withDevice(car)) { first = it }
+
+        // Its address written otherwise is the same car; the name and the network address are not used.
+        var second: String? = null
+        val again = HeadUnitForm("Other name", "192.168.1.1", "22").withDevice(car.copy(address = car.address.lowercase()))
+        assertTrue(viewModel.addHeadUnit(again) { second = it })
+
+        val unit = repository.headUnits.first().single()
+        assertEquals(unit.id, first)
+        assertEquals(unit.id, second)
+        assertEquals("Test Car", unit.name)
+        assertEquals(listOf(SerialEndpoint("00:11:22:33:44:55", "Test Car")), unit.endpoints)
+
+        // Another car, or none, is added.
+        viewModel.addHeadUnit(HeadUnitForm().withDevice(bluetooth.devices[1]))
+        viewModel.addHeadUnit(HeadUnitForm("Bench", "192.168.1.1", "22"))
+        viewModel.addHeadUnit(HeadUnitForm("Bench", "192.168.1.1", "22"))
+        assertEquals(listOf("Test Car", "Headphones", "Bench", "Bench"), repository.headUnits.first().map { it.name })
     }
 
     @Test

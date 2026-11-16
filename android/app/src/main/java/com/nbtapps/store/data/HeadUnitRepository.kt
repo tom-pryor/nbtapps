@@ -8,10 +8,13 @@ import androidx.datastore.core.DataStoreFactory
 import androidx.datastore.core.Serializer
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import com.nbtapps.store.model.HeadUnit
+import com.nbtapps.store.model.PairedDevice
+import com.nbtapps.store.model.SerialEndpoint
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -32,7 +35,39 @@ interface HeadUnitRepository {
 
     /** Replaces the head unit [id] with what [change] makes of it. Does nothing if it is not there. */
     suspend fun update(id: String, change: (HeadUnit) -> HeadUnit)
+
+    /**
+     * Adds [headUnit] unless a saved one is the same car: one with a Bluetooth serial endpoint to an address that
+     * [headUnit] has one to too ([sameCar]). Returns the id of the one that is saved then: the other's, which is
+     * left as it is, or [headUnit]'s. The look and the add are one change, so two calls at once for one car add it
+     * once. A head unit with no serial endpoint is always added. A list that cannot be written is thrown, as [add]'s is.
+     */
+    suspend fun addUnlessSaved(headUnit: HeadUnit): String
 }
+
+/** The car's Bluetooth addresses that [unit] has a serial endpoint to. */
+private val HeadUnit.serialAddresses: List<String>
+    get() = endpoints.filterIsInstance<SerialEndpoint>().map { it.address }
+
+/** Whether [a] and [b] are the same car: each has a serial endpoint to one address, however its letters are written. */
+fun sameCar(a: HeadUnit, b: HeadUnit): Boolean =
+    a.serialAddresses.any { address -> b.serialAddresses.any { it.equals(address, ignoreCase = true) } }
+
+/** The head unit in [this] that is the same car as [unit] ([sameCar]), if there is one. */
+internal fun List<HeadUnit>.sameCarAs(unit: HeadUnit): HeadUnit? = firstOrNull { sameCar(it, unit) }
+
+/**
+ * Saves the car [device], picked from the devices paired with this phone, and returns its head unit's id: the one
+ * saved with a serial endpoint to its address already, or a new one named after the device. The new one is in the
+ * list by the time this returns. See [HeadUnitRepository.addUnlessSaved].
+ */
+suspend fun HeadUnitRepository.saveCar(device: PairedDevice): String = addUnlessSaved(
+    HeadUnit(
+        id = UUID.randomUUID().toString(),
+        name = device.name,
+        endpoints = listOf(SerialEndpoint(address = device.address, deviceName = device.name)),
+    ),
+)
 
 /** Keeps head units in memory, for tests and previews. */
 @Singleton
@@ -49,6 +84,17 @@ class InMemoryHeadUnitRepository @Inject constructor() : HeadUnitRepository {
 
     override suspend fun update(id: String, change: (HeadUnit) -> HeadUnit) =
         units.update { list -> list.map { if (it.id == id) change(it) else it } }
+
+    override suspend fun addUnlessSaved(headUnit: HeadUnit): String {
+        var saved = headUnit.id
+        // The change may be made again if another came between; the last time is the one that counts.
+        units.update { list ->
+            val there = list.sameCarAs(headUnit)
+            saved = there?.id ?: headUnit.id
+            if (there == null) list + headUnit else list
+        }
+        return saved
+    }
 }
 
 /**
@@ -73,6 +119,17 @@ class DataStoreHeadUnitRepository(private val store: DataStore<List<HeadUnit>>) 
 
     override suspend fun update(id: String, change: (HeadUnit) -> HeadUnit) {
         store.updateData { list -> list.map { if (it.id == id) change(it) else it } }
+    }
+
+    override suspend fun addUnlessSaved(headUnit: HeadUnit): String {
+        var saved = headUnit.id
+        // The store makes one change at a time, so a second call sees what the first added.
+        store.updateData { list ->
+            val there = list.sameCarAs(headUnit)
+            saved = there?.id ?: headUnit.id
+            if (there == null) list + headUnit else list
+        }
+        return saved
     }
 }
 

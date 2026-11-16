@@ -13,8 +13,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
  * Adding a head unit, wherever the app offers it: the dialog while [show], the Nearby devices permission it may
- * ask for, and the phone's Bluetooth read again on each return to the screen. [onAdded] gets the new head unit's
- * id once the form was valid; the dialog is the caller's to close then, as on [onDismiss].
+ * ask for, and the phone's Bluetooth read again on each return to the screen. [onAdded] gets the head unit's id once
+ * a valid form is saved: the new one's, or, for a car that is saved already, that one's. The dialog is the caller's
+ * to close then, as on [onDismiss].
  *
  * Kept in composition while the dialog is closed too, so the paired devices are current when it opens.
  */
@@ -41,7 +42,7 @@ fun AddHeadUnitFlow(
             takesAddress = uiState.takesAddress,
             onAllowBluetooth = { permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT) },
             onDismiss = onDismiss,
-            onConfirm = { form -> viewModel.addHeadUnit(form)?.let(onAdded) },
+            onConfirm = { form -> viewModel.addHeadUnit(form, onAdded) },
         )
     }
 }

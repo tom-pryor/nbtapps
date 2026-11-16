@@ -10,10 +10,14 @@ import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.HeadUnitChecks
 import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.InstalledPackage
+import com.nbtapps.store.model.PairedDevice
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -132,6 +136,45 @@ class HeadUnitStoreTest {
             first.remove("one")
         }
         assertTrue(opened { it.headUnits.first() }.isEmpty())
+    }
+
+    /** Picks [device] from [repository] [times] times at once, as a double tap would, and returns the ids told. */
+    private suspend fun pickedAtOnce(repository: HeadUnitRepository, device: PairedDevice, times: Int): List<String> = coroutineScope {
+        (1..times).map { async(Dispatchers.Default) { repository.saveCar(device) } }.awaitAll()
+    }
+
+    @Test
+    fun `a car is saved once however often it is picked, and one saved before is found by its address`() = runTest {
+        val device = PairedDevice("BMW 12345", "AA:BB:CC:DD:EE:FF", car = true)
+        opened { repository ->
+            val ids = pickedAtOnce(repository, device, 2)
+            val unit = repository.headUnits.first().single()
+            assertEquals(listOf(unit.id, unit.id), ids)
+            assertEquals(HeadUnit(unit.id, "BMW 12345", listOf(SerialEndpoint("AA:BB:CC:DD:EE:FF", "BMW 12345"))), unit)
+        }
+
+        opened { repository ->
+            repository.add(car)
+            // The same car under another name and with its address in small letters, as it might be saved by hand.
+            assertEquals("one", repository.saveCar(PairedDevice("Other name", "00:11:22:33:44:55")))
+            assertEquals(2, repository.headUnits.first().size)
+            assertEquals(car, repository.headUnit("one").first())
+        }
+    }
+
+    @Test
+    fun `the in-memory repository saves a car once too`() = runTest {
+        val memory = InMemoryHeadUnitRepository()
+        val device = PairedDevice("BMW 12345", "AA:BB:CC:DD:EE:FF")
+        repeat(20) { pickedAtOnce(memory, device, 4) }
+
+        val unit = memory.headUnits.first().single()
+        assertEquals(unit.id, memory.saveCar(device.copy(address = "aa:bb:cc:dd:ee:ff")))
+        // A head unit with no serial endpoint is no car to look for.
+        val bench = HeadUnit("bench", "Bench", listOf(TcpEndpoint("192.168.0.1", 7144)))
+        assertEquals("bench", memory.addUnlessSaved(bench))
+        assertEquals("bench2", memory.addUnlessSaved(bench.copy(id = "bench2")))
+        assertEquals(3, memory.headUnits.first().size)
     }
 
     @Test
