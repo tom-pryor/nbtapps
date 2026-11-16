@@ -13,7 +13,8 @@ read.
      as ${plugins}/NbtApp/ and asks for an HMI restart; what it refuses
   2. release: signs with a key the header holds, to signed/, and the result verifies under that key; what it
      refuses, each by itself
-  3. this repo's src/version.hpp names a version, and src/nbt_app.cpp has the line the library is asked for
+  3. this repo's src/version.hpp names a version, as spec/manifest.schema.json has one, and src/nbt_app.cpp has
+     the line the library is asked for
 """
 import json
 import os
@@ -153,8 +154,11 @@ def main():
     refused("an archive of another folder", "is not the package of the plugin", release)
 
     # ---- 3. this repo's sources
+    # A version as a package's manifest may have it: a pre-release, such as 1.2.0-beta.1, is one too.
     version = plugin_pkg.source_version()
-    check(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is not None, "src/version.hpp names a version", version)
+    with open(os.path.join(ROOT, "spec", "manifest.schema.json")) as f:
+        pattern = json.load(f)["$defs"]["version"]["pattern"]
+    check(re.search(pattern, version) is not None, "src/version.hpp names a version", version)
     with open(os.path.join(ROOT, "src", "nbt_app.cpp")) as f:
         line = re.search(r'^const char kBuildLine\[\] = (.*);$', f.read(), re.M)
     check(line is not None and line.group(1) == '"NBTApp plugin " NBT_PLUGIN_VERSION " (build " NBT_APP_VERSION ")"',
