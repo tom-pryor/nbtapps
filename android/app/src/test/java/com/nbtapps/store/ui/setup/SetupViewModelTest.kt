@@ -383,7 +383,7 @@ class SetupViewModelTest {
     }
 
     @Test
-    fun `the same car saved and paired from outside while the car is being picked is used as it is`() = test {
+    fun `a car saved and paired from outside while the car is being picked is taken as the car, and used as it is`() = test {
         phones.code = "420042"
         connector.onConnect = ::switchable
         val viewModel = viewModel()
@@ -395,8 +395,8 @@ class SetupViewModelTest {
         assertTrue(jobs.connect(id).isFailure)
         assertTrue(jobs.pair("420042").isSuccess)
         setup.begin(id)
-        assertEquals("the page is the user's", SetupStep.PickCar, viewModel.uiState.value.step)
 
+        // Picking the car now changes nothing: it is the car already.
         viewModel.select(car)
         viewModel.pickCar()
 

@@ -171,9 +171,12 @@ class SetupViewModel @Inject constructor(
 
     init {
         phone.refreshConnected()
+        // A link that is up as the set-up opens was not made while it was open: see adopt.
+        val atStart = jobs.connection.value
         // What is seen of the car picked is kept: that an agent answered on it, and that it takes the phone.
         viewModelScope.launch {
             combine(kept, jobs.connection) { kept, connection -> kept.answers.headUnitId to connection }.collect { (id, connection) ->
+                if (id == null && connection is ConnectionState.Connected && connection != atStart) adopt(connection)
                 if (id == null || connection.headUnitId != id) return@collect
                 when (connection) {
                     is ConnectionState.NeedsPairing -> change(id) {
@@ -272,6 +275,35 @@ class SetupViewModel @Inject constructor(
         val before = savedBeforeAdd
         savedBeforeAdd = null
         choose(headUnitId, added = before != null && headUnitId !in before, name = null, address = null)
+    }
+
+    /**
+     * The app's link came up, [connected], while the set-up for a new user had no car yet: on Welcome, Not yet or
+     * pick-the-car. The phone was paired meanwhile from outside, as by a code another app handed over, so the head
+     * unit linked to is the car being set up, already paired: the set-up goes on to start-with-the-car while there
+     * is a set-up for it that has not been left, and to Done otherwise ([setupStep]). The set-up did not add it, so
+     * giving it up removes nothing. A set-up for a further car is the user's to point at a car, and is not moved.
+     */
+    private fun adopt(connected: ConnectionState.Connected) {
+        if (furtherCar) return
+        change {
+            if (it.answers.headUnitId != null) {
+                it
+            } else {
+                Kept(
+                    answers = SetupAnswers(
+                        agentInstalled = true,
+                        headUnitId = connected.headUnitId,
+                        paired = true,
+                        enableAutostart = it.answers.enableAutostart,
+                    ),
+                    answered = true,
+                    startsWithCar = connected.autostart?.on == true,
+                    selectedName = it.selectedName,
+                    selectedAddress = it.selectedAddress,
+                )
+            }
+        }
     }
 
     /** Takes [id] as the car being set up, and connects to it unless the app has a link to it already. */
