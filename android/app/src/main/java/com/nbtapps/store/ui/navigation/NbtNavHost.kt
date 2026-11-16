@@ -3,6 +3,7 @@
 package com.nbtapps.store.ui.navigation
 
 import androidx.annotation.DrawableRes
+import androidx.compose.animation.EnterTransition
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
@@ -14,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.navigation.NavDestination.Companion.hasRoute
@@ -32,7 +34,9 @@ import com.nbtapps.store.ui.headunits.HeadUnitsScreen
 import com.nbtapps.store.ui.job.JobScreen
 import com.nbtapps.store.ui.logs.LogPullScreen
 import com.nbtapps.store.ui.pairing.PairingScreen
+import com.nbtapps.store.ui.setup.SetupScreen
 import com.nbtapps.store.ui.spptest.SppTestScreen
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -51,6 +55,14 @@ data class LogPullRoute(val headUnitId: String, val packageId: String)
 
 @Serializable
 object SppTestRoute
+
+/**
+ * The set-up that walks the user through adding the car, connecting, pairing and starting with the car: see
+ * [SetupScreen]. [furtherCar]: it adds a car where there is one already, and begins at picking it, with no question
+ * before it. The name of the property is the key [SetupViewModel][com.nbtapps.store.ui.setup.SetupViewModel] reads.
+ */
+@Serializable
+data class SetupRoute(val furtherCar: Boolean)
 
 @Serializable
 object CatalogueRoute
@@ -78,15 +90,17 @@ private val topLevelDestinations = listOf(
 )
 
 /**
- * The app's screens. It opens on the catalogue, or when [startOnHeadUnits], on the head units list; the value must
- * not change while the app runs, since the screens are stacked on the one it opened on.
+ * The app's screens. It opens on the catalogue; with [openSetupAtStart], the set-up is opened over it at once, and
+ * [onSetupOpened] told, so that the caller can keep it from being opened again by a rotation or a restored process.
+ * Leaving the set-up goes back to the catalogue.
  *
  * [headUnitToOpen], when it is not null, is the head unit whose page another screen of the app asked to be shown, as
  * the screen for a handed-over pairing code does: the page is opened, and [onHeadUnitOpened] told.
  */
 @Composable
 fun NbtNavHost(
-    startOnHeadUnits: Boolean,
+    openSetupAtStart: Boolean,
+    onSetupOpened: () -> Unit,
     navController: NavHostController = rememberNavController(),
     headUnitToOpen: String? = null,
     onHeadUnitOpened: () -> Unit = {},
@@ -101,15 +115,29 @@ fun NbtNavHost(
         launchSingleTop = true
         restoreState = true
     }
-    // The head unit named in a top bar: its own screen, or with none saved, the list where one is added.
+    // The head unit named in a top bar: its own screen, or with none saved, the set-up, where one is added.
     val openHeadUnit = { id: String -> navController.navigate(HeadUnitDetailRoute(id)) }
-    val addHeadUnit = { openTopLevel(HeadUnitsRoute) }
+    val setUp = { navController.navigate(SetupRoute(furtherCar = false)) }
+    val addCar = { navController.navigate(SetupRoute(furtherCar = true)) }
+    // Only the set-up itself is popped: a second tap while it goes must not pop the screen under it.
+    val leaveSetup = {
+        if (navController.currentBackStackEntry?.destination?.hasRoute(SetupRoute::class) == true) navController.popBackStack()
+    }
+    // The set-up opened at launch comes up at once, over a catalogue the user has not seen yet.
+    val setupAtLaunch = remember { AtomicBoolean(false) }
     val pairHeadUnit = { id: String -> navController.navigate(PairingRoute(id)) }
     // From the pairing screen: back to the head unit's page where it was opened from there, or to the page in its place.
     val headUnitAfterPairing = { id: String ->
         navController.popBackStack()
         val below = navController.currentBackStackEntry?.takeIf { it.destination.hasRoute(HeadUnitDetailRoute::class) }
         if (below?.toRoute<HeadUnitDetailRoute>()?.headUnitId != id) navController.navigate(HeadUnitDetailRoute(id))
+    }
+    LaunchedEffect(openSetupAtStart) {
+        if (openSetupAtStart) {
+            setupAtLaunch.set(true)
+            setUp()
+            onSetupOpened()
+        }
     }
     LaunchedEffect(headUnitToOpen) {
         if (headUnitToOpen != null) {
@@ -140,13 +168,28 @@ fun NbtNavHost(
     ) { padding ->
         NavHost(
             navController = navController,
-            startDestination = if (startOnHeadUnits) HeadUnitsRoute else CatalogueRoute,
+            startDestination = CatalogueRoute,
             modifier = Modifier.padding(padding).consumeWindowInsets(padding),
         ) {
             composable<HeadUnitsRoute> {
                 HeadUnitsScreen(
                     onOpenHeadUnit = { id -> navController.navigate(HeadUnitDetailRoute(id)) },
                     onOpenSppTest = { navController.navigate(SppTestRoute) },
+                    onSetUp = setUp,
+                    onAddCar = addCar,
+                )
+            }
+            composable<SetupRoute>(enterTransition = { if (setupAtLaunch.getAndSet(false)) EnterTransition.None else null }) {
+                SetupScreen(
+                    onLeave = leaveSetup,
+                    onBrowse = {
+                        leaveSetup()
+                        openTopLevel(CatalogueRoute)
+                    },
+                    onOpenHeadUnit = { id ->
+                        leaveSetup()
+                        navController.navigate(HeadUnitDetailRoute(id))
+                    },
                 )
             }
             composable<HeadUnitDetailRoute> { entry ->
@@ -188,7 +231,7 @@ fun NbtNavHost(
                 CatalogueScreen(
                     onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
                     onOpenHeadUnit = openHeadUnit,
-                    onAddHeadUnit = addHeadUnit,
+                    onSetUp = setUp,
                     onPairHeadUnit = pairHeadUnit,
                 )
             }
@@ -198,7 +241,7 @@ fun NbtNavHost(
                     onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
                     onInstall = { id, version -> navController.navigate(JobRoute(installId = id, installVersion = version)) },
                     onOpenHeadUnit = openHeadUnit,
-                    onAddHeadUnit = addHeadUnit,
+                    onSetUp = setUp,
                     onPairHeadUnit = pairHeadUnit,
                 )
             }

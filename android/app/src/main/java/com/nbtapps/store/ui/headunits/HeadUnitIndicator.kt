@@ -36,17 +36,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
  * For the actions of a top bar: the selected head unit by name, with a dot for the app's link to it. A tap opens
  * a menu to connect, disconnect, open the head unit's own screen ([onOpenHeadUnit]) or connect to another saved
  * one, and where the head unit wants the phone paired first, to pair it ([onPairHeadUnit]). With no head unit
- * saved it is a way to where one is added ([onAddHeadUnit]).
+ * saved it is a button that opens the set-up ([onSetUp]), or with that null, nothing: for a screen that offers the
+ * set-up itself.
  */
 @Composable
 fun HeadUnitIndicator(
     onOpenHeadUnit: (String) -> Unit,
-    onAddHeadUnit: () -> Unit,
+    onSetUp: (() -> Unit)?,
     onPairHeadUnit: (String) -> Unit,
     viewModel: HeadUnitIndicatorViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    HeadUnitIndicatorContent(uiState, viewModel::connect, viewModel::disconnect, onOpenHeadUnit, onAddHeadUnit, onPairHeadUnit)
+    HeadUnitIndicatorContent(uiState, viewModel::connect, viewModel::disconnect, onOpenHeadUnit, onSetUp, onPairHeadUnit)
 }
 
 @Composable
@@ -55,14 +56,14 @@ private fun HeadUnitIndicatorContent(
     onConnect: (String) -> Unit,
     onDisconnect: () -> Unit,
     onOpenHeadUnit: (String) -> Unit,
-    onAddHeadUnit: () -> Unit,
+    onSetUp: (() -> Unit)?,
     onPairHeadUnit: (String) -> Unit,
 ) {
     val unit = uiState.headUnit
     when {
-        // Nothing until the saved head units are read: "Add head unit" must not flash up for a user who has one.
+        // Nothing until the saved head units are read: "Set up your car" must not flash up for a user who has one.
         !uiState.loaded -> Unit
-        unit == null -> TextButton(onClick = onAddHeadUnit) { Text("Add head unit") }
+        unit == null -> if (onSetUp != null) TextButton(onClick = onSetUp) { Text("Set up your car") }
         else -> Box {
             var open by remember { mutableStateOf(false) }
             TextButton(

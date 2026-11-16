@@ -3,12 +3,13 @@
 package com.nbtapps.store.ui.headunits
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -20,26 +21,30 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.DebugTools
 import com.nbtapps.store.R
 import com.nbtapps.store.model.HeadUnit
 
+/**
+ * The saved head units. With none, it offers the set-up ([onSetUp]); "+" opens the set-up for a further car
+ * ([onAddCar]), which begins at picking it.
+ */
 @Composable
 fun HeadUnitsScreen(
     onOpenHeadUnit: (String) -> Unit,
     onOpenSppTest: () -> Unit,
+    onSetUp: () -> Unit,
+    onAddCar: () -> Unit,
     viewModel: HeadUnitsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    var showAddDialog by rememberSaveable { mutableStateOf(false) }
 
     HeadUnitsContent(
         uiState = uiState,
@@ -47,14 +52,8 @@ fun HeadUnitsScreen(
         // The echo test is a tool of the test bench: the screen is in every build, the way to it in the debug one.
         onOpenSppTest = onOpenSppTest.takeIf { DebugTools.BLUETOOTH_TEST },
         onRemoveHeadUnit = viewModel::removeHeadUnit,
-        onAddClick = { showAddDialog = true },
-    )
-
-    AddHeadUnitFlow(
-        show = showAddDialog,
-        onDismiss = { showAddDialog = false },
-        onAdded = { showAddDialog = false },
-        viewModel = viewModel,
+        onSetUp = onSetUp,
+        onAddClick = onAddCar,
     )
 }
 
@@ -65,6 +64,7 @@ private fun HeadUnitsContent(
     onOpenHeadUnit: (String) -> Unit,
     onOpenSppTest: (() -> Unit)?,
     onRemoveHeadUnit: (String) -> Unit,
+    onSetUp: () -> Unit,
     onAddClick: () -> Unit,
 ) {
     Scaffold(
@@ -76,17 +76,23 @@ private fun HeadUnitsContent(
         },
         floatingActionButton = {
             FloatingActionButton(onClick = onAddClick) {
-                Icon(painterResource(R.drawable.ic_add), contentDescription = "Add head unit")
+                Icon(painterResource(R.drawable.ic_add), contentDescription = "Add a car")
             }
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (uiState.headUnits.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    Modifier.fillMaxSize().padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
                     Text(
-                        "No head units yet. Tap + to add one.",
+                        "No car added yet. The set-up adds it and pairs this phone with it.",
                         style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Center,
                     )
+                    Button(onClick = onSetUp) { Text("Set up your car") }
                 }
             } else {
                 LazyColumn {

@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -225,6 +226,10 @@ class CatalogueViewModel @Inject constructor(
     private val ownUpdate = combine(repository.catalogue, updater.state, jobs.job) { catalogue, state, job ->
         Triple(appUpdate(catalogue.index?.app, installed), state, job?.needsPhone == true)
     }
+
+    /** No head unit is saved, so the screen offers the set-up. False until the saved head units have been read. */
+    val noHeadUnit: StateFlow<Boolean> =
+        headUnits.headUnits.map { it.isEmpty() }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val uiState: StateFlow<CatalogueUiState> =
         combine(repository.catalogue, head, query, filter, headUnitRefresh) { catalogue, (head, switchedOn), query, filter, refresh ->

@@ -51,10 +51,15 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             NbtAppTheme {
-                val startOnHeadUnits by start.startOnHeadUnits.collectAsStateWithLifecycle()
+                val openSetup by start.openSetup.collectAsStateWithLifecycle()
                 val toOpen by headUnitToOpen.collectAsStateWithLifecycle()
-                startOnHeadUnits?.let {
-                    NbtNavHost(startOnHeadUnits = it, headUnitToOpen = toOpen, onHeadUnitOpened = { headUnitToOpen.value = null })
+                openSetup?.let {
+                    NbtNavHost(
+                        openSetupAtStart = it,
+                        onSetupOpened = start::setupOpened,
+                        headUnitToOpen = toOpen,
+                        onHeadUnitOpened = { headUnitToOpen.value = null },
+                    )
                 }
             }
         }
@@ -98,14 +103,15 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Which screen the app opens on waits for the saved head units to be read. Nothing is drawn until then, so
-     * the system's launch screen stays up in place of an empty frame.
+     * Whether the set-up is opened over the catalogue waits for the saved head units and the user's choice to be
+     * read, and where it is opened, for it to have been. Nothing is drawn until then, so the system's launch screen
+     * stays up in place of an empty frame, or of the catalogue for a moment.
      */
     private fun holdFirstFrameUntilStartIsKnown() {
         val content = findViewById<View>(android.R.id.content)
         content.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
             override fun onPreDraw(): Boolean {
-                if (start.startOnHeadUnits.value == null) return false
+                if (start.openSetup.value != false) return false
                 content.viewTreeObserver.removeOnPreDrawListener(this)
                 return true
             }

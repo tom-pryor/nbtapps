@@ -79,22 +79,25 @@ import com.nbtapps.store.ui.headunits.checksLine
 /**
  * The catalogue's packages, against the head unit the app is working with: which of them it has, in which
  * version, and which have an update, with those first. The top bar names that head unit ([HeadUnitIndicator]):
- * [onOpenHeadUnit] opens its screen, [onAddHeadUnit] goes to where one is added, and [onPairHeadUnit] to where
- * the phone is paired with it.
+ * [onOpenHeadUnit] opens its screen, and [onPairHeadUnit] goes to where the phone is paired with it. With no head
+ * unit saved, a banner at the top of the list offers the set-up ([onSetUp]) in its place.
  */
 @Composable
 fun CatalogueScreen(
     onOpenPackage: (String) -> Unit,
     onOpenHeadUnit: (String) -> Unit,
-    onAddHeadUnit: () -> Unit,
+    onSetUp: () -> Unit,
     onPairHeadUnit: (String) -> Unit,
     viewModel: CatalogueViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val noHeadUnit by viewModel.noHeadUnit.collectAsStateWithLifecycle()
 
     CatalogueContent(
         uiState = uiState,
-        headUnit = { HeadUnitIndicator(onOpenHeadUnit, onAddHeadUnit, onPairHeadUnit) },
+        // The banner says it: the bar has nothing to add with no head unit.
+        headUnit = { HeadUnitIndicator(onOpenHeadUnit, onSetUp = null, onPairHeadUnit) },
+        onSetUp = onSetUp.takeIf { noHeadUnit },
         onQueryChange = viewModel::setQuery,
         onSelectFilter = viewModel::selectFilter,
         onRefresh = viewModel::refresh,
@@ -109,6 +112,7 @@ fun CatalogueScreen(
 private fun CatalogueContent(
     uiState: CatalogueUiState,
     headUnit: @Composable () -> Unit,
+    onSetUp: (() -> Unit)?,
     onQueryChange: (String) -> Unit,
     onSelectFilter: (CatalogueFilter) -> Unit,
     onRefresh: () -> Unit,
@@ -162,6 +166,7 @@ private fun CatalogueContent(
             ) {
                 // Always a scrollable list, so pull-to-refresh also works on the empty and error states.
                 LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                    onSetUp?.let { setUp -> item(key = "set-up") { SetUpBanner(onSetUp = setUp) } }
                     val message = uiState.emptyMessage()
                     when {
                         !uiState.loaded && uiState.error == null -> item {
@@ -421,6 +426,29 @@ private fun HeadUnitBanner(text: String, @DrawableRes icon: Int, onOpenHeadUnit:
                 onClick = onOpenHeadUnit,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
             ) { Text("Head unit") }
+        }
+    }
+}
+
+/** With no head unit saved: the set-up, which adds the car the packages are installed on. */
+@Composable
+private fun SetUpBanner(onSetUp: () -> Unit) {
+    Card(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Icon(painterResource(R.drawable.ic_head_unit), contentDescription = null)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Set up your car", style = MaterialTheme.typography.titleMedium)
+                    Text("Add your car to install these on it. It takes four short steps.", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            Button(onClick = onSetUp, Modifier.align(Alignment.End)) { Text("Set up") }
         }
     }
 }

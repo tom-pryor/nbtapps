@@ -57,7 +57,7 @@ fun CataloguePackageScreen(
     onOpenPackage: (String) -> Unit,
     onInstall: (packageId: String, version: String) -> Unit,
     onOpenHeadUnit: (String) -> Unit,
-    onAddHeadUnit: () -> Unit,
+    onSetUp: () -> Unit,
     onPairHeadUnit: (String) -> Unit,
     viewModel: CataloguePackageViewModel = hiltViewModel(),
 ) {
@@ -77,7 +77,7 @@ fun CataloguePackageScreen(
                         Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = "Back")
                     }
                 },
-                actions = { HeadUnitIndicator(onOpenHeadUnit, onAddHeadUnit, onPairHeadUnit) },
+                actions = { HeadUnitIndicator(onOpenHeadUnit, onSetUp, onPairHeadUnit) },
             )
         },
     ) { padding ->

@@ -5,6 +5,7 @@ package com.nbtapps.store.ui.navigation
 import androidx.lifecycle.SavedStateHandle
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
+import com.nbtapps.store.data.InMemorySetupRepository
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.TcpEndpoint
 import kotlinx.coroutines.test.runTest
@@ -18,27 +19,48 @@ class StartViewModelTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private val repository = InMemoryHeadUnitRepository()
+    private val setup = InMemorySetupRepository()
     private val car = HeadUnit("car", "Car", listOf(TcpEndpoint("192.168.0.1", 7144)))
 
+    private fun viewModel(state: SavedStateHandle = SavedStateHandle()) = StartViewModel(repository, setup, state)
+
     @Test
-    fun `with no head unit saved the app opens on the head units list`() = runTest {
-        assertEquals(true, StartViewModel(repository, SavedStateHandle()).startOnHeadUnits.value)
+    fun `with no head unit saved the set-up is opened over the catalogue`() = runTest {
+        assertEquals(true, viewModel().openSetup.value)
     }
 
     @Test
-    fun `with a head unit saved the app opens on the catalogue`() = runTest {
+    fun `with a head unit saved it is not`() = runTest {
         repository.add(car)
-        assertEquals(false, StartViewModel(repository, SavedStateHandle()).startOnHeadUnits.value)
+        assertEquals(false, viewModel().openSetup.value)
     }
 
     @Test
-    fun `the start is decided once, and a head unit added or removed later does not move it`() = runTest {
+    fun `once skipped it is not, with no head unit saved either`() = runTest {
+        setup.setSkipped(true)
+        assertEquals(false, viewModel().openSetup.value)
+    }
+
+    @Test
+    fun `it is opened once, and neither a rotation nor a restored process opens it again`() = runTest {
         val savedState = SavedStateHandle()
-        val viewModel = StartViewModel(repository, savedState)
-        repository.add(car)
-        assertEquals(true, viewModel.startOnHeadUnits.value)
+        val viewModel = viewModel(savedState)
+        assertEquals(true, viewModel.openSetup.value)
 
-        // The process was stopped and the app restored: the start is the one its stack was built on.
-        assertEquals(true, StartViewModel(repository, savedState).startOnHeadUnits.value)
+        viewModel.setupOpened()
+
+        assertEquals(false, viewModel.openSetup.value)
+        // The process was stopped and the app restored from its saved state.
+        val restored = viewModel(SavedStateHandle(savedState.keys().associateWith { savedState.get<Any?>(it) }))
+        assertEquals(false, restored.openSetup.value)
+    }
+
+    @Test
+    fun `it is decided once, and a head unit added or removed later does not change it`() = runTest {
+        val savedState = SavedStateHandle()
+        val viewModel = viewModel(savedState)
+        repository.add(car)
+        assertEquals(true, viewModel.openSetup.value)
+        assertEquals(true, viewModel(savedState).openSetup.value)
     }
 }
