@@ -74,15 +74,16 @@
 // Two options are for finding out what a car needs of the decide step, which lets go the links of other programs
 // (serial_link.hpp): --decide MS waits that long for a link's magic bytes in place of the protocol's
 // serial.decideMs, and --decide-hold keeps the node of a link that is let go open, unread, until the link ends,
-// in place of closing it. The agent's first lines in the log say which of the two it goes by, and which programs
+// in place of closing it for another program or reading it to its end. The agent's first lines in the log say which of the two it goes by, and which programs
 // the gate holds off a link meanwhile.
 // `nbtagent --look PATH` is how the gate is checked, by this program run again: one stat() of PATH, answered by
 // the exit code.
 //
 // SIGINT and SIGTERM stop it between install steps, never inside one. An agent that stops, or ends for a newer
 // version of itself, tells each phone so first (link.closing, agent.hpp) and closes its links; with Bluetooth
-// serial it then waits, five seconds at most, for the phones to end their links, before it takes its service and
-// its gate away and ends (serial_link.hpp). `kill -9` leaves it no time for any of that.
+// serial it then waits, six seconds at most, for the phones to end their links, reading their nodes meanwhile,
+// before it takes its service and its gate away and ends (serial_link.hpp). A link that is still up then has its
+// node closed with the process. `kill -9` leaves it no time for any of that.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <signal.h>
@@ -144,7 +145,7 @@ static int usage() {
             "                  the open of its node, before the link is let go as another program's\n"
             "                  (1 to %u; default %u, the protocol's)\n"
             "  --decide-hold   with Bluetooth serial: a link that is let go keeps its node open, unread,\n"
-            "                  until the link ends, in place of having it closed\n"
+            "                  until the link ends, in place of having it closed or read to its end\n"
 #else
             "usage: nbtagent --root DIR [--socket PATH]"
 #ifdef NBT_TEST_KEYS
@@ -241,8 +242,8 @@ static SerialConfig serialConfigOf(const Options& options) {
     return config;
 }
 
-// Waits, `ms` at most, until every serial link whose agent's end has closed has been ended by its phone, or has
-// had its time for that (serial_link.hpp). Each link says in the log which of the two it was.
+// Waits, `ms` at most, until every serial link whose agent's end has closed has been ended by its phone
+// (serial_link.hpp). Each link says in the log when it ended.
 static void waitForPhones(int ms) {
     unsigned open = serialLinksOpen();
     if (open == 0) return;
@@ -250,7 +251,7 @@ static void waitForPhones(int ms) {
     snprintf(text, sizeof text, "bluetooth: %u serial link%s closed by the agent and not yet ended by the phone: waiting, %d ms at most",
              open, open == 1 ? " is" : "s are", ms);
     logLine(stderr, text);
-    if (!waitForSerialLinks(ms)) logLine(stderr, "bluetooth: a serial link is still up, and ends with this process");
+    if (!waitForSerialLinks(ms)) logLine(stderr, "bluetooth: a serial link is still up: its node is closed as this process ends");
 }
 #endif
 
@@ -375,9 +376,9 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
     agent.endPhoneLinks(handOver ? kClosingRestarting : kClosingStopping, 2000);
 #ifdef NBT_HEAD_UNIT
     if (bluetooth != 0) {
-        // The process stays for as long as the serial links wait for their phones to end them: a node that goes
-        // under a phone which still holds the link is what the car's Bluetooth did not get over. The registration
-        // and the gate stay for that long too, as they were while the links were up.
+        // The process stays a while for the phones to end their serial links: a node closed under a link that is
+        // still up leaves what the phone goes on sending ahead of every later link. The registration and the gate
+        // stay for that long too, as they were while the links were up.
         const int wait = (int)serialConfigOf(options).lingerMs + 1000;
         waitForPhones(wait);
         // Takes the service's registration and the gate away again.

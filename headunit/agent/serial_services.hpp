@@ -85,6 +85,11 @@ public:
     // The programs that are declared for any service, each once, sorted.
     std::vector<std::string> programs();
 
+    // Whether a program declared for a serial service is running now, which is who would read a serial link that
+    // is not the agent's. A program whose state cannot be told counts as running. From any thread.
+    enum Readers { kNoneDeclared, kNoneRunning, kSomeMayRun };
+    Readers readers();
+
     // Asks for the removal of every declared service that no program answers for. Returns how many removals were
     // asked for. `why` goes into the log. From any thread.
     unsigned sweep(const char* why);

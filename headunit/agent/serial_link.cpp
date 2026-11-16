@@ -46,7 +46,8 @@ std::string format(const char* fmt, va_list ap) {
     return line;
 }
 
-// True once `fd` has something to read or `ms` are over; *ready says which.
+// True once `fd` has something to read or `ms` are over; *ready says which. For the link's socket pair: a node is
+// never waited on this way (node_reader.hpp).
 bool waitReadable(int fd, int ms, bool* ready) {
     fd_set rf;
     FD_ZERO(&rf);
@@ -59,19 +60,17 @@ bool waitReadable(int fd, int ms, bool* ready) {
     return r >= 0 || errno == EINTR;
 }
 
-// ---- one link: two threads between the node and a socket pair ----------------------------------------------------
-// The node's side of the copying. "up" carries what the phone sends to the agent and owns the pump: it ends last,
-// closes everything and frees it. "down" carries what the agent sends to the phone.
+// ---- one link: the node's reader, and two threads between it and a socket pair -----------------------------------
+// The node's reader (NodeReader) reads the node. "up" takes what it read to the agent and owns the pump: it ends
+// last, closes everything and frees it. "down" carries what the agent sends to the phone, straight into the node.
 
-// One read takes a whole message of the node, and what does not fit is lost: far above any message seen.
-const size_t kNodeRead = 32768;
 // One blocking write to the node. Writes of this size are what the node has been seen to take whole.
 const size_t kNodeWrite = 1000;
 // How long either thread waits before it looks whether the other one has ended the link.
-const int kPumpTickMs = 100;
+const int kPumpTickMs = kNodeTickMs;
 
 pthread_mutex_t gPumpsMu = PTHREAD_MUTEX_INITIALIZER;
-unsigned gPumps = 0;   // links whose threads are still running
+unsigned gPumps = 0;   // links whose node is still open
 
 void countPump(int by) {
     pthread_mutex_lock(&gPumpsMu);
@@ -80,25 +79,29 @@ void countPump(int by) {
 }
 
 struct Pump {
-    int node, sock;
+    NodeReader* reader;
+    int node, sock;          // node: the reader's descriptor, which "down" writes into
     std::string path;
     SerialLog* log;
     pthread_t down;
-    unsigned lingerMs;       // how long the node is kept, and read, once the agent's end has closed
-    pthread_mutex_t mu;      // done, why, goneAt
+    unsigned lingerMs;       // once the agent's end has closed: when the log says that the link is still up
+    pthread_mutex_t mu;      // done, why, goneAt, goneWhy
     bool done;
     std::string why;
     double goneAt;           // when the agent's end was found closed; 0 while it is open
+    std::string goneWhy;     // what closed it, for the log
     uint64_t fromPhone, toPhone;   // each counted by one thread, and read once both have ended
     uint64_t dropped;              // what the phone sent after the agent's end had closed: "up" counts it
     std::vector<uint8_t> first;    // read from the node before the link was made: "up" sends it on first
 
-    Pump() : node(-1), sock(-1), log(NULL), lingerMs(0), done(false), goneAt(0), fromPhone(0), toPhone(0), dropped(0) {
+    Pump()
+        : reader(NULL), node(-1), sock(-1), log(NULL), lingerMs(0), done(false), goneAt(0), fromPhone(0), toPhone(0),
+          dropped(0) {
         pthread_mutex_init(&mu, NULL);
     }
     ~Pump() { pthread_mutex_destroy(&mu); }
 
-    // The first reason given is the one the log gets.
+    // The link has ended. The first reason given is the one the log gets.
     void end(const std::string& reason) {
         pthread_mutex_lock(&mu);
         if (!done) why = reason;
@@ -111,16 +114,21 @@ struct Pump {
         pthread_mutex_unlock(&mu);
         return d;
     }
-    // The agent's end has closed: from the first call of this the node is kept for the phone to end the link.
-    void agentGone() {
+    // The agent's end has closed, or what the phone sends can no longer go to it: from the first call of this the
+    // node is kept, and read, until the phone ends the link. The first reason is the one the log gets.
+    void agentGone(const std::string& reason) {
         pthread_mutex_lock(&mu);
-        if (goneAt == 0) goneAt = monoNow();
+        if (goneAt == 0) {
+            goneAt = monoNow();
+            goneWhy = reason;
+        }
         pthread_mutex_unlock(&mu);
     }
-    // When that was; 0 while the agent has its end.
-    double goneSince() {
+    // When that was, and why; 0 while the agent has its end.
+    double goneSince(std::string* reason) {
         pthread_mutex_lock(&mu);
         double at = goneAt;
+        *reason = goneWhy;
         pthread_mutex_unlock(&mu);
         return at;
     }
@@ -146,16 +154,24 @@ void* pumpDown(void* arg) {
     uint8_t buf[kNodeWrite];
     for (;;) {
         bool ready = false;
-        if (!waitReadable(p->sock, kPumpTickMs, &ready)) { p->end("the link's socket failed"); break; }
+        if (!waitReadable(p->sock, kPumpTickMs, &ready)) {
+            p->agentGone("the link's socket failed");
+            break;
+        }
         if (!ready) {
             if (p->ended()) break;
             continue;
         }
         ssize_t k = read(p->sock, buf, sizeof(buf));
         if (k < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-        if (k <= 0) { p->agentGone(); break; }
+        if (k <= 0) {
+            p->agentGone("closed by the agent");
+            break;
+        }
         if (!writeAll(p->node, buf, (size_t)k)) {
-            p->end(std::string("a write to the node failed: ") + strerror(errno));
+            // The agent is told that the link has gone; the node stays with "up" until the link has ended.
+            p->agentGone(std::string("a write to the node failed (") + strerror(errno) + ")");
+            shutdown(p->sock, SHUT_RDWR);
             break;
         }
         p->toPhone += (uint64_t)k;
@@ -163,72 +179,70 @@ void* pumpDown(void* arg) {
     return NULL;
 }
 
-// How a link ended whose phone ended it: `how` alone while the agent had its end, and after that the agent's close
-// with how long the phone took to follow it.
-std::string endedByPhone(const char* how, double goneAt) {
+// How a link ended whose phone ended it: `how` alone while the agent had its end, and after that what closed the
+// agent's end, with how long the phone took to follow it.
+std::string endedByPhone(const char* how, double goneAt, const std::string& goneWhy) {
     if (goneAt == 0) return how;
-    char text[160];
-    snprintf(text, sizeof(text), "closed by the agent, and the phone ended the link %.0f ms later",
-             (monoNow() - goneAt) * 1000.0);
-    return text;
+    char text[64];
+    snprintf(text, sizeof(text), ", and the phone ended the link %.0f ms later", (monoNow() - goneAt) * 1000.0);
+    return goneWhy + text;
 }
 
-// What the phone sends, to the agent: one large read for each message of the node.
+// What the phone sends, to the agent: what the node's reader has read, as it comes.
 //
-// Once the agent's end has closed, the node is kept open and read, and what comes is dropped, until the phone ends
-// the link or `lingerMs` have passed. On the car, when the agent had closed a link's node and the phone went on
-// holding the link and sending into it, nothing arrived on any later link until the head unit was restarted. So
-// the node is not closed under a phone that is about to end the link itself: the agent tells the phone that it is
-// closing (link.closing, agent.hpp), and the phone ends the link when it hears that.
+// Once the agent's end has closed, for whatever reason, the node is kept open and read, and what comes is dropped,
+// until the phone ends the link, however long that takes. Closing a node does not end its link, and what the phone
+// goes on sending into a link whose node was closed waits ahead of the node and comes on the next link that is
+// opened. So the node is not closed under a link that is up: the agent tells the phone that it is closing
+// (link.closing, agent.hpp), and the phone ends the link when it hears that. When `lingerMs` have passed with the
+// link still up, the log says so.
 void* pumpUp(void* arg) {
     Pump* p = static_cast<Pump*>(arg);
-    std::vector<uint8_t> buf(kNodeRead);
     if (!p->first.empty()) {
-        if (writeAll(p->sock, &p->first[0], p->first.size())) p->fromPhone += p->first.size();
-        else p->agentGone();
+        if (writeAll(p->sock, &p->first[0], p->first.size())) {
+            p->fromPhone += p->first.size();
+        } else {
+            p->agentGone("closed by the agent");
+            p->dropped += p->first.size();
+        }
     }
-    while (!p->ended()) {
-        double gone = p->goneSince();
-        if (gone > 0 && (monoNow() - gone) * 1000.0 >= (double)p->lingerMs) {
-            char text[160];
-            if (p->lingerMs == 0) {
-                snprintf(text, sizeof(text), "closed by the agent");
-            } else {
-                snprintf(text, sizeof(text), "closed by the agent, and the link was still up %u ms later: its node is "
-                                             "closed under it", p->lingerMs);
-            }
-            p->end(text);
-            break;
-        }
-        bool ready = false;
-        if (!waitReadable(p->node, kPumpTickMs, &ready)) { p->end("the node failed"); break; }
-        if (!ready) continue;
-        ssize_t k = read(p->node, &buf[0], buf.size());
-        if (k < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-        if (k == 0) { p->end(endedByPhone("closed by the phone", gone)); break; }
-        if (k < 0) {
+    bool saidStillUp = false;
+    std::vector<uint8_t> got;
+    for (;;) {
+        got.clear();
+        NodeReader::Got what = p->reader->next(kPumpTickMs, &got);
+        std::string goneWhy;
+        double gone = p->goneSince(&goneWhy);
+        if (what == NodeReader::kEnded) {
+            int error = p->reader->endError();
             // On the car a link that ends takes its node away, and the read then fails.
-            if (gone > 0 || access(p->path.c_str(), F_OK) != 0) p->end(endedByPhone("the phone's link ended", gone));
-            else p->end(std::string("a read of the node failed: ") + strerror(errno));
+            if (error == 0) p->end(endedByPhone("closed by the phone", gone, goneWhy));
+            else if (gone > 0 || access(p->path.c_str(), F_OK) != 0) p->end(endedByPhone("the phone's link ended", gone, goneWhy));
+            else p->end(std::string("a read of the node failed: ") + strerror(error));
             break;
         }
-        if (gone > 0) {
-            p->dropped += (uint64_t)k;
-            continue;
+        if (what == NodeReader::kData) {
+            if (gone > 0) {
+                p->dropped += got.size();
+            } else if (!writeAll(p->sock, &got[0], got.size())) {
+                p->agentGone("closed by the agent");
+                p->dropped += got.size();
+            } else {
+                p->fromPhone += got.size();
+            }
         }
-        if ((size_t)k == buf.size())
-            p->log->line(p->path + ": a read filled the whole buffer, so the rest of that message may be lost");
-        if (!writeAll(p->sock, &buf[0], (size_t)k)) {
-            p->agentGone();
-            p->dropped += (uint64_t)k;
-            continue;
+        if (gone > 0 && !saidStillUp && (monoNow() - gone) * 1000.0 >= (double)p->lingerMs) {
+            saidStillUp = true;
+            char text[200];
+            snprintf(text, sizeof(text), ": the link is still up %u ms after the agent's end closed (%s): its node is "
+                     "kept, and read, until the phone ends the link", p->lingerMs, goneWhy.c_str());
+            p->log->line(p->path + text);
         }
-        p->fromPhone += (uint64_t)k;
     }
     // The agent sees its end close once it has read what is still on the way to it.
     shutdown(p->sock, SHUT_WR);
     pthread_join(p->down, NULL);
-    close(p->node);
+    p->reader->finish();
     close(p->sock);
     char counts[160];
     snprintf(counts, sizeof(counts), ": %llu B from the phone, %llu B to it", (unsigned long long)p->fromPhone,
@@ -247,12 +261,12 @@ void* pumpUp(void* arg) {
 
 }  // namespace
 
-Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log, const std::vector<uint8_t>& first,
+Link* newSerialLink(NodeReader* reader, const std::string& path, SerialLog* log, const std::vector<uint8_t>& first,
                     unsigned lingerMs) {
     int pair[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
         log->line(path + ": no socket pair for the link: " + strerror(errno));
-        close(nodeFd);
+        reader->finish();
         return 0;
     }
     closeOnExec(pair[0]);
@@ -265,7 +279,8 @@ Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log, const s
 
     countPump(1);
     Pump* p = new Pump();
-    p->node = nodeFd;
+    p->reader = reader;
+    p->node = reader->fd();
     p->sock = pair[1];
     p->path = path;
     p->log = log;
@@ -287,7 +302,7 @@ Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log, const s
             p->end("not started");
             pthread_join(p->down, NULL);
         }
-        close(nodeFd);
+        reader->finish();
         close(pair[0]);
         close(pair[1]);
         delete p;
@@ -295,6 +310,13 @@ Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log, const s
         return 0;
     }
     return new SocketLink(pair[0], "serial");
+}
+
+Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log, const std::vector<uint8_t>& first,
+                    unsigned lingerMs) {
+    NodeReader* reader = NodeReader::start(nodeFd, path, log);
+    if (reader == 0) return 0;
+    return newSerialLink(reader, path, log, first, lingerMs);
 }
 
 unsigned serialLinksOpen() {
@@ -560,7 +582,7 @@ void SerialListener::stop() {
     if (hasThread_) pthread_join(thread_, NULL);
     hasThread_ = false;
     if (active()) shutDown();
-    closeKept(true);
+    closeKept(kEvery);
     // A link that was opened and that the agent has not taken: nobody serves it from here on.
     std::vector<Link*> unserved;
     pthread_mutex_lock(&mu_);
@@ -603,7 +625,7 @@ void SerialListener::shutDown() {
     pthread_mutex_unlock(&mu_);
     if (held) gate_->release();
     gate_->detach();
-    closeKept(true);
+    closeKept(kAllButRead);
 }
 
 Link* SerialListener::accept() {
@@ -761,92 +783,176 @@ void SerialListener::updateHold() {
 
 // ---- the decide step ---------------------------------------------------------------------------------------------
 
-// Reads what the phone says first on the open node `fd`, until it tells whose link this is or the time for it is
-// over. kOurs: it opened with the magic bytes, and *first holds all that was read. kLetGo: it is another
-// program's, or nobody's. kEnded: the link ended first. *why says which, for the log. Nothing is written.
-SerialListener::Decided SerialListener::decide(int fd, const std::string& path, double openedAt,
-                                               std::vector<uint8_t>* first, std::string* why) {
+namespace {
+
+// What the bytes at `p` are, as the start of what came on a link.
+enum Opening {
+    kOpenMagic,       // the magic bytes
+    kOpenMagicPart,   // the start of them, and no more yet
+    kOpenFrame,       // a whole frame of the protocol with a good check value, of *frameBytes
+    kOpenFramePart,   // what may be the start of one
+    kOpenOther        // neither
+};
+
+Opening judgeOpening(const uint8_t* p, size_t n, size_t* frameBytes) {
+    size_t m = n < kLinkMagicBytes ? n : kLinkMagicBytes;
+    if (memcmp(p, kLinkMagic, m) == 0) return m == kLinkMagicBytes ? kOpenMagic : kOpenMagicPart;
+    const size_t most = kFrameHeaderBytes + kMaxFramePayload + kFrameCheckBytes;
+    FrameDecoder frames;
+    frames.feed(p, n < most ? n : most);
+    Frame frame;
+    FrameDecoder::Result r = frames.next(&frame, 0);
+    if (r == FrameDecoder::kFrame) {
+        *frameBytes = kFrameHeaderBytes + frame.payload.size() + kFrameCheckBytes;
+        return kOpenFrame;
+    }
+    return r == FrameDecoder::kNeedMore ? kOpenFramePart : kOpenOther;
+}
+
+}  // namespace
+
+// Reads what came first on the node, from its reader, until it tells whose link this is or the time for it is over.
+//
+// What a phone sent into an earlier link that nobody read comes ahead of what it sends on this one, as one run of
+// bytes. When that run starts with whole frames of this protocol, they were the agent's link's: they are counted in
+// *leftOver and passed over, and the magic bytes are looked for after them, within the same time.
+//
+// kOurs: the magic bytes came, at the start or after such leftovers, and *first holds what was read from them on.
+// kLetGo: with no leftovers, anything else came first, or nothing did: the link is another program's, or nobody's.
+// kDrain: after leftovers, something that is neither a frame nor the magic bytes came, or nothing more did: the
+// node is read until the link ends, and the link is neither handed to the agent nor let go. kEnded: the link ended
+// first. *why says which, for the log. Nothing is written.
+SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::string& path, double openedAt,
+                                               std::vector<uint8_t>* first, uint64_t* leftOver, std::string* why) {
     const double by = openedAt + config_.decideMs / 1000.0;
-    std::vector<uint8_t> buf(kNodeRead);
+    std::vector<uint8_t> got;
+    size_t at = 0;   // where what has not been passed over as leftovers starts
+    *leftOver = 0;
     for (;;) {
+        Opening o = kOpenMagicPart;
+        while (at < got.size()) {
+            size_t frame = 0;
+            o = judgeOpening(&got[at], got.size() - at, &frame);
+            if (o != kOpenFrame) break;
+            at += frame;
+            *leftOver += frame;
+        }
+        if (at < got.size() && o == kOpenMagic) {
+            first->assign(got.begin() + (long)at, got.end());
+            return kOurs;
+        }
+        if (at < got.size() && o == kOpenOther) {
+            if (*leftOver > 0) {
+                *why = "then came bytes that are neither a frame nor the magic bytes";
+                return kDrain;
+            }
+            *why = "it did not open with the magic bytes";
+            return kLetGo;
+        }
         if (stopping()) {
             *why = "the listener was stopped";
             return kEnded;
         }
         double left = by - monoNow();
         if (left <= 0) {
-            *why = first->empty() ? "nothing came from the phone in that time"
-                                  : "only a part of the magic bytes came in that time";
+            if (*leftOver > 0) {
+                *why = at == got.size() ? "then nothing more came in that time"
+                                        : "then neither a whole frame nor the magic bytes came in that time";
+                return kDrain;
+            }
+            *why = got.empty() ? "nothing came from the phone in that time"
+                               : (o == kOpenMagicPart ? "only a part of the magic bytes came in that time"
+                                                      : "it did not open with the magic bytes in that time");
             return kLetGo;
         }
         int ms = (int)(left * 1000.0) + 1;
-        bool ready = false;
-        if (!waitReadable(fd, ms < kPumpTickMs ? ms : kPumpTickMs, &ready)) {
-            *why = "the node failed";
+        bool none = got.empty();
+        NodeReader::Got what = reader->next(ms < kPumpTickMs ? ms : kPumpTickMs, &got);
+        if (what == NodeReader::kEnded) {
+            int error = reader->endError();
+            if (error == 0) *why = "closed by the phone";
+            else if (access(path.c_str(), F_OK) != 0) *why = "the phone's link ended";
+            else *why = std::string("a read of the node failed: ") + strerror(error);
             return kEnded;
         }
-        if (!ready) continue;
-        ssize_t k = read(fd, &buf[0], buf.size());
-        if (k < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-        if (k == 0) {
-            *why = "closed by the phone";
-            return kEnded;
-        }
-        if (k < 0) {
-            *why = access(path.c_str(), F_OK) != 0 ? std::string("the phone's link ended")
-                                                  : std::string("a read of the node failed: ") + strerror(errno);
-            return kEnded;
-        }
-        if (first->empty())
+        if (what == NodeReader::kData && none)
             say("%s: its first message came %.0f ms after the open", path.c_str(), (monoNow() - openedAt) * 1000.0);
-        if ((size_t)k == buf.size())
-            say("%s: a read filled the whole buffer, so the rest of that message may be lost", path.c_str());
-        first->insert(first->end(), buf.begin(), buf.begin() + k);
-        size_t have = first->size() < kLinkMagicBytes ? first->size() : kLinkMagicBytes;
-        if (memcmp(&(*first)[0], kLinkMagic, have) != 0) {
-            *why = "it did not open with the magic bytes";
-            return kLetGo;
-        }
-        if (have == kLinkMagicBytes) return kOurs;
     }
 }
 
-// Lets the link on the open node `fd` go: it is not read again, and nothing was written into it.
-void SerialListener::letGo(int fd, int node, const std::string& path, double openedAt, const std::string& why) {
-    LetGo gone;
-    gone.node = node;
-    gone.fd = -1;
-    gone.at = monoNow();
+// Lets the link on the node go: it was not the agent's, and nothing was written into it. Who reads it now decides
+// what becomes of its node. A program declared for a serial service that runs, or may run, gets the node: the
+// reader is stopped and the node closed for it. With none, nobody would ever read the link, and bytes that wait
+// unread ahead of a node come on the next link: the node is read, and what comes dropped, until the link ends.
+void SerialListener::letGo(NodeReader* reader, int node, const std::string& path, double openedAt, const std::string& why) {
+    double ms = (monoNow() - openedAt) * 1000.0;
     if (config_.letGoKeepsNode) {
-        gone.fd = fd;
-        say("%s let go %.0f ms after the open (%s). Its node stays open, unread, until the link ends", path.c_str(),
-            (gone.at - openedAt) * 1000.0, why.c_str());
-    } else {
-        close(fd);
-        bool there = access(path.c_str(), F_OK) == 0;
-        say("%s let go %.0f ms after the open (%s) and closed: %s", path.c_str(), (gone.at - openedAt) * 1000.0,
-            why.c_str(), there ? "its node is still there" : "its node went with the close");
-        if (!there) return;
+        int fd = reader->stop();
+        say("%s let go %.0f ms after the open (%s). Its node stays open, unread, until the link ends", path.c_str(), ms,
+            why.c_str());
+        keep(node, fd, 0, "let go");
+        return;
     }
-    letGo_.push_back(gone);   // until its node goes
+    SerialServices::Readers readers = services_ != 0 ? services_->readers() : SerialServices::kNoneDeclared;
+    if (readers == SerialServices::kSomeMayRun) {
+        reader->finish();
+        bool there = access(path.c_str(), F_OK) == 0;
+        say("%s let go %.0f ms after the open (%s) and closed: %s", path.c_str(), ms, why.c_str(),
+            there ? "its node is still there" : "its node went with the close");
+        if (there) keep(node, -1, 0, "let go");   // until its node goes
+        return;
+    }
+    reader->drain();
+    say("%s let go %.0f ms after the open (%s). %s, so nobody would read it: its node is read, with what comes "
+        "dropped, until the link ends", path.c_str(), ms, why.c_str(),
+        readers == SerialServices::kNoneDeclared ? "No program is declared for a serial service"
+                                                 : "No program declared for a serial service is running");
+    keep(node, -1, reader, "let go");
 }
 
-// The links that were let go and whose node has gone since, or with `all` every one: a node that was kept open is
-// closed.
-void SerialListener::closeKept(bool all) {
+// A node that is not the agent's link, from now until it goes: read by `reader`, or kept open unread (fd >= 0), or
+// closed already (neither), and then only for the log to say when it went.
+void SerialListener::keep(int node, int fd, NodeReader* reader, const char* what) {
+    LetGo kept;
+    kept.node = node;
+    kept.fd = fd;
+    kept.reader = reader;
+    kept.at = monoNow();
+    kept.what = what;
+    letGo_.push_back(kept);
+}
+
+// The nodes that are not the agent's link and whose link has ended since: a node that is read or kept open is
+// closed. kEvery: every one of them, the listener's thread having ended. kAllButRead: the same, except that a node
+// whose link is still up and is read goes on being read.
+void SerialListener::closeKept(Closing which) {
     for (size_t i = 0; i < letGo_.size();) {
-        const LetGo& gone = letGo_[i];
-        std::string path = nodePath(gone.node);
-        if (!all && access(path.c_str(), F_OK) == 0) {
+        const LetGo kept = letGo_[i];
+        std::string path = nodePath(kept.node);
+        bool ended = kept.reader != 0 ? kept.reader->ended() : access(path.c_str(), F_OK) != 0;
+        if (!ended && (which == kEndedOnly || (which == kAllButRead && kept.reader != 0))) {
             ++i;
             continue;
         }
-        if (gone.fd >= 0) close(gone.fd);
-        if (!all)
-            say(gone.fd >= 0 ? "%s: the link ended %.1f s after it was let go, and its node is closed now"
-                             : "%s is gone, %.1f s after it was let go and closed",
-                path.c_str(), monoNow() - gone.at);
         letGo_.erase(letGo_.begin() + (long)i);
+        uint64_t dropped = 0;
+        if (kept.reader != 0) {
+            dropped = kept.reader->dropped();
+            kept.reader->finish();
+        } else if (kept.fd >= 0) {
+            close(kept.fd);
+        }
+        double after = monoNow() - kept.at;
+        if (kept.reader != 0) {
+            say(ended ? "%s: the link ended %.1f s after it was %s; %llu B were dropped, and its node is closed now"
+                      : "%s: the link was still up %.1f s after it was %s, and its node is closed as the listener "
+                        "stops; %llu B were dropped",
+                path.c_str(), after, kept.what, (unsigned long long)dropped);
+        } else if (which == kEndedOnly) {
+            say(kept.fd >= 0 ? "%s: the link ended %.1f s after it was %s, and its node is closed now"
+                             : "%s is gone, %.1f s after it was %s and closed",
+                path.c_str(), after, kept.what);
+        }
     }
 }
 
@@ -860,6 +966,9 @@ void SerialListener::take(int node) {
         say("open %s: %s", path.c_str(), strerror(errno));
         return;
     }
+    // The first read goes out at once: a read is what brings forward what the phone has sent.
+    NodeReader* reader = NodeReader::start(fd, path, log_, config_.readNode);
+    if (reader == 0) return;
     closeOnExec(fd);
     pthread_mutex_lock(&mu_);
     double reqAt = reqAt_;
@@ -877,19 +986,29 @@ void SerialListener::take(int node) {
 
     std::vector<uint8_t> first;
     std::string why;
-    Decided found = decide(fd, path, openedAt, &first, &why);
+    uint64_t leftOver = 0;
+    Decided found = decide(reader, path, openedAt, &first, &leftOver, &why);
+    if (leftOver > 0)
+        say("%s: %llu B left over from an earlier link came first, as whole frames, and were dropped", path.c_str(),
+            (unsigned long long)leftOver);
     Link* link = 0;
     const char* holdWhy = 0;
     if (found == kOurs) {
         say("%s: it opened with the magic bytes, so the link is the agent's", path.c_str());
         // Counted as up from here, which keeps the hold on.
-        link = newSerialLink(fd, path, log_, first, config_.lingerMs);
+        link = newSerialLink(reader, path, log_, first, config_.lingerMs);
         if (link == 0) holdWhy = "the link could not be set up";
     } else if (found == kLetGo) {
-        letGo(fd, node, path, openedAt, why);
+        letGo(reader, node, path, openedAt, why);
         holdWhy = "the link was let go";
+    } else if (found == kDrain) {
+        reader->drain();
+        say("%s drained %.0f ms after the open (%s): the link is neither the agent's nor let go. Its node is read, "
+            "with what comes dropped, until the link ends", path.c_str(), (monoNow() - openedAt) * 1000.0, why.c_str());
+        keep(node, -1, reader, "drained");
+        holdWhy = "the link is drained";
     } else {
-        close(fd);
+        reader->finish();
         say("%s closed, %s, before it was known whose link it is", path.c_str(), why.c_str());
         holdWhy = "the link ended before it was decided on";
     }
@@ -909,7 +1028,7 @@ void SerialListener::take(int node) {
 }
 
 void SerialListener::lookForLinks() {
-    closeKept(false);
+    closeKept(kEndedOnly);
     bool present[NodeTracker::kNodes];
     scanNodes(present);
     NodeTracker::State before[NodeTracker::kNodes], after[NodeTracker::kNodes];

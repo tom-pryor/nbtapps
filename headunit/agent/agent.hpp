@@ -78,10 +78,10 @@
 // into the 30 seconds, ten seconds apart, and has waited ten more: time the agent was away is not taken for the
 // phone's silence. The phone, though, hears nothing from the agent for as long as such a part takes.
 //
-// How the agent ends a link on purpose. The phone made the link and is to end it: a Bluetooth serial link that the
-// agent closed under a phone which went on holding it left the car's Bluetooth giving later links nothing
-// (serial_link.hpp). So the agent says so first, on a link that is not the local socket's and on which `hello` is
-// done:
+// How the agent ends a link on purpose. The phone made the link and is to end it: closing a Bluetooth serial link's
+// node does not end the link, and what a phone goes on sending into it comes ahead of every later link's bytes
+// (serial_link.hpp), so the agent keeps the node, and reads it, until the phone has ended the link. So the agent
+// says so first, on a link that is not the local socket's and on which `hello` is done:
 //
 //   { "event": "link.closing", "params": { "reason": "restarting" } }
 //
@@ -248,7 +248,8 @@ public:
     bool onTrial() const { return onTrial_; }
     // For the end of the process: ends every link but the local socket's, each with link.closing and this reason
     // where `hello` is done on it, and comes back when every one of them has taken what the agent had to say, or
-    // after `waitMs`. The links are closed by then, and the serial ones wait for their phones (serial_link.hpp).
+    // after `waitMs`. The links are closed by then; the nodes of the serial ones are read until their phones end
+    // the links (serial_link.hpp).
     // The local socket's links are left: they end with the process.
     void endPhoneLinks(const char* reason, int waitMs);
 

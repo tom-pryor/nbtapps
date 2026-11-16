@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "../../agent/agent.hpp"
+#include "../../agent/frame.hpp"
 #include "../../agent/fsutil.hpp"
 #include "../../agent/host_platform.hpp"
 #include "test_util.hpp"
@@ -350,8 +351,8 @@ static void testLink() {
         CHECK(link != 0 && std::string(link->kind()) == "serial");
         exchange(node, link, pattern(300000, 1), pattern(200000, 2));
         exchange(node, link, "a", "b");
-        // The agent's side closes: what was still on its way is sent first, and the node is closed at once only
-        // where no time is given for the phone to end the link.
+        // The agent's side closes: what was still on its way is sent first, and the node stays open until the
+        // phone ends the link, even where no time is given for that.
         std::string last = pattern(5000, 3);
         size_t sent = 0;
         while (sent < last.size()) {
@@ -362,10 +363,11 @@ static void testLink() {
         delete link;
         bool closed = false;
         CHECK(node.hear(last.size(), 5000, &closed) == last);
-        node.hear(1, 3000, &closed);
-        CHECK(closed);
-        CHECK_IN(trace.text(),
-                 sawWithin(trace, "closed, closed by the agent: 300001 B from the phone, 205001 B to it", 2000));
+        CHECK(node.hear(1, 300, &closed).empty() && !closed && serialLinksOpen() == 1);
+        node.hangUp();
+        CHECK_IN(trace.text(), sawWithin(trace, "closed, closed by the agent, and the phone ended the link ", 2000));
+        CHECK_IN(trace.text(), trace.saw(" ms later: 300001 B from the phone, 205001 B to it"));
+        CHECK(trace.saw("the link is still up 0 ms after the agent's end closed (closed by the agent)"));
     }
     {   // the agent's side closes and the phone still holds the link: the node stays open and is read, what the
         // phone sends is dropped, and the phone's own end of the link is what closes the node
@@ -389,22 +391,35 @@ static void testLink() {
                                          "after the agent's close were dropped"));
         CHECK(waitForSerialLinks(1000) && monoNow() - at < 4.0);   // well inside the time it would have waited
     }
-    {   // a phone that does not end the link: the node is closed under it when the time is up, and the log says so
+    {   // a phone that does not end the link and goes on sending, for longer than `lingerMs`: nothing is closed under
+        // it, all it sends is read and dropped, the log says once that the link is still up, and the node closes
+        // only when the phone ends the link
         Trace trace;
         LinksGone gone;
         Node node(dir + "/btspp", 4);
-        Link* link = newSerialLink(node.openNear(), node.path, &trace, std::vector<uint8_t>(), 700);
+        Link* link = newSerialLink(node.openNear(), node.path, &trace, std::vector<uint8_t>(), 300);
         CHECK(link != 0);
         exchange(node, link, "hello", "bye");
         delete link;
         bool closed = false;
-        node.say("still here");
-        CHECK(node.hear(1, 300, &closed).empty() && !closed);
-        node.hear(1, 3000, &closed);
-        CHECK(closed);
-        CHECK_IN(trace.text(), sawWithin(trace, "closed, closed by the agent, and the link was still up 700 ms later: its "
-                                                "node is closed under it: 5 B from the phone, 3 B to it, and 10 B that "
-                                                "the phone sent after the agent's close were dropped", 2000));
+        size_t sent = 0;
+        double until = monoNow() + 1.2;
+        while (monoNow() < until) {
+            node.say("still here");
+            sent += 10;
+            CHECK(node.hear(1, 50, &closed).empty() && !closed);
+        }
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp4: the link is still up 300 ms after the agent's end closed (closed "
+                                                "by the agent): its node is kept, and read, until the phone ends the "
+                                                "link", 1000));
+        pause(300);
+        CHECK(trace.count("is still up") == 1 && !trace.saw("closed,") && serialLinksOpen() == 1);
+        node.hangUp();
+        char counts[160];
+        snprintf(counts, sizeof counts, " ms later: 5 B from the phone, 3 B to it, and %u B that the phone sent after "
+                 "the agent's close were dropped", (unsigned)sent);
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp4 closed, closed by the agent, and the phone ended the link ", 2000));
+        CHECK_IN(trace.text(), trace.saw(counts));
     }
     {   // the phone's side ends: the link ends, after what the phone had sent
         Trace trace;
@@ -807,14 +822,21 @@ static void testAgent() {
         phone.close("done");
         CHECK(car.sessionsWithin(0, 3000));
     }
-    {   // a link that opens with anything else never reaches the agent: it is let go, with not a byte written
+    {   // a link that opens with anything else never reaches the agent: it is let go, with not a byte written. No
+        // program is declared for a serial service here, so nobody would read it: its node is read until the link
+        // ends
         Node node(car.dir + "/btspp", 1);
         car.connect(node);
         node.say("\x10\x20\x30\x40 another app's opening");
         CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp1 let go", 3000));
+        CHECK(car.trace.saw("No program is declared for a serial service, so nobody would read it"));
         CHECK(!car.sessionsWithin(1, 200));
         bool closed = false;
-        CHECK(node.hear(1, 3000, &closed).empty() && closed);
+        node.say("more of it");
+        CHECK(node.hear(1, 300, &closed).empty() && !closed);
+        node.hangUp();
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp1: the link ended ", 3000));
+        CHECK(car.trace.saw("s after it was let go; ") && car.trace.saw(" B were dropped, and its node is closed now"));
     }
     {   // nor does one on which the phone says nothing
         Node node(car.dir + "/btspp", 2);
@@ -822,10 +844,12 @@ static void testAgent() {
         CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp2 let go", 3000));
         CHECK(!car.sessionsWithin(1, 200));
         bool closed = false;
-        CHECK(node.hear(1, 3000, &closed).empty() && closed);
+        CHECK(node.hear(1, 300, &closed).empty() && !closed);
+        node.hangUp();
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp2: the link ended ", 3000));
     }
     {   // one that opens with the magic bytes and then says nothing is the agent's, which gives it 30 s for its
-        // hello: then the agent ends it, its node is closed, and nothing was written
+        // hello: then the agent ends it, nothing was written, and its node is closed when the phone ends the link
         Node node(car.dir + "/btspp", 3);
         car.connect(node);
         node.say(kMagic);
@@ -835,7 +859,9 @@ static void testAgent() {
         car.clock.ahead += 8000;
         CHECK(car.sessionsWithin(0, 3000));
         bool closed = false;
-        CHECK(node.hear(1, 3000, &closed).empty() && closed);
+        CHECK(node.hear(1, 300, &closed).empty() && !closed);
+        node.hangUp();
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp3 closed, closed by the agent, and the phone ended the link ", 3000));
     }
     {   // the agent stops: a phone that has said hello is told so, with link.closing as the last thing on its
         // link, and when the phone ends the link on that, the node closes with the phone and not under it
@@ -870,7 +896,8 @@ static void testAgent() {
         CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp4 closed, closed by the agent, and the phone ended the link ", 2000));
         CHECK(waitForSerialLinks(1000));
     }
-    {   // a link that a phone opens while the agent is going, and that the agent never takes: stop() ends it
+    {   // a link that a phone opens while the agent is going, and that the agent never takes: stop() ends the
+        // agent's end of it, and its node is read until the phone ends the link
         Node node(car.dir + "/btspp", 5);
         car.connect(node);
         node.say(kMagic);
@@ -880,8 +907,11 @@ static void testAgent() {
         CHECK(car.trace.saw("1 link had been opened and not yet taken by the agent"));
         CHECK(car.listener.accept() == 0 && car.agent.sessions() == 0);
         bool closed = false;
-        CHECK(node.hear(1, 3000, &closed).empty() && closed);   // not a byte was written into it
-        CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp5 closed, closed by the agent, and the link was still up 300 ms later", 2000));
+        CHECK(node.hear(1, 600, &closed).empty() && !closed);   // not a byte was written into it
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp5: the link is still up 300 ms after the agent's end closed", 2000));
+        CHECK(serialLinksOpen() == 1);
+        node.hangUp();
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp5 closed, closed by the agent, and the phone ended the link ", 2000));
     }
     car.listener.stop();
     CHECK(car.trace.saw("deregister") && car.trace.saw("gate detach"));
@@ -957,12 +987,19 @@ static bool closedUnwritten(Node& node, int ms) {
 // then on, with nothing written into it, and never handed to the agent.
 static void testDecide() {
     std::string dir = freshFolder("decide");
-    {
+    {   // a program declared for a serial service runs, so a link that is let go is closed for it
         Trace trace;
         LinksGone gone;
         FakeGap gap(&trace);
         FakeGate gate(&trace);
+        Machine machine(dir + "/root");
+        machine.running = "radiod";
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
         SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        services.setRemover(&listener);
+        listener.setServices(&services);
         std::string why;
         CHECK_IN(why, listener.start(&why));
         gap.attach();
@@ -1033,6 +1070,7 @@ static void testDecide() {
         CHECK_IN(trace.text(), sawWithin(trace, "before it was known whose link it is", 3000));
         CHECK(!trace.saw("btspp5 let go") && acceptWithin(listener, 50) == 0);
         listener.stop();
+        services.setRemover(0);
     }
     {   // for a car on which a link does not outlive the close of its node: the node stays open, unread, until the
         // link ends
@@ -1105,6 +1143,8 @@ static void testDecide() {
         gap.phone(kInfServiceRequest, kCarSerialService);
         first.appear();
         CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
+        // Its program is declared and not running: nobody would read the link, so its node is read until it ends.
+        CHECK(trace.saw("No program declared for a serial service is running, so nobody would read it"));
         CHECK_IN(trace.text(), sawWithin(trace, "(a phone's link was not the agent's)", 2000));
         for (int i = 0; i < 400 && trace.count("deregister TestRadio") < 2; ++i) pause(5);
         CHECK_IN(trace.text(), trace.count("deregister TestRadio") == 2);
@@ -1239,6 +1279,270 @@ static void testHold() {
     }
 }
 
+// ---- the node's reader ----------------------------------------------------------------------------------------------
+
+// What a stand-in for the car's Bluetooth stack holds for a node: bytes the phone sent that wait ahead of the node,
+// which only a read brings forward. The node itself, a terminal here, never has them, so a wait on it never says
+// that there is something to read while a read would return them.
+static pthread_mutex_t gAheadMu = PTHREAD_MUTEX_INITIALIZER;
+static std::string gAhead;
+
+static void sendAhead(const std::string& bytes) {
+    pthread_mutex_lock(&gAheadMu);
+    gAhead += bytes;
+    pthread_mutex_unlock(&gAheadMu);
+}
+
+// The stand-in's timed read: what waits ahead of the node, in pieces of 1,700 bytes at most, at once; with
+// nothing waiting, the node itself, for its end, and a short wait.
+static long readAhead(int fd, void* buf, size_t len, int ms) {
+    pthread_mutex_lock(&gAheadMu);
+    size_t n = gAhead.size() < len ? gAhead.size() : len;
+    if (n > 1700) n = 1700;
+    memcpy(buf, gAhead.data(), n);
+    gAhead.erase(0, n);
+    pthread_mutex_unlock(&gAheadMu);
+    if (n > 0) return (long)n;
+    return timedNodeRead(fd, buf, len, ms < 20 ? ms : 20);
+}
+
+// A read that does not come back when its time is up: it waits until its node has been closed under it.
+static long readStuck(int fd, void*, size_t, int) {
+    while (fcntl(fd, F_GETFD) != -1) pause(5);
+    errno = EBADF;
+    return -1;
+}
+
+// What the reader gives until `want` bytes are there, or it says the link has ended. *ended: it said so.
+static std::string takeFrom(NodeReader* reader, size_t want, int ms, bool* ended) {
+    std::vector<uint8_t> got;
+    *ended = false;
+    double end = monoNow() + ms / 1000.0;
+    while (got.size() < want && monoNow() < end) {
+        if (reader->next(100, &got) == NodeReader::kEnded) {
+            *ended = true;
+            break;
+        }
+    }
+    return std::string(got.begin(), got.end());
+}
+
+static void testReader() {
+    std::string dir = freshFolder("reader");
+    {   // what the phone sends comes in order; with nothing sent, nothing comes when the time is up; when the phone
+        // ends the link, the reader says so after the last of its bytes
+        Trace trace;
+        Node node(dir + "/btspp", 0);
+        NodeReader* reader = NodeReader::start(node.openNear(), node.path, &trace);
+        CHECK(reader != 0);
+        std::vector<uint8_t> got;
+        double at = monoNow();
+        CHECK(reader->next(150, &got) == NodeReader::kNothing && got.empty());
+        CHECK(monoNow() - at >= 0.14 && monoNow() - at < 1.0);
+        const std::string sent = pattern(100000, 7);
+        node.say(sent);
+        bool ended = false;
+        CHECK(takeFrom(reader, sent.size(), 5000, &ended) == sent && !ended);
+        node.say("last");
+        CHECK(takeFrom(reader, 4, 3000, &ended) == "last" && !ended);
+        node.hangUp();
+        CHECK(takeFrom(reader, 1, 3000, &ended).empty() && ended && reader->ended() && reader->dropped() == 0);
+        reader->finish();
+        // Said once for the process, by the first reader whose read had its time run out.
+        CHECK_IN(trace.text(), trace.saw("btspp0: a read with nothing to read came back when its time was up, on time"));
+    }
+    {   // stop() while a read waits: the thread has stopped within a tick, the node is handed back open, and what
+        // the phone sends from then on stays for whoever reads the node next
+        Trace trace;
+        Node node(dir + "/btspp", 1);
+        int fd = node.openNear();
+        NodeReader* reader = NodeReader::start(fd, node.path, &trace);
+        pause(50);
+        double at = monoNow();
+        CHECK(reader->stop() == fd);
+        CHECK(monoNow() - at < 0.25 && fcntl(fd, F_GETFD) != -1);
+        node.say("for the next reader");
+        char buffer[64];
+        CHECK(read(fd, buffer, sizeof buffer) == 19 && memcmp(buffer, "for the next reader", 19) == 0);
+        close(fd);
+    }
+    {   // in drain mode what comes is counted and dropped, what waited in the queue too
+        Trace trace;
+        Node node(dir + "/btspp", 2);
+        NodeReader* reader = NodeReader::start(node.openNear(), node.path, &trace);
+        node.say("queued");
+        pause(100);
+        reader->drain();
+        node.say("and dropped");
+        std::vector<uint8_t> got;
+        CHECK(reader->next(200, &got) == NodeReader::kNothing && got.empty());
+        node.hangUp();
+        bool ended = false;
+        CHECK(takeFrom(reader, 1, 3000, &ended).empty() && ended && reader->dropped() == 17);
+        reader->finish();
+    }
+    {   // a read that does not come back when its time is up: after three ticks the node is closed under it, the
+        // log says so, and the thread frees itself once that read has returned
+        Trace trace;
+        Node node(dir + "/btspp", 3);
+        NodeReader* reader = NodeReader::start(node.openNear(), node.path, &trace, &readStuck);
+        pause(50);
+        double at = monoNow();
+        CHECK(reader->stop() == -1);
+        double took = monoNow() - at;
+        CHECK(took >= 0.29 && took < 1.0);
+        CHECK_IN(trace.text(), trace.saw("btspp3: its read did not come back within 300 ms of being asked to stop, so "
+                                         "the node is closed under it"));
+        pause(50);
+    }
+    {   // a stand-in for the car's stack, on which the bytes wait ahead of the node and a wait on the node never
+        // says that they are there: they come all the same, in order, because a read is always out
+        Trace trace;
+        Node node(dir + "/btspp", 4);
+        int fd = node.openNear();
+        NodeReader* reader = NodeReader::start(fd, node.path, &trace, &readAhead);
+        const std::string sent = pattern(20000, 8);
+        sendAhead(sent);
+        bool ended = false;
+        CHECK(takeFrom(reader, sent.size(), 5000, &ended) == sent && !ended);
+        fd_set rf;
+        FD_ZERO(&rf);
+        FD_SET(fd, &rf);
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000;
+        CHECK(select(fd + 1, &rf, NULL, NULL, &tv) == 0);   // the node itself never had them
+        node.hangUp();
+        takeFrom(reader, 1, 3000, &ended);
+        CHECK(ended);
+        reader->finish();
+    }
+}
+
+// ---- what an earlier link left behind -------------------------------------------------------------------------------
+
+// A frame of the protocol, as a phone app sends one: a MSG with this text.
+static std::string frameOf(const std::string& text) {
+    std::string out;
+    encodeFrame(kFrameMsg, 0, 0, text.data(), text.size(), &out);
+    return out;
+}
+
+// What a phone sent into a link that nobody read comes on the next link, ahead of what the phone sends on that
+// one. Whole frames there are passed over, and the magic bytes looked for after them.
+static void testLeftOvers() {
+    std::string dir = freshFolder("left-over");
+    const std::string old = frameOf("{\"id\":7,\"method\":\"ping\",\"params\":{}}") + frameOf("{\"id\":8,\"result\":{}}");
+    char said[160];
+    snprintf(said, sizeof said, ": %u B left over from an earlier link came first, as whole frames, and were dropped",
+             (unsigned)old.size());
+    {
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+
+        // Old frames, then this link's magic bytes: the agent's link in the same try, from the magic bytes on.
+        Node first(dir + "/btspp", 0);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        first.appear();
+        first.say(old + kMagic + "and the rest");
+        Link* link = acceptWithin(listener, 3000);
+        CHECK_IN(trace.text(), link != 0);
+        CHECK(readFrom(link, 16, 3000) == kMagic + "and the rest");
+        CHECK_IN(trace.text(), trace.saw(std::string("btspp0") + said));
+        CHECK(trace.saw("btspp0: it opened with the magic bytes, so the link is the agent's"));
+        CHECK(trace.count("left over from an earlier link") == 1);
+        first.hangUp();
+        first.vanish();
+        CHECK(endsWithin(link, 3000));
+        delete link;
+
+        // The same in pieces: a frame cut in two, and the magic bytes too.
+        Node pieces(dir + "/btspp", 1);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        pieces.appear();
+        pieces.say(old.substr(0, 10));
+        pause(40);
+        pieces.say(old.substr(10) + "NB");
+        pause(40);
+        pieces.say("TL!");
+        link = acceptWithin(listener, 3000);
+        CHECK_IN(trace.text(), link != 0);
+        CHECK(readFrom(link, 5, 3000) == "NBTL!" && trace.saw(std::string("btspp1") + said));
+        pieces.hangUp();
+        pieces.vanish();
+        CHECK(endsWithin(link, 3000));
+        delete link;
+
+        // Old frames and nothing more in the time: the node is drained, read until the link ends, and neither the
+        // agent's nor let go.
+        Node only(dir + "/btspp", 2);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        only.appear();
+        only.say(old);
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp2 drained", 3000));
+        CHECK(trace.saw("(then nothing more came in that time): the link is neither the agent's nor let go"));
+        CHECK(trace.saw(std::string("btspp2") + said) && !trace.saw("btspp2 let go"));
+        only.say("NBTL late");
+        bool closed = false;
+        CHECK(only.hear(1, 300, &closed).empty() && !closed && acceptWithin(listener, 50) == 0);
+        only.hangUp();
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp2: the link ended ", 3000));
+        CHECK(trace.saw("s after it was drained; 9 B were dropped, and its node is closed now"));
+        only.vanish();
+
+        // Old frames and then something else: drained at once.
+        Node other(dir + "/btspp", 3);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        other.appear();
+        double at = monoNow();
+        other.say(old + "\x10\x20\x30\x40 not a frame");
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp3 drained", 3000) && monoNow() - at < 0.25);
+        CHECK(trace.saw("(then came bytes that are neither a frame nor the magic bytes)"));
+        CHECK(other.hear(1, 100, &closed).empty() && !closed && acceptWithin(listener, 50) == 0 && !trace.saw("btspp3 let go"));
+        other.hangUp();
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp3: the link ended ", 3000));
+        other.vanish();
+        listener.stop();
+    }
+    {   // the whole way with the stand-in for the car's stack: nothing waits on the node, and the link works
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        SerialConfig config = configFor(dir);
+        config.readNode = &readAhead;
+        SerialListener listener(&gap, &gate, &trace, config);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        Node node(dir + "/btspp", 4);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        node.appear();
+        sendAhead(frameOf("{}") + kMagic + "up");
+        Link* link = acceptWithin(listener, 3000);
+        CHECK_IN(trace.text(), link != 0);
+        CHECK(readFrom(link, 6, 3000) == kMagic + "up");
+        const std::string more = pattern(5000, 9);
+        sendAhead(more);
+        CHECK(readFrom(link, more.size(), 3000) == more);
+        CHECK(link->write("down", 4) == 4);
+        bool closed = false;
+        CHECK(node.hear(4, 3000, &closed) == "down");
+        node.hangUp();
+        CHECK(endsWithin(link, 3000));
+        delete link;
+        listener.stop();
+    }
+}
+
 // What nbtagent's --decide and --decide-hold are made of: the value of the one, and what the agent's first log
 // lines say of the decide step and of the gate's hold.
 static void testOptions() {
@@ -1261,17 +1565,19 @@ static void testOptions() {
     SerialConfig config;
     CHECK(config.decideMs == (unsigned)kSerialDecideMs && !config.letGoKeepsNode);
     CHECK(describeSerialDecide(config) ==
-          "a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node. Any other is "
-          "let go: its node is closed for the program it belongs to");
+          "a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any "
+          "whole frames left over from an earlier link. Any other is let go: its node is closed for the program it "
+          "belongs to if a program declared for a serial service is running, and read until the link ends if none is");
     config.decideMs = 1200;
     config.letGoKeepsNode = true;
     CHECK(describeSerialDecide(config) ==
           "a link is the agent's if it opens with the magic bytes within 1200 ms (--decide; the protocol's time is "
-          "500 ms) of the open of its node. Any other is let go: its node stays open, unread, until the link ends "
-          "(--decide-hold)");
+          "500 ms) of the open of its node, after any whole frames left over from an earlier link. Any other is let "
+          "go: its node stays open, unread, until the link ends (--decide-hold)");
     CHECK(config.lingerMs == (unsigned)kSerialLingerMs &&
           describeSerialLinger(config) == "a link the agent ends keeps its node, read and with what comes dropped, until "
-                                          "the phone ends the link, for 5000 ms at most");
+                                          "the phone ends the link; the log says so if it is still up 5000 ms after the "
+                                          "agent's end closed");
 
     CHECK(config.registerMs == 20000 && config.retryMs == 30000);
     CHECK(describeSerialRetry(config) ==
@@ -1299,11 +1605,13 @@ int main(int argc, char** argv) {
     // As the agent has it: a link whose other side has gone shows as an error, not as a signal.
     signal(SIGPIPE, SIG_IGN);
     testOptions();
+    testReader();   // first: the one line of the process on whether a read came back on time is its
     testLink();
     testListener();
     testAgent();
     testLeftBehind();
     testDecide();
+    testLeftOvers();
     testHold();
     printf("test_serial: ok\n");
     return 0;

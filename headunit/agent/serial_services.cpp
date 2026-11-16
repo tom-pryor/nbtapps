@@ -154,6 +154,15 @@ std::vector<std::string> SerialServices::programs() {
     return std::vector<std::string>(unique.begin(), unique.end());
 }
 
+SerialServices::Readers SerialServices::readers() {
+    std::vector<std::string> names = programs();   // with the lock, so not under it here
+    if (names.empty()) return kNoneDeclared;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (platform_->programState(names[i]) != kProgramNotRunning) return kSomeMayRun;
+    }
+    return kNoneRunning;
+}
+
 unsigned SerialServices::sweep(const char* why) { return sweepOf(declared(), why); }
 
 unsigned SerialServices::sweepIfDue(const char* why) {

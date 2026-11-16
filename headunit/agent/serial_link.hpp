@@ -9,36 +9,48 @@
 // The agent registers a serial service of its own with the stack (spp_service.hpp). A phone app connects to the
 // service's UUID; the stack says that a phone has asked for a link, and some tens of milliseconds later the link
 // is there as a node, /dev/btsppN. The phone dialled, so it speaks first: the agent writes nothing into a link
-// until the link has opened with the protocol's magic bytes (peer.hpp), and a link that opens otherwise is closed
+// until the link has opened with the protocol's magic bytes (peer.hpp), and a link that opens otherwise is let go
 // without a byte sent. That matters because the stack does not say whose link a node holds. It names the car's own
 // serial service in every request, for a link to our UUID too, so every link a phone opens is looked at, and what
 // the phone says first decides whether it is ours.
 //
-// Three things on the car shape the code:
+// What is understood about the node shapes the code (node_reader.hpp has the details):
 //
+//   * What the phone sends waits in the stack, ahead of the node, and moves into the node only when new bytes come
+//     while nothing waits there, or when a read() reaches the node. select() does not ask the stack, so it says that
+//     the node is empty while bytes wait. Bytes that nobody read outlive their link and come on a later link, ahead
+//     of what the phone sends on that one, as one run of bytes. So every open node has one reader, a thread that
+//     keeps a read out on the node from the open until the close (NodeReader), and nothing waits on a node with
+//     select(). The agent's one thread can be inside an install step, so the listener has a thread of its own that
+//     opens the node at once and hands the open link to the agent through a queue and a pipe.
+//   * Closing a node does not end its link. A node closed under a link that is still up, while the phone goes on
+//     sending, leaves those bytes waiting ahead of the node, and every later link opens with them: before the bytes
+//     of the phone's new link come the old ones, which a reader that waits on select() never brings forward. So no
+//     node is closed under a link that may still carry bytes, unless a program that reads such links is there to
+//     take the node.
 //   * The car's media process opens the first node as well, for the car maker's phone apps, and takes the first
 //     bytes of whatever link is there. So the gate (spp_gate.hpp) is put in front of that node before the service
 //     is registered, and refuses that process for as long as the listener runs. While it does, the car maker's
 //     phone apps do not work over Bluetooth. Without the gate in front the service is not registered at all.
-//   * What a phone sends before a reader has the node open does not reach a reader that opens it later. The node
-//     has to be opened at once, and the agent's one thread can be inside an install step. So the listener has a
-//     thread of its own that opens the node, and hands the open link to the agent through a queue and a pipe.
-//   * The node is not a socket. It hands over a message whole or loses the rest of it, and what it does with a
-//     write that cannot go out at once has only been seen for blocking writes of about a thousand bytes. So the
-//     agent does not read or write the node itself: each link has two threads that copy between the node and a
-//     socket pair, in large reads and small blocking writes, and the agent holds the other end of the pair as an
-//     ordinary link of kind "serial". A slow agent holds the copying up, and with it the phone.
+//   * What the node does with a write that cannot go out at once has only been seen for blocking writes of about a
+//     thousand bytes. So the agent does not read or write the node itself: each link of the agent's has its reader
+//     and two threads that copy between it, the node and a socket pair, in small blocking writes, and the agent
+//     holds the other end of the pair as an ordinary link of kind "serial".
 //
 // Another program on the car that takes serial links (a second service with a reader of its own) meets the same
 // node for the same links: the stack gives one node to whatever link comes. Two things keep the two apart:
 //
-//   * The decide step. The listener's thread reads what the phone says first, for kSerialDecideMs from the open at
-//     most. A link that opens with the magic bytes is the agent's, and goes to the agent with those bytes. Any other
-//     link is let go: its node is closed and not read again, and no byte was written into it, so the program it
-//     belongs to finds it as it would have. What the phone had said on it by then is lost to that program. A
-//     link nobody answers is a sign of a service that was left behind, so the list of other programs' services is
-//     swept then (serial_services.hpp). SerialConfig::letGoKeepsNode (`nbtagent --decide-hold`) keeps the node
-//     open instead, unread, until the link ends.
+//   * The decide step. The listener's thread takes what the reader brings, for kSerialDecideMs from the open at
+//     most. Whole frames of this protocol at its start are what an earlier link of the agent's left: they are
+//     counted, dropped and said in the log, and the magic bytes are looked for after them. A link that opens with
+//     the magic bytes, so, is the agent's, and goes to the agent with those bytes. After such leftovers anything
+//     else, or nothing more in the time, has the node drained: read, with what comes dropped, until the link ends,
+//     never handed to the agent and never let go. Any other link is let go, with no byte written into it. If a
+//     program declared for a serial service runs, or may run, its node is closed for that program, which finds the
+//     link as it would have, short of what the phone had said by then. If none does, nobody would ever read the
+//     link, and the node is drained as well. A link nobody answers is a sign of a service that was left behind, so
+//     the list of other programs' services is swept then (serial_services.hpp). SerialConfig::letGoKeepsNode
+//     (`nbtagent --decide-hold`) keeps the node of a link that is let go open instead, unread, until the link ends.
 //   * The hold. From a phone's request until its link has been let go, and for as long as a link of the agent's is
 //     up, the gate also refuses the opens of the programs that are declared for a serial service, so that none of
 //     them takes a link's first bytes or writes into a link of the agent's. Their looks at the node are passed on.
@@ -47,21 +59,15 @@
 // liked. The agent ends a serial link that has not done `hello` within 30 seconds, and one that has gone silent for
 // as long (agent.hpp).
 //
-// How a link of the agent's ends. The phone made the link, and the phone is to end it: a link whose node the agent
-// closed while the phone still held it, and went on sending into it, is what the car's Bluetooth does not get over:
-// when the phone app holds such a link for 30 seconds or more, every new link after it is given a node on which
-// nothing arrives, until the head unit is restarted. A close that the phone follows with its own within a second
-// does no harm. So:
+// How a link of the agent's ends. The phone made the link, and the phone ends it:
 //
 //   * when the agent ends a link on purpose it tells the phone first, with the event link.closing (agent.hpp), and
 //     a phone app ends the link as soon as it hears that;
-//   * when the agent's end of a link has closed, for whatever reason, the link's threads keep the node open and
-//     go on reading it, dropping what comes, until the phone ends the link. They wait kSerialLingerMs for that
-//     (SerialConfig::lingerMs) and close the node then, under a phone that has not heard or does not know the
-//     event; the log says which of the two it was;
-//   * the program does not end while a link waits like that (waitForSerialLinks).
-//
-// A link that is let go, as another program's, is not kept that way: its node is closed after the decide step.
+//   * when the agent's end of a link has closed, for whatever reason, the link's threads keep the node open and go
+//     on reading it, dropping what comes, until the phone ends the link, however long that takes. If the link is
+//     still up kSerialLingerMs after the agent's close (SerialConfig::lingerMs), the log says so once; the link
+//     counts in serialLinksOpen() until its node is closed;
+//   * the program waits a while before it ends for the links that are still up (waitForSerialLinks).
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <pthread.h>
@@ -72,6 +78,7 @@
 #include <vector>
 
 #include "link.hpp"
+#include "node_reader.hpp"
 #include "protocol_constants.hpp"
 #include "serial_log.hpp"
 #include "serial_services.hpp"
@@ -89,21 +96,26 @@ const char* const kCarSerialService = "SPP";
 
 // SerialLog, where the serial code's account of what it does goes, is in serial_log.hpp.
 
-// A link of kind "serial" on a serial node that is open already (blocking, for reading and writing). It takes
-// `nodeFd` over: two threads copy between the node and the link until either side ends, and close the node then.
-// 0 if it cannot be set up; the node is closed then too. The process must ignore SIGPIPE, as the agent does.
+// A link of kind "serial" on a serial node whose reader is running (node_reader.hpp). It takes `reader` over: two
+// threads copy between the reader, the node and the link, and the node is closed when the link has ended. 0 if it
+// cannot be set up; the node is closed then too. The process must ignore SIGPIPE, as the agent does.
 //
-// The threads outlive the Link object. When the phone's side has ended they notice within a few hundred
-// milliseconds, close the node and say so in the log. When the Link is deleted, or closed, they send on what the
-// agent had still written and then keep the node open, reading it and dropping what comes, until the phone ends
-// the link, for `lingerMs` at most: see the top of this file. `log` has to be there until they have ended, which
-// serialLinksOpen() tells.
+// The threads outlive the Link object. When the phone's side has ended they notice within a tick, close the node
+// and say so in the log. When the Link is deleted, or closed, they send on what the agent had still written and
+// then keep the node open, reading it and dropping what comes, until the phone ends the link, however long that
+// takes; once `lingerMs` have passed the log says that the link is still up. See the top of this file. `log` has
+// to be there until they have ended, which serialLinksOpen() tells.
 //
 // `first` is what has been read from the node already: the link gives it before anything else.
+Link* newSerialLink(NodeReader* reader, const std::string& path, SerialLog* log,
+                    const std::vector<uint8_t>& first = std::vector<uint8_t>(),
+                    unsigned lingerMs = (unsigned)kSerialLingerMs);
+// The same on a node that is open already (blocking, for reading and writing), with a reader of its own started
+// on it with the platform's timed read.
 Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log,
                     const std::vector<uint8_t>& first = std::vector<uint8_t>(),
                     unsigned lingerMs = (unsigned)kSerialLingerMs);
-// How many links' threads are still running.
+// How many links of the agent's still have their node open.
 unsigned serialLinksOpen();
 // Waits until none is, for `ms` at most. False if some still are.
 bool waitForSerialLinks(int ms);
@@ -172,13 +184,14 @@ struct SerialConfig {
                                  // how long the hold waits for it
     bool letGoKeepsNode;         // a link that is let go keeps its node open, unread, until the link ends: for a
                                  // car on which a link does not outlive the close of its node
-    unsigned lingerMs;           // a link of the agent's whose agent's end has closed: how long its node is kept
-                                 // open and read, for the phone to end the link
+    unsigned lingerMs;           // a link of the agent's whose agent's end has closed, and that is still up this
+                                 // long after: the log says so. Its node is kept and read until the link ends
+    NodeReadFn readNode;         // the timed read of a node; 0: the platform's (node_reader.hpp)
 
     SerialConfig()
         : name(kSerialServiceName), uuid(kSerialServiceUuid), carService(kCarSerialService),
           nodePrefix("/dev/btspp"), registerMs(20000), retryMs(30000), requestWindowS(15), decideMs((unsigned)kSerialDecideMs),
-          linkWaitMs(3000), letGoKeepsNode(false), lingerMs((unsigned)kSerialLingerMs) {}
+          linkWaitMs(3000), letGoKeepsNode(false), lingerMs((unsigned)kSerialLingerMs), readNode(0) {}
 };
 
 // ---- the decide step as nbtagent's options set it, and as its first log lines say it ----------------------------
@@ -211,9 +224,10 @@ inline std::string describeSerialDecide(const SerialConfig& config) {
         snprintf(ms, sizeof ms, "%u ms (--decide; the protocol's time is %u ms)", config.decideMs, (unsigned)kSerialDecideMs);
     }
     return std::string("a link is the agent's if it opens with the magic bytes within ") + ms +
-           " of the open of its node. Any other is let go: " +
+           " of the open of its node, after any whole frames left over from an earlier link. Any other is let go: " +
            (config.letGoKeepsNode ? "its node stays open, unread, until the link ends (--decide-hold)"
-                                  : "its node is closed for the program it belongs to");
+                                  : "its node is closed for the program it belongs to if a program declared for a "
+                                    "serial service is running, and read until the link ends if none is");
 }
 
 // What becomes of a link of the agent's when the agent ends it.
@@ -221,7 +235,7 @@ inline std::string describeSerialLinger(const SerialConfig& config) {
     char ms[32];
     snprintf(ms, sizeof ms, "%u ms", config.lingerMs);
     return std::string("a link the agent ends keeps its node, read and with what comes dropped, until the phone ends "
-                       "the link, for ") + ms + " at most";
+                       "the link; the log says so if it is still up ") + ms + " after the agent's end closed";
 }
 
 // What the listener does when the car's Bluetooth service does not take the registration, or loses it.
@@ -299,10 +313,13 @@ private:
     void lookForLinks();
     void take(int node);
     // What the decide step found.
-    enum Decided { kOurs, kLetGo, kEnded };
-    Decided decide(int fd, const std::string& path, double openedAt, std::vector<uint8_t>* first, std::string* why);
-    void letGo(int fd, int node, const std::string& path, double openedAt, const std::string& why);
-    void closeKept(bool all);
+    enum Decided { kOurs, kLetGo, kDrain, kEnded };
+    Decided decide(NodeReader* reader, const std::string& path, double openedAt, std::vector<uint8_t>* first,
+                   uint64_t* leftOver, std::string* why);
+    void letGo(NodeReader* reader, int node, const std::string& path, double openedAt, const std::string& why);
+    void keep(int node, int fd, NodeReader* reader, const char* what);
+    enum Closing { kEndedOnly, kAllButRead, kEvery };
+    void closeKept(Closing which);
     void updateHold();
     void waitForPass();
     bool linkExpected();
@@ -310,11 +327,14 @@ private:
     void shutDown();
     bool comeBack();
 
-    // A link that was let go, on the listener's thread only: with its node kept open (fd >= 0) until the link
-    // ends, or closed, and then only for the log to say when its node went.
+    // A link that is not the agent's, on the listener's thread only: with its node read and what comes dropped
+    // (reader), or kept open and unread (fd >= 0), until the link ends; or closed, and then only for the log to say
+    // when its node went.
     struct LetGo {
         int node, fd;
+        NodeReader* reader;
         double at;
+        const char* what;   // what became of the link, for the log: "let go", "drained"
     };
 
     NodeGate* gate_;

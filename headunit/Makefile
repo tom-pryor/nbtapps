@@ -125,6 +125,7 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 #   spp_service  our Bluetooth serial service: its registration with the Bluetooth stack
 #   spp_gate     the gate in front of /dev/btspp0, which keeps the car's media process off a serial link
 #   spp_nodes    which serial node holds a link of ours
+#   node_reader  the one reader of an open serial node, which keeps a read out on it
 #   serial_link  the Bluetooth serial listener, and a link on a serial node
 #   programs     which programs are running, by the file names of their executables
 #   serial_services  the serial services that packages' programs register, and the removal of one whose program
@@ -144,7 +145,7 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/manifest.cpp agent/package.cpp agent/fsutil.cpp agent/process.cpp agent/journal.cpp \
                agent/store.cpp agent/hmi_ids.cpp agent/engine.cpp agent/frame.cpp agent/link.cpp agent/peer.cpp \
                agent/planner.cpp agent/job.cpp agent/agent.cpp agent/hu_platform.cpp agent/dsi_client.cpp \
-               agent/spp_service.cpp agent/spp_gate.cpp agent/serial_link.cpp agent/programs.cpp \
+               agent/spp_service.cpp agent/spp_gate.cpp agent/node_reader.cpp agent/serial_link.cpp agent/programs.cpp \
                agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp agent/checks.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
