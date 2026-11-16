@@ -34,6 +34,15 @@ fun SetupScreen(
     when (uiState.step) {
         SetupStep.Welcome -> WelcomePage(onYes = { viewModel.answer(true) }, onNotYet = { viewModel.answer(false) }, onBrowse = skip)
         SetupStep.NotYet -> NotYetPage(onBack = back, onInstalled = { viewModel.answer(true) })
+        SetupStep.PickCar -> PickCarPage(
+            uiState,
+            onBack = back,
+            onSkip = skip,
+            onSelect = viewModel::select,
+            onConnect = viewModel::pickCar,
+            onBeginAddress = viewModel::beginAddress,
+            onAdded = viewModel::addedByAddress,
+        )
         else -> SetupFrame(number = setupStepNumber(uiState.step), count = uiState.stepCount, onBack = back, onSkip = skip) {}
     }
 }
