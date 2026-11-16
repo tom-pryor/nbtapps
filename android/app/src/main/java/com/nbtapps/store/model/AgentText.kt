@@ -52,6 +52,14 @@ object AgentText {
         else -> request(code)
     }
 
+    /** For the `error` of `serial.reset`. */
+    fun serialReset(code: String): String = when (code) {
+        "busy" -> "The head unit is busy with a job. Try again once it has finished."
+        "io-error" -> "The head unit couldn't ask the car's Bluetooth to end the link"
+        "unsupported" -> "The head unit's agent can't reset the Bluetooth link"
+        else -> request(code)
+    }
+
     /** Where on the car's screen a phone is paired: what the agent repo's plugin calls its menu and the row in it. */
     const val PAIR_ON_CAR = "On the car's screen, open NBTApp (in the Media/Radio menu) and choose Pair a phone."
 

@@ -1595,6 +1595,117 @@ class JobRepositoryTest {
         assertEquals(1, counting.opened.get())
     }
 
+    // ---- the reset of the Bluetooth link ---------------------------------------------------------------------------
+
+    /** A repository over Bluetooth serial whose agents list [capabilities], with the wait for the car's end cut to [waitMs]. */
+    private suspend fun resetting(capabilities: String = """["serial-reset"]""", waitMs: Long = 5_000): Pair<JobRepository, FakeConnector> {
+        headUnits.add(bluetoothCar)
+        val serial = FakeConnector(serial = true)
+        serial.onConnect = { it.capabilities = capabilities }
+        return JobRepository(
+            headUnits, serial, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L }, resetWaitMs = waitMs,
+        ) to serial
+    }
+
+    @Test
+    fun `a reset the car carries out ends the link, and the app connects again by itself`() = test {
+        val (jobs, serial) = resetting()
+        assertTrue(jobs.connect("bt").isSuccess)
+        assertTrue((jobs.connection.value as ConnectionState.Connected).serialReset)
+        val first = serial.agent
+        val seen = states(jobs)
+
+        val outcome = jobs.resetSerial().getOrThrow()
+
+        assertEquals(SerialResetOutcome.Sent(endedByCar = true, connected = true), outcome)
+        assertEquals(1, first.resets.get())
+        assertEquals(listOf("{}"), first.requestsOf("serial.reset").map { it.toString() })
+        assertEquals(2, serial.agents.size)
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+        // The link's end was no failure to show.
+        assertTrue("$seen", seen.none { it is ConnectionState.Failed })
+    }
+
+    @Test
+    fun `a reset the car does not carry out in time has the app end the link itself, and connect again`() = test {
+        val (jobs, serial) = resetting(waitMs = 300)
+        serial.onConnect = { agent ->
+            agent.capabilities = """["serial-reset"]"""
+            agent.resetEndsAfterMs = null
+        }
+        assertTrue(jobs.connect("bt").isSuccess)
+        val first = serial.agent
+
+        val outcome = jobs.resetSerial().getOrThrow()
+
+        assertEquals(SerialResetOutcome.Sent(endedByCar = false, connected = true), outcome)
+        assertTrue("the phone held the link", first.phoneLeft())
+        assertEquals(2, serial.agents.size)
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+    }
+
+    @Test
+    fun `a reset with no serial link up is armed, and nothing more happens`() = test {
+        val (jobs, serial) = resetting()
+        serial.onConnect = { agent ->
+            agent.capabilities = """["serial-reset"]"""
+            agent.serialReset = "armed"
+        }
+        assertTrue(jobs.connect("bt").isSuccess)
+
+        assertEquals(SerialResetOutcome.Armed(60_000), jobs.resetSerial().getOrThrow())
+
+        delay(500)
+        assertEquals(1, serial.agents.size)
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+    }
+
+    @Test
+    fun `a reset the agent refuses is shown in the app's words, and the link stays`() = test {
+        val (jobs, serial) = resetting()
+        serial.onConnect = { agent ->
+            agent.capabilities = """["serial-reset"]"""
+            agent.serialReset = "busy"
+        }
+        assertTrue(jobs.connect("bt").isSuccess)
+
+        val refusal = jobs.resetSerial().exceptionOrNull() as AgentRefusal
+
+        assertEquals("busy", refusal.code)
+        assertEquals(AgentText.serialReset("busy"), refusal.message)
+        delay(500)
+        assertEquals(1, serial.agents.size)
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+        // And a link's end after that is a failure to show as before.
+        serial.agent.drop()
+        await(jobs.connection, "the lost link") { it is ConnectionState.Failed }
+    }
+
+    @Test
+    fun `an agent without the capability is not asked for a reset, and nor is one while a job needs the phone`() = test {
+        val (jobs, serial) = resetting(capabilities = """["autostart"]""")
+        assertTrue(jobs.connect("bt").isSuccess)
+        assertFalse((jobs.connection.value as ConnectionState.Connected).serialReset)
+
+        val failure = jobs.resetSerial().exceptionOrNull()
+
+        assertEquals("This head unit's agent can't reset the Bluetooth link. Update the agent first.", failure?.message)
+        assertTrue(serial.agent.requestsOf("serial.reset").isEmpty())
+
+        // With the capability, and a job that needs the phone.
+        val stored = stored()
+        connector.onConnect = { agent ->
+            planning(agent, stored)
+            agent.capabilities = """["serial-reset"]"""
+        }
+        val busy = watched()
+        startedJob(stored, busy)
+        assertEquals("Wait for the job to finish, then try again.", busy.resetSerial().exceptionOrNull()?.message)
+        assertTrue(connector.agent.requestsOf("serial.reset").isEmpty())
+        // And with no link at all.
+        assertTrue(repository(connector).resetSerial().isFailure)
+    }
+
     @Test
     fun `a head unit removed while the app was away is not connected to on coming back`() = test {
         val jobs = watched()

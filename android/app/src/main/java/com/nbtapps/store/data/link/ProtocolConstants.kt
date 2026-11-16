@@ -38,10 +38,11 @@ object ProtocolConstants {
     const val SERIAL_DECIDE_MS = 500L
 
     /**
-     * How long the agent keeps a serial link's node open, in milliseconds, once it has closed its own end of the
-     * link: the phone made the link, and the phone ends it. The app does so the moment `link.closing` arrives
-     * ([AgentSession]), which is well inside this. Left to its keep-alive it would hold the link for
-     * [SERIAL_SILENCE_MS], and have the node closed under it.
+     * The phone made the link, and the phone ends it. Once the agent has closed its own end of a serial link it keeps
+     * the link's node open and reads it, dropping what comes, until the phone has ended the link, however long that
+     * takes: closing a node does not end its link. When the link is still up this long after the agent's close, in
+     * milliseconds, the agent's log says so. The app ends its link the moment `link.closing` arrives ([AgentSession]),
+     * well inside this; left to its keep-alive it would hold the link for [SERIAL_SILENCE_MS].
      */
     const val SERIAL_LINGER_MS = 5_000L
 

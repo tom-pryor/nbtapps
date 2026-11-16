@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -142,6 +143,7 @@ fun HeadUnitDetailScreen(
                 AutostartCard(state, busy, uiState.autostartError, viewModel::setAutostart, onOpenPackage)
             }
             InstalledCard(uiState, connected, onUninstall, onOpenLogs)
+            TroubleshootingCard(uiState, viewModel::resetSerial)
         }
     }
 
@@ -434,6 +436,62 @@ private fun InstalledRow(pkg: InstalledPackage, connected: Boolean, onUninstall:
             }
         },
     )
+}
+
+/**
+ * Whether the Troubleshooting card is shown: while there is a link to an agent that can have the car end this phone's
+ * Bluetooth link, and no job needs the phone; and while a reset asked from this page runs or has an outcome to show,
+ * since the reset itself ends the link.
+ */
+internal fun showsTroubleshooting(uiState: HeadUnitDetailUiState): Boolean = uiState.canResetSerial || uiState.serialReset != null
+
+/** What the confirmation of the reset says it does, and when it is for. */
+internal const val RESET_EXPLAINED =
+    "The car ends this phone's Bluetooth link to the head unit, and the app connects again by itself. " +
+        "This is for when the phone connects but nothing happens."
+
+/** What can be done from the phone when the link to the head unit does not work as it should. */
+@Composable
+private fun TroubleshootingCard(uiState: HeadUnitDetailUiState, onReset: () -> Unit) {
+    if (!showsTroubleshooting(uiState)) return
+    var confirming by rememberSaveable { mutableStateOf(false) }
+    val reset = uiState.serialReset
+    Section("Troubleshooting") {
+        ListItem(
+            headlineContent = { Text("Reset Bluetooth link") },
+            supportingContent = { Text("For when the phone connects but nothing happens.") },
+            trailingContent = {
+                if (reset == SerialResetUi.Working) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                } else {
+                    TextButton(onClick = { confirming = true }, enabled = uiState.canResetSerial) { Text("Reset…") }
+                }
+            },
+        )
+        (reset as? SerialResetUi.Done)?.let { done ->
+            Text(
+                done.text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (done.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("Reset the Bluetooth link?") },
+            text = { Text(RESET_EXPLAINED) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirming = false
+                        onReset()
+                    },
+                ) { Text("Reset") }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable

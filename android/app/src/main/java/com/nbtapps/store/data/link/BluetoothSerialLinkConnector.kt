@@ -57,9 +57,14 @@ interface SerialSocket : Closeable {
  * on the same node there, another app's included.
  *
  * What the phone says first is how the agent tells its links from those of other programs on the car: it waits
- * [ProtocolConstants.SERIAL_DECIDE_MS] from its open of a link for the magic bytes and lets the link go without
- * them. So they are written here, the moment the connect comes back, and not with the first frame, which waits
- * for whoever sends it. The link says so ([Link.magicSent]), and its [Peer] sends none.
+ * [ProtocolConstants.SERIAL_DECIDE_MS] from its open of a link for the magic bytes, passing over whole frames that
+ * an earlier link left unread, and lets the link go without them. So they are written here, the moment the connect
+ * comes back, and not with the first frame, which waits for whoever sends it. The link says so ([Link.magicSent]),
+ * and its [Peer] sends none.
+ *
+ * Closing a link's node on the car does not end the link: the phone ends it, or the car does when the agent asks it
+ * to ([AgentClient.serialReset]). The agent reads a link it is done with until then, so that nothing the phone still
+ * writes is left in the car's Bluetooth for the next link.
  *
  * The car takes one serial link from a phone at a time. While another app on the phone holds it, a connect
  * fails at once, so a failed connect is tried again for [windowMillis]. During a wireless Android Auto session

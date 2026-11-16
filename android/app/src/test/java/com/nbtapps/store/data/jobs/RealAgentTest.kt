@@ -13,8 +13,11 @@ import com.nbtapps.store.data.catalogue.CatalogueState
 import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
 import com.nbtapps.store.data.catalogue.FileCatalogueSource
 import com.nbtapps.store.data.crypto.Hex
+import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.link.ProtocolConstants
+import com.nbtapps.store.data.link.RemoteException
 import com.nbtapps.store.data.logs.LogPullRequest
 import com.nbtapps.store.data.logs.LogPullState
 import com.nbtapps.store.data.packages.PackageArchive
@@ -720,6 +723,30 @@ class RealAgentTest {
         assertFalse(ended.linkLost)
         awaitInstalled("org.nbtapp.big 1.0.0")
         assertEquals(3L * 1024 * 1024, root.walkTopDown().first { it.name == "blob.bin" }.length())
+    }
+
+    @Test
+    fun `the bench agent takes no Bluetooth serial links, so it has no reset of one, and says so when asked`() = test {
+        assertTrue(jobs.connect("bench").isSuccess)
+        assertFalse(ProtocolConstants.CAPABILITY_SERIAL_RESET in connected().capabilities)
+        assertFalse(connected().serialReset)
+        // The repository does not ask such an agent.
+        assertTrue(jobs.resetSerial().isFailure)
+
+        // Asked over a link of the test's own, the agent refuses.
+        val session = AgentSession(connector.connect(TcpEndpoint("local", 1)), scope)
+        try {
+            session.client.hello(identity.id(), identity.name)
+            val refusal = try {
+                session.client.serialReset()
+                null
+            } catch (e: RemoteException) {
+                e.code
+            }
+            assertEquals("unsupported", refusal)
+        } finally {
+            session.close("the test is over")
+        }
     }
 
     @Test

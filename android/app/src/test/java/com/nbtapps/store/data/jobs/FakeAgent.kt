@@ -206,6 +206,8 @@ class FakeChecks {
  * It also sends files as the agent does for `files.fetch`, from [logs]: the answer, and then the DATA frames of
  * one raw deflate stream, [dataChunk] bytes a frame. A test can have a stream stop until it is cancelled, end with
  * `files.error`, or come damaged.
+ *
+ * And it answers `serial.reset` as the agent does ([serialReset]), with the car ending the link after `sent`.
  */
 class FakeAgent(private val link: Link, val headUnitId: String) {
     /** See the class. Set before the phone's first byte arrives. */
@@ -266,6 +268,23 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
     /** The paths whose deflate streams come with a byte of them changed. */
     val damaged: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    /**
+     * What `serial.reset` answers, as the agent does for an agent that lists `serial-reset`: `sent`, `armed`, or the
+     * code of a refusal. One that does not list it answers `unsupported`, as the real one does.
+     */
+    @Volatile
+    var serialReset = "sent"
+
+    /**
+     * With `sent`, the car ends the link this long after the answer, as the real agent has it do, which for the phone
+     * is the link ending from the far side. Null where the car leaves it up.
+     */
+    @Volatile
+    var resetEndsAfterMs: Long? = 300
+
+    /** How many `serial.reset` requests were taken, refusals among them. */
+    val resets = AtomicInteger()
+
     /** A files stream that is being sent: its frames go out with its lock held, so a cancel comes after them all. */
     private class Outgoing {
         var cancelled = false
@@ -307,6 +326,23 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
                 stream.stopped.countDown()
             }
             "{}"
+        }
+        handlers["serial.reset"] = {
+            if ("\"${ProtocolConstants.CAPABILITY_SERIAL_RESET}\"" !in capabilities) throw Refusal("unsupported")
+            resets.incrementAndGet()
+            when (serialReset) {
+                "sent" -> {
+                    resetEndsAfterMs?.let { after ->
+                        thread(isDaemon = true) {
+                            Thread.sleep(after)
+                            link.close()
+                        }
+                    }
+                    """{"state":"sent"}"""
+                }
+                "armed" -> """{"state":"armed","forMs":60000}"""
+                else -> throw Refusal(serialReset)
+            }
         }
         thread(isDaemon = true, name = "fake-agent") { run() }
     }

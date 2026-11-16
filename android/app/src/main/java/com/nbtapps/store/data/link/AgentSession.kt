@@ -41,9 +41,11 @@ import kotlinx.serialization.json.JsonObject
  *
  * How a link ends: the phone made it, and the phone ends it. Before the agent ends a link of its own accord it
  * sends the event `link.closing` with why ([LinkClosing]), and this side closes the link the moment that arrives,
- * with nothing more sent ([closeAs]). On Bluetooth serial that is more than good manners: a car's Bluetooth has
- * been seen to give no later link any bytes, until the head unit was restarted, after a phone went on holding a
- * link whose other end the agent had closed. The agent waits [ProtocolConstants.SERIAL_LINGER_MS] for it.
+ * with nothing more sent ([closeAs]). On Bluetooth serial that is more than good manners: the agent closing its end
+ * does not end the link, and what a phone writes into a link the agent no longer serves waits in the car's Bluetooth
+ * ahead of the bytes of every later link. So the agent reads the link, dropping what comes, until the phone has ended
+ * it, and its log says so when that takes longer than [ProtocolConstants.SERIAL_LINGER_MS]. Where bytes are stuck all
+ * the same, the agent can have the car end the phone's link: [AgentClient.serialReset].
  */
 class AgentSession(
     link: Link,

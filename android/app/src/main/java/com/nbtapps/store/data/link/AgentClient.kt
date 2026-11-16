@@ -21,6 +21,8 @@ import com.nbtapps.store.model.JobResult
 import com.nbtapps.store.model.JobSnapshot
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.PlanRequest
+import com.nbtapps.store.model.SerialReset
+import com.nbtapps.store.model.SerialResetState
 import com.nbtapps.store.model.TrustedSource
 import com.nbtapps.store.model.TrustedSources
 import java.io.IOException
@@ -391,6 +393,22 @@ class AgentClient(
         put("id", id)
         put("token", token)
     })
+
+    /**
+     * Asks the agent to have the car's Bluetooth service end this phone's Bluetooth serial link, which closing the
+     * link's node does not do. With `sent` a serial link's node was open, and the car is asked about 300 ms after this
+     * answer, so the answer comes first on a link that is itself that one. With `armed` none was, and the next serial
+     * link that opens within [SerialReset.forMs] is ended at its open. Only an agent that lists
+     * [ProtocolConstants.CAPABILITY_SERIAL_RESET] has it.
+     *
+     * @throws RemoteException with `busy` while a job runs, `io-error` where the car's Bluetooth service could not be
+     *   asked, `unsupported` from an agent that takes no Bluetooth serial links.
+     */
+    suspend fun serialReset(): SerialReset {
+        val answer: SerialReset = call("serial.reset")
+        if (answer.state != SerialResetState.SENT && answer.state != SerialResetState.ARMED) throw ProtocolException(UNREADABLE)
+        return answer
+    }
 
     private fun planIdParams(planId: String) = buildJsonObject { put("planId", planId) }
 

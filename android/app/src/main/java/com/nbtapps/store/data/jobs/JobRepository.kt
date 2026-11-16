@@ -46,6 +46,7 @@ import com.nbtapps.store.model.LinkClosing
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.PlanRequest
 import com.nbtapps.store.model.RemoveTarget
+import com.nbtapps.store.model.SerialResetState
 import com.nbtapps.store.model.inConnectOrder
 import java.io.File
 import java.io.IOException
@@ -98,6 +99,9 @@ sealed interface ConnectionState {
 
         /** The agent has the compatibility checks: [JobRepository.ensureChecked] and the calls after it. */
         val checks: Boolean get() = ProtocolConstants.CAPABILITY_CHECKS in capabilities
+
+        /** The agent can have the car end this phone's Bluetooth serial link: [JobRepository.resetSerial]. */
+        val serialReset: Boolean get() = ProtocolConstants.CAPABILITY_SERIAL_RESET in capabilities
     }
 
     /**
@@ -189,6 +193,19 @@ class Rejoin(
     val giveUpAfterMs: Long = 45_000,
 )
 
+/** How asking the car to end this phone's Bluetooth serial link went: see [JobRepository.resetSerial]. */
+sealed interface SerialResetOutcome {
+    /**
+     * The car was asked to end the link the app had, and [endedByCar] says whether it did so in the time allowed;
+     * where it did not, the app ended the link itself. Then the app connected again by itself, and [connected] says
+     * whether that link is up.
+     */
+    data class Sent(val endedByCar: Boolean, val connected: Boolean) : SerialResetOutcome
+
+    /** No Bluetooth serial link was up on the head unit: the car ends the next one that opens within [forMs]. */
+    data class Armed(val forMs: Long) : SerialResetOutcome
+}
+
 /** Told when a job starts needing the phone, so the process is kept running for it. */
 fun interface JobKeeper {
     fun jobRunning()
@@ -252,6 +269,8 @@ class JobRepository(
     private val shareDir: File = File(System.getProperty("java.io.tmpdir"), "nbt-share"),
     /** Whether the user has the app in front of them. A test that has no activities leaves it always so. */
     private val foreground: AppForeground = AlwaysInForeground,
+    /** How long [resetSerial] waits for the car to end the link, in milliseconds; a test shortens it. */
+    private val resetWaitMs: Long = 5_000,
 ) {
     private val connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val jobState = MutableStateFlow<JobView?>(null)
@@ -326,6 +345,10 @@ class JobRepository(
     /** The app's own connect on coming back, while it runs: what the user asks for takes its place. */
     @Volatile
     private var returning: Job? = null
+
+    /** The link the car has been asked to end ([resetSerial]): its end is the app's to follow, not a failure. */
+    @Volatile
+    private var resetting: AgentSession? = null
 
     init {
         scope.launch { watchForeground() }
@@ -942,6 +965,61 @@ class JobRepository(
     suspend fun restart(kind: String): Result<Unit> = withSession { current -> current.client.restart(kind) }
 
     /**
+     * Has the car end this phone's Bluetooth serial link (`serial.reset`), which the agent closing its end does not
+     * do: for when the phone connects and nothing arrives, because bytes an earlier link left wait in the car's
+     * Bluetooth. Only an agent that lists [ProtocolConstants.CAPABILITY_SERIAL_RESET] has it, and it is refused while
+     * a job needs the phone.
+     *
+     * With `sent` the car ends the very link it was asked on, about 300 ms after the answer. The app waits up to
+     * [resetWaitMs] for that, ends the link itself where the car did not, and connects again by itself, quietly, as
+     * on coming back to the foreground: shown as [ConnectionState.Connecting], and a failure leaves
+     * [ConnectionState.Disconnected]. Not where the user disconnected or connected meanwhile. With `armed` no serial
+     * link was up on the head unit, as over another kind of link, and nothing more happens: the car ends the next one
+     * that opens within the time the answer gives.
+     *
+     * A refusal is an [AgentRefusal] in the app's words ([AgentText.serialReset]).
+     */
+    suspend fun resetSerial(): Result<SerialResetOutcome> = using {
+        val current = session ?: return Result.failure(IOException(NOT_CONNECTED))
+        val connected = connectionState.value as? ConnectionState.Connected ?: return Result.failure(IOException(NOT_CONNECTED))
+        if (!connected.serialReset) return Result.failure(IOException(NO_SERIAL_RESET))
+        if (jobState.value?.needsPhone == true) return Result.failure(IOException(RESET_WHILE_JOB))
+        // Before the answer: the link may end on its heels.
+        resetting = current
+        val answer = try {
+            current.client.serialReset()
+        } catch (e: RemoteException) {
+            resetting = null
+            return Result.failure(AgentRefusal(e.code, AgentText.serialReset(e.code)))
+        } catch (e: IOException) {
+            resetting = null
+            return Result.failure(e)
+        }
+        if (answer.state == SerialResetState.ARMED) {
+            resetting = null
+            return Result.success(SerialResetOutcome.Armed(answer.forMs ?: ARMED_FOR_MS))
+        }
+        val endedByCar = withTimeoutOrNull(resetWaitMs) { current.ended.await() } != null
+        val again = connectLock.withLock {
+            // Whether [pump] has seen the end yet or not, the link is no longer the app's.
+            if (session === current) {
+                session = null
+                current.close(RESET_BY_APP)
+                connectionState.value = ConnectionState.Connecting(connected.headUnitId)
+            }
+            resetting = null
+            // The user disconnected, or connected, meanwhile: theirs stands.
+            if (connectionState.value != ConnectionState.Connecting(connected.headUnitId)) return@withLock false
+            // For the car to take the last link down, as between the links a connect opens.
+            delay(greeting.pauseMs)
+            val result = attempt(connected.headUnitId, quiet = true)
+            if (result.isFailure && result.exceptionOrNull() !is PairingNeeded) connectionState.value = ConnectionState.Disconnected
+            result.isSuccess
+        }
+        Result.success(SerialResetOutcome.Sent(endedByCar, again))
+    }
+
+    /**
      * Opens a link to [endpoint] and says `hello` on it. [holding] is told of each session while it is open and
      * not yet the caller's, and of null once it has been closed again.
      *
@@ -1140,8 +1218,9 @@ class JobRepository(
         for (event in current.events) {
             apply(headUnitId, event)
             // The agent is about to end for its own update. One that knows `link.closing` says so next; one from
-            // before says nothing and takes its end of the link away, and a serial link held after that is what a
-            // car's Bluetooth has not got over. So the link is ended here, for both.
+            // before says nothing and closes its end, which does not end a serial link: one the phone goes on holding,
+            // and writing to, leaves bytes in the car's Bluetooth ahead of every later link's. So the link is ended
+            // here, for both.
             if (event is JobEvent.Progress && event.job.state == JobState.RESTARTING) current.closeAs(LinkClosing.RESTARTING)
             if (event is JobEvent.Done) {
                 current.blobs.jobEnded()
@@ -1156,6 +1235,11 @@ class JobRepository(
         connectLock.withLock {
             if (session !== current) return@withLock
             session = null
+            if (resetting === current) {
+                // The car ended the link because the app asked it to, and the app connects again: see [resetSerial].
+                connectionState.value = ConnectionState.Connecting(headUnitId)
+                return@withLock
+            }
             val unfinished = { view: JobView? -> view != null && !view.ended && view.headUnitId == headUnitId }
             if (told == LinkClosing.RESTARTING) {
                 // The job is not lost with the link: the app goes after it. The service that keeps the process
@@ -1246,6 +1330,15 @@ class JobRepository(
         /** Why the link is ended, and a connect given up, when the app leaves the foreground with nothing using the link. */
         const val LEFT = "The app was left, with nothing using the link"
         const val LEFT_WHILE_CONNECTING = "The app was left before the link was up"
+
+        const val NO_SERIAL_RESET = "This head unit's agent can't reset the Bluetooth link. Update the agent first."
+        const val RESET_WHILE_JOB = "Wait for the job to finish, then try again."
+
+        /** Why the app ends a link the car was asked to end and did not. */
+        const val RESET_BY_APP = "The car was asked to end the link, and the app ended it"
+
+        /** How long an `armed` reset lasts where the agent's answer does not say: the agent's own time. */
+        const val ARMED_FOR_MS = 60_000L
 
         /** The time in a ZIP's name: the phone's own, as the user reads it. */
         val ZIP_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")

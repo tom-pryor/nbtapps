@@ -419,3 +419,21 @@ data class CheckFixResult(
     /** One of [RestartKind]'s: what the fix left needed. */
     val restart: String = RestartKind.NONE,
 )
+
+/** What `serial.reset` did: the `state` of [SerialReset]. */
+object SerialResetState {
+    /** A serial link's node was open: the car was asked to end that link, about 300 ms after this answer. */
+    const val SENT = "sent"
+
+    /** No serial link's node was open: the car ends the next serial link that opens within [SerialReset.forMs]. */
+    const val ARMED = "armed"
+}
+
+/** The result of `serial.reset`. */
+@Serializable
+data class SerialReset(
+    /** One of [SerialResetState]'s. */
+    val state: String,
+    /** With `armed`: for how long, in milliseconds, the next serial link is ended at its open. */
+    val forMs: Long? = null,
+)

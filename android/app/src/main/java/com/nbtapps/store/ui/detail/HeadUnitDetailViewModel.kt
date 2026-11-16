@@ -14,6 +14,7 @@ import com.nbtapps.store.data.jobs.AutostartSetupState
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.JobView
+import com.nbtapps.store.data.jobs.SerialResetOutcome
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.serialUnavailable
 import com.nbtapps.store.di.ApplicationScope
@@ -69,6 +70,38 @@ internal fun PhoneBluetooth.serialStatus(unit: HeadUnit?): SerialStatus? =
         SerialStatus(serialUnavailable(it.address), needsPermission = access() == BluetoothAccess.NOT_ALLOWED)
     }
 
+/** Where the Bluetooth link's reset asked from the head unit's page stands: see [HeadUnitDetailViewModel.resetSerial]. */
+sealed interface SerialResetUi {
+    data object Working : SerialResetUi
+
+    /** It is over: [text] says how it went, in one line, and [failed] where it could not be done. */
+    data class Done(val text: String, val failed: Boolean = false) : SerialResetUi
+}
+
+/** What the page says of how the reset went: see [JobRepository.resetSerial]. */
+internal fun serialResetText(result: Result<SerialResetOutcome>): SerialResetUi.Done {
+    val outcome = result.getOrElse { return SerialResetUi.Done(it.message ?: "The head unit didn't answer", failed = true) }
+    return SerialResetUi.Done(
+        when (outcome) {
+            is SerialResetOutcome.Armed ->
+                "No Bluetooth link was up, so the car will end the next one this phone opens within ${within(outcome.forMs)}."
+            is SerialResetOutcome.Sent -> when {
+                outcome.endedByCar && outcome.connected -> "The car ended the Bluetooth link, and the app connected again."
+                outcome.endedByCar -> "The car ended the Bluetooth link. The app couldn't connect again by itself."
+                outcome.connected -> "The car didn't end the Bluetooth link in time, so the app ended it and connected again."
+                else -> "The car didn't end the Bluetooth link in time, so the app ended it. It couldn't connect again by itself."
+            }
+        },
+    )
+}
+
+/** [millis] as the outcome's line says it: a minute, as the agent has it, or so many seconds. */
+private fun within(millis: Long): String = when {
+    millis == 60_000L -> "a minute"
+    millis % 60_000L == 0L -> "${millis / 60_000L} minutes"
+    else -> "${millis / 1000L} seconds"
+}
+
 data class HeadUnitDetailUiState(
     /** False until the saved head units have been read. */
     val loaded: Boolean = false,
@@ -108,6 +141,13 @@ data class HeadUnitDetailUiState(
     val checkError: String? = null,
     /** The confirmation of a check's fix that is open, if one is. */
     val fix: CheckFixStep? = null,
+    /**
+     * There is a link to this head unit, its agent can have the car end the phone's Bluetooth link, and no job needs
+     * the phone: see [JobRepository.resetSerial].
+     */
+    val canResetSerial: Boolean = false,
+    /** The reset asked from this page, while it runs and once it is over. Null where none was. */
+    val serialReset: SerialResetUi? = null,
 )
 
 @HiltViewModel
@@ -118,7 +158,7 @@ class HeadUnitDetailViewModel internal constructor(
     private val connector: LinkConnector,
     private val bluetooth: PhoneBluetooth,
     private val setup: AutostartSetup,
-    appScope: CoroutineScope,
+    private val appScope: CoroutineScope,
 ) : ViewModel() {
 
     @Inject
@@ -139,6 +179,7 @@ class HeadUnitDetailViewModel internal constructor(
         val autostartError: String? = null,
         val checking: Boolean = false,
         val checkError: String? = null,
+        val serialReset: SerialResetUi? = null,
     )
 
     private val local = MutableStateFlow(Local())
@@ -175,6 +216,8 @@ class HeadUnitDetailViewModel internal constructor(
                 canCheck = connected?.checks == true,
                 checking = local.checking,
                 checkError = local.checkError,
+                canResetSerial = connected?.serialReset == true && job?.needsPhone != true,
+                serialReset = local.serialReset,
             )
         }
 
@@ -259,6 +302,19 @@ class HeadUnitDetailViewModel internal constructor(
     /** Puts the problem of the check [id] aside: it is no longer shown here, until the checks are run again by hand. */
     fun dismissCheck(id: String) {
         viewModelScope.launch { jobs.dismissCheck(headUnitId, id) }
+    }
+
+    /**
+     * Has the car end this phone's Bluetooth link, and the app connect again, once the user has confirmed it. It is
+     * the app's, so it goes on when the page is left; what it came to is shown here in one line.
+     */
+    fun resetSerial() {
+        if (local.value.serialReset == SerialResetUi.Working || !uiState.value.canResetSerial) return
+        local.update { it.copy(serialReset = SerialResetUi.Working) }
+        appScope.launch {
+            val result = jobs.resetSerial()
+            local.update { it.copy(serialReset = serialResetText(result)) }
+        }
     }
 
     /** [kind] is `hmi` or `reboot`. */

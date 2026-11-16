@@ -69,8 +69,8 @@ class ProtocolConstantsTest {
         assertTrue(ProtocolConstants.SERIAL_PING_AFTER_MS > 0 && 2 * ProtocolConstants.SERIAL_PING_AFTER_MS <= ProtocolConstants.SERIAL_SILENCE_MS)
         // The agent decides on a link long before it would ping it.
         assertTrue(ProtocolConstants.SERIAL_DECIDE_MS in 1 until ProtocolConstants.SERIAL_PING_AFTER_MS)
-        // The agent waits less for the phone to end a link than the app's keep-alive would hold one. So the app
-        // has to end the link when `link.closing` comes, which SerialSessionTest holds it to.
+        // The agent's log says a link is still up, after its own end closed, well before the app's keep-alive would
+        // end it. So the app has to end the link when `link.closing` comes, which SerialSessionTest holds it to.
         assertTrue(ProtocolConstants.SERIAL_LINGER_MS in 1 until ProtocolConstants.SERIAL_SILENCE_MS)
         // A package's serial service may have neither the agent's name nor the car's.
         assertFalse(ManifestParser.isSerialServiceName(ProtocolConstants.SERIAL_SERVICE_NAME))
