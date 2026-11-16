@@ -12,6 +12,7 @@ import com.nbtapps.store.data.AppForeground
 import com.nbtapps.store.data.BluetoothSppEchoClient
 import com.nbtapps.store.data.DataStoreHeadUnitRepository
 import com.nbtapps.store.data.DataStorePrereleaseRepository
+import com.nbtapps.store.data.DataStoreSetupRepository
 import com.nbtapps.store.data.FilePhoneIdentity
 import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.KeystorePairingKeys
@@ -19,9 +20,11 @@ import com.nbtapps.store.data.PairingKeys
 import com.nbtapps.store.data.PhoneBluetooth
 import com.nbtapps.store.data.PhoneIdentity
 import com.nbtapps.store.data.PrereleaseRepository
+import com.nbtapps.store.data.SetupRepository
 import com.nbtapps.store.data.SppEchoClient
 import com.nbtapps.store.data.headUnitStore
 import com.nbtapps.store.data.prereleaseStore
+import com.nbtapps.store.data.setupStore
 import com.nbtapps.store.data.catalogue.CatalogueRepository
 import com.nbtapps.store.data.catalogue.CatalogueSource
 import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
@@ -111,6 +114,12 @@ abstract class AppModule {
             DataStorePrereleaseRepository(
                 prereleaseStore(context.dataStoreFile("prerelease-packages.json"), CoroutineScope(SupervisorJob() + Dispatchers.IO)),
             )
+
+        /** Whether the user has skipped the set-up for a new user. */
+        @Provides
+        @Singleton
+        fun provideSetupRepository(@ApplicationContext context: Context): SetupRepository =
+            DataStoreSetupRepository(setupStore(context.dataStoreFile("setup.json"), CoroutineScope(SupervisorJob() + Dispatchers.IO)))
 
         @Provides
         @Singleton
