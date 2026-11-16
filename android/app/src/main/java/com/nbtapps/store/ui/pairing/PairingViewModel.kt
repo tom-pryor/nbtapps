@@ -20,12 +20,10 @@ import com.nbtapps.store.ui.navigation.PairingRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /** Where pairing this phone with one head unit stands, as the app's link to it tells. */
@@ -98,9 +96,6 @@ internal fun pairingStep(headUnitId: String, connection: ConnectionState): Pairi
  */
 internal fun setsUpAutostart(ticked: Boolean, step: PairingStep): Boolean = ticked && (step as? PairingStep.EnterCode)?.autostart == true
 
-/** What of [typed] is a code so far: its digits, as the agent reads them, and no more of them than a code has. */
-internal fun codeDigits(typed: String): String = typed.filter { it in '0'..'9' }.take(ProtocolConstants.PAIRING_CODE_DIGITS)
-
 /**
  * Pairs this phone with one head unit: the user opens the pairing screen on the car, which shows a code, and
  * types the code here. It goes to the agent over the link the app already has to it, which waits for just that
@@ -123,22 +118,21 @@ class PairingViewModel @Inject constructor(
 
     private val enableAutostart = savedStateHandle.getStateFlow(ENABLE_AUTOSTART, true)
 
-    private data class Local(val code: String = "", val working: Boolean = false, val error: String? = null)
-
-    private val local = MutableStateFlow(Local())
+    /** The code as typed, and handing it to the agent. */
+    private val codes = CodePairing(jobs, setup, appScope)
 
     /** The confirmation of what the set-up asks to remove: the set-up runs the fix once the user has said yes. */
     private val fixes = CheckFixFlow(jobs, appScope)
 
     private val page =
-        combine(headUnits.headUnit(headUnitId), jobs.connection, local, enableAutostart, setup.state) { unit, connection, local, enable, setup ->
+        combine(headUnits.headUnit(headUnitId), jobs.connection, codes.state, enableAutostart, setup.state) { unit, connection, entry, enable, setup ->
             PairingUiState(
                 loaded = true,
                 headUnitName = unit?.name,
                 step = pairingStep(headUnitId, connection),
-                code = local.code,
-                working = local.working,
-                error = local.error,
+                code = entry.code,
+                working = entry.working,
+                error = entry.error,
                 enableAutostart = enable,
                 setup = setup?.takeIf { it.headUnitId == headUnitId }?.step,
                 restartNeeded = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == headUnitId }?.info?.restartNeeded == RestartKind.HMI,
@@ -155,27 +149,15 @@ class PairingViewModel @Inject constructor(
         savedStateHandle[ENABLE_AUTOSTART] = on
     }
 
-    fun setCode(typed: String) {
-        local.update { it.copy(code = codeDigits(typed), error = null) }
-    }
+    fun setCode(typed: String) = codes.setCode(typed)
 
     /**
      * Hands the code to the agent. The attempt belongs to the app, not to this screen: once the agent has issued
-     * the phone a key, the key has to be kept and proved whether or not the user is still looking.
+     * the phone a key, the key has to be kept and proved whether or not the user is still looking. See [CodePairing].
      */
     fun pair() {
-        val code = local.value.code
-        if (local.value.working || code.length != ProtocolConstants.PAIRING_CODE_DIGITS) return
         // As the box stood when Pair was tapped.
-        val autostart = setsUpAutostart(enableAutostart.value, pairingStep(headUnitId, jobs.connection.value))
-        local.update { it.copy(working = true, error = null) }
-        appScope.launch {
-            val result = jobs.pair(code)
-            // A set-up from an earlier pairing says nothing of this one.
-            if (result.isSuccess) if (autostart) setup.begin(headUnitId) else setup.dismiss(headUnitId)
-            // A code that was wrong is not typed over: it is cleared for the next one.
-            local.update { Local(error = result.exceptionOrNull()?.let { it.message ?: "The phone couldn't be paired" }) }
-        }
+        codes.pair(headUnitId, autostart = setsUpAutostart(enableAutostart.value, pairingStep(headUnitId, jobs.connection.value)))
     }
 
     /** Opens the app's link to the head unit, for the code to go over. As in the top bar's menu, the attempt is the app's. */
