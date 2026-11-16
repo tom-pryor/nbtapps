@@ -42,10 +42,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.ui.headunits.AddHeadUnitFlow
+import com.nbtapps.store.ui.headunits.AdvancedAutostart
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
 import com.nbtapps.store.ui.headunits.CheckFixDialog
 import com.nbtapps.store.ui.headunits.ChecksLine
-import com.nbtapps.store.ui.headunits.EnableAutostartBox
 import com.nbtapps.store.ui.headunits.checksLine
 
 /**
@@ -220,7 +220,7 @@ private fun Prompt(
         units.isEmpty() -> {
             Text("Add your car to pair it.")
             // Adding the car goes straight on to pairing, so the box is here too.
-            EnableAutostartBox(uiState.enableAutostart, onEnableAutostart)
+            AdvancedAutostart(uiState.enableAutostart, onEnableAutostart)
             Button(onClick = onAdd) { Text("Add your car") }
             return
         }
@@ -232,7 +232,7 @@ private fun Prompt(
             }
         }
     }
-    EnableAutostartBox(uiState.enableAutostart, onEnableAutostart)
+    AdvancedAutostart(uiState.enableAutostart, onEnableAutostart)
     Button(onClick = onPair, enabled = uiState.canPair) { Text("Pair") }
     TextButton(onClick = onAdd) { Text("A different car…") }
 }

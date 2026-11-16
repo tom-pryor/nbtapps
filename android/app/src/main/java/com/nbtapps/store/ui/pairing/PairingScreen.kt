@@ -36,16 +36,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.model.AgentText
+import com.nbtapps.store.ui.headunits.AdvancedAutostart
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
 import com.nbtapps.store.ui.headunits.CheckFixDialog
 import com.nbtapps.store.ui.headunits.ChecksLine
-import com.nbtapps.store.ui.headunits.EnableAutostartBox
 import com.nbtapps.store.ui.headunits.checksLine
 
 /**
  * Pairs this phone with a head unit. It says where on the car's screen the code is shown and takes the code;
  * with no link to the head unit it offers to open one, since the code goes over it. Where the agent can be started
- * with the car, a box offers that, and once the phone is paired the screen shows how setting it up goes.
+ * with the car, a box under Advanced offers that, and once the phone is paired the screen shows how setting it up goes.
  * [onOpenJob] leads to the job screen, for the install of the iDrive plugin; [onOpenHeadUnit] to the head unit's
  * page, for what its checks found.
  */
@@ -155,7 +155,7 @@ private fun CodeEntry(
         keyboardActions = KeyboardActions(onDone = { onPair() }),
         modifier = Modifier.fillMaxWidth(),
     )
-    if (step.autostart) EnableAutostartBox(uiState.enableAutostart, onEnableAutostart, enabled = !uiState.working)
+    if (step.autostart) AdvancedAutostart(uiState.enableAutostart, onEnableAutostart, enabled = !uiState.working)
     if (uiState.working) {
         Working("Pairing…")
     } else {

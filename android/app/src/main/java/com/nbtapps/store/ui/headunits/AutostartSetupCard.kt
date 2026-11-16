@@ -32,8 +32,9 @@ internal const val ENABLE_AUTOSTART_NOTE =
         "Last, if an app was installed on the head unit by hand, you are asked about it."
 
 /**
- * The box on both pairing screens that has the head unit set up to start the agent with the car once the phone is
- * paired: see [AutostartSetup][com.nbtapps.store.data.jobs.AutostartSetup]. It is ticked to begin with.
+ * The box on both pairing screens, under [AdvancedAutostart], that has the head unit set up to start the agent with
+ * the car once the phone is paired: see [AutostartSetup][com.nbtapps.store.data.jobs.AutostartSetup]. It is ticked
+ * to begin with.
  */
 @Composable
 fun EnableAutostartBox(checked: Boolean, onCheckedChange: (Boolean) -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
