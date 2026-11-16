@@ -28,7 +28,7 @@ so iDrive creates the menu row itself. Nothing in HmiMain3D is patched.
 | `tools/plugin_pkg.py` | Builds that package of `release/NbtApp/` (`make plugin-pkg`) and signs it for a release (`make plugin-release`) |
 | `tools/check.py` | `make check` |
 | `tools/make_icons.py`, `tools/update_stubs.sh` | Redraw the images; regenerate `stubs/*.syms` from a firmware dump |
-| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running) and `serial_services` (the serial services other programs register, and the removal of one whose program is gone). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
+| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `node_reader` (the one reader of an open serial node, which keeps a read out on it), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running) and `serial_services` (the serial services other programs register, and the removal of one whose program is gone). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
 | `spec/` | Definitions shared with the Android app: `manifest.schema.json`; `json-profile.vectors`, the cases every JSON parser of the project must agree on; and `protocol/`, the frames every codec must build and refuse alike, one whole conversation with the agent, frame by frame, and `constants.txt`, the names and numbers both sides must hold alike |
 | `tools/nbtpkg.py` | Builds, signs and verifies `.nbtpkg` packages |
 | `tools/check_agent.py` | `make agent-check`: `release/agent/` is the head unit's kind of program, holds nothing of the test bench, and its `nbtagent` holds the official package key; and the agent's own package in `release/pkg/` is byte for byte what `tools/agent_pkg.py` makes of that folder |
@@ -114,9 +114,15 @@ format and the protocol.
   reference tab).
 - On a Bluetooth serial link the agent gives 4,096 bytes as its largest frame, sends `ping` after 10 seconds with
   nothing heard, and ends the link after 30; a serial link with no `hello` 30 seconds after it opened is ended
-  too. A serial link on which the protocol's magic bytes have not come 500 ms after the agent opened it is not
-  the agent's, and is let go. Those numbers, with the serial service's name and UUID, are in
-  `spec/protocol/constants.txt`, which the phone app has to keep to as well.
+  too. A serial link on which the protocol's magic bytes have not come 500 ms after the agent opened it, after any
+  whole frames that an earlier link left unread, is not the agent's, and is let go. Those numbers, with the serial
+  service's name and UUID, are in `spec/protocol/constants.txt`, which the phone app has to keep to as well.
+- An agent that takes Bluetooth serial links has `serial.reset` and lists the capability `serial-reset` in
+  `hello`; any other answers it with `unsupported`. It asks the car's Bluetooth service to end the phone's serial
+  link, which closing the link's node does not do: with a serial node open, about 300 ms after its answer
+  (`{"state":"sent"}`), and with none, at the open of the next serial link within 60 seconds
+  (`{"state":"armed","forMs":60000}`). It is refused with `busy` while a job runs, and with `io-error` when the
+  car's Bluetooth service cannot be asked. `nbtctl serial reset` asks for it (see "How a link ends" below).
 - The phone made a link, and the phone ends it. When the agent ends a link of its own accord it says so first,
   with the event `link.closing`, and closes its end once that is written out; nothing follows the event. Its
   `reason` is `stopping` (the agent's process ends), `restarting` (it ends for a newer version of itself, which
@@ -372,7 +378,7 @@ service is), the agent takes the gate away again, and sets both up anew 30 secon
 service is registered. Its lines in the log start with `bluetooth:`. The phone's Bluetooth pairing with
 the car is not enough on this link: until the phone has been paired with the agent and has proved it with `auth`,
 the agent answers `hello`, `ping`, `auth` and `pairing.issue`, and refuses everything else. A link that does not open with the protocol's magic bytes is let go (see "Other programs' links"
-below). One that does, and then does not say `hello` within 30 seconds or goes silent for as long, is ended. With
+below), and one that opens with what an earlier link left behind is looked at past it (see "What the node does"). One that does, and then does not say `hello` within 30 seconds or goes silent for as long, is ended. With
 `--root` and `--bluetooth` a dropped SSH session stops the agent as `kill` does, so that the registration does
 not stay behind:
 
@@ -390,28 +396,61 @@ NBT_AGENT_SOCKET=/tmp/hu/agent.sock /tmp/nbt/nbtctl phones          # the paired
 NBT_AGENT_SOCKET=/tmp/hu/agent.sock /tmp/nbt/nbtctl forget --all    # end every pairing
 ```
 
-**How a link ends.** When the agent closes a link's node while the phone app goes on holding the link, and
-sending `ping` into it, for 30 seconds or more, the car's Bluetooth does not get over it: the car opens each new
-link, the agent opens its node, and no byte of the phone's comes until the head unit is restarted. A phone that
-follows the agent's close with a new link within a second does no harm. The agent therefore does three things:
+**What the node does.** What the phone sends waits in the car's Bluetooth stack, ahead of `/dev/btsppN`, and
+moves into the node only when new bytes come while nothing waits there, or when a `read()` reaches the node.
+`select()` does not ask the stack, so it says that the node is empty while bytes wait ahead of it. Bytes that
+nobody read outlive their link and come on a later link, ahead of that link's own, as one run of bytes. A node
+that the agent had stopped reading while the phone went on sending was seen to leave every later link silent to
+an agent that waited on `select()`, until a plain read of the node brought all the old bytes at once. So:
 
-- it tells the phone before it ends a link (`link.closing`, above), so that the phone app ends the link itself;
-- when its own end of a link has closed, for whatever reason, it keeps the link's node open and goes on reading
-  it, dropping what comes, until the phone has ended the link. It waits 5 seconds for that (`serial.lingerMs` in
-  `spec/protocol/constants.txt`) and then closes the node under the phone. The link's last line in the log says
-  which it was, and how much the phone still sent:
+- every open node has one reader (`agent/node_reader.hpp`), a thread that issues a blocking read from the moment
+  the node is opened, under a time limit of 100 ms that the kernel holds it to (`TimerTimeout`), and another one
+  as soon as each comes back, until the node is closed. Nothing waits on a node with `select()`. The log says
+  once per run whether such a read came back on time when its time was up;
+- whole frames of the protocol at the start of a link are what an earlier link of the agent's left: the agent
+  drops them, says how many bytes they were, and looks for the magic bytes after them, within the same 500 ms. A
+  link whose leftovers are followed by anything else, or by nothing, is drained: its node is read, with what comes
+  dropped, until the link ends, and it is neither the agent's nor let go. A stale `hello` at the very start of the
+  old bytes cannot be told from a new one: the agent takes it, meets the next stale magic bytes as a broken frame,
+  and ends the link; its node is then read to the end, and the phone's next try is clean;
+- a node is not closed under a link that may still carry bytes, except for a program that reads such links
+  ("Other programs' links" below).
+
+**How a link ends.** Closing a link's node does not end the link: the phone ends it, or the car does when it is
+asked to. The agent therefore:
+
+- tells the phone before it ends a link (`link.closing`, above), so that the phone app ends the link itself;
+- when its own end of a link has closed, for whatever reason, keeps the link's node open and goes on reading it,
+  dropping what comes, until the phone has ended the link, however long that takes. If the link is still up
+  5 seconds after the agent's close (`serial.lingerMs` in `spec/protocol/constants.txt`), the log says so once. The
+  link's last line in the log says how it ended, and how much the phone still sent:
 
   ```
   bluetooth: /dev/btspp0 closed, closed by the agent, and the phone ended the link 180 ms later: 5210 B from the phone, 3984 B to it
-  bluetooth: /dev/btspp0 closed, closed by the agent, and the link was still up 5000 ms later: its node is closed under it: 5210 B from the phone, 3984 B to it, and 36 B that the phone sent after the agent's close were dropped
+  bluetooth: /dev/btspp0: the link is still up 5000 ms after the agent's end closed (closed by the agent): its node is kept, and read, until the phone ends the link
   ```
 
-- an agent that stops, or ends for a newer version, waits for that before it takes its service and its gate away
-  and ends. An update of the agent is held up by 5 seconds at most. `kill -9` leaves no time for any of it.
+- when it stops, or ends for a newer version, waits up to 6 seconds for the phones to end their links before it
+  takes its service and its gate away and ends. A link that is still up then has its node closed with the process.
+  `kill -9` leaves no time for any of it;
+- has the car end the phone's link when it is asked to: `serial.reset`, which `nbtctl serial reset` sends. The
+  agent sends the car's Bluetooth service a ServiceDisconnect for the phone that last asked for a link. With a
+  serial node open (one being decided on, a link of the agent's, or one being read to its end) that goes out about
+  300 ms after the answer, so that a phone that asked on that very link has its answer first. With none open, the
+  next serial link whose node opens within 60 seconds is ended at the open, with no decide step, and its node read
+  until the link ends; that is for a phone whose links come up and carry nothing, which taps Connect once more.
+  The log says how long after the request the link's node went, or that the link was still up 3 seconds after it.
+  The phone's address goes into the request and never into the log. Which values the car wants in the request is
+  not settled; `nbtctl call serial.reset '{"device":"...","instance":"...","service":"..."}'` tries others without
+  a new build:
 
-A phone app that does not know the event still holds its link for up to 30 seconds, which is longer than the
-agent waits. A link that the agent lets go as another program's (below) is not kept this way: its node is closed
-after the decide step, as before.
+  ```sh
+  nbtctl serial reset     # "sent": the car was asked to end the link, and the agent's log says what came of it
+                          # "armed": no serial link is up; tap Connect in the phone app within 60 s
+  ```
+
+A link that the agent lets go as another program's (below) is closed for that program if one runs, and read to
+its end otherwise.
 
 **Serial services of other programs.** The car's Bluetooth stack keeps a registration until someone removes it or
 the stack restarts. A program that registers a serial service of its own and ends without removing it leaves it
@@ -443,24 +482,29 @@ it, so a program that takes serial links of its own meets the agent's links, and
 things keep them apart, both in the agent:
 
 - The agent opens a link's node and reads what the phone says first. A link that opens with the protocol's magic
-  bytes is the agent's. Any other is let go, at once if something else came first and after 500 ms if nothing
-  came: the agent closes the node, reads no more of it and has written nothing into it, so the program the link
-  belongs to finds it as it would have. What the phone had sent by then is lost to that program, so this suits a
-  program whose links start with the car speaking, or a phone that sends again.
+  bytes, after any leftovers of an earlier link ("What the node does", above), is the agent's. Any other is let
+  go, at once if something else came first and after 500 ms if nothing came, and the agent has written nothing
+  into it. If a program declared for a serial service (above) is running, or whether one is cannot be told, the
+  agent stops reading the node and closes it, so the program the link belongs to finds it as it would have. What
+  the phone had sent by then is lost to that program, so this suits a program whose links start with the car
+  speaking, or a phone that sends again. If none is declared, or none of them runs, nobody would ever read the
+  link, and what waited unread would come ahead of the next link's bytes: the agent reads the node, dropping what
+  comes, until the link ends, and says so in the log.
 - From a phone's request for a link until that link has been let go, and for as long as a link of the agent's is
   up, the gate also refuses the opens of the programs that are declared for a serial service (above), so that none
   of them takes a link's first bytes or writes into the agent's link. Their looks at the node (`stat`, `access`)
   are passed on. A program that is not declared is not held off.
 
-The log has, for every link, how long after the open its first message came, whether it was the agent's or was
-let go and why, whether the node was still there after the close and when it went, and each time the gate starts
-and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, and go
+The log has, for every link, how long after the open its first message came, how many bytes an earlier link had
+left on it, whether it was the agent's, was let go or was drained, and why, whether the node was still there after
+the close and when it went, how much was dropped from a node that was read to its end, and each time the gate
+starts and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, and go
 with Bluetooth serial only:
 
 | Option | What it changes |
 |---|---|
 | `--decide <ms>` | How long the magic bytes are waited for, 1 to 10000, in place of the protocol's 500 ms. A phone app goes by the protocol's time, so this is for measuring, not for a car that is in use |
-| `--decide-hold` | A link that is let go keeps its node open, unread, until the link ends, in place of having it closed. For a car on which a link does not outlive the close of its node: there the other program would lose every link the agent lets go. The agent reads and writes nothing on a node it keeps, and the gate's hold is off by then, so the other program can open the node beside it |
+| `--decide-hold` | A link that is let go keeps its node open, unread, until the link ends, in place of having it closed or read to its end. For a car on which a link does not outlive the close of its node: there the other program would lose every link the agent lets go. The agent reads and writes nothing on a node it keeps, and the gate's hold is off by then, so the other program can open the node beside it |
 
 When Bluetooth serial has started, four lines in the log say what the agent goes by: the time and what becomes
 of a link that is let go, what becomes of a link the agent ends, what it does about a registration that is not
@@ -468,8 +512,8 @@ taken or is lost, and the programs the gate holds off as they are declared at th
 each time the hold goes on):
 
 ```
-bluetooth: a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node. Any other is let go: its node is closed for the program it belongs to
-bluetooth: a link the agent ends keeps its node, read and with what comes dropped, until the phone ends the link, for 5000 ms at most
+bluetooth: a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any whole frames left over from an earlier link. Any other is let go: its node is closed for the program it belongs to if a program declared for a serial service is running, and read until the link ends if none is
+bluetooth: a link the agent ends keeps its node, read and with what comes dropped, until the phone ends the link; the log says so if it is still up 5000 ms after the agent's end closed
 bluetooth: a serial service that the car's Bluetooth service does not take, or that is not registered for 20 s, is given up: the gate is taken away, and both are set up again 30 s later, for as long as it takes
 bluetooth: while a link is being decided on or is the agent's, the gate also refuses opens by radiod
 ```
