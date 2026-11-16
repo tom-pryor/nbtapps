@@ -1,9 +1,11 @@
 # NBTApp
 
 A native iDrive app for BMW NBT Evo head units (iDrive 5/6, QNX Neutrino 6.5.0 SP1, ARMv7LE). For now it is
-small: an **NBTApp** entry in Media/Radio that opens a menu with four rows, **Start the agent**, **Pair a phone**,
-**Forget all phones** and **About**. The first starts the install agent on a head unit with no console, and the
-next two are the car's side of pairing a phone app with it (see [Packages and the agent](#packages-and-the-agent)).
+small: an **NBTApp** entry in Media/Radio that opens a menu with five rows, **Start the agent**, **Pair a phone**,
+**Forget all phones**, **Reset Bluetooth link** and **About**. The first starts the install agent on a head unit
+with no console, the next two are the car's side of pairing a phone app with it (see
+[Packages and the agent](#packages-and-the-agent)), and the fourth has the car end the phone's Bluetooth serial
+link, for a phone app that connects and gets nothing (see "How a link ends").
 
 It is an iDrive **PluginApp**, built on the **HU Framework**: the head unit's own framework for add-on apps such as
 `SecurityMenu` and `ActiveSeating` (`libAppFramework.A.so`, `libCoreFramework.A.so`). At boot, HmiMain3D loads every
@@ -14,13 +16,13 @@ so iDrive creates the menu row itself. Nothing in HmiMain3D is patched.
 
 | Path | Purpose |
 |---|---|
-| `src/nbt_app.cpp` | The app (`pluginAppInfo` entry point). Fills the About text and drives the three screens that talk to the agent; the menu and its steps are XML |
+| `src/nbt_app.cpp` | The app (`pluginAppInfo` entry point). Fills the About text and drives the four screens that talk to the agent; the menu and its steps are XML |
 | `src/agent_start.hpp` | The start of the agent's launcher when the HMI starts, on a head unit that is asked to start the agent by itself, and the record that keeps an agent which brings the head unit down from being started for ever; and its start by hand from the Start the agent screen |
-| `src/phone_screens.hpp`, `src/agent_link.hpp` | What the Start the agent, Pair a phone and Forget all phones screens ask of the agent, and when; and their link to it, the agent's local socket |
+| `src/phone_screens.hpp`, `src/agent_link.hpp` | What the Start the agent, Pair a phone, Forget all phones and Reset Bluetooth link screens ask of the agent, and when; and their link to it, the agent's local socket |
 | `src/hu_framework.hpp` | Declarations of the HU Framework (it ships no headers) |
 | `src/version.hpp` | The plugin's version, which its package is released as |
 | `plugin/NbtApp.manifest` | Tells iDrive what to load |
-| `plugin/NbtApp.xml` | The UI: entry in Media/Radio after the Bluetooth audio row, menu (`hmiState` 10), Start the agent (`hmiState` 16), Pair a phone (`hmiState` 14), Forget all phones (`hmiState` 15), About page (`hmiState` 12), preview (`hmiState` 11) |
+| `plugin/NbtApp.xml` | The UI: entry in Media/Radio after the Bluetooth audio row, menu (`hmiState` 10), Start the agent (`hmiState` 16), Pair a phone (`hmiState` 14), Forget all phones (`hmiState` 15), Reset Bluetooth link (`hmiState` 17), About page (`hmiState` 12), preview (`hmiState` 11) |
 | `assets/` | Images: 63x54 row icon, 549x484 preview |
 | `stubs/*.syms` | Symbol names of the two HU Framework libraries. The build makes empty link stubs from them, so no head-unit binary is needed |
 | `tools/make_db.py` | The texts and image ids; packs the text and image DBs |
@@ -122,7 +124,8 @@ format and the protocol.
   link, which closing the link's node does not do: with a serial node open, about 300 ms after its answer
   (`{"state":"sent"}`), and with none, at the open of the next serial link within 60 seconds
   (`{"state":"armed","forMs":60000}`). It is refused with `busy` while a job runs, and with `io-error` when the
-  car's Bluetooth service cannot be asked. `nbtctl serial reset` asks for it (see "How a link ends" below).
+  car's Bluetooth service cannot be asked. `nbtctl serial reset` asks for it, and so does the plugin's **Reset
+  Bluetooth link** screen (see "How a link ends" below).
 - The phone made a link, and the phone ends it. When the agent ends a link of its own accord it says so first,
   with the event `link.closing`, and closes its end once that is written out; nothing follows the event. Its
   `reason` is `stopping` (the agent's process ends), `restarting` (it ends for a newer version of itself, which
@@ -279,8 +282,10 @@ make plugin-release KEY=/path/to/package.key           # -> release/pkg/signed/,
 - **Its version** is the plugin's own, in `src/version.hpp`, and is not the agent's. A version that has been
   released is never built again with other content: raise the number.
 - **`requires.agent`** in `plugin/package/manifest.json.in` names the oldest agent the plugin runs with. It is
-  1.1.0, the first agent whose update brings its launcher: the plugin starts that launcher's starter. When it is
-  raised, and in which order the two packages are released, is under
+  1.1.0, the first agent whose update brings its launcher: the plugin starts that launcher's starter. The
+  **Reset Bluetooth link** screen needs an agent with `serial.reset` and does not raise it: with an older agent
+  the screen says that the agent cannot do this, and the rest of the plugin works as before. When it is raised,
+  and in which order the two packages are released, is under
   [Releasing the agent and the plugin](#releasing-the-agent-and-the-plugin).
 - **`make plugin-release`** refuses what `make agent-release` refuses of the agent's package: a library that was
   not built from the commit checked out, or does not say it is the version of the package, and a key that is not
@@ -450,6 +455,14 @@ asked to. The agent therefore:
   nbtctl serial reset     # "sent": the car was asked to end the link, and the agent's log says what came of it
                           # "armed": no serial link is up; tap Connect in the phone app within 60 s
   ```
+
+  On the car's screen it is **NBTApp**, **Reset Bluetooth link**, and that page's second row, **Reset now**:
+  the plugin sends `serial.reset` with no values over the agent's local socket, as **Forget all phones** sends
+  `phones.forget`, waits up to 5 seconds for the answer, and the first row says what came of it:
+  **Now tap Connect in the phone app** for `armed`, **Ending it. Connect again in the app** for `sent`, **A job
+  is running. Try again later** for `busy`, and **The agent cannot do this. Update it** for `unsupported`, which
+  is what an agent from before `serial.reset` answers, and one with no Bluetooth serial listener. One press per
+  showing; the page starts over when it is shown again. It needs no SSH and no link from the phone.
 
 A link that the agent lets go as another program's (below) is closed for that program if one runs, and read to
 its end otherwise.
@@ -902,7 +915,7 @@ plugin to be installed, to start, or to do what the version before it did. What 
 plugins that are out:
 
 - the messages a plugin sends on the local socket, which are `hello` with the role `plugin`, `pairing.open`,
-  `pairing.close` and `phones.forget`, and what they answer;
+  `pairing.close`, `phones.forget` and `serial.reset`, and what they answer;
 - the files a plugin goes by when it starts the agent: `launcher`, `autostart` and `autostart.boots` in
   `/var/opt/nbtapp/agent`, `/tmp/nbtapp/log/launcher.pid`, and `/var/opt/nbtapp/disable`. A plugin starts
   `launcher` with `/bin/ksh` and `NBT_LAUNCH_DELAY`, so a starter of any version takes both.
