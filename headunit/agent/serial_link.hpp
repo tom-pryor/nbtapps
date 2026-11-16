@@ -43,12 +43,12 @@
 //   * The decide step. The listener's thread takes what the reader brings, for kSerialDecideMs from the open at
 //     most. Whole frames of this protocol at its start are what an earlier link of the agent's left: they are
 //     counted, dropped and said in the log, and the magic bytes are looked for after them. A link that opens with
-//     the magic bytes, so, is the agent's, and goes to the agent with those bytes. After such leftovers anything
-//     else, or nothing more in the time, has the node drained: read, with what comes dropped, until the link ends,
-//     never handed to the agent and never let go. Any other link is let go, with no byte written into it. If a
-//     program declared for a serial service runs, or may run, its node is closed for that program, which finds the
-//     link as it would have, short of what the phone had said by then. If none does, nobody would ever read the
-//     link, and the node is drained as well. A link nobody answers is a sign of a service that was left behind, so
+//     the magic bytes, so, is the agent's, and goes to the agent with those bytes. Any other link is let go, with
+//     no byte written into it, and that includes one on which the leftovers are followed by anything else, or by
+//     nothing in the time: another program's link may have the agent's old bytes in front of it. If a program
+//     declared for a serial service runs, or may run, its node is closed for that program, which finds the link as
+//     it would have, short of what the phone had said by then. If none does, nobody would ever read the link, and
+//     its node is read, with what comes dropped, until the link ends. A link nobody answers is a sign of a service that was left behind, so
 //     the list of other programs' services is swept then (serial_services.hpp). SerialConfig::letGoKeepsNode
 //     (`nbtagent --decide-hold`) keeps the node of a link that is let go open instead, unread, until the link ends.
 //   * The hold. From a phone's request until its link has been let go, and for as long as a link of the agent's is
@@ -333,7 +333,7 @@ private:
     void lookForLinks();
     void take(int node);
     // What the decide step found.
-    enum Decided { kOurs, kLetGo, kDrain, kEnded };
+    enum Decided { kOurs, kLetGo, kEnded };
     Decided decide(NodeReader* reader, const std::string& path, double openedAt, std::vector<uint8_t>* first,
                    uint64_t* leftOver, std::string* why);
     void letGo(NodeReader* reader, int node, const std::string& path, double openedAt, const std::string& why);
@@ -356,7 +356,7 @@ private:
         int node, fd;
         NodeReader* reader;
         double at;
-        const char* what;   // what became of the link, for the log: "let go", "drained"
+        const char* what;   // what became of the link, for the log: "let go", "ended at its open"
     };
 
     NodeGate* gate_;

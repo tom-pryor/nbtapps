@@ -406,11 +406,13 @@ an agent that waited on `select()`, until a plain read of the node brought all t
 - every open node has one reader (`agent/node_reader.hpp`), a thread that issues a blocking read from the moment
   the node is opened, under a time limit of 100 ms that the kernel holds it to (`TimerTimeout`), and another one
   as soon as each comes back, until the node is closed. Nothing waits on a node with `select()`. The log says
-  once per run whether such a read came back on time when its time was up;
+  once per run whether such a read came back on time when its time was up, and, if the time limit could not be
+  set, that it could not, and why;
 - whole frames of the protocol at the start of a link are what an earlier link of the agent's left: the agent
   drops them, says how many bytes they were, and looks for the magic bytes after them, within the same 500 ms. A
-  link whose leftovers are followed by anything else, or by nothing, is drained: its node is read, with what comes
-  dropped, until the link ends, and it is neither the agent's nor let go. A stale `hello` at the very start of the
+  link whose leftovers are followed by anything else, or by nothing, may be another program's link with the
+  agent's old bytes in front of it, and is let go as any other link that is not the agent's ("Other programs'
+  links" below). A stale `hello` at the very start of the
   old bytes cannot be told from a new one: the agent takes it, meets the next stale magic bytes as a broken frame,
   and ends the link; its node is then read to the end, and the phone's next try is clean;
 - a node is not closed under a link that may still carry bytes, except for a program that reads such links
@@ -496,7 +498,7 @@ things keep them apart, both in the agent:
   are passed on. A program that is not declared is not held off.
 
 The log has, for every link, how long after the open its first message came, how many bytes an earlier link had
-left on it, whether it was the agent's, was let go or was drained, and why, whether the node was still there after
+left on it, whether it was the agent's or was let go, and why, whether the node was still there after
 the close and when it went, how much was dropped from a node that was read to its end, and each time the gate
 starts and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, and go
 with Bluetooth serial only:

@@ -52,14 +52,44 @@ bool firstTimeUp() {
     return first;
 }
 
+// A time limit that could not be armed, kept for the reader to say once in the log: the first one's error, and
+// whether it has been said.
+pthread_mutex_t gArmMu = PTHREAD_MUTEX_INITIALIZER;
+int gArmError = 0;
+bool gArmSaid = false;
+
 }  // namespace
+
+void noteNodeReadArmError(int error) {
+    pthread_mutex_lock(&gArmMu);
+    if (gArmError == 0) gArmError = error;
+    pthread_mutex_unlock(&gArmMu);
+}
+
+bool takeNodeReadArmError(int* error) {
+    pthread_mutex_lock(&gArmMu);
+    bool take = gArmError != 0 && !gArmSaid;
+    if (take) {
+        gArmSaid = true;
+        *error = gArmError;
+    }
+    pthread_mutex_unlock(&gArmMu);
+    return take;
+}
 
 long timedNodeRead(int fd, void* buf, size_t len, int ms) {
 #ifdef __QNXNTO__
-    // The limit is for the next blocking kernel call, which has to be the read: nothing comes between the two.
+    // The limit is for the next blocking kernel call, which has to be the read: nothing comes between the two but
+    // the store of what arming it returned. TimerTimeout_r returns the error itself, so errno is not touched.
     _Uint64t ns = (_Uint64t)ms * 1000000u;
-    TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY, NULL, &ns, NULL);
-    return (long)read(fd, buf, len);
+    int armed = TimerTimeout_r(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY, NULL, &ns, NULL);
+    long k = (long)read(fd, buf, len);
+    if (armed < 0) {   // an error comes back negative; anything else is the flags of the limit that was set before
+        int error = errno;   // the read's, for the caller
+        noteNodeReadArmError(-armed);
+        errno = error;
+    }
+    return k;
 #else
     // A pseudo-terminal, in the tests, says truthfully when it has bytes.
     fd_set rf;
@@ -125,6 +155,16 @@ void NodeReader::run() {
         double asked = monoNow();
         long k = read_(fd_, &buf[0], buf.size(), kNodeTickMs);
         int error = errno;
+        int armError = 0;
+        if (takeNodeReadArmError(&armError)) {
+            pthread_mutex_lock(&mu_);
+            bool mine = !released_;
+            pthread_mutex_unlock(&mu_);
+            if (mine)
+                log_->line(path_ + ": the time limit of a read could not be set (" + strerror(armError) + "): a read "
+                           "of the node waits until bytes come or the link ends, and a stop has to close the node "
+                           "under it");
+        }
         if (k > 0) {
             pthread_mutex_lock(&mu_);
             if (drain_) dropped_ += (uint64_t)k;

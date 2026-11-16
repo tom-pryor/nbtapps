@@ -934,10 +934,10 @@ Opening judgeOpening(const uint8_t* p, size_t n, size_t* frameBytes) {
 // *leftOver and passed over, and the magic bytes are looked for after them, within the same time.
 //
 // kOurs: the magic bytes came, at the start or after such leftovers, and *first holds what was read from them on.
-// kLetGo: with no leftovers, anything else came first, or nothing did: the link is another program's, or nobody's.
-// kDrain: after leftovers, something that is neither a frame nor the magic bytes came, or nothing more did: the
-// node is read until the link ends, and the link is neither handed to the agent nor let go. kEnded: the link ended
-// first. *why says which, for the log. Nothing is written.
+// kLetGo: anything else came, or nothing did, before or after such leftovers: the link is another program's, or
+// nobody's. Leftovers alone do not make it the agent's: another program's link may have the agent's old bytes in
+// front of it, and letGo() gives it to that program as it gives any other. kEnded: the link ended first. *why says
+// which, for the log. Nothing is written.
 SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::string& path, double openedAt,
                                                std::vector<uint8_t>* first, uint64_t* leftOver, std::string* why) {
     const double by = openedAt + config_.decideMs / 1000.0;
@@ -958,11 +958,8 @@ SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::st
             return kOurs;
         }
         if (at < got.size() && o == kOpenOther) {
-            if (*leftOver > 0) {
-                *why = "then came bytes that are neither a frame nor the magic bytes";
-                return kDrain;
-            }
-            *why = "it did not open with the magic bytes";
+            *why = *leftOver > 0 ? "after the leftovers came bytes that are neither a frame nor the magic bytes"
+                                 : "it did not open with the magic bytes";
             return kLetGo;
         }
         if (stopping()) {
@@ -973,9 +970,9 @@ SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::st
         double left = by - monoNow();
         if (left <= 0) {
             if (*leftOver > 0) {
-                *why = at == got.size() ? "then nothing more came in that time"
-                                        : "then neither a whole frame nor the magic bytes came in that time";
-                return kDrain;
+                *why = at == got.size() ? "nothing more came after the leftovers in that time"
+                                        : "neither a whole frame nor the magic bytes came after the leftovers in that time";
+                return kLetGo;
             }
             *why = got.empty() ? "nothing came from the phone in that time"
                                : (o == kOpenMagicPart ? "only a part of the magic bytes came in that time"
@@ -1157,12 +1154,6 @@ void SerialListener::take(int node) {
     } else if (found == kLetGo) {
         letGo(reader, node, path, openedAt, why);
         holdWhy = "the link was let go";
-    } else if (found == kDrain) {
-        reader->drain();
-        say("%s drained %.0f ms after the open (%s): the link is neither the agent's nor let go. Its node is read, "
-            "with what comes dropped, until the link ends", path.c_str(), (monoNow() - openedAt) * 1000.0, why.c_str());
-        keep(node, -1, reader, "drained");
-        holdWhy = "the link is drained";
     } else {
         reader->finish();
         say("%s closed, %s, before it was known whose link it is", path.c_str(), why.c_str());

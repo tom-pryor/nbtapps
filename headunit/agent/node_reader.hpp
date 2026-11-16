@@ -46,7 +46,13 @@ typedef long (*NodeReadFn)(int fd, void* buf, size_t len, int ms);
 
 // The platform's own. On QNX nothing that can block comes between arming the time limit and the read(): the limit
 // holds for the next blocking kernel call only.
+// When the time limit cannot be armed, the read goes ahead without it, and the error is kept: the first reader
+// whose read comes back after that says it in the log, once in the process.
 long timedNodeRead(int fd, void* buf, size_t len, int ms);
+// What timedNodeRead keeps when arming failed: the first error, an errno value. A test may note one of its own.
+void noteNodeReadArmError(int error);
+// True, with that error, the first time it is asked after one was noted, and never again.
+bool takeNodeReadArmError(int* error);
 
 // How long one read waits at most: a tick.
 const int kNodeTickMs = 100;

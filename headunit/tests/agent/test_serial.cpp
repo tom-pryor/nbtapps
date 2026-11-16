@@ -1421,6 +1421,24 @@ static void testReader() {
         CHECK(ended);
         reader->finish();
     }
+    {   // a time limit that could not be armed: the first reader whose read comes back after that says so, with the
+        // error, and no reader says it again in the process
+        noteNodeReadArmError(EINVAL);
+        noteNodeReadArmError(EPERM);   // only the first is kept
+        Trace trace;
+        Node node(dir + "/btspp", 5), next(dir + "/btspp", 6);
+        NodeReader* reader = NodeReader::start(node.openNear(), node.path, &trace);
+        CHECK_IN(trace.text(), sawWithin(trace, std::string("btspp5: the time limit of a read could not be set (") +
+                                                    strerror(EINVAL) + "): a read of the node waits until bytes come "
+                                                    "or the link ends", 2000));
+        NodeReader* second = NodeReader::start(next.openNear(), next.path, &trace);
+        pause(300);
+        CHECK(trace.count("could not be set") == 1);
+        int error = 0;
+        CHECK(!takeNodeReadArmError(&error));
+        reader->finish();
+        second->finish();
+    }
 }
 
 // ---- what an earlier link left behind -------------------------------------------------------------------------------
@@ -1484,36 +1502,77 @@ static void testLeftOvers() {
         CHECK(endsWithin(link, 3000));
         delete link;
 
-        // Old frames and nothing more in the time: the node is drained, read until the link ends, and neither the
-        // agent's nor let go.
+        // Old frames and nothing more in the time: let go, as any link that is not the agent's. No program is
+        // declared for a serial service here, so its node is read, with what comes dropped, until the link ends.
         Node only(dir + "/btspp", 2);
         gap.phone(kInfServiceRequest, kCarSerialService);
         only.appear();
         only.say(old);
-        CHECK_IN(trace.text(), sawWithin(trace, "btspp2 drained", 3000));
-        CHECK(trace.saw("(then nothing more came in that time): the link is neither the agent's nor let go"));
-        CHECK(trace.saw(std::string("btspp2") + said) && !trace.saw("btspp2 let go"));
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp2 let go", 3000));
+        CHECK(trace.saw("(nothing more came after the leftovers in that time). No program is declared for a serial "
+                        "service, so nobody would read it"));
+        CHECK(trace.saw(std::string("btspp2") + said));
         only.say("NBTL late");
         bool closed = false;
         CHECK(only.hear(1, 300, &closed).empty() && !closed && acceptWithin(listener, 50) == 0);
         only.hangUp();
         CHECK_IN(trace.text(), sawWithin(trace, "btspp2: the link ended ", 3000));
-        CHECK(trace.saw("s after it was drained; 9 B were dropped, and its node is closed now"));
+        CHECK(trace.saw("s after it was let go; 9 B were dropped, and its node is closed now"));
         only.vanish();
 
-        // Old frames and then something else: drained at once.
+        // Old frames and then something else: let go at once, and read the same way.
         Node other(dir + "/btspp", 3);
         gap.phone(kInfServiceRequest, kCarSerialService);
         other.appear();
         double at = monoNow();
         other.say(old + "\x10\x20\x30\x40 not a frame");
-        CHECK_IN(trace.text(), sawWithin(trace, "btspp3 drained", 3000) && monoNow() - at < 0.25);
-        CHECK(trace.saw("(then came bytes that are neither a frame nor the magic bytes)"));
-        CHECK(other.hear(1, 100, &closed).empty() && !closed && acceptWithin(listener, 50) == 0 && !trace.saw("btspp3 let go"));
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp3 let go", 3000) && monoNow() - at < 0.25);
+        CHECK(trace.saw("(after the leftovers came bytes that are neither a frame nor the magic bytes). No program is "
+                        "declared"));
+        CHECK(other.hear(1, 100, &closed).empty() && !closed && acceptWithin(listener, 50) == 0);
         other.hangUp();
         CHECK_IN(trace.text(), sawWithin(trace, "btspp3: the link ended ", 3000));
         other.vanish();
         listener.stop();
+    }
+    {   // the same two with a program declared for a serial service that runs: the link may be its, with the
+        // agent's old bytes in front, so its node is closed for it, with nothing written
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        Machine machine(dir + "/root");
+        machine.running = "radiod";
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        services.setRemover(&listener);
+        listener.setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+
+        Node only(dir + "/btspp", 0);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        only.appear();
+        only.say(old);
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
+        CHECK(trace.saw("(nothing more came after the leftovers in that time) and closed"));
+        CHECK(trace.saw(std::string("btspp0") + said) && closedUnwritten(only, 2000) && acceptWithin(listener, 50) == 0);
+        only.vanish();
+
+        Node other(dir + "/btspp", 1);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        other.appear();
+        other.say(old + "\x10\x20\x30\x40 not a frame");
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
+        CHECK(trace.saw("(after the leftovers came bytes that are neither a frame nor the magic bytes) and closed"));
+        CHECK(closedUnwritten(other, 2000) && acceptWithin(listener, 50) == 0);
+        other.vanish();
+        listener.stop();
+        services.setRemover(0);
     }
     {   // the whole way with the stand-in for the car's stack: nothing waits on the node, and the link works
         Trace trace;
