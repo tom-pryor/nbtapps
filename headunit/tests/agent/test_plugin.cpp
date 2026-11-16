@@ -349,6 +349,17 @@ static void testForget() {
     screen.confirmed();
     car.run(0, &screen);
     CHECK(view.take() == "forget ask, forget working, forget done");
+    // Left while it waits for the agent: what was sent stands, nothing more is shown, and the screen asks again when
+    // it is shown again.
+    screen.shown();
+    screen.confirmed();
+    CHECK(view.take() == "forget ask, forget working" && screen.wantsTick());
+    screen.hidden();
+    CHECK(!screen.wantsTick() && screen.status() == kForgetAsk);
+    car.run(0, &screen);
+    CHECK(view.take().empty());
+    screen.shown();
+    CHECK(view.take() == "forget ask" && screen.status() == kForgetAsk);
 }
 
 // Reset Bluetooth link against a real agent: one without the Bluetooth serial listener, which answers as an agent

@@ -179,9 +179,11 @@ public:
     }
 
     void hidden() {
-        // What was sent is not taken back: the agent forgets, and nobody is told.
+        // What was sent is not taken back: the agent forgets, and nobody is told. A press that had no answer is
+        // over, so the next showing starts over; the app starts no showing over while one waits.
         link_.close();
         forgetId_ = 0;
+        if (status_ == kForgetWorking) status_ = kForgetAsk;
     }
 
     // The row was pressed. Once per showing: a second press does nothing.
