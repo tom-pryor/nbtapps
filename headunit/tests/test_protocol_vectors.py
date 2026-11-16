@@ -277,6 +277,7 @@ CONSTANTS = {
     "capability.detachedSignature": "name",
     "capability.files": "name",
     "capability.checks": "name",
+    "capability.serialReset": "name",
 }
 
 

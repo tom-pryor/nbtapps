@@ -35,6 +35,7 @@
 //   checks  [--list]                       the compatibility checks: what was put onto the head unit by hand; with
 //                                          --list, every folder each one would move and every path it would remove
 //   checks  fix ID                         runs that check, and its fix on what it found
+//   serial  reset                          has the car end the phone's Bluetooth serial link (serial.reset)
 //   call METHOD [JSON]                     any request, the reply printed as it came
 //
 // `autostart` prints three lines: "autostart on" or "autostart off"; "available yes", or "available no" with the
@@ -52,6 +53,12 @@
 // each that is still there and each folder that was not moved, "stopped NAME" for each program that was stopped,
 // then the check's id and the state it finds now, and "restart needed:" with the restart, unless none is. It exits
 // with 1 if the check still finds a problem, or finds nothing it can say.
+//
+// `serial reset` prints "sent" or "armed" as its first line, and then what that means: "sent", that the car was
+// asked to end the phone's serial link and the agent's log says what came of it; "armed", that no serial link was
+// up, that the next one within 60 seconds is ended at its open, and that Connect is to be tapped in the phone app
+// now. `nbtctl call serial.reset '{"device":"...","instance":"...","service":"..."}'` gives other values for the
+// request.
 //
 // `pair` prints "code NNNNNN" as its first line, then one line when the window has closed: "paired", or
 // "not paired: " and the reason (wrong-code, expired, replaced). Its exit status is 0 only for "paired".
@@ -572,6 +579,7 @@ int usage() {
             "  pull    ID PATH --out FILE [--offset N] [--length N] [--none]\n"
             "  checks  [--list]         what was put onto the head unit by hand\n"
             "  checks  fix ID           that check's fix, on the list it finds\n"
+            "  serial  reset            have the car end the phone's Bluetooth serial link\n"
             "  call METHOD [JSON]\n"
             "The socket is $NBT_AGENT_SOCKET if --socket is not given"
 #ifdef __QNXNTO__
@@ -1042,6 +1050,23 @@ int main(int argc, char** argv) {
         std::string restart = text(r, "restart");
         if (!restart.empty() && restart != "none") printf("restart needed: %s\n", restart.c_str());
         return text(r, "state") == "ok" ? 0 : 1;
+    }
+
+    if (command == "serial") {
+        if (args.size() != 1 || args[0] != "reset") return usage();
+        if (!c.call("serial.reset", "{}", &reply)) return 3;
+        if (!reply.ok) return refused("serial.reset", reply);
+        doc.parse(reply.text, 0);
+        std::string state = text(doc.root(), "state");
+        if (state == "sent") {
+            printf("sent\nThe car was asked to end the phone's serial link. The agent's log says what came of it.\n");
+        } else if (state == "armed") {
+            printf("armed\nNo serial link is up. The next one within %lld s is ended as soon as it opens: tap Connect "
+                   "in the phone app now.\n", integer(doc.root(), "forMs") / 1000);
+        } else {
+            printf("%s\n", reply.text.c_str());
+        }
+        return 0;
     }
 
     if (command == "restart") {

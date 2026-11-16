@@ -67,7 +67,9 @@
 //     on reading it, dropping what comes, until the phone ends the link, however long that takes. If the link is
 //     still up kSerialLingerMs after the agent's close (SerialConfig::lingerMs), the log says so once; the link
 //     counts in serialLinksOpen() until its node is closed;
-//   * the program waits a while before it ends for the links that are still up (waitForSerialLinks).
+//   * the program waits a while before it ends for the links that are still up (waitForSerialLinks);
+//   * when the agent is asked to (serial.reset, serial_reset.hpp), the listener asks the car's Bluetooth service to
+//     end the phone's link (ServiceDisconnect, spp_service.hpp), which is the one way the agent has of ending one.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <pthread.h>
@@ -81,6 +83,7 @@
 #include "node_reader.hpp"
 #include "protocol_constants.hpp"
 #include "serial_log.hpp"
+#include "serial_reset.hpp"
 #include "serial_services.hpp"
 #include "spp_gate.hpp"
 #include "spp_nodes.hpp"
@@ -187,12 +190,19 @@ struct SerialConfig {
     unsigned lingerMs;           // a link of the agent's whose agent's end has closed, and that is still up this
                                  // long after: the log says so. Its node is kept and read until the link ends
     NodeReadFn readNode;         // the timed read of a node; 0: the platform's (node_reader.hpp)
+    unsigned resetArmedMs;       // serial.reset with no node open: for how long the next link is ended at its open
 
     SerialConfig()
         : name(kSerialServiceName), uuid(kSerialServiceUuid), carService(kCarSerialService),
           nodePrefix("/dev/btspp"), registerMs(20000), retryMs(30000), requestWindowS(15), decideMs((unsigned)kSerialDecideMs),
-          linkWaitMs(3000), letGoKeepsNode(false), lingerMs((unsigned)kSerialLingerMs), readNode(0) {}
+          linkWaitMs(3000), letGoKeepsNode(false), lingerMs((unsigned)kSerialLingerMs), readNode(0),
+          resetArmedMs(60000) {}
 };
+
+// serial.reset with a node open: how long after the request ServiceDisconnect goes to the car, so that a caller on
+// that very link has its answer first; and how long after that the log waits to say what came of it.
+const unsigned kSerialResetDelayMs = 300;
+const unsigned kSerialResetWatchMs = 3000;
 
 // ---- the decide step as nbtagent's options set it, and as its first log lines say it ----------------------------
 // `--decide MS` sets SerialConfig::decideMs in place of the protocol's serial.decideMs, and `--decide-hold` sets
@@ -278,7 +288,8 @@ inline std::string describeSerialHold(const std::vector<std::string>& programs) 
 //
 // The hold goes by the links of the serial kind that are up in this process (serialLinksOpen()), so a process has
 // one listener at a time.
-class SerialListener : public Listener, public SerialServiceRemover, private btspp::SppService::Events {
+class SerialListener : public Listener, public SerialServiceRemover, public SerialReset,
+                       private btspp::SppService::Events {
 public:
     // Nothing passed in is owned; all of it must outlive the listener, and `gap` the process (see DsiGapClient).
     SerialListener(btspp::GapClient* gap, NodeGate* gate, SerialLog* log, const SerialConfig& config = SerialConfig());
@@ -296,6 +307,15 @@ public:
 
     virtual int fd() const { return wakeRead_; }
     virtual Link* accept();
+
+    // serial.reset (serial_reset.hpp). With a node open, the one being decided on, a link of the agent's or one
+    // that is read to its end, ServiceDisconnect goes to the car kSerialResetDelayMs later. With none, the next link
+    // whose node opens within SerialConfig::resetArmedMs is ended at the open, with no decide step, and its node read
+    // until the link ends; once. The log says how long after ServiceDisconnect a node that was open then went, or
+    // that the link was still up kSerialResetWatchMs after it. kResetFailed if the listener is not active, the car's
+    // Bluetooth service is not attached, or, with a node open, no phone has asked for a link to be named.
+    virtual Outcome resetSerialLink(const std::string& device, const std::string& instance, const std::string& service,
+                                    int64_t* forMs, std::string* why);
 
 private:
     SerialListener(const SerialListener&);
@@ -320,6 +340,8 @@ private:
     void keep(int node, int fd, NodeReader* reader, const char* what);
     enum Closing { kEndedOnly, kAllButRead, kEvery };
     void closeKept(Closing which);
+    void tendReset();
+    void watchNodes(const bool nodes[btspp::NodeTracker::kNodes], double from);
     void updateHold();
     void waitForPass();
     bool linkExpected();
@@ -346,6 +368,19 @@ private:
     pthread_t thread_;
     bool hasThread_;
     std::vector<LetGo> letGo_;   // the listener's thread, and stop() once that has ended
+    double watchFrom_;           // the listener's thread: when ServiceDisconnect went out for watched_; 0: none
+    bool watched_[btspp::NodeTracker::kNodes];
+
+    // What serial.reset asked for, for the listener's thread to do.
+    struct Reset {
+        bool due;                // ServiceDisconnect is to go out at `at`
+        double at;
+        bool armed;              // the next link that opens before `until` is ended at its open
+        double until;
+        double askedAt;
+        std::string device, instance, service;
+        Reset() : due(false), at(0), armed(false), until(0), askedAt(0) {}
+    };
 
     pthread_mutex_t mu_;         // everything below
     pthread_cond_t wake_;        // a phone has asked for a link, the registration has changed, or stop()
@@ -359,6 +394,9 @@ private:
     bool held_;                  // the gate's hold is on
     std::string heldText_;       // the programs it holds off, for the log
     const char* holdWhy_;        // what has just happened that may turn the hold on or off, for the log; 0: nothing
+    unsigned kept_;              // the nodes in letGo_ that are open still: read, or kept unread
+    Reset reset_;
+    double resetHotUntil_;       // until then the thread looks without a pause, for serial.reset
 };
 
 }  // namespace nbt

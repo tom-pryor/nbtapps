@@ -31,6 +31,7 @@
 //   checks.run                      the compatibility checks (checks.hpp): what was put onto the head unit by hand
 //                                   and stands in the way, each with what it found, a page at a time
 //   checks.fix                      a check's fix, with the token of the lists the user was shown
+//   serial.reset                    has the car end the phone's Bluetooth serial link (serial_reset.hpp): see below
 //   job.progress, job.log, job.done the agent's events, to every controller
 //   link.closing                    the agent's event to a phone whose link it is about to end; the last thing it
 //                                   says on that link
@@ -137,6 +138,20 @@
 //   checks.fix { "id", "token" }    -> { "state", "removed", "moved": [ { "from", "to" } ], "left": [paths],
 //                                        "leftMore", "stopped": [names], "restart" }
 // `removed` counts the paths that were removed; a folder that was not moved has its `from` in `left`.
+//
+// serial.reset. Closing a serial link's node does not end the link; the car's Bluetooth service ends it when it is
+// asked to (ServiceDisconnect, spp_service.hpp). An agent with a Bluetooth serial listener (setSerialReset) lists
+// the capability serial-reset in `hello`; one without answers the method with `unsupported`. It is refused with
+// `busy` while a job runs, and with `io-error` when the car's Bluetooth service cannot be asked. The answer comes at
+// once, and the listener's thread does the rest; the log says what came of it.
+//
+//   serial.reset { "device"?, "instance"?, "service"? }   -> { "state": "sent" }
+//                                                           | { "state": "armed", "forMs": 60000 }
+//
+// "sent": a serial node is open, and the request goes to the car shortly after the answer, so that a caller on that
+// very link has its answer first. "armed": none is, and the next serial link whose node opens within forMs is ended
+// at the open, once. The three strings, 1 to 32 printable characters each, put other values into the request in
+// place of the agent's own, so that they can be tried without a new build.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdint.h>
@@ -155,6 +170,7 @@
 #include "phones.hpp"
 #include "planner.hpp"
 #include "platform.hpp"
+#include "serial_reset.hpp"
 #include "sha256.hpp"
 
 namespace nbt {
@@ -232,6 +248,8 @@ public:
 
     // Where controllers connect.
     void addListener(Listener* listener);
+    // What serial.reset asks; 0, which is how it starts, for an agent without Bluetooth serial. Not owned.
+    void setSerialReset(SerialReset* reset) { serialReset_ = reset; }
     // A link on which a controller has connected: takes it over. The controller dialled, so it speaks first.
     void adopt(Link* link);
 
@@ -430,6 +448,8 @@ private:
     void checksRun(Session* s, int64_t id, const json::Value& params);
     void checksFix(Session* s, int64_t id, const json::Value& params);
     CheckContext checkContext();
+    // See the top of this file.
+    void serialReset(Session* s, int64_t id, const json::Value& params);
     void autostartGet(Session* s, int64_t id);
     void autostartSet(Session* s, int64_t id, const json::Value& params);
     // Whether something would start the agent with the head unit here if it were asked to. If not: the error's
@@ -462,6 +482,7 @@ private:
     PhoneStore phones_;
     Pairing pairing_;
     std::vector<Listener*> listeners_;
+    SerialReset* serialReset_;
     std::vector<Session*> sessions_;
     unsigned nextSession_;
 

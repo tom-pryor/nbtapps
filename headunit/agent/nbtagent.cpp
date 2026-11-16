@@ -335,6 +335,7 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
         bluetooth->listener.setServices(&bluetooth->services);
         if (bluetooth->listener.start(&why)) {
             agent.addListener(&bluetooth->listener);
+            agent.setSerialReset(&bluetooth->listener);
             agent.engine().setStepObserver(&bluetooth->services);
             logLine(stderr, std::string("Bluetooth serial: service '") + kSerialServiceName + "', UUID " + kSerialServiceUuid +
                                 ". While this agent runs, the car maker's phone apps do not work over Bluetooth.");
@@ -382,6 +383,7 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
         const int wait = (int)serialConfigOf(options).lingerMs + 1000;
         waitForPhones(wait);
         // Takes the service's registration and the gate away again.
+        agent.setSerialReset(0);
         agent.engine().setStepObserver(0);
         bluetooth->services.setRemover(0);
         bluetooth->listener.stop();

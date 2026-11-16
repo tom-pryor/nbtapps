@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-// Host test for agent/spp_service.hpp: the UUID and name checks, the SppUuidRegister / SppUuidDeregister payloads,
-// the reply and inform readers, and the registration itself, run against a Bluetooth server that this test plays.
+// Host test for agent/spp_service.hpp: the UUID and name checks, the SppUuidRegister / SppUuidDeregister /
+// ServiceDisconnect payloads, the reply and inform readers, the registration itself and ServiceDisconnect, run
+// against a Bluetooth server that this test plays.
 // All names, addresses and UUIDs are invented; only the payload layout is the Bluetooth server's.
 
 #include "../../agent/spp_service.hpp"
@@ -681,7 +682,69 @@ int main() {
         CHECK(spp.state() == SppService::kRegistered && seen.removed() == "OtherRadio=0");
     }
 
-    // 15. The real client is the head unit's: anywhere else it does not open, and nothing can be sent through it.
+    // 15. ServiceDisconnect: for the phone of the last request for a link that the server told. Its address goes
+    //     into the request, and into nothing that is said.
+    {
+        // Four strings, byte for byte.
+        std::vector<uint8_t> d = buildServiceDisconnect("BtCtrl", "ExtBox1", kPhoneAddress, "SPP");
+        CHECK(d == bytes("\x07\x00\x00\x00" "BtCtrl\x00\x00"
+                         "\x08\x00\x00\x00" "ExtBox1\x00"
+                         "\x0d\x00\x00\x00" "AABBCCDDEEFF\x00\x00\x00\x00"
+                         "\x04\x00\x00\x00" "SPP\x00", 52));
+        Registered r;
+        CHECK(!r.spp.knowsPhone() && !r.spp.disconnectPhone("", "", "") && r.gap.sent.empty());   // no phone yet
+        r.gap.inform(kInfServiceRequest, "SPP");
+        r.gap.inform(kInfServiceRequestComplete, "Another");   // not a request: it changes nothing
+        CHECK(r.spp.knowsPhone() && r.spp.disconnectPhone("", "", ""));
+        CHECK(r.gap.took(kReqServiceDisconnect) == d);
+        CHECK(r.seen.said("ServiceDisconnect device 'BtCtrl', instance 'ExtBox1', service 'SPP', for the phone of the "
+                          "last request for a link"));
+        // Other values, to try them without a new build.
+        CHECK(r.spp.disconnectPhone("Dev2", "Inst2", "Other"));
+        CHECK(r.gap.took(kReqServiceDisconnect) == buildServiceDisconnect("Dev2", "Inst2", kPhoneAddress, "Other"));
+        // What comes back that this class does not know: its id, its type and its first value, never its strings.
+        std::vector<uint8_t> answer;
+        putU32(answer, 3);
+        putString(answer, kPhoneAddress);
+        putString(answer, kPhoneName);
+        r.gap.events->gapMessage(kTypeResponse, 0x80000031u, &answer[0], (uint32_t)answer.size());
+        CHECK(r.seen.said("after ServiceDisconnect, a message from the Bluetooth server that the agent does not know: "
+                          "id 0x80000031, type 0x200, first value 3 (0x3)"));
+        r.gap.events->gapMessage(kTypeResponse, 0x80000032u, &answer[0], 2);
+        CHECK(r.seen.said("id 0x80000032, type 0x200, 2 bytes"));
+        // A rejection of it, which changes nothing of the registration's.
+        r.gap.reject(kTypeRejectedA, kReqServiceDisconnect);
+        CHECK(r.seen.said("the Bluetooth server rejected ServiceDisconnect (type 0x202)"));
+        CHECK(r.spp.state() == SppService::kRegistered && r.seen.passed().empty());
+        // What it knows is not among them.
+        r.gap.reply(kRspSppUuidRegister, 0);
+        r.gap.reply(kRspSppUuidDeregister, 0);
+        size_t unknown = 0;
+        for (size_t i = 0; i < r.seen.lines.size(); ++i)
+            if (r.seen.lines[i].find("does not know") != std::string::npos) ++unknown;
+        CHECK(unknown == 2);
+        CHECK(!r.seen.said(kPhoneName) && !r.seen.said(kPhoneAddress));
+        // A later phone's request is the one named.
+        r.gap.inform(kInfServiceRequest, "Echo");
+        CHECK(r.spp.disconnectPhone("", "", ""));
+        CHECK(r.gap.took(kReqServiceDisconnect) == buildServiceDisconnect("BtCtrl", "ExtBox1", kPhoneAddress, "Echo"));
+        // With the server gone nothing is sent.
+        r.gap.detach();
+        CHECK(!r.spp.disconnectPhone("", "", "") && r.gap.sent.empty());
+    }
+    {   // before any ServiceDisconnect, an answer nobody knows is not logged
+        Registered r;
+        r.gap.reply(0x80000031u, 3);
+        CHECK(!r.seen.said("does not know") && r.spp.state() == SppService::kRegistered);
+    }
+    {   // a request the client does not take
+        Registered r;
+        r.gap.inform(kInfServiceRequest, "SPP");
+        r.gap.takes = false;
+        CHECK(!r.spp.disconnectPhone("", "", "") && r.seen.said("not sent"));
+    }
+
+    // 16. The real client is the head unit's: anywhere else it does not open, and nothing can be sent through it.
 #ifndef __QNXNTO__
     {
         DsiGapClient real;

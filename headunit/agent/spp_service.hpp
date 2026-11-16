@@ -12,8 +12,8 @@
 // the registration behind until then, with nothing answering it.
 //
 // Three layers, each usable without the one below:
-//   * pure helpers (no devices, plain C++98): the UUID and name checks, the payloads of the two requests, readers
-//     for the replies and informs
+//   * pure helpers (no devices, plain C++98): the UUID and name checks, the payloads of the requests, readers for
+//     the replies and informs
 //   * GapClient: the server as its client sees it. DsiGapClient is the real one, for the head unit only (its library
 //     is the head unit's). A test puts its own in its place
 //   * SppService: the registration itself, on any GapClient
@@ -42,6 +42,12 @@ const int kGapMajor = 35;
 const int kGapMinor = 0;
 const uint32_t kReqSppUuidRegister = 0x2e;           // name, service UUID, connect UUID, u32 type
 const uint32_t kReqSppUuidDeregister = 0x2f;         // name
+// Ends a link of a phone's to one of the car's services: closing the link's node does not. Which values a link that
+// the phone opened needs is not settled; kDisconnectDevice and kDisconnectInstance are the first ones tried. The
+// id of its reply is not known.
+const uint32_t kReqServiceDisconnect = 0x1b;         // device, instance, address, service
+const char* const kDisconnectDevice = "BtCtrl";
+const char* const kDisconnectInstance = "ExtBox1";
 const uint32_t kRspSppUuidRegister = 0x80000043;     // u32 GapErrorCode
 const uint32_t kRspSppUuidDeregister = 0x80000044;   // u32 GapErrorCode
 // Informs about a link the PHONE opens to one of the car's services, each naming the service. The request comes
@@ -125,6 +131,16 @@ inline std::vector<uint8_t> buildRegister(const std::string& name, const std::st
 inline std::vector<uint8_t> buildDeregister(const std::string& name) {
     std::vector<uint8_t> p;
     putString(p, name);
+    return p;
+}
+
+inline std::vector<uint8_t> buildServiceDisconnect(const std::string& device, const std::string& instance,
+                                                   const std::string& address, const std::string& service) {
+    std::vector<uint8_t> p;
+    putString(p, device);
+    putString(p, instance);
+    putString(p, address);
+    putString(p, service);
     return p;
 }
 
@@ -345,6 +361,18 @@ public:
     // unanswered one is told as such. kOtherRemovalReplyS unless a test sets it.
     void setOtherReplyTime(double seconds) { otherReplyS_ = seconds; }
 
+    // Asks the server to end the phone's link: ServiceDisconnect for the phone of the last request for a link
+    // that the server told (kInfServiceRequest), whatever service it was for. `device`, `instance` and `service`
+    // may be given; empty is kDisconnectDevice, kDisconnectInstance and the service named in that request. The
+    // phone's address goes into the request and nowhere else. False, with nothing sent, if the server is not
+    // attached or no phone has asked for a link since this object was made. A reply or a rejection that comes
+    // after it and that this object does not know is logged with its id, its type and its first 32-bit value. From
+    // any thread.
+    bool disconnectPhone(const std::string& device, const std::string& instance, const std::string& service);
+    // Whether a phone has asked for a link since this object was made: disconnectPhone() has someone to name.
+    bool knowsPhone();
+    bool attached() const { return gap_->attached(); }
+
     State state();
     const std::string& name() const { return name_; }
     const std::string& uuid() const { return uuid_; }
@@ -368,12 +396,13 @@ private:
     void sendRegister();
     bool sendDeregister(const char* why);
     void sendNextOther();
+    void noteUnknown(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len);
 
     GapClient* gap_;
     Events* events_;
     std::string name_, uuid_;
     uint32_t type_;
-    pthread_mutex_t mu_;   // state_, mode_, subscribed_, and the three below
+    pthread_mutex_t mu_;   // state_, mode_, subscribed_, and everything below
     State state_;
     Mode mode_;
     bool subscribed_;      // the phones' requests are asked for of the server that is attached now
@@ -381,6 +410,10 @@ private:
     std::string otherSent_;                   // sent, and waiting for its reply; empty for none
     double otherSentAt_;
     double otherReplyS_;
+    // The last phone's request for a link: its address and the service it asked for. In memory only; neither
+    // reaches the log or leaves this class.
+    std::string phoneAddress_, phoneService_;
+    unsigned unknownLeft_;                    // after a ServiceDisconnect: how many more unknown answers are logged
 };
 
 }  // namespace btspp

@@ -48,6 +48,7 @@ class ProtocolConstantsTest {
         "capability.detachedSignature" to ProtocolConstants.CAPABILITY_DETACHED_SIGNATURE,
         "capability.files" to ProtocolConstants.CAPABILITY_FILES,
         "capability.checks" to ProtocolConstants.CAPABILITY_CHECKS,
+        "capability.serialReset" to ProtocolConstants.CAPABILITY_SERIAL_RESET,
     )
 
     /** What only the agent needs. Nothing at present: the app reads manifests, and so needs the service's name too. */

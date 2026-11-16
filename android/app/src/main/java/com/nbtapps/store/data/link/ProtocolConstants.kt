@@ -86,4 +86,11 @@ object ProtocolConstants {
      * phone asks, with the token of the list the user was shown. An agent that does not list it has no checks.
      */
     const val CAPABILITY_CHECKS = "checks"
+
+    /**
+     * A capability: the agent has `serial.reset`, which asks the car's Bluetooth service to end the phone's Bluetooth
+     * serial link: at once if a serial link's node is open, and otherwise at the open of the next one. Only an agent
+     * that takes Bluetooth serial links lists it; one that does not list it answers `serial.reset` with `unsupported`.
+     */
+    const val CAPABILITY_SERIAL_RESET = "serial-reset"
 }

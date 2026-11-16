@@ -376,6 +376,11 @@ def run():
         check(ok("autostart", "off") == state, "autostart off, which is what it was")
         check(ctl("autostart", "maybe")[0] == 2, "autostart with a word that is neither on nor off")
 
+        # The bench's agent takes no Bluetooth serial links, so it has no serial link to have the car end.
+        code, out = ctl("serial", "reset")
+        check(code == 1 and "nbtctl: serial.reset: unsupported: " in out, "serial reset, with no Bluetooth serial", out)
+        check(ctl("serial", "frob")[0] == 2, "serial with a word it does not take")
+
         # A second agent on the same socket is turned away, and the first keeps the socket.
         second = subprocess.run(BENCH + ["--root", HU, "--socket", SOCKET],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)

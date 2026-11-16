@@ -3589,6 +3589,86 @@ static void testChecksBusy() {
     CHECK(fs::kindOf(t.platform.systemPath("/opt/aa/bin/demod")) == fs::kFile);
 }
 
+// ---- serial.reset ---------------------------------------------------------------------------------------------------
+
+// The Bluetooth serial listener as serial.reset sees it, played by the test: it answers as it is told, and keeps
+// what it was given.
+class FakeReset : public SerialReset {
+public:
+    FakeReset() : outcome(kResetSent), calls(0) {}
+    virtual Outcome resetSerialLink(const std::string& device, const std::string& instance, const std::string& service,
+                                    int64_t* forMs, std::string* why) {
+        ++calls;
+        given = device + "|" + instance + "|" + service;
+        *forMs = 60000;
+        if (outcome == kResetFailed) *why = "the test's Bluetooth service cannot be asked";
+        return outcome;
+    }
+    Outcome outcome;
+    unsigned calls;
+    std::string given;
+};
+
+static bool listsCapability(const Parsed& hello, const char* name) {
+    json::Value list = hello.result.find("capabilities");
+    for (size_t i = 0; i < list.size(); ++i) {
+        if (list.at(i).isString() && list.at(i).string() == name) return true;
+    }
+    return false;
+}
+
+static void testSerialReset() {
+    {   // an agent with no Bluetooth serial listener does not list the capability, and has no such method
+        Bench b("serial-reset-none");
+        Phone* p = b.connect();
+        Parsed hello(b.call(p, "hello", kGoodHello));
+        CHECK(hello.result.find("capabilities").size() == 4 && !listsCapability(hello, kCapabilitySerialReset));
+        CHECK(Parsed(b.call(p, "serial.reset", "{}")).code() == "unsupported");
+    }
+    Bench b("serial-reset");
+    FakeReset reset;
+    b.agent.setSerialReset(&reset);
+    Phone* p = b.phone();
+    Parsed hello(p->helloReply);
+    CHECK(hello.result.find("capabilities").size() == 5 && listsCapability(hello, kCapabilitySerialReset));
+
+    // A node is open: sent. None is: armed, for as long as the listener says.
+    Parsed sent(b.call(p, "serial.reset", "{}"));
+    CHECK_IN(p->lastHeard, str(sent.result, "state") == "sent" && sent.result.size() == 1 && reset.given == "||");
+    reset.outcome = SerialReset::kResetArmed;
+    Parsed armed(b.call(p, "serial.reset", "{}"));
+    CHECK(str(armed.result, "state") == "armed" && integer(armed.result, "forMs") == 60000 && reset.calls == 2);
+    // Other values for the request, to try them without a new build.
+    CHECK(Parsed(b.call(p, "serial.reset", "{\"device\":\"Dev2\",\"instance\":\"Inst 2\",\"service\":\"Other\"}")).result.isObject());
+    CHECK(reset.given == "Dev2|Inst 2|Other" && reset.calls == 3);
+    CHECK(Parsed(b.call(p, "serial.reset", "{\"service\":\"Other\"}")).result.isObject() && reset.given == "||Other");
+
+    // Values that are not short, printable strings.
+    const char* bad[] = {"{\"device\":\"\"}", "{\"device\":5}", "{\"instance\":null}", "{\"service\":\"a\\nb\"}",
+                         "{\"service\":\"\\u00e9t\\u00e9\"}", "{\"device\":\"012345678901234567890123456789012\"}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) CHECK_IN(bad[i], Parsed(b.call(p, "serial.reset", bad[i])).code() == "bad-request");
+    CHECK(reset.calls == 4);
+
+    // The car's Bluetooth service cannot be asked.
+    reset.outcome = SerialReset::kResetFailed;
+    Parsed failed(b.call(p, "serial.reset", "{}"));
+    CHECK(failed.code() == "io-error" && str(failed.error, "message") == "the test's Bluetooth service cannot be asked");
+    reset.outcome = SerialReset::kResetSent;
+
+    // The plugin may ask too, and a paired phone on a link of its own.
+    Phone* plugin = b.connect();
+    CHECK(Parsed(b.call(plugin, "hello", kPluginHello)).result.isObject());
+    CHECK(str(Parsed(b.call(plugin, "serial.reset", "{}")).result, "state") == "sent");
+    Phone* phone = b.phone("3", 4096, "serial");
+    CHECK(str(Parsed(b.call(phone, "serial.reset", "{}")).result, "state") == "sent" && reset.calls == 7);
+
+    // Not while a job runs: here one that waits for its archives.
+    std::string planId = planOk(b, p, kRuntime, "", kRuntime);
+    p->serve = false;
+    startJob(b, p, planId);
+    CHECK(b.agent.job().active() && Parsed(b.call(p, "serial.reset", "{}")).code() == "busy" && reset.calls == 7);
+}
+
 static void testSession(const std::string& path) {
     std::string now = sessionText(), before = testutil::readFile(path);
     if (now != before) {
@@ -3650,6 +3730,7 @@ int main(int argc, char** argv) {
     testFiles();
     testChecks();
     testChecksBusy();
+    testSerialReset();
     testSession(session);
     fs::removeTree(gWork, 0);
     printf("test_agent: ok\n");

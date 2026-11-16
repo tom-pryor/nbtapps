@@ -43,6 +43,9 @@ const char* const kCapabilityDetachedSignature = "detached-signature";
 const char* const kCapabilityFiles = "files";
 // A capability: this agent has checks.run and checks.fix, the compatibility checks (checks.hpp).
 const char* const kCapabilityChecks = "checks";
+// A capability: this agent has serial.reset, which has the car end the phone's Bluetooth serial link
+// (serial_reset.hpp). Only an agent with a Bluetooth serial listener lists it.
+const char* const kCapabilitySerialReset = "serial-reset";
 
 }  // namespace nbt
 

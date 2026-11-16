@@ -74,3 +74,8 @@ capability.files files
 # installed by hand), and puts it right when a controller asks, with the token of what the user was shown. One that
 # does not list it answers them with `unsupported`.
 capability.checks checks
+# An agent that lists this one has serial.reset: it asks the car's Bluetooth service to end the phone's Bluetooth
+# serial link, which closing the link's node does not do, at once if a serial link's node is open and otherwise at
+# the open of the next one. Only an agent that takes Bluetooth serial links lists it; one that does not list it
+# answers serial.reset with `unsupported`.
+capability.serialReset serial-reset

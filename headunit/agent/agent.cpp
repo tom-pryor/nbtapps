@@ -108,7 +108,7 @@ void SystemRandom::bytes(uint8_t* out, size_t len) {
 Agent::Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std::string& agentVersion, Clock* clock,
              RandomSource* random)
     : platform_(platform), keys_(keys), agentVersion_(agentVersion), clock_(clock), random_(random),
-      engine_(platform, keys, agentVersion), planner_(&engine_), job_(&engine_, this), nextSession_(1), building_(0),
+      engine_(platform, keys, agentVersion), planner_(&engine_), job_(&engine_, this), serialReset_(0), nextSession_(1), building_(0),
       havePlan_(false), jobOwner_(0), jobAccounted_(true), inStep_(false), restartDeadlineMs_(0), onTrial_(false),
       handOverDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), log_(stderr) {}
 
@@ -942,6 +942,67 @@ void Agent::checksFix(Session* s, int64_t id, const json::Value& params) {
     answer(s, id, w.text());
 }
 
+// ---- serial.reset -------------------------------------------------------------------------------------------------
+
+namespace {
+
+// A value of serial.reset's: 1 to 32 printable characters, nothing that steers a log or a terminal.
+bool resetValue(const std::string& text) {
+    if (text.empty() || text.size() > 32) return false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] < 0x20 || text[i] > 0x7e) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+void Agent::serialReset(Session* s, int64_t id, const json::Value& params) {
+    if (serialReset_ == 0) {
+        refuse(s, id, "unsupported", "this agent has no Bluetooth serial listener");
+        return;
+    }
+    static const char* const kNames[3] = {"device", "instance", "service"};
+    std::string values[3];
+    for (int i = 0; i < 3; ++i) {
+        json::Value v = params.find(kNames[i]);
+        if (!v.present()) continue;
+        if (!v.isString() || !resetValue(v.string())) {
+            refuse(s, id, "bad-request", "serial.reset takes device, instance and service, each 1 to 32 printable characters");
+            return;
+        }
+        values[i] = v.string();
+    }
+    if (job_.active() || inStep_) {
+        refuse(s, id, "busy", "a job is running");
+        return;
+    }
+    int64_t forMs = 0;
+    std::string why;
+    SerialReset::Outcome outcome = serialReset_->resetSerialLink(values[0], values[1], values[2], &forMs, &why);
+    if (outcome == SerialReset::kResetFailed) {
+        refuse(s, id, "io-error", why);
+        return;
+    }
+    std::string given;
+    for (int i = 0; i < 3; ++i) {
+        if (!values[i].empty()) given += std::string(given.empty() ? " (" : ", ") + kNames[i] + " '" + values[i] + "'";
+    }
+    if (!given.empty()) given += ")";
+    json::Writer w;
+    w.beginObject();
+    if (outcome == SerialReset::kResetSent) {
+        note(linkName(s->number) + ": serial.reset: the car is asked to end the phone's serial link" + given);
+        w.key("state").string("sent");
+    } else {
+        note(linkName(s->number) + ": serial.reset: the next serial link within " + number((uint64_t)(forMs / 1000)) +
+             " s is ended at its open" + given);
+        w.key("state").string("armed").key("forMs").integer(forMs);
+    }
+    w.endObject();
+    answer(s, id, w.text());
+}
+
 // ---- restartNeeded ------------------------------------------------------------------------------------------------
 
 // Whether an installed package still waits for a restart is kept in the run folder: a power cut clears that
@@ -1025,6 +1086,7 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "autostart.set") autostartSet(s, id, params);
     else if (method == "checks.run") checksRun(s, id, params);
     else if (method == "checks.fix") checksFix(s, id, params);
+    else if (method == "serial.reset") serialReset(s, id, params);
     else refuse(s, id, "unsupported", "this agent has no method " + sanitizeUtf8(method.substr(0, 64), 0));
 }
 
@@ -1085,9 +1147,12 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     w.beginObject().key("protocolMin").integer(kProtocolVersion).key("protocolMax").integer(kProtocolVersion);
     w.key("role").string("agent").key("headUnitId").string(headUnitId_).key("agentVersion").string(agentVersion_);
     // What this agent has beyond the protocol's first version: autostart.get and autostart.set, installs checked
-    // with the offer's signature, the files of a package, and the compatibility checks.
+    // with the offer's signature, the files of a package, the compatibility checks, and, with Bluetooth serial,
+    // serial.reset.
     w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart);
-    w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks).endArray().endObject();
+    w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks);
+    if (serialReset_ != 0) w.string(kCapabilitySerialReset);
+    w.endArray().endObject();
     // What `auth` signs: the two payloads as they travel. The reply's is what respond() sends for this result.
     const std::string& asked = peer->incoming();
     std::string reply = resultText(id, w.text());

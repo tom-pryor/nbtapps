@@ -479,8 +479,9 @@ void SppNodeGate::detach() {
 
 SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, const SerialConfig& config)
     : gate_(gate), log_(log), services_(0), config_(config), spp_(gap, this), wakeRead_(-1), wakeWrite_(-1),
-      hasThread_(false), stop_(false), active_(false), tracker_(config.requestWindowS), hotUntil_(0), reqAt_(0),
-      refused_(0), deciding_(false), held_(false), holdWhy_(0) {
+      hasThread_(false), watchFrom_(0), stop_(false), active_(false), tracker_(config.requestWindowS), hotUntil_(0),
+      reqAt_(0), refused_(0), deciding_(false), held_(false), holdWhy_(0), kept_(0), resetHotUntil_(0) {
+    for (int i = 0; i < NodeTracker::kNodes; ++i) watched_[i] = false;
     pthread_mutex_init(&mu_, NULL);
     pthread_cond_init(&wake_, NULL);
 }
@@ -707,19 +708,134 @@ bool SerialListener::linkExpected() {
 }
 
 // Between two looks at the nodes: a moment while a link is expected, otherwise until something happens, and
-// 200 ms at most.
+// 200 ms at most, or 20 ms while serial.reset has something to do or to watch.
 void SerialListener::waitForPass() {
     pthread_mutex_lock(&mu_);
-    bool hot = monoNow() < hotUntil_;
+    double now = monoNow();
+    bool hot = now < hotUntil_;
     if (!hot && !stop_) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 200000000L;
+        ts.tv_nsec += now < resetHotUntil_ ? 20000000L : 200000000L;
         if (ts.tv_nsec >= 1000000000L) { ++ts.tv_sec; ts.tv_nsec -= 1000000000L; }
         pthread_cond_timedwait(&wake_, &mu_, &ts);
     }
     pthread_mutex_unlock(&mu_);
     if (hot) usleep(2000);
+}
+
+// ---- serial.reset ------------------------------------------------------------------------------------------------
+
+// On the agent's thread: only says what is to happen, for the listener's thread to do.
+SerialReset::Outcome SerialListener::resetSerialLink(const std::string& device, const std::string& instance,
+                                                     const std::string& service, int64_t* forMs, std::string* why) {
+    unsigned agents = serialLinksOpen();
+    pthread_mutex_lock(&mu_);
+    bool active = active_;
+    bool open = deciding_ || kept_ > 0 || agents > 0;
+    pthread_mutex_unlock(&mu_);
+    if (!active) {
+        *why = "Bluetooth serial is not set up just now";
+        return kResetFailed;
+    }
+    if (!spp_.attached()) {
+        *why = "the car's Bluetooth service is not attached";
+        return kResetFailed;
+    }
+    if (open && !spp_.knowsPhone()) {
+        *why = "no phone has asked for a serial link since the agent started, so there is no link to name";
+        return kResetFailed;
+    }
+    *forMs = (int64_t)config_.resetArmedMs;
+    pthread_mutex_lock(&mu_);
+    double now = monoNow();
+    reset_.device = device;
+    reset_.instance = instance;
+    reset_.service = service;
+    reset_.askedAt = now;
+    if (open) {
+        reset_.due = true;
+        reset_.at = now + kSerialResetDelayMs / 1000.0;
+        resetHotUntil_ = reset_.at + kSerialResetWatchMs / 1000.0;
+    } else {
+        reset_.armed = true;
+        reset_.until = now + config_.resetArmedMs / 1000.0;
+    }
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+    if (open) {
+        say("serial.reset: a serial node is open, so ServiceDisconnect goes to the car in %u ms", kSerialResetDelayMs);
+    } else {
+        say("serial.reset: no serial node is open, so the next serial link whose node opens within %u s is ended at "
+            "its open", config_.resetArmedMs / 1000);
+    }
+    return open ? kResetSent : kResetArmed;
+}
+
+// The nodes that are there when ServiceDisconnect has gone out, sent at `from`: the log says when they go.
+void SerialListener::watchNodes(const bool nodes[NodeTracker::kNodes], double from) {
+    bool any = false;
+    for (int i = 0; i < NodeTracker::kNodes; ++i) {
+        watched_[i] = nodes[i];
+        any = any || nodes[i];
+    }
+    watchFrom_ = any ? from : 0;
+    if (!any) say("serial.reset: no serial node was there when ServiceDisconnect went out");
+}
+
+// On the listener's thread, at every pass and during the decide step: what serial.reset asked for that is due, and
+// what has come of a ServiceDisconnect so far.
+void SerialListener::tendReset() {
+    double now = monoNow();
+    pthread_mutex_lock(&mu_);
+    bool due = reset_.due && now >= reset_.at;
+    if (due) reset_.due = false;
+    bool ranOut = reset_.armed && now >= reset_.until;
+    if (ranOut) reset_.armed = false;
+    Reset asked = reset_;
+    pthread_mutex_unlock(&mu_);
+    if (ranOut)
+        say("serial.reset: no serial link came within %u s to be ended at its open: nothing is asked any more",
+            config_.resetArmedMs / 1000);
+    if (due) {
+        // The nodes this listener opened, that are there now. Someone else's are not watched.
+        bool present[NodeTracker::kNodes];
+        scanNodes(present);
+        pthread_mutex_lock(&mu_);
+        for (int i = 0; i < NodeTracker::kNodes; ++i) present[i] = present[i] && tracker_.state(i) == NodeTracker::kOurs;
+        pthread_mutex_unlock(&mu_);
+        if (spp_.disconnectPhone(asked.device, asked.instance, asked.service)) {
+            say("serial.reset: ServiceDisconnect sent, %.0f ms after it was asked for", (now - asked.askedAt) * 1000.0);
+            watchNodes(present, now);
+        } else {
+            say("serial.reset: ServiceDisconnect could not be sent: the car's Bluetooth service is not attached, or "
+                "did not take the request");
+        }
+    }
+    if (watchFrom_ == 0) return;
+    bool present[NodeTracker::kNodes];
+    scanNodes(present);
+    bool left = false;
+    std::string up;
+    for (int i = 0; i < NodeTracker::kNodes; ++i) {
+        if (!watched_[i]) continue;
+        if (present[i]) {
+            left = true;
+            up += (up.empty() ? "" : ", ") + nodePath(i);
+            continue;
+        }
+        watched_[i] = false;
+        say("serial.reset: %s went %.0f ms after ServiceDisconnect was sent", nodePath(i).c_str(),
+            (now - watchFrom_) * 1000.0);
+    }
+    if (!left) {
+        watchFrom_ = 0;
+    } else if (now - watchFrom_ >= kSerialResetWatchMs / 1000.0) {
+        say("serial.reset: the link was still up %u s after ServiceDisconnect was sent: %s goes on being read until "
+            "the link ends", kSerialResetWatchMs / 1000, up.c_str());
+        for (int i = 0; i < NodeTracker::kNodes; ++i) watched_[i] = false;
+        watchFrom_ = 0;
+    }
 }
 
 // ---- the hold ----------------------------------------------------------------------------------------------------
@@ -853,6 +969,7 @@ SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::st
             *why = "the listener was stopped";
             return kEnded;
         }
+        tendReset();
         double left = by - monoNow();
         if (left <= 0) {
             if (*leftOver > 0) {
@@ -920,6 +1037,11 @@ void SerialListener::keep(int node, int fd, NodeReader* reader, const char* what
     kept.at = monoNow();
     kept.what = what;
     letGo_.push_back(kept);
+    if (fd >= 0 || reader != 0) {
+        pthread_mutex_lock(&mu_);
+        ++kept_;
+        pthread_mutex_unlock(&mu_);
+    }
 }
 
 // The nodes that are not the agent's link and whose link has ended since: a node that is read or kept open is
@@ -935,6 +1057,11 @@ void SerialListener::closeKept(Closing which) {
             continue;
         }
         letGo_.erase(letGo_.begin() + (long)i);
+        if (kept.fd >= 0 || kept.reader != 0) {
+            pthread_mutex_lock(&mu_);
+            --kept_;
+            pthread_mutex_unlock(&mu_);
+        }
         uint64_t dropped = 0;
         if (kept.reader != 0) {
             dropped = kept.reader->dropped();
@@ -983,6 +1110,35 @@ void SerialListener::take(int node) {
     // The gate is looked at only now, with the node open: the open comes before everything else. The time for the
     // decide step runs from the open all the same.
     gate_->watch();
+
+    // serial.reset asked for the next link to be ended: this one, with no decide step.
+    pthread_mutex_lock(&mu_);
+    bool reset = reset_.armed && openedAt < reset_.until;
+    Reset asked = reset_;
+    if (reset) {
+        reset_.armed = false;
+        resetHotUntil_ = monoNow() + kSerialResetWatchMs / 1000.0;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (reset) {
+        reader->drain();
+        bool sent = spp_.disconnectPhone(asked.device, asked.instance, asked.service);
+        say("%s: serial.reset asked %.1f s ago for the next serial link to be ended at its open. %s, and its node is "
+            "read, with what comes dropped, until the link ends", path.c_str(), openedAt - asked.askedAt,
+            sent ? "ServiceDisconnect is sent at once, with no decide step" : "ServiceDisconnect could not be sent");
+        keep(node, -1, reader, "ended at its open");
+        if (sent) {
+            bool one[NodeTracker::kNodes];
+            for (int i = 0; i < NodeTracker::kNodes; ++i) one[i] = i == node;
+            watchNodes(one, monoNow());
+        }
+        pthread_mutex_lock(&mu_);
+        deciding_ = false;
+        holdWhy_ = "the link is ended at its open";
+        pthread_mutex_unlock(&mu_);
+        updateHold();
+        return;
+    }
 
     std::vector<uint8_t> first;
     std::string why;
@@ -1120,6 +1276,7 @@ void SerialListener::run() {
             }
         }
         lookForLinks();
+        tendReset();
         // The hold goes off when the agent's link has ended, or when no link has come of a phone's request.
         updateHold();
         // Not while a link is expected: the check takes some ten milliseconds, and the open must not wait for it.

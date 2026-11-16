@@ -72,7 +72,7 @@ void DsiGapClient::onData(DsiClient*, uint32_t type, uint32_t id, uint32_t, cons
 
 SppService::SppService(GapClient* gap, Events* events)
     : gap_(gap), events_(events), type_(0), state_(kIdle), mode_(kModeOff), subscribed_(false), otherSentAt_(0),
-      otherReplyS_(kOtherRemovalReplyS) {
+      otherReplyS_(kOtherRemovalReplyS), unknownLeft_(0) {
     pthread_mutex_init(&mu_, NULL);
 }
 
@@ -211,6 +211,56 @@ void SppService::sendNextOther() {
     events_->sppOtherRemoved(next, kNoError);
 }
 
+namespace {
+// After a ServiceDisconnect, this many answers that this class does not know are logged.
+const unsigned kUnknownLogged = 8;
+}  // namespace
+
+bool SppService::knowsPhone() {
+    pthread_mutex_lock(&mu_);
+    bool known = !phoneAddress_.empty();
+    pthread_mutex_unlock(&mu_);
+    return known;
+}
+
+bool SppService::disconnectPhone(const std::string& device, const std::string& instance, const std::string& service) {
+    pthread_mutex_lock(&mu_);
+    std::string address = phoneAddress_;
+    std::string named = service.empty() ? phoneService_ : service;
+    pthread_mutex_unlock(&mu_);
+    if (!gap_->attached() || address.empty()) return false;
+    std::string d = device.empty() ? std::string(kDisconnectDevice) : device;
+    std::string i = instance.empty() ? std::string(kDisconnectInstance) : instance;
+    pthread_mutex_lock(&mu_);
+    unknownLeft_ = kUnknownLogged;
+    pthread_mutex_unlock(&mu_);
+    say("ServiceDisconnect device '%s', instance '%s', service '%s', for the phone of the last request for a link",
+        d.c_str(), i.c_str(), named.c_str());
+    if (send(kReqServiceDisconnect, buildServiceDisconnect(d, i, address, named))) return true;
+    pthread_mutex_lock(&mu_);
+    unknownLeft_ = 0;
+    pthread_mutex_unlock(&mu_);
+    return false;
+}
+
+// An answer this class does not know, after a ServiceDisconnect: its id, its type and its first 32-bit value, and
+// never its strings, which may name the phone.
+void SppService::noteUnknown(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len) {
+    pthread_mutex_lock(&mu_);
+    bool say1 = unknownLeft_ > 0;
+    if (say1) --unknownLeft_;
+    pthread_mutex_unlock(&mu_);
+    if (!say1) return;
+    if (len >= 4) {
+        uint32_t first = readError(payload, len);
+        say("after ServiceDisconnect, a message from the Bluetooth server that the agent does not know: id 0x%x, "
+            "type 0x%x, first value %u (0x%x)", id, type, first, first);
+    } else {
+        say("after ServiceDisconnect, a message from the Bluetooth server that the agent does not know: id 0x%x, "
+            "type 0x%x, %u bytes", id, type, len);
+    }
+}
+
 bool SppService::send(uint32_t id, const std::vector<uint8_t>& payload) {
     if (gap_->request(id, payload)) return true;
     say("DSI request 0x%x not sent: the Bluetooth server is not attached", id);
@@ -256,14 +306,25 @@ void SppService::gapDetached() {
 
 void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len) {
     if (isServiceRequestInform(id)) {
-        // The phone's name and address are personal data: they stay here, and only the service goes on.
+        // The phone's name and address are personal data: they stay here, and only the service goes on. The address
+        // is kept, for a ServiceDisconnect, and never said.
         ServiceRequest q = parseServiceRequest(id, payload, len);
+        if (id == kInfServiceRequest && q.ok && !q.address.empty()) {
+            pthread_mutex_lock(&mu_);
+            phoneAddress_ = q.address;
+            phoneService_ = q.service;
+            pthread_mutex_unlock(&mu_);
+        }
         events_->sppPhone(id == kInfServiceRequest ? kPhoneAsked
                                                    : (id == kInfServiceRequestComplete ? kPhoneLinked : kPhoneRefused),
                           q.service, q.ok);
         return;
     }
     bool rejected = type == kTypeRejectedA || type == kTypeRejectedB;
+    if (rejected && id == kReqServiceDisconnect) {
+        say("the Bluetooth server rejected ServiceDisconnect (type 0x%x)", type);
+        return;
+    }
 
     // The answer to a removal of another program's registration, if one is out: it went out before any removal of
     // our own that is waiting too, so its answer is the first of the two.
@@ -313,7 +374,9 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
         if (s == kClearSent) { set(kRetrySent); sendRegister(); }
         else set(err == 0 ? kRemoved : kRemoveFailed);
         sendNextOther();   // a removal of another program's registration may have waited for this answer
+        return;
     }
+    if (type == kTypeResponse && id != kRspSppUuidRegister && id != kRspSppUuidDeregister) noteUnknown(type, id, payload, len);
 }
 
 }  // namespace btspp

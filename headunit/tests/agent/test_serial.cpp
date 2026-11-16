@@ -137,6 +137,9 @@ public:
             trace_->add("deregister " + name.str());
             putU32(reply, 0);
             events_->gapMessage(kTypeResponse, kRspSppUuidDeregister, &reply[0], (uint32_t)reply.size());
+        } else if (id == kReqServiceDisconnect) {
+            disconnect = payload;   // before the trace says so, which is what the test waits for
+            trace_->add("gap disconnect");
         }
         return true;
     }
@@ -157,7 +160,8 @@ public:
     }
 
     bool canOpen;
-    uint32_t registerError;   // what a registration is answered with
+    uint32_t registerError;          // what a registration is answered with
+    std::vector<uint8_t> disconnect;   // the last ServiceDisconnect's payload
 
 private:
     Events* events_;
@@ -1543,6 +1547,115 @@ static void testLeftOvers() {
     }
 }
 
+// ---- serial.reset ---------------------------------------------------------------------------------------------------
+
+// The listener's side of serial.reset: ServiceDisconnect for a link whose node is open, a little after it was asked
+// for, and with none open, at the open of the next link's node; and in the log, what came of it.
+static void testReset() {
+    std::string dir = freshFolder("reset");
+    Trace trace;
+    LinksGone gone;
+    FakeGap gap(&trace);
+    FakeGate gate(&trace);
+    SerialConfig config = configFor(dir);
+    config.resetArmedMs = 1500;
+    SerialListener listener(&gap, &gate, &trace, config);
+    std::string why;
+    int64_t forMs = 0;
+    // Not set up: nothing can be asked.
+    CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetFailed && !why.empty());
+    CHECK_IN(why, listener.start(&why));
+    gap.attach();
+    CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+
+    // A link of the agent's is up: sent, and ServiceDisconnect goes out some 300 ms later, for the phone that asked
+    // for the link last. The car ends the link, and the log says how soon its node went.
+    Node first(dir + "/btspp", 0);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    first.appear();
+    Link* link = dialled(listener, first, trace);
+    double asked = monoNow();
+    CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetSent);
+    CHECK(!trace.saw("gap disconnect"));
+    CHECK_IN(trace.text(), sawWithin(trace, "gap disconnect", 2000));
+    CHECK(monoNow() - asked >= 0.29);
+    CHECK(gap.disconnect == buildServiceDisconnect("BtCtrl", "ExtBox1", "AABBCCDDEEFF", kCarSerialService));
+    CHECK_IN(trace.text(), trace.saw("serial.reset: ServiceDisconnect sent, "));
+    first.hangUp();
+    first.vanish();
+    CHECK_IN(trace.text(), sawWithin(trace, "serial.reset: " + first.path + " went ", 2000));
+    CHECK(trace.saw(" ms after ServiceDisconnect was sent"));
+    CHECK(endsWithin(link, 3000));
+    delete link;
+
+    // Other values; and a link that stays up, which the log says 3 s after.
+    Node second(dir + "/btspp", 1);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    second.appear();
+    link = dialled(listener, second, trace);
+    CHECK(listener.resetSerialLink("Dev2", "Inst2", "Other", &forMs, &why) == SerialReset::kResetSent);
+    CHECK_IN(trace.text(), sawWithin(trace, "serial.reset: the link was still up 3 s after ServiceDisconnect was sent: " +
+                                                second.path + " goes on being read until the link ends", 5000));
+    CHECK(gap.disconnect == buildServiceDisconnect("Dev2", "Inst2", "AABBCCDDEEFF", "Other"));
+    exchange(second, link, "still", "noch");
+    second.hangUp();
+    second.vanish();
+    CHECK(endsWithin(link, 3000));
+    delete link;
+    pause(450);   // the listener sees that the node has gone
+
+    // No node is open: armed. The next link is ended at the open of its node, with no decide step, and its node
+    // read until the link ends; even with the magic bytes it is not the agent's.
+    unsigned before = trace.count("gap disconnect");
+    CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetArmed && forMs == 1500);
+    CHECK(trace.count("gap disconnect") == before);
+    Node third(dir + "/btspp", 2);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    third.appear();
+    CHECK_IN(trace.text(), sawWithin(trace, "btspp2: serial.reset asked ", 3000));
+    CHECK(trace.saw("ServiceDisconnect is sent at once, with no decide step, and its node is read"));
+    CHECK(trace.count("gap disconnect") == before + 1 && !trace.saw("btspp2: its first message came"));
+    third.say(kMagic);
+    bool closed = false;
+    CHECK(acceptWithin(listener, 300) == 0 && third.hear(1, 50, &closed).empty() && !closed);
+    third.hangUp();
+    third.vanish();
+    CHECK_IN(trace.text(), sawWithin(trace, "serial.reset: " + third.path + " went ", 2000));
+    CHECK_IN(trace.text(), sawWithin(trace, "btspp2: the link ended ", 2000));
+    CHECK(trace.saw("s after it was ended at its open; 4 B were dropped"));
+    pause(450);
+
+    // Once: the link after it is decided on as ever.
+    Node fourth(dir + "/btspp", 3);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    fourth.appear();
+    link = dialled(listener, fourth, trace);
+    CHECK(trace.count("gap disconnect") == before + 1);
+    fourth.hangUp();
+    fourth.vanish();
+    CHECK(endsWithin(link, 3000));
+    delete link;
+    pause(450);
+
+    // Armed, and no link comes in its time: nothing is asked any more, and the next link is decided on.
+    CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetArmed);
+    CHECK_IN(trace.text(), sawWithin(trace, "serial.reset: no serial link came within 1 s to be ended at its open", 3000));
+    Node fifth(dir + "/btspp", 4);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    fifth.appear();
+    link = dialled(listener, fifth, trace);
+    CHECK(trace.count("gap disconnect") == before + 1);
+    fifth.hangUp();
+    fifth.vanish();
+    CHECK(endsWithin(link, 3000));
+    delete link;
+
+    // Nothing of the phone's in the log.
+    CHECK(!trace.saw("Test Phone") && !trace.saw("AABBCCDDEEFF"));
+    listener.stop();
+    CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetFailed);
+}
+
 // What nbtagent's --decide and --decide-hold are made of: the value of the one, and what the agent's first log
 // lines say of the decide step and of the gate's hold.
 static void testOptions() {
@@ -1612,6 +1725,7 @@ int main(int argc, char** argv) {
     testLeftBehind();
     testDecide();
     testLeftOvers();
+    testReset();
     testHold();
     printf("test_serial: ok\n");
     return 0;
