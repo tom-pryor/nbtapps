@@ -318,6 +318,9 @@ class AutostartSetupTest {
     private suspend fun installing(): String =
         requireNotNull((await(setup.state, "the plugin's job") { (it?.step as? AutostartStep.Installing)?.planId != null }?.step as AutostartStep.Installing).planId)
 
+    /** The stages the set-up's run has begun, as its state records them. */
+    private fun stages(): List<AutostartStage>? = setup.state.value?.stages
+
     private fun sets(): List<String> = connector.agents.flatMap { agent -> agent.requestsOf("autostart.set").map { it.toString() } }
 
     @Test
@@ -330,6 +333,7 @@ class AutostartSetupTest {
 
         assertEquals(AutostartStep.Done(changed = false), ended())
         assertEquals("car", setup.state.value?.headUnitId)
+        assertEquals(listOf(AutostartStage.CHECKING), stages())
         assertEquals(emptyList<String>(), sets())
         assertEquals(0, catalogue.refreshes.get())
     }
@@ -344,6 +348,7 @@ class AutostartSetupTest {
 
         assertEquals(AutostartStep.Done(changed = true), ended())
         assertTrue(bench.on)
+        assertEquals("nothing got or installed", listOf(AutostartStage.CHECKING, AutostartStage.SWITCHING_ON), stages())
         assertEquals(listOf("""{"on":true}"""), sets())
         assertEquals(0, plans.get())
         assertEquals(0, catalogue.refreshes.get())
@@ -357,6 +362,7 @@ class AutostartSetupTest {
         setup.begin("car")
 
         val planId = installing()
+        assertEquals(listOf(AutostartStage.CHECKING, AutostartStage.GETTING_PLUGIN, AutostartStage.INSTALLING_PLUGIN), stages())
         // The catalogue was loaded for it, and the archive is on the phone now.
         assertEquals(1, catalogue.refreshes.get())
         assertEquals(listOf("$PLUGIN 1.0.0"), store.packages.value.map { "${it.id} ${it.version}" })
@@ -367,6 +373,7 @@ class AutostartSetupTest {
 
         assertEquals(AutostartStep.Done(changed = true), ended())
         assertTrue(bench.on)
+        assertEquals(AutostartStage.entries, stages())
         assertEquals(listOf("""{"on":true}"""), sets())
         assertEquals(Autostart(on = true, available = true), (jobs.connection.value as ConnectionState.Connected).autostart)
     }
@@ -383,12 +390,15 @@ class AutostartSetupTest {
         finishJob("1.0.0")
 
         assertEquals(AutostartStep.Done(changed = true), ended())
+        // Got from what the phone holds: it is chosen all the same, and not downloaded.
+        assertEquals(AutostartStage.entries, stages())
         assertEquals("1.0.0", bench.plugin)
         assertEquals("hmi-restart", (jobs.connection.value as ConnectionState.Connected).info.restartNeeded)
 
         setup.restart()
 
         assertEquals(AutostartStep.Restarting, await(setup.state, "restarting") { it?.step == AutostartStep.Restarting }?.step)
+        assertEquals(AutostartStage.entries, stages())
         assertEquals("hmi", connector.agent.requestsOf("system.restart").single().getValue("kind").jsonPrimitive.content)
         // It has ended, and goes once dismissed.
         setup.dismiss()
@@ -435,11 +445,14 @@ class AutostartSetupTest {
         bench.refuseSet = "io-error"
         finishJob("1.0.0")
         assertEquals(AutostartStep.Failed(AgentText.autostart("io-error")), ended())
+        assertEquals(AutostartStage.entries, stages())
 
         bench.refuseSet = null
         setup.retry()
 
         assertEquals(AutostartStep.Done(changed = true), ended())
+        // The run of the retry only switched on.
+        assertEquals(listOf(AutostartStage.CHECKING, AutostartStage.SWITCHING_ON), stages())
         assertEquals(1, plans.get())
     }
 
@@ -509,6 +522,7 @@ class AutostartSetupTest {
         setup.begin("car")
         val unloaded = ended() as AutostartStep.Failed
         assertTrue(unloaded.reason, unloaded.reason.startsWith("The catalogue couldn't be loaded."))
+        assertEquals(listOf(AutostartStage.CHECKING, AutostartStage.GETTING_PLUGIN), stages())
 
         catalogueWith("1.0.0")
         source.unreachable = "no network"

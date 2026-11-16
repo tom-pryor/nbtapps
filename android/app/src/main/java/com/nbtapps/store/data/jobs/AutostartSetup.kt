@@ -154,8 +154,47 @@ sealed interface AutostartStep {
     data class Failed(val reason: String) : AutostartStep
 }
 
-/** The set-up of [headUnitId], this app's id of the head unit, and where it stands. */
-data class AutostartSetupState(val headUnitId: String, val step: AutostartStep) {
+/**
+ * The stages a set-up goes through, in the order it goes through them, as [AutostartSetupState.stages] records them.
+ * A run need not go through all of them: see there.
+ */
+enum class AutostartStage {
+    /** What the agent says of it is looked at, and its checks are run: every run begins with this. */
+    CHECKING,
+
+    /** The iDrive plugin is chosen from the catalogue, and downloaded to the phone where the phone lacks it. */
+    GETTING_PLUGIN,
+
+    /** The iDrive plugin is installed on the head unit. */
+    INSTALLING_PLUGIN,
+
+    /** The agent is switched to start with the car. */
+    SWITCHING_ON,
+}
+
+/** The stage that [AutostartSetup] is in while it shows this step, or null for a step that is no stage's. */
+private val AutostartStep.stage: AutostartStage?
+    get() = when (this) {
+        AutostartStep.Checking -> AutostartStage.CHECKING
+        AutostartStep.Downloading -> AutostartStage.GETTING_PLUGIN
+        is AutostartStep.Installing -> AutostartStage.INSTALLING_PLUGIN
+        AutostartStep.SwitchingOn -> AutostartStage.SWITCHING_ON
+        else -> null
+    }
+
+/**
+ * The set-up of [headUnitId], this app's id of the head unit, and where it stands.
+ *
+ * [stages] are the stages the run that shows [step] has begun, in order; the last is the one it is in, or was in
+ * when it ended or began to ask. A stage that is not there was not needed, or not reached: where the head unit has
+ * the iDrive plugin it is neither got nor installed, and where the agent starts with the car already it is not
+ * switched on. A run begun again, by [AutostartSetup.retry] too, begins the list again.
+ */
+data class AutostartSetupState(
+    val headUnitId: String,
+    val step: AutostartStep,
+    val stages: List<AutostartStage> = emptyList(),
+) {
     /** Nothing more happens by itself: it is done, iDrive restarts, or it failed. */
     val ended: Boolean get() = step is AutostartStep.Done || step is AutostartStep.Restarting || step is AutostartStep.Failed
 
@@ -306,20 +345,35 @@ class AutostartSetup(
         work?.cancel()
         question = null
         val mine = ++generation
-        current.value = AutostartSetupState(headUnitId, AutostartStep.Checking)
+        current.value = AutostartSetupState(headUnitId, AutostartStep.Checking, listOf(AutostartStage.CHECKING))
         work = scope.launch {
             val end = run(headUnitId, fresh, mine) { step -> publish(mine, step) }
             publish(mine, end)
         }
     }
 
-    /** Shows [step] as where the set-up stands, unless the run [mine] has been replaced meanwhile. */
+    /**
+     * Shows [step] as where the set-up stands, unless the run [mine] has been replaced meanwhile. A step of a stage
+     * not yet begun begins it ([AutostartSetupState.stages]).
+     */
     private fun publish(mine: Int, step: AutostartStep) {
         synchronized(lock) {
             val last = current.value ?: return
-            if (mine == generation) current.value = last.copy(step = step)
+            if (mine == generation) current.value = last.copy(step = step, stages = last.stages.with(step.stage))
         }
     }
+
+    /** Records that the run [mine] has begun [stage], where no step of its own says so, unless the run has been replaced. */
+    private fun enter(mine: Int, stage: AutostartStage) {
+        synchronized(lock) {
+            val last = current.value ?: return
+            if (mine == generation) current.value = last.copy(stages = last.stages.with(stage))
+        }
+    }
+
+    /** These stages with [stage] added at the end, if it is not among them already. */
+    private fun List<AutostartStage>.with(stage: AutostartStage?): List<AutostartStage> =
+        if (stage == null || stage in this) this else this + stage
 
     /** The link to [headUnitId], if the app has one up. */
     private fun connectedTo(headUnitId: String): ConnectionState.Connected? =
@@ -336,7 +390,7 @@ class AutostartSetup(
     private suspend fun run(headUnitId: String, fresh: Boolean, mine: Int, show: (AutostartStep) -> Unit): AutostartStep {
         // Up to the questions every step needs the link, the plugin's download too, since its install follows: the
         // app leaving the foreground meanwhile does not end it. A question waits for the user, and so does not.
-        val end = jobs.usingLink { setUp(headUnitId, fresh, show) }
+        val end = jobs.usingLink { setUp(headUnitId, fresh, mine, show) }
         if (end !is AutostartStep.Done) return end
         // Last, the questions, as they are kept now; asked for again, in case the first run was refused.
         var done: AutostartStep.Done = end
@@ -348,7 +402,7 @@ class AutostartSetup(
     }
 
     /** What [run] does before the questions: everything up to the agent starting with the car, or how that failed. */
-    private suspend fun setUp(headUnitId: String, fresh: Boolean, show: (AutostartStep) -> Unit): AutostartStep {
+    private suspend fun setUp(headUnitId: String, fresh: Boolean, mine: Int, show: (AutostartStep) -> Unit): AutostartStep {
         // A refresh that fails leaves what was read before, or no link, which the next line sees.
         if (fresh && connectedTo(headUnitId) != null) jobs.refresh()
         val connected = connectedTo(headUnitId) ?: return AutostartStep.Failed(NO_LINK)
@@ -358,7 +412,11 @@ class AutostartSetup(
             AutostartPlan.AlreadyOn -> AutostartStep.Done(changed = false)
             AutostartPlan.SwitchOn -> switchOn(headUnitId, show)
             is AutostartPlan.CannotBe -> AutostartStep.Failed(plan.reason)
-            is AutostartPlan.InstallFirst -> install(headUnitId, connected, plan.needs, show) ?: settle(headUnitId) ?: switchOn(headUnitId, show)
+            is AutostartPlan.InstallFirst -> {
+                // Choosing the plugin is part of getting it, whether or not it has to be downloaded.
+                enter(mine, AutostartStage.GETTING_PLUGIN)
+                install(headUnitId, connected, plan.needs, show) ?: settle(headUnitId) ?: switchOn(headUnitId, show)
+            }
         }
     }
 
