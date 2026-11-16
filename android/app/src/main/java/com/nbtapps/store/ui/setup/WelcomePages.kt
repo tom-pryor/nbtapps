@@ -2,7 +2,9 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.setup
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -38,7 +40,7 @@ internal fun WelcomePage(onYes: () -> Unit, onNotYet: () -> Unit, onBrowse: () -
         MutedText("NBTApps installs apps on your car's head unit from this phone, over Bluetooth.")
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(vertical = 4.dp)) {
-                CardRow("The NBTApp agent on the head unit", "Installed once, from a computer, over SSH.") { RowNumber(1) }
+                CardRow("The NBTApp agent on the head unit", "Installed once, before the app can reach the car.") { RowNumber(1) }
                 CardRow("This phone paired with the car", "In the phone's Bluetooth settings, as for calls or music.") { RowNumber(2) }
             }
         }
@@ -47,8 +49,9 @@ internal fun WelcomePage(onYes: () -> Unit, onNotYet: () -> Unit, onBrowse: () -
 }
 
 /**
- * The page for a car the agent is not on yet: the app cannot put it there, and the install guide can. [onBack] goes
- * back to the question, and [onInstalled] on to picking the car.
+ * The page for a car the agent is not on yet: the app cannot put it there, and the page gives the two ways that can.
+ * The first is the installer, a web page that puts the agent on the car by itself; the second is the install guide,
+ * followed by hand. [onBack] goes back to the question, and [onInstalled] on to picking the car.
  */
 @Composable
 internal fun NotYetPage(onBack: () -> Unit, onInstalled: () -> Unit) {
@@ -56,37 +59,54 @@ internal fun NotYetPage(onBack: () -> Unit, onInstalled: () -> Unit) {
     SetupFrame(
         onBack = onBack,
         buttons = {
-            Button(onClick = { sendInstallGuide(context) }, Modifier.fillMaxWidth()) { Text("Send the guide to my computer") }
-            OutlinedButton(onClick = { openInstallGuide(context) }, Modifier.fillMaxWidth()) { Text("Read it on this phone") }
-            TextButton(onClick = onInstalled, Modifier.fillMaxWidth()) { Text("The agent is installed now") }
+            OutlinedButton(onClick = onInstalled, Modifier.fillMaxWidth()) { Text("The agent is installed now") }
         },
     ) {
         PageTitle("Install the agent first")
-        MutedText("This part is done from a computer, once per car. The app can't do it for you. Once the agent is on the car, the app does the rest.")
-        SectionHeading("What it takes")
+        MutedText("This is done once per car, before the app can reach it. There are two ways to do it.")
+
+        SectionHeading("Option 1: the installer")
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(vertical = 4.dp)) {
-                CardRow("A car with an NBT Evo head unit, and a root shell on it over SSH")
+                CardRow("It installs the agent for you", "A web page that works on an Android phone, or on a computer.")
                 HorizontalDivider(Modifier.padding(horizontal = 16.dp))
-                CardRow("A computer, to download the agent and reach the car")
-                HorizontalDivider(Modifier.padding(horizontal = 16.dp))
-                CardRow("A USB stick, or SSH from the computer, to put the files on the car")
-            }
-        }
-        SectionHeading("The install guide")
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text("Steps 1 to 3 put the agent on the car and start it. Come back here after step 3.", style = MaterialTheme.typography.bodyLarge)
-                SelectionContainer {
-                    Text(
-                        INSTALL_GUIDE_URL,
-                        Modifier.padding(top = 8.dp),
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                CardRow("You need an ENET cable", "And a USB Ethernet adapter, if your phone or computer has no Ethernet port.")
+                Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Address(AGENT_INSTALLER_URL)
+                    Button(onClick = { openAgentInstaller(context) }, Modifier.fillMaxWidth()) { Text("Open the installer") }
                 }
             }
         }
+
+        SectionHeading("Option 2: by hand")
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                CardRow("Follow the install guide", "Steps 1 to 3 put the agent on the car and start it.")
+                HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                CardRow("You need SSH access to the head unit", "The installer in option 1 can switch it on.")
+                Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Address(INSTALL_GUIDE_URL)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { openInstallGuide(context) }) { Text("Read the guide") }
+                        TextButton(onClick = { sendInstallGuide(context) }) { Text("Send it to my computer") }
+                    }
+                }
+            }
+        }
+
+        MutedText("Come back here once the agent is on the car.")
+    }
+}
+
+/** A web address in small type, which can be selected to copy it. */
+@Composable
+private fun Address(url: String) {
+    SelectionContainer {
+        Text(
+            url,
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
