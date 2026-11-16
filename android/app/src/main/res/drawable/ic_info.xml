@@ -1,0 +1,18 @@
+<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
+<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M3,12a9,9 0,1 0,18 0a9,9 0,1 0,-18 0"
+        android:strokeWidth="2"
+        android:strokeColor="#FF000000" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M10.75,8a1.25,1.25 0,1 0,2.5 0a1.25,1.25 0,1 0,-2.5 0" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M11,10.5h2v6.5h-2z" />
+</vector>

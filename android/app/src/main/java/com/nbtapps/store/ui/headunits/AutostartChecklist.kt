@@ -151,14 +151,7 @@ private fun ChecklistLine(row: ChecklistRow) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-            when (row.mark) {
-                ChecklistMark.DONE -> Icon(painterResource(R.drawable.ic_check), contentDescription = null, tint = colors.primary)
-                ChecklistMark.WORKING -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                ChecklistMark.TO_COME -> Icon(painterResource(R.drawable.ic_to_come), contentDescription = null, tint = colors.outline)
-                ChecklistMark.FAILED -> Icon(painterResource(R.drawable.ic_error), contentDescription = null, tint = colors.error)
-            }
-        }
+        ChecklistMarkIcon(row.mark)
         Text(
             row.text,
             style = MaterialTheme.typography.bodyLarge,
@@ -171,8 +164,22 @@ private fun ChecklistLine(row: ChecklistRow) {
     }
 }
 
+/** The mark of a row, drawn in a box of 24dp: a tick, a spinner, a ring for what is to come, or the error sign. */
+@Composable
+internal fun ChecklistMarkIcon(mark: ChecklistMark) {
+    val colors = MaterialTheme.colorScheme
+    Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+        when (mark) {
+            ChecklistMark.DONE -> Icon(painterResource(R.drawable.ic_check), contentDescription = null, tint = colors.primary)
+            ChecklistMark.WORKING -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            ChecklistMark.TO_COME -> Icon(painterResource(R.drawable.ic_to_come), contentDescription = null, tint = colors.outline)
+            ChecklistMark.FAILED -> Icon(painterResource(R.drawable.ic_error), contentDescription = null, tint = colors.error)
+        }
+    }
+}
+
 /** What a screen reader says of a row's mark, which is otherwise only drawn. */
-private fun markDescription(mark: ChecklistMark): String = when (mark) {
+internal fun markDescription(mark: ChecklistMark): String = when (mark) {
     ChecklistMark.DONE -> "Done"
     ChecklistMark.WORKING -> "Under way"
     ChecklistMark.TO_COME -> "To come"

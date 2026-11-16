@@ -31,7 +31,7 @@ fun SetupScreen(
     }
     BackHandler(onBack = back)
 
-    when (uiState.step) {
+    when (val step = uiState.step) {
         SetupStep.Welcome -> WelcomePage(onYes = { viewModel.answer(true) }, onNotYet = { viewModel.answer(false) }, onBrowse = skip)
         SetupStep.NotYet -> NotYetPage(onBack = back, onInstalled = { viewModel.answer(true) })
         SetupStep.PickCar -> PickCarPage(
@@ -42,6 +42,15 @@ fun SetupScreen(
             onConnect = viewModel::pickCar,
             onBeginAddress = viewModel::beginAddress,
             onAdded = viewModel::addedByAddress,
+        )
+        is SetupStep.Connect -> ConnectPage(
+            uiState,
+            failure = step.failure,
+            onCancel = back,
+            onSkip = skip,
+            onRetry = viewModel::retry,
+            onPickAnother = viewModel::pickAnother,
+            onRefresh = viewModel::refreshBluetooth,
         )
         else -> SetupFrame(number = setupStepNumber(uiState.step), count = uiState.stepCount, onBack = back, onSkip = skip) {}
     }
