@@ -40,8 +40,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * for what it shows; [compact] is its tighter form.
  *
  * The caller holds the choice: [selected] is the address of the device picked, or null, and [onPick] is told the
- * device the user picks. With [pickDefault], while nothing is picked, [onPick] is also told the car [defaultCar]
- * finds, as soon as there is one: the user can still pick another.
+ * device the user picks. With [pickDefault], while nothing is picked, [onPickDefault] (to begin with [onPick]) is
+ * told the car [defaultCar] finds, as soon as there is one: the user can still pick another.
  */
 @Composable
 fun CarPickerFlow(
@@ -50,6 +50,7 @@ fun CarPickerFlow(
     modifier: Modifier = Modifier,
     compact: Boolean = false,
     pickDefault: Boolean = true,
+    onPickDefault: (PairedDevice) -> Unit = onPick,
     viewModel: CarPickerViewModel = hiltViewModel(),
 ) {
     val bluetooth by viewModel.bluetooth.collectAsStateWithLifecycle()
@@ -76,7 +77,7 @@ fun CarPickerFlow(
     val state = carPickerState(bluetooth.access, bluetooth.devices, connected, refusedForGood)
     if (pickDefault && selected == null) {
         val default = defaultCar(bluetooth.devices, connected)
-        LaunchedEffect(default) { default?.let(onPick) }
+        LaunchedEffect(default) { default?.let(onPickDefault) }
     }
 
     CarPicker(

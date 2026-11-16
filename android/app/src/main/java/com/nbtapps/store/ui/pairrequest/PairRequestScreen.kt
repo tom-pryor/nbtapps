@@ -41,9 +41,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.model.HeadUnit
+import com.nbtapps.store.model.PairedDevice
 import com.nbtapps.store.ui.headunits.AddHeadUnitFlow
 import com.nbtapps.store.ui.headunits.AdvancedAutostart
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.CarPickerFlow
 import com.nbtapps.store.ui.headunits.CheckFixDialog
 import com.nbtapps.store.ui.headunits.ChecksLine
 import com.nbtapps.store.ui.headunits.checksLine
@@ -99,7 +101,7 @@ fun PairRequestScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             val code = uiState.code
-            val name = uiState.chosen?.name ?: "the car"
+            val name = uiState.carName ?: "the car"
             when {
                 !uiState.loaded || code == null -> CircularProgressIndicator()
                 else -> when (step) {
@@ -107,9 +109,11 @@ fun PairRequestScreen(
                         code = code,
                         uiState = uiState,
                         onChoose = viewModel::choose,
+                        onPickDifferent = viewModel::pickDifferent,
+                        onPickDevice = viewModel::pickDevice,
                         onEnableAutostart = viewModel::setEnableAutostart,
                         onPair = viewModel::pair,
-                        onAdd = { adding = true },
+                        onAddByAddress = { adding = true },
                     )
                     PairRequestStep.Connecting -> Working("Connecting to $name…")
                     PairRequestStep.Pairing -> Working("Pairing with $name…")
@@ -160,14 +164,16 @@ fun PairRequestScreen(
         CheckFixDialog(fix, onConfirm = viewModel::confirmRemoval, onRetry = viewModel::retryRemoval, onClose = viewModel::closeRemoval)
     }
 
-    AddHeadUnitFlow(
-        show = adding,
-        onDismiss = { adding = false },
-        onAdded = { id ->
-            adding = false
-            viewModel.added(id)
-        },
-    )
+    if (uiState.takesAddress) {
+        AddHeadUnitFlow(
+            show = adding,
+            onDismiss = { adding = false },
+            onAdded = { id ->
+                adding = false
+                viewModel.added(id)
+            },
+        )
+    }
 }
 
 private const val NEW_CODE = "Get a new code from the app that sent this one."
@@ -199,9 +205,11 @@ private fun Prompt(
     code: String,
     uiState: PairRequestUiState,
     onChoose: (String) -> Unit,
+    onPickDifferent: () -> Unit,
+    onPickDevice: (PairedDevice, Boolean) -> Unit,
     onEnableAutostart: (Boolean) -> Unit,
     onPair: () -> Unit,
-    onAdd: () -> Unit,
+    onAddByAddress: () -> Unit,
 ) {
     Text(
         "Another app sent pairing code ${grouped(code)}",
@@ -217,14 +225,8 @@ private fun Prompt(
     }
     val units = uiState.headUnits
     when {
-        units.isEmpty() -> {
-            Text("Add your car to pair it.")
-            // Adding the car goes straight on to pairing, so the box is here too.
-            AdvancedAutostart(uiState.enableAutostart, onEnableAutostart)
-            Button(onClick = onAdd) { Text("Add your car") }
-            return
-        }
-        units.size == 1 -> Text("Pair this phone with ${units.single().name}?")
+        units.isEmpty() -> Text("Pair this phone with which car?")
+        units.size == 1 && !uiState.picking -> Text("Pair this phone with ${units.single().name}?")
         else -> {
             Text("Pair this phone with which car?")
             Column(Modifier.selectableGroup()) {
@@ -232,9 +234,18 @@ private fun Prompt(
             }
         }
     }
+    if (uiState.picking) {
+        CarPickerFlow(
+            selected = uiState.device?.address,
+            onPick = { onPickDevice(it, false) },
+            onPickDefault = { onPickDevice(it, true) },
+            compact = true,
+        )
+    }
     AdvancedAutostart(uiState.enableAutostart, onEnableAutostart)
     Button(onClick = onPair, enabled = uiState.canPair) { Text("Pair") }
-    TextButton(onClick = onAdd) { Text("A different car…") }
+    if (units.isNotEmpty() && !uiState.picking) TextButton(onClick = onPickDifferent) { Text("A different car…") }
+    if (uiState.takesAddress) TextButton(onClick = onAddByAddress) { Text("Use a network address") }
 }
 
 @Composable

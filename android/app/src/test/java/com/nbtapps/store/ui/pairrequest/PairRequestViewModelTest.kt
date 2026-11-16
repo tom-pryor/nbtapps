@@ -5,6 +5,7 @@ package com.nbtapps.store.ui.pairrequest
 import androidx.lifecycle.SavedStateHandle
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.MainDispatcherRule
+import com.nbtapps.store.data.FakePhoneBluetooth
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.InMemoryPrereleaseRepository
 import com.nbtapps.store.data.MemoryPairingKeys
@@ -22,10 +23,13 @@ import com.nbtapps.store.data.jobs.FakePhones
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.link.LinkConnectors
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.HeadUnit
+import com.nbtapps.store.model.PairedDevice
+import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
@@ -75,7 +79,10 @@ class PairRequestViewModelTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val headUnits = InMemoryHeadUnitRepository()
     private val connector = FakeConnector()
-    private val gated = Gated(connector)
+
+    /** The way to a car picked from the phone's paired devices, as the debug build has both. */
+    private val serial = FakeConnector(serial = true)
+    private val gated = Gated(LinkConnectors(listOf(connector, serial)))
     private val keys = MemoryPairingKeys()
     private val phoneId = "5f2c9a1e07b34d6688a0c1d2e3f40516"
     private val agentId = "000102030405060708090a0b0c0d0e0f"
@@ -113,7 +120,14 @@ class PairRequestViewModelTest {
     private val other = HeadUnit("other", "Other car", listOf(TcpEndpoint("192.168.0.2", 7144)))
 
     /** Agents that ask for `auth`, as a car's does, and what they know of phones. */
-    private val phones = FakePhones().also { connector.phones = it }
+    private val phones = FakePhones().also {
+        connector.phones = it
+        serial.phones = it
+    }
+
+    /** A car among the phone's paired devices, and another paired device. */
+    private val device = PairedDevice("BMW 12345", "AA:BB:CC:DD:EE:FF", car = true)
+    private val phone = FakePhoneBluetooth(devices = listOf(device, PairedDevice("Headphones", "11:22:33:44:55:66")))
 
     @After
     fun tearDown() = scope.cancel()
@@ -125,7 +139,8 @@ class PairRequestViewModelTest {
         }
     }
 
-    private fun viewModel(state: SavedStateHandle = SavedStateHandle()) = PairRequestViewModel(state, headUnits, jobs, setup, scope, clock)
+    private fun viewModel(state: SavedStateHandle = SavedStateHandle(), links: LinkConnector = gated) =
+        PairRequestViewModel(state, headUnits, jobs, setup, phone, links, scope, clock)
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; last was ${flow.value}")
@@ -411,8 +426,154 @@ class PairRequestViewModelTest {
         assertEquals(car, await(linked.uiState, "the pick") { it.chosen == car }.chosen)
     }
 
+    // ---- picking the car from the phone's paired devices ----
+
+    private fun serialIssued(): List<String> =
+        serial.agents.flatMap { agent -> agent.requestsOf("pairing.issue").map { it.getValue("code").jsonPrimitive.content } }
+
     @Test
-    fun `a car added on the screen is chosen, and pairing goes on with it without a second tap`() = test(saved = emptyList()) {
+    fun `with nothing saved a device picked is saved once on Pair, and the phone is paired with it`() = test(saved = emptyList()) {
+        phones.code = "420042"
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", 90_000))
+        val none = viewModel.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+        assertTrue("nothing else to choose from", none.picking)
+        assertNull(none.device)
+        assertFalse(none.canPair)
+
+        viewModel.pickDevice(device)
+        val picked = await(viewModel.uiState, "the pick") { it.device != null }
+        assertEquals(device.address, picked.device?.address)
+        assertEquals("BMW 12345", picked.carName)
+        assertTrue("it is added on Pair", picked.newCar)
+        assertFalse(picked.prePicked)
+        assertTrue(picked.canPair)
+        assertTrue("nothing saved before Pair", headUnits.headUnits.first().isEmpty())
+        assertTrue("nothing connected before Pair", serial.agents.isEmpty())
+
+        viewModel.pair()
+
+        val paired = viewModel.awaitStep("paired") { it is PairRequestStep.Paired }
+        assertEquals(PairRequestStep.Paired("BMW 12345"), paired.step)
+        val unit = headUnits.headUnits.first().single()
+        assertEquals(listOf(SerialEndpoint(device.address, device.name)), unit.endpoints)
+        assertEquals(unit, paired.chosen)
+        assertFalse(paired.picking)
+        assertTrue("this request added it", paired.newCar)
+        assertEquals(unit.id, (jobs.connection.value as ConnectionState.Connected).headUnitId)
+        assertEquals(listOf("420042"), serialIssued())
+    }
+
+    @Test
+    fun `a device saved already is the head unit paired with, and is not added again`() = test(saved = emptyList()) {
+        val mine = HeadUnit("mine", "My car", listOf(SerialEndpoint(device.address.lowercase(), device.name)))
+        headUnits.add(mine)
+        phones.code = "420042"
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", null))
+        val prompt = viewModel.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+        assertEquals(mine, prompt.chosen)
+        assertFalse(prompt.picking)
+
+        viewModel.pickDifferent()
+        viewModel.pickDevice(device)
+        val picked = await(viewModel.uiState, "the pick") { it.device != null }
+        assertTrue(picked.picking)
+        assertNull("the saved car is not the one any more", picked.chosen)
+        assertFalse("it is saved already", picked.newCar)
+
+        viewModel.pair()
+
+        val paired = viewModel.awaitStep("paired") { it is PairRequestStep.Paired }
+        assertEquals(PairRequestStep.Paired("My car"), paired.step)
+        assertEquals(listOf("mine"), headUnits.headUnits.first().map { it.id })
+        assertEquals("mine", paired.chosen?.id)
+        assertFalse(paired.newCar)
+    }
+
+    @Test
+    fun `a device picked while other cars are saved is added beside them, and paired with`() = test(saved = listOf(car, other)) {
+        phones.code = "420042"
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", null))
+        viewModel.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+
+        viewModel.pickDifferent()
+        val picking = await(viewModel.uiState, "picking") { it.picking }
+        assertFalse("no device picked yet", picking.canPair)
+        viewModel.pickDevice(device)
+        assertTrue(await(viewModel.uiState, "the pick") { it.device != null }.newCar)
+
+        viewModel.pair()
+
+        val paired = viewModel.awaitStep("paired") { it is PairRequestStep.Paired }
+        val saved = headUnits.headUnits.first()
+        assertEquals(3, saved.size)
+        val added = saved.single { it.id != car.id && it.id != other.id }
+        assertEquals(added, paired.chosen)
+        assertTrue(paired.newCar)
+        assertTrue(connector.agents.isEmpty())
+
+        // Choosing a saved car puts a device picked aside.
+        val again = viewModel()
+        again.handle(PairRequest("135790", null))
+        again.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+        again.pickDifferent()
+        again.pickDevice(device)
+        again.choose(other.id)
+        val chosen = await(again.uiState, "the saved car") { it.chosen == other }
+        assertFalse(chosen.picking)
+        assertNull(chosen.device)
+    }
+
+    @Test
+    fun `a code that has run out with a device picked saves nothing`() = test(saved = emptyList()) {
+        phones.code = "420042"
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", 30_000))
+        viewModel.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+        viewModel.pickDevice(device)
+        await(viewModel.uiState, "the pick") { it.device != null }
+
+        now += 30_000
+        viewModel.pair()
+
+        viewModel.awaitStep("time up") { it == PairRequestStep.TimeUp }
+        delay(200)
+        assertTrue(headUnits.headUnits.first().isEmpty())
+        assertTrue(serial.agents.isEmpty())
+    }
+
+    @Test
+    fun `a device the picker picked is said to be picked for the user only while it is connected`() = test(saved = emptyList()) {
+        phone.links = setOf(device.address)
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", null))
+        viewModel.awaitStep("the prompt") { it == PairRequestStep.Prompt }
+
+        viewModel.pickDevice(device, byDefault = true)
+        assertTrue(await(viewModel.uiState, "picked for the user") { it.prePicked }.prePicked)
+
+        phone.links = emptySet()
+        phone.refreshConnected()
+        assertFalse(await(viewModel.uiState, "not connected") { it.device != null && !it.prePicked }.prePicked)
+
+        // Picked by the user, it is the user's pick.
+        phone.links = setOf(device.address)
+        phone.refreshConnected()
+        viewModel.pickDevice(device)
+        delay(200)
+        assertFalse(viewModel.uiState.value.prePicked)
+    }
+
+    @Test
+    fun `a network address is offered only in a build that reaches one`() = test {
+        assertTrue(await(viewModel().uiState, "loaded") { it.loaded }.takesAddress)
+        assertFalse(await(viewModel(links = serial).uiState, "loaded") { it.loaded }.takesAddress)
+    }
+
+    @Test
+    fun `a car added by network address is chosen, and pairing goes on with it without a second tap`() = test(saved = emptyList()) {
         phones.code = "420042"
         val viewModel = viewModel()
         viewModel.handle(PairRequest("420042", null))
@@ -425,7 +586,9 @@ class PairRequestViewModelTest {
         assertEquals(PairRequestStep.Connecting, viewModel.awaitStep("waiting for it") { true }.step)
         headUnits.add(car)
 
-        assertEquals(PairRequestStep.Paired("Test car"), viewModel.awaitStep("paired") { it is PairRequestStep.Paired }.step)
+        val paired = viewModel.awaitStep("paired") { it is PairRequestStep.Paired }
+        assertEquals(PairRequestStep.Paired("Test car"), paired.step)
+        assertTrue("this request added it", paired.newCar)
     }
 
     // ---- starting with the car ----
