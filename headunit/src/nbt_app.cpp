@@ -17,6 +17,9 @@
 //                       window's code: six digits, as two texts of three. The user types the code into the phone
 //                       app, and the screen says how that went.
 //   Forget all phones   hmiState 15. Its second row tells the agent to forget every paired phone.
+//   Reset Bluetooth     hmiState 17. Its second row asks the agent to have the car end the phone's Bluetooth
+//   link                serial link, for a phone app that connects and gets nothing, and the first row says how
+//                       that went.
 //   About               hmiState 12.
 //
 // What the screens say to the agent, and when, is in phone_screens.hpp, and how they reach it in
@@ -125,6 +128,21 @@ const unsigned kForgetWorkingText = 32;
 const unsigned kForgetDoneText = 33;
 const unsigned kForgetFailedText = 34;
 
+// Reset Bluetooth link (hmiState 17): the first row says what it does and then how it went, and the second does it
+// (raAction 32) and reads "---" once it has been pressed.
+const unsigned kResetState = 17;
+const unsigned kResetAction = 32;
+const unsigned kResetStatusModel = 49;
+const unsigned kResetRowModel = 50;
+const unsigned kResetAskText = 60;
+const unsigned kResetNowText = 61;
+const unsigned kResetWorkingText = 62;
+const unsigned kResetArmedText = 63;
+const unsigned kResetSentText = 64;
+const unsigned kResetBusyText = 65;
+const unsigned kResetUnsupportedText = 66;
+const unsigned kResetFailedText = 67;
+
 // The types of a state's notifications (hu_framework.hpp, addHandler).
 const unsigned kNotifyFocus = 1;
 const unsigned kNotifyVisible = 11;
@@ -193,11 +211,11 @@ public:
 };
 
 // ---- the screens ---------------------------------------------------------------------------------------------------
-class Screens : public nbt::PairView, public nbt::ForgetView, public nbt::StartView {
+class Screens : public nbt::PairView, public nbt::ForgetView, public nbt::StartView, public nbt::ResetView {
 public:
     explicit Screens(bmw::PluginApp* app)
         : app_(app), pair_(nbt::kHeadUnitSocket, this), forget_(nbt::kHeadUnitSocket, this),
-          start_(nbt::kHeadUnitSocket, this, &starter_) {}
+          start_(nbt::kHeadUnitSocket, this, &starter_), reset_(nbt::kHeadUnitSocket, this) {}
 
     // A state of ours is shown (or has the focus), or was left.
     void pairShown() {
@@ -215,11 +233,16 @@ public:
         arm();
     }
     void startHidden() { start_.hidden(); }
+    void resetShown() {
+        if (reset_.status() != nbt::kResetWorking) reset_.shown();
+    }
+    void resetHidden() { reset_.hidden(); }
     // The app is being taken down: no link to the agent outlasts it.
     void closeLinks() {
         pair_.hidden();
         forget_.hidden();
         start_.hidden();
+        reset_.hidden();
     }
     void forgetPressed() {
         forget_.confirmed();
@@ -229,11 +252,16 @@ public:
         start_.pressed();
         arm();
     }
+    void resetPressed() {
+        reset_.pressed();
+        arm();
+    }
 
     void tick() {
         pair_.tick();
         forget_.tick();
         start_.tick();
+        reset_.tick();
         arm();
     }
 
@@ -298,10 +326,31 @@ public:
         alog("start the agent: status %d, texts %u and %u", (int)status, text, row);
     }
 
+    // ResetView
+    virtual void resetShow(nbt::ResetStatus status) {
+        unsigned text = kResetFailedText, row = kNoCodeText;
+        switch (status) {
+            case nbt::kResetAsk:
+                text = kResetAskText;
+                row = kResetNowText;
+                break;
+            case nbt::kResetWorking: text = kResetWorkingText; break;
+            case nbt::kResetArmed: text = kResetArmedText; break;
+            case nbt::kResetSent: text = kResetSentText; break;
+            case nbt::kResetNoAgent: text = kNoAgentText; break;
+            case nbt::kResetBusy: text = kResetBusyText; break;
+            case nbt::kResetUnsupported: text = kResetUnsupportedText; break;
+            case nbt::kResetFailed: text = kResetFailedText; break;
+        }
+        app_->updateModel(kResetStatusModel, bmw::TextID(text));
+        app_->updateModel(kResetRowModel, bmw::TextID(row));
+        alog("reset bluetooth link: status %d, texts %u and %u", (int)status, text, row);
+    }
+
 private:
     // Keeps the timer running for as long as a screen has a link to the agent, and not a tick longer.
     void arm() {
-        if (g_tickQueued || !(pair_.wantsTick() || forget_.wantsTick() || start_.wantsTick())) return;
+        if (g_tickQueued || !(pair_.wantsTick() || forget_.wantsTick() || start_.wantsTick() || reset_.wantsTick())) return;
         g_tickQueued = true;
         app_->post(reinterpret_cast<bmw::Runnable*>(&g_tick), nbt::kScreenTickMs);
     }
@@ -311,6 +360,7 @@ private:
     nbt::ForgetScreen forget_;
     HandStarter starter_;   // before start_, which is handed it
     nbt::StartScreen start_;
+    nbt::ResetScreen reset_;
 };
 
 Screens* g_screens = NULL;
@@ -378,6 +428,20 @@ bool onForgetPressed(void*, const bmw::Parcel&) {
     return true;
 }
 
+bool onResetVisible(void*, const bmw::Parcel& parcel) {
+    bool visible = readFlag(parcel);
+    alog("state %u: visible=%d", kResetState, (int)visible);
+    if (visible) NBT_GUARDED("reset shown", g_screens->resetShown());
+    else NBT_GUARDED("reset hidden", g_screens->resetHidden());
+    return true;
+}
+
+bool onResetPressed(void*, const bmw::Parcel&) {
+    alog("action %u: reset bluetooth link", kResetAction);
+    NBT_GUARDED("reset pressed", g_screens->resetPressed());
+    return true;
+}
+
 // A delegate for one of the handlers above. Its object is the app, which no handler here reads: the framework
 // calls a delegate only when its object is set as well as its function (hu_framework.hpp, Delegate), so one with
 // no object is registered and never called. addHandler copies the two words, so the delegate need not outlast it.
@@ -395,8 +459,11 @@ bool appOnInit(bmw::PluginApp* self) {
     self->addHandler(kForgetAction, handler(self, &onForgetPressed));
     self->addHandler(kStartState, kNotifyVisible, handler(self, &onStartVisible));
     self->addHandler(kStartAction, handler(self, &onStartPressed));
-    alog("onInit: base onInit -> %d, About model %u <- text %u, handlers for states %u, %u and %u and actions %u "
-         "and %u", (int)ok, kAboutModel, kAboutText, kPairState, kForgetState, kStartState, kForgetAction, kStartAction);
+    self->addHandler(kResetState, kNotifyVisible, handler(self, &onResetVisible));
+    self->addHandler(kResetAction, handler(self, &onResetPressed));
+    alog("onInit: base onInit -> %d, About model %u <- text %u, handlers for states %u, %u, %u and %u and actions "
+         "%u, %u and %u", (int)ok, kAboutModel, kAboutText, kPairState, kForgetState, kStartState, kResetState,
+         kForgetAction, kStartAction, kResetAction);
     return ok;
 }
 

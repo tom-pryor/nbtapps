@@ -3,7 +3,9 @@
 // Host test for the plugin's side of pairing: src/agent_link.hpp, src/phone_screens.hpp and src/crc32.hpp, which
 // are the parts of libNbtApp.so that need no HU Framework. The screens run here against a real Agent, over a
 // real local socket, with a view that writes down what it is told to show; a phone on a link of the serial kind
-// types the code, and what Start the agent starts is an agent made by the test. What the HMI does with a text is not tested here, or anywhere but on a car.
+// types the code, and what Start the agent starts is an agent made by the test. What the agent's serial.reset asks of
+// the car is a stand-in, and what a real agent answers only while a job runs comes from a stand-in for the agent.
+// What the HMI does with a text is not tested here, or anywhere but on a car.
 //
 // One thread, as in the HMI: a screen's tick, then a turn of the agent, until both have had their say.
 //
@@ -55,7 +57,7 @@ public:
 };
 
 // What the HMI would be told to show, in order: "code 123456", "done", ...
-class View : public PairView, public ForgetView, public StartView {
+class View : public PairView, public ForgetView, public StartView, public ResetView {
 public:
     virtual void pairShow(PairStatus status, const std::string& code) {
         static const char* const names[] = {"asking", "code", "done", "wrong-codes", "ran-out", "too-soon", "no-agent", "failed"};
@@ -70,6 +72,10 @@ public:
     virtual void startShow(StartStatus status) {
         static const char* const names[] = {"checking", "running", "ask", "starting", "started", "no-launcher", "failed"};
         shown.push_back(std::string("start ") + names[status]);
+    }
+    virtual void resetShow(ResetStatus status) {
+        static const char* const names[] = {"ask", "working", "armed", "sent", "no-agent", "busy", "unsupported", "failed"};
+        shown.push_back(std::string("reset ") + names[status]);
     }
     // Everything shown since the last call, joined by ", ".
     std::string take() {
@@ -172,6 +178,53 @@ static void turns(StartScreen* screen, Car* car, unsigned n) {
         if (car != 0) car->agent.turn(0);
     }
 }
+
+static void turns(ResetScreen* screen, Car* car, unsigned n) {
+    for (unsigned i = 0; i < n; ++i) {
+        screen->tick();
+        if (car != 0) car->agent.turn(0);
+    }
+}
+
+// What the agent's serial.reset asks of the car: the Bluetooth serial listener's part, which the bench has not got.
+// It comes to what the test says.
+class FakeSerialReset : public SerialReset {
+public:
+    FakeSerialReset() : outcome(SerialReset::kResetSent), calls(0) {}
+    virtual Outcome resetSerialLink(const std::string& device, const std::string& instance, const std::string& service,
+                                    int64_t* forMs, std::string* why) {
+        ++calls;
+        // The plugin names none of the three, so that the listener puts in its own.
+        CHECK(device.empty() && instance.empty() && service.empty());
+        if (outcome == SerialReset::kResetArmed) *forMs = 60000;
+        if (outcome == SerialReset::kResetFailed) *why = "the car's Bluetooth service cannot be asked";
+        return outcome;
+    }
+    Outcome outcome;
+    int calls;
+};
+
+// An agent that answers hello, and serial.reset as the test says: with an error's code, or with a result.
+class ResetAnswers : public PeerHandler {
+public:
+    ResetAnswers() : asked(0) {}
+    virtual void onRequest(Peer* peer, int64_t id, const std::string& method, const json::Value&) {
+        if (method == "hello") {
+            peer->respond(id, "{}");
+        } else if (method == "serial.reset") {
+            ++asked;
+            if (code.empty()) peer->respond(id, result);
+            else peer->respondError(id, code.c_str(), "as the test says");
+        } else {
+            peer->respondError(id, "unsupported", "this stand-in has no method " + method);
+        }
+    }
+    virtual void onResponse(Peer*, int64_t, bool, const json::Value&, const std::string&, const std::string&) {}
+    virtual void onEvent(Peer*, const std::string&, int64_t, const json::Value&) {}
+    virtual void onData(Peer*, uint16_t, const std::string&, bool) {}
+    std::string code, result;
+    int asked;
+};
 
 // The code in "…, code 123456".
 static std::string codeIn(const std::string& shown) {
@@ -298,6 +351,127 @@ static void testForget() {
     CHECK(view.take() == "forget ask, forget working, forget done");
 }
 
+// Reset Bluetooth link against a real agent: one without the Bluetooth serial listener, which answers as an agent
+// from before serial.reset does, and one with a stand-in for the listener's part.
+static void testReset() {
+    Car car("reset");
+    View view;
+    ResetScreen screen(car.socket, &view);
+    // It says what it does first, and nothing is sent until the row is pressed.
+    screen.shown();
+    turns(&screen, &car, 12);
+    CHECK(view.take() == "reset ask" && !screen.wantsTick() && car.agent.sessions() == 0);
+    screen.pressed();
+    CHECK(view.take() == "reset working" && screen.wantsTick());
+    turns(&screen, &car, 12);
+    CHECK(view.take() == "reset unsupported" && !screen.wantsTick() && screen.status() == kResetUnsupported);
+    turns(&screen, &car, 12);
+    CHECK(car.agent.sessions() == 0);
+
+    // A serial link is up, and the car is asked to end it.
+    FakeSerialReset reset;
+    car.agent.setSerialReset(&reset);
+    screen.shown();
+    screen.pressed();
+    turns(&screen, &car, 12);
+    CHECK(view.take() == "reset ask, reset working, reset sent" && !screen.wantsTick() && reset.calls == 1);
+    // A second press does nothing.
+    screen.pressed();
+    turns(&screen, &car, 12);
+    CHECK(view.take().empty() && !screen.wantsTick() && reset.calls == 1 && screen.status() == kResetSent);
+    // None is up: the next one is ended at its open, and the user taps Connect for it. Shown again, the screen
+    // starts over.
+    reset.outcome = SerialReset::kResetArmed;
+    screen.shown();
+    screen.pressed();
+    turns(&screen, &car, 12);
+    CHECK(view.take() == "reset ask, reset working, reset armed" && reset.calls == 2);
+    // The car's Bluetooth service cannot be asked: io-error.
+    reset.outcome = SerialReset::kResetFailed;
+    screen.shown();
+    screen.pressed();
+    turns(&screen, &car, 12);
+    CHECK(view.take() == "reset ask, reset working, reset failed" && reset.calls == 3);
+    turns(&screen, &car, 12);
+    CHECK(car.agent.sessions() == 0);
+    car.agent.setSerialReset(0);
+}
+
+// Reset Bluetooth link against a stand-in for the agent, for what a real one answers only while a job runs, and for
+// answers the screen does not know. Then the stand-in goes while the screen waits, and the screen is left while it
+// waits.
+static void testResetAnswers() {
+    std::string why, path = gSocketDir + "/reset-answers.sock";
+    LocalListener listener;
+    CHECK_IN(why, listener.open(path, &why));
+    View view;
+    ResetScreen screen(path, &view);
+    static const char* const cases[][3] = {
+        // code, result, what the screen shows
+        {"busy", "", "busy"},
+        {"unsupported", "", "unsupported"},
+        {"io-error", "", "failed"},
+        {"bad-request", "", "failed"},
+        {"internal", "", "failed"},
+        {"", "{\"state\":\"sent\"}", "sent"},
+        {"", "{\"state\":\"armed\",\"forMs\":60000}", "armed"},
+        {"", "{\"state\":\"later\"}", "failed"},
+        {"", "{\"state\":1}", "failed"},
+        {"", "{}", "failed"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        ResetAnswers answers;
+        answers.code = cases[i][0];
+        answers.result = cases[i][1];
+        screen.shown();
+        screen.pressed();
+        Link* link = listener.accept();
+        CHECK(link != 0);
+        Peer agent(link, false, &answers);
+        for (int round = 0; round < 6; ++round) {
+            screen.tick();
+            agent.readable();
+            agent.flush();
+        }
+        std::string shown = view.take();
+        CHECK_IN(shown, shown == std::string("reset ask, reset working, reset ") + cases[i][2]);
+        CHECK(answers.asked == 1 && !screen.wantsTick());
+    }
+    {   // It goes while the screen waits.
+        screen.shown();
+        screen.pressed();
+        delete listener.accept();
+        screen.tick();
+        screen.tick();
+        CHECK(view.take() == "reset ask, reset working, reset no-agent" && !screen.wantsTick());
+    }
+    {   // The screen is left while it waits: the link is closed, the answer that comes after is not shown, and the
+        // screen starts over when it is shown again.
+        ResetAnswers answers;
+        answers.result = "{\"state\":\"sent\"}";
+        screen.shown();
+        screen.pressed();
+        Peer agent(listener.accept(), false, &answers);
+        screen.tick();
+        agent.readable();
+        agent.flush();
+        CHECK(answers.asked == 1 && view.take() == "reset ask, reset working");
+        screen.hidden();
+        CHECK(!screen.wantsTick() && screen.status() == kResetAsk);
+        for (int round = 0; round < 6; ++round) {
+            screen.tick();
+            agent.readable();
+            agent.flush();
+        }
+        CHECK(view.take().empty() && !screen.wantsTick());
+        screen.shown();
+        CHECK(view.take() == "reset ask" && screen.status() == kResetAsk);
+        screen.pressed();
+        CHECK(view.take() == "reset working" && screen.wantsTick());
+        screen.hidden();
+    }
+}
+
 // Start the agent: one that is running, one that is not installed, one that comes a while after its start, and
 // one that does not come.
 static void testStart() {
@@ -381,6 +555,12 @@ static void testNoAgent() {
         forget.shown();
         forget.confirmed();
         CHECK(view.take() == "forget ask, forget no-agent" && !forget.wantsTick());
+        ResetScreen reset(gSocketDir + "/nobody.sock", &view);
+        reset.shown();
+        reset.pressed();
+        CHECK(view.take() == "reset ask, reset no-agent" && !reset.wantsTick());
+        reset.pressed();
+        CHECK(view.take().empty());
     }
     std::string why, path = gSocketDir + "/mute.sock";
     LocalListener mute;
@@ -401,6 +581,15 @@ static void testNoAgent() {
         held = mute.accept();
         for (unsigned i = 0; i <= kScreenAnswerTicks; ++i) forget.tick();
         CHECK(view.take() == "forget ask, forget working, forget no-agent" && !forget.wantsTick());
+        delete held;
+        ResetScreen reset(path, &view);
+        reset.shown();
+        reset.pressed();
+        held = mute.accept();
+        for (unsigned i = 0; i < kScreenAnswerTicks; ++i) reset.tick();
+        CHECK(view.take() == "reset ask, reset working" && reset.wantsTick());
+        reset.tick();
+        CHECK(view.take() == "reset no-agent" && !reset.wantsTick());
         delete held;
     }
     {   // It goes while the screen waits. The write that follows raises no signal: the HMI's process has to live.
@@ -457,6 +646,8 @@ int main(int argc, char** argv) {
     testCrc();
     testPair();
     testForget();
+    testReset();
+    testResetAnswers();
     testStart();
     testNoAgent();
 

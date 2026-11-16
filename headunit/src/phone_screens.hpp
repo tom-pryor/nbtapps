@@ -18,6 +18,10 @@
 //                       only while the code is on the screen.
 //   Forget all phones   Asks once, on a row of its own, and then tells the agent to forget every paired phone
 //                       (phones.forget). Each phone has to be paired again after that.
+//   Reset Bluetooth     Says what it does, and on a press of its second row asks the agent to have the car end the
+//   link                phone's Bluetooth serial link (serial.reset), for a phone app that connects and gets nothing.
+//                       With a link up the car is asked to end it; with none, the next link that opens within a minute
+//                       is ended at its open, and the screen says to tap Connect in the phone app for that.
 //
 // A screen opens a link to the agent when it has something to ask and closes it when it has its answer, so
 // with none of them on the screen the plugin has no link and runs no timer. Start the agent also runs the timer
@@ -231,6 +235,108 @@ private:
     int64_t forgetId_;     // the phones.forget that has no answer yet, or 0
     unsigned waited_;
     ForgetStatus status_;
+};
+
+// ---- Reset Bluetooth link ------------------------------------------------------------------------------------------
+
+enum ResetStatus {
+    kResetAsk,           // the row that does it is waiting to be pressed
+    kResetWorking,       // the agent has been asked
+    kResetArmed,         // no serial link was up: the next one within a minute is ended at its open
+    kResetSent,          // a serial link was up, and the car has been asked to end it
+    kResetNoAgent,       // no agent is running, or it stopped
+    kResetBusy,          // the agent is running a job, and was not asked
+    kResetUnsupported,   // the agent has no serial.reset: one from before it, or one with no Bluetooth serial listener
+    kResetFailed         // the agent answered with another error, or with a result this screen does not know
+};
+
+class ResetView {
+public:
+    virtual ~ResetView() {}
+    virtual void resetShow(ResetStatus status) = 0;
+};
+
+// The agent answers serial.reset at once, and the car ends the link after that: what the screen says is what the
+// agent answered, and the agent's log says what came of it. An agent that does not know the method answers it with
+// `unsupported`, as one does that has the method and no Bluetooth serial listener; the screen tells neither apart.
+class ResetScreen : public AgentLinkListener {
+public:
+    ResetScreen(const std::string& socketPath, ResetView* view)
+        : path_(socketPath), view_(view), link_(this), resetId_(0), waited_(0), status_(kResetAsk) {}
+
+    // The screen came up: it says what it does again, whatever the last time came to.
+    void shown() {
+        link_.close();
+        resetId_ = 0;
+        show(kResetAsk);
+    }
+
+    void hidden() {
+        // What was sent is not taken back: the car ends the link, or the next one, and nobody is told. A press that
+        // had no answer is over, so the next showing starts over; the app starts no showing over while one waits.
+        link_.close();
+        resetId_ = 0;
+        if (status_ == kResetWorking) status_ = kResetAsk;
+    }
+
+    // The row was pressed. Once per showing: a second press does nothing.
+    void pressed() {
+        if (status_ != kResetAsk) return;
+        waited_ = 0;
+        std::string why;
+        if (!link_.open(path_, &why)) {
+            show(kResetNoAgent);
+            return;
+        }
+        show(kResetWorking);
+        // With no device, instance or service: the agent puts in its own.
+        resetId_ = link_.request("serial.reset", "{}");
+    }
+
+    bool wantsTick() const { return link_.isOpen(); }
+
+    void tick() {
+        link_.poll();
+        if (resetId_ != 0 && link_.isOpen() && ++waited_ > kScreenAnswerTicks) {
+            link_.close();
+            resetId_ = 0;
+            show(kResetNoAgent);
+        }
+    }
+
+    ResetStatus status() const { return status_; }
+
+    // AgentLinkListener
+    virtual void agentReply(int64_t id, const json::Value& result, const std::string& code) {
+        if (id != resetId_) return;
+        resetId_ = 0;
+        link_.close();
+        if (!code.empty()) {
+            show(code == "busy" ? kResetBusy : code == "unsupported" ? kResetUnsupported : kResetFailed);
+            return;
+        }
+        json::Value state = result.find("state");
+        std::string said = state.isString() ? state.string() : std::string();
+        show(said == "sent" ? kResetSent : said == "armed" ? kResetArmed : kResetFailed);
+    }
+    virtual void agentEvent(const std::string&, const json::Value&) {}
+    virtual void agentGone(const std::string&) {
+        resetId_ = 0;
+        if (status_ == kResetWorking) show(kResetNoAgent);
+    }
+
+private:
+    void show(ResetStatus status) {
+        status_ = status;
+        view_->resetShow(status);
+    }
+
+    std::string path_;
+    ResetView* view_;
+    AgentLink link_;
+    int64_t resetId_;      // the serial.reset that has no answer yet, or 0
+    unsigned waited_;
+    ResetStatus status_;
 };
 
 // ---- Start the agent -----------------------------------------------------------------------------------------------

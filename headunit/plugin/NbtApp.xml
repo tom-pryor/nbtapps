@@ -18,10 +18,13 @@
       <hmiAction id="26" target="14"/>
       <hmiAction id="27" target="15"/>
       <hmiAction id="29" target="16"/>
+      <hmiAction id="31" target="17"/>
       <!-- Handled by libNbtApp.so: tells the agent to forget every paired phone. -->
       <raAction id="28"/>
       <!-- Handled by libNbtApp.so: starts the agent's launcher. -->
       <raAction id="30"/>
+      <!-- Handled by libNbtApp.so: asks the agent to have the car end the phone's Bluetooth serial link. -->
+      <raAction id="32"/>
     </actions>
     <models>
       <textIdModel id="3" textId="1">
@@ -67,6 +70,16 @@
       <textIdModel id="47" textId="20">
         <synonyms/>
       </textIdModel>
+      <!-- Reset Bluetooth link: 48 is the menu row and the title; libNbtApp.so points 49 and 50 at how things stand. -->
+      <textIdModel id="48" textId="7">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="49" textId="60">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="50" textId="61">
+        <synonyms/>
+      </textIdModel>
     </models>
     <hmiStates>
       <!-- The menu. -->
@@ -75,6 +88,7 @@
           <button action="29" id="68" model="45" text="Start the agent"/>
           <button action="26" id="66" model="38" text="Pair a phone"/>
           <button action="27" id="67" model="39" text="Forget all phones"/>
+          <button action="31" id="89" model="48" text="Reset Bluetooth link"/>
           <button action="25" id="65" model="36" text="About"/>
         </components>
       </hmiState>
@@ -100,6 +114,14 @@
         <components>
           <button id="87" model="46" text="Looking for the agent..."/>
           <button action="30" id="88" model="47" text="---"/>
+        </components>
+      </hmiState>
+      <!-- Reset Bluetooth link: the first row says what it does, and then how it went; the second does it, once per
+           showing, and reads text 20 after that. The rows are what src/phone_screens.hpp (ResetScreen) says. -->
+      <hmiState id="17" parentId="10" text="Reset Bluetooth link" textModel="48">
+        <components>
+          <button id="90" model="49" text="Ends the phone's link for a new one"/>
+          <button action="32" id="91" model="50" text="Reset now"/>
         </components>
       </hmiState>
       <!-- About: a non-selectable Richtext list; libNbtApp.so puts text 3 into model 37 in onInit. -->
