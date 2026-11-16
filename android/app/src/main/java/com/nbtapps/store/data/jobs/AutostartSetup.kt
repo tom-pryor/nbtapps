@@ -334,17 +334,9 @@ class AutostartSetup(
      * how it ended. With [fresh] it goes by what the agent says now, where otherwise it goes by what the link last read.
      */
     private suspend fun run(headUnitId: String, fresh: Boolean, mine: Int, show: (AutostartStep) -> Unit): AutostartStep {
-        // A refresh that fails leaves what was read before, or no link, which the next line sees.
-        if (fresh && connectedTo(headUnitId) != null) jobs.refresh()
-        val connected = connectedTo(headUnitId) ?: return AutostartStep.Failed(NO_LINK)
-        // Before the install: the agent does not run the checks while a step installs.
-        jobs.ensureChecked()
-        val end = when (val plan = autostartPlan(connected.autostart)) {
-            AutostartPlan.AlreadyOn -> AutostartStep.Done(changed = false)
-            AutostartPlan.SwitchOn -> switchOn(headUnitId, show)
-            is AutostartPlan.CannotBe -> AutostartStep.Failed(plan.reason)
-            is AutostartPlan.InstallFirst -> install(headUnitId, connected, plan.needs, show) ?: settle(headUnitId) ?: switchOn(headUnitId, show)
-        }
+        // Up to the questions every step needs the link, the plugin's download too, since its install follows: the
+        // app leaving the foreground meanwhile does not end it. A question waits for the user, and so does not.
+        val end = jobs.usingLink { setUp(headUnitId, fresh, show) }
         if (end !is AutostartStep.Done) return end
         // Last, the questions, as they are kept now; asked for again, in case the first run was refused.
         var done: AutostartStep.Done = end
@@ -353,6 +345,21 @@ class AutostartSetup(
             if (done.fixFailed != null) break
         }
         return done
+    }
+
+    /** What [run] does before the questions: everything up to the agent starting with the car, or how that failed. */
+    private suspend fun setUp(headUnitId: String, fresh: Boolean, show: (AutostartStep) -> Unit): AutostartStep {
+        // A refresh that fails leaves what was read before, or no link, which the next line sees.
+        if (fresh && connectedTo(headUnitId) != null) jobs.refresh()
+        val connected = connectedTo(headUnitId) ?: return AutostartStep.Failed(NO_LINK)
+        // Before the install: the agent does not run the checks while a step installs.
+        jobs.ensureChecked()
+        return when (val plan = autostartPlan(connected.autostart)) {
+            AutostartPlan.AlreadyOn -> AutostartStep.Done(changed = false)
+            AutostartPlan.SwitchOn -> switchOn(headUnitId, show)
+            is AutostartPlan.CannotBe -> AutostartStep.Failed(plan.reason)
+            is AutostartPlan.InstallFirst -> install(headUnitId, connected, plan.needs, show) ?: settle(headUnitId) ?: switchOn(headUnitId, show)
+        }
     }
 
     /**

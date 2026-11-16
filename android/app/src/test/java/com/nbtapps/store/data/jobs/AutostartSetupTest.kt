@@ -3,6 +3,7 @@
 package com.nbtapps.store.data.jobs
 
 import com.nbtapps.store.AgentVectors
+import com.nbtapps.store.data.FakeForeground
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.InMemoryPrereleaseRepository
 import com.nbtapps.store.data.MemoryPairingKeys
@@ -170,7 +171,11 @@ class AutostartSetupTest {
         override val name = "Pixel 9"
     }
     private val store by lazy { PackageStore(folder.newFolder("packages")) }
-    private val jobs by lazy { JobRepository(headUnits, connector, identity, MemoryPairingKeys(), store, {}, scope, shareDir = folder.newFolder("share")) }
+    /** Whether the app is in front of the user: so throughout, unless a test says otherwise. */
+    private val shown = FakeForeground()
+    private val jobs by lazy {
+        JobRepository(headUnits, connector, identity, MemoryPairingKeys(), store, {}, scope, shareDir = folder.newFolder("share"), foreground = shown)
+    }
     private val archives = AgentVectors.file("packages/good")
     private val source = FileCatalogueSource(null, archives)
     private val catalogue = TestCatalogue()
@@ -828,6 +833,28 @@ class AutostartSetupTest {
         setup.confirmRemoval("aa-fix", shownToken("aa-fix"))
         assertEquals(AutostartStep.Done(changed = true, moved = 1, removed = 3), ended())
         assertEquals(1, checks.fixes.size)
+    }
+
+    @Test
+    fun `the set-up keeps the link while the app is away, until it waits for the user's answer`() = test {
+        catalogueWith("1.0.0")
+        withChecks(demo())
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        installing()
+
+        // The user leaves the app while the plugin installs: what follows the job needs the link as much.
+        shown.state.value = false
+        finishJob("1.0.0")
+
+        val question = asked()
+        assertTrue(question.switchedOn)
+        assertEquals(listOf("""{"on":true}"""), sets())
+        // A question waits for the user, who is not there: the link goes meanwhile.
+        assertTrue(connector.agent.phoneLeft())
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        setup.skipRemoval()
+        assertEquals(AutostartStep.Done(changed = true), ended())
     }
 
     private companion object {

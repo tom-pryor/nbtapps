@@ -6,7 +6,9 @@ import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import androidx.datastore.dataStoreFile
+import com.nbtapps.store.data.ActivityForeground
 import com.nbtapps.store.data.AndroidPhoneBluetooth
+import com.nbtapps.store.data.AppForeground
 import com.nbtapps.store.data.BluetoothSppEchoClient
 import com.nbtapps.store.data.DataStoreHeadUnitRepository
 import com.nbtapps.store.data.DataStorePrereleaseRepository
@@ -77,11 +79,19 @@ abstract class AppModule {
     @Binds
     abstract fun bindApkInstaller(impl: SessionApkInstaller): ApkInstaller
 
+    @Binds
+    abstract fun bindAppForeground(impl: ActivityForeground): AppForeground
+
     companion object {
         @Provides
         @Singleton
         @ApplicationScope
         fun provideApplicationScope(): CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+        /** Whether one of the app's activities is started, as the application reports it. */
+        @Provides
+        @Singleton
+        fun provideActivityForeground(@ApplicationScope scope: CoroutineScope): ActivityForeground = ActivityForeground(scope)
 
         /** Since the phone started, its sleep included: the same in every process of the app. */
         @Provides
@@ -167,7 +177,12 @@ abstract class AppModule {
             keeper: JobKeeper,
             @ApplicationScope scope: CoroutineScope,
             @ApplicationContext context: Context,
-        ): JobRepository = JobRepository(headUnits, connector, identity, keys, store, keeper, scope, shareDir = File(context.cacheDir, "share"))
+            foreground: AppForeground,
+        ): JobRepository = JobRepository(
+            headUnits, connector, identity, keys, store, keeper, scope,
+            shareDir = File(context.cacheDir, "share"),
+            foreground = foreground,
+        )
 
         /** Setting a head unit up to start the agent with the car, which goes on when the pairing screen is left. */
         @Provides

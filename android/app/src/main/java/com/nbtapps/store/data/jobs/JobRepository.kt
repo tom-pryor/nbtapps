@@ -2,6 +2,8 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.data.jobs
 
+import com.nbtapps.store.data.AlwaysInForeground
+import com.nbtapps.store.data.AppForeground
 import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.PairingKeys
 import com.nbtapps.store.data.PhoneIdentity
@@ -50,15 +52,20 @@ import java.io.IOException
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -213,6 +220,13 @@ fun interface JobKeeper {
  * What the head unit holds is read when the link is made, and again whenever a job has ended, since a job is what
  * changes it. That goes for a job that ended while the app had no link, too: the agent's own update ends on its
  * new version, after the link is back, and only then is what that version brings there to be read ([finish]).
+ *
+ * No link is held idle while the app is out of the user's sight ([foreground]): Android may freeze a process in the
+ * background with its socket open, and a phone that answers the agent long after the agent gave the link up spoils
+ * the car's next links. So when the app leaves the foreground with nothing using the link, the link is ended from
+ * this side and the head unit remembered; when it comes back, the app connects to that head unit again by itself.
+ * A job that needs the phone, a pull of logs, and a call that waits for the agent's answer ([usingLink]) keep the
+ * link for as long as they last: see [watchForeground].
  */
 class JobRepository(
     private val headUnits: HeadUnitRepository,
@@ -230,6 +244,8 @@ class JobRepository(
      * empty, since a pull is done again in a minute. Each pull empties it first.
      */
     private val shareDir: File = File(System.getProperty("java.io.tmpdir"), "nbt-share"),
+    /** Whether the user has the app in front of them. A test that has no activities leaves it always so. */
+    private val foreground: AppForeground = AlwaysInForeground,
 ) {
     private val connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val jobState = MutableStateFlow<JobView?>(null)
@@ -284,6 +300,32 @@ class JobRepository(
     private var forgottenBy: String? = null
 
     /**
+     * The calls that wait for the agent's answer now, and how many have ended: see [usingLink]. Counting the ends
+     * makes each one a change of the value, which [watchForeground] sees even where it missed the call's beginning.
+     */
+    private data class Uses(val now: Int, val ended: Long)
+
+    private val inUse = MutableStateFlow(Uses(0, 0))
+
+    /**
+     * The head unit whose link was ended when the app left the foreground, which the app connects to again when it
+     * comes back: see [leave] and [comeBack]. Null when there is none.
+     */
+    @Volatile
+    private var remembered: String? = null
+
+    /** The connects under way, the user's and the app's own on coming back: leaving the app gives them up. */
+    private val dialling: MutableSet<Job> = ConcurrentHashMap.newKeySet()
+
+    /** The app's own connect on coming back, while it runs: what the user asks for takes its place. */
+    @Volatile
+    private var returning: Job? = null
+
+    init {
+        scope.launch { watchForeground() }
+    }
+
+    /**
      * Opens a link to the head unit [headUnitId] over the first of its endpoints that answers, replacing any
      * link there is. The endpoints are tried in [inConnectOrder]. On success the head unit's profile and
      * installed list are fresh, and a job found running there is followed; a job of this app's that paused
@@ -293,23 +335,47 @@ class JobRepository(
      * this fails with [PairingNeeded]; [pair] goes on from there.
      *
      * A caller that is cancelled meanwhile, as a screen's is when the user leaves it, takes the attempt with
-     * it: no link stays open, and the state is [ConnectionState.Disconnected].
+     * it: no link stays open, and the state is [ConnectionState.Disconnected]. So does the app leaving the
+     * foreground ([leave]), which fails the connect instead of cancelling its caller.
      */
     suspend fun connect(headUnitId: String): Result<Unit> {
         // What the user asks for takes the place of what the app was waiting to do by itself.
+        remembered = null
+        returning?.cancel()
         stopRejoining()
-        return connectLock.withLock {
-            // A wait that began while this one waited for the lock was not there to be ended above.
-            stopRejoining()
-            attempt(headUnitId, rejoining = false)
+        return dialled {
+            connectLock.withLock {
+                // A wait that began while this one waited for the lock was not there to be ended above.
+                stopRejoining()
+                attempt(headUnitId, quiet = false)
+            }
+        } ?: Result.failure(IOException(LEFT_WHILE_CONNECTING))
+    }
+
+    /**
+     * Runs [block], a connect, so that the app leaving the foreground can give it up ([leave]): null where it did.
+     * A caller that is cancelled is cancelled as it was before.
+     */
+    private suspend fun <T> dialled(block: suspend () -> T): T? = coroutineScope {
+        val work = async { block() }
+        dialling += work
+        try {
+            work.await()
+        } catch (e: CancellationException) {
+            // Only the connect was cancelled, not its caller: the app left.
+            ensureActive()
+            null
+        } finally {
+            dialling -= work
         }
     }
 
     /**
-     * What [connect] does, with [connectLock] held. When [rejoining], it is one of the app's own tries after the
-     * agent restarted: a failure is the caller's to publish, and the state stays [ConnectionState.Connecting].
+     * What [connect] does, with [connectLock] held. When [quiet], it is one of the app's own tries, after the agent
+     * restarted or on coming back to the foreground: a failure is the caller's to publish, and the state stays
+     * [ConnectionState.Connecting].
      */
-    private suspend fun attempt(headUnitId: String, rejoining: Boolean): Result<Unit> {
+    private suspend fun attempt(headUnitId: String, quiet: Boolean): Result<Unit> {
         drop("The app connected again")
         val unit = headUnits.headUnit(headUnitId).first()
             ?: return Result.failure(IOException("That head unit is no longer saved"))
@@ -342,8 +408,90 @@ class JobRepository(
             // Each way that was tried, with why it failed.
             else -> failures.joinToString("\n") { (endpoint, why) -> "${endpoint.label}: $why" }
         }
-        if (!rejoining) connectionState.value = ConnectionState.Failed(headUnitId, reason)
+        if (!quiet) connectionState.value = ConnectionState.Failed(headUnitId, reason)
         return Result.failure(IOException(reason))
+    }
+
+    /**
+     * Follows whether the app is in front of the user and whether anything uses the link, for as long as the
+     * repository lives. Busy means a job that needs the phone ([JobView.needsPhone], which covers the app's own wait
+     * to connect again after the agent restarted), a pull of logs that runs, or a call that waits for the agent's
+     * answer ([usingLink]).
+     *
+     * Out of sight and not busy, the link goes ([leave]): at once when the app leaves, or once what kept it busy is
+     * over if the app is still out of sight then. Back in sight, the app connects again to the head unit it let go
+     * of ([comeBack]). The foreground service a job runs under is not this one's: it keeps the process for the job.
+     */
+    private suspend fun watchForeground() {
+        var shownBefore = false
+        // Every change is looked at, not only a change of the two answers: a leave that found the link busy after all,
+        // once it held the lock, is tried again on the next change, which the end of that use is.
+        combine(foreground.inForeground, jobState, logPullState, inUse) { shown, job, pull, using ->
+            shown to (job?.needsPhone == true || pull is LogPullState.Pulling || using.now > 0)
+        }.collect { (shown, busy) ->
+            if (shown && !shownBefore) comeBack()
+            if (!shown && !busy) leave()
+            shownBefore = shown
+        }
+    }
+
+    /** Whether something uses the link now: see [watchForeground]. */
+    private fun busy(): Boolean = jobState.value?.needsPhone == true || logPullState.value is LogPullState.Pulling || inUse.value.now > 0
+
+    /** The head unit [state] has a link to, or is connecting to. */
+    private fun linkedTo(state: ConnectionState): String? = when (state) {
+        is ConnectionState.Connected -> state.headUnitId
+        is ConnectionState.Connecting -> state.headUnitId
+        is ConnectionState.NeedsPairing -> state.headUnitId
+        else -> null
+    }
+
+    /**
+     * Ends the link from this side, as the app leaves the foreground with nothing using it: a connect under way is
+     * given up, a link that waits to be paired goes too, the state is [ConnectionState.Disconnected], and the head
+     * unit is remembered for [comeBack]. Nothing is done where something has come to use the link meanwhile, as a
+     * job found running on a link just made.
+     */
+    private suspend fun leave() {
+        val before = linkedTo(connectionState.value)
+        // Also one that waits for the lock, and so shows nothing yet.
+        dialling.forEach { it.cancel() }
+        if (before == null) return
+        stopRejoining()
+        connectLock.withLock {
+            stopRejoining()
+            if (busy()) return@withLock
+            val target = linkedTo(connectionState.value) ?: before
+            drop(LEFT)
+            connectionState.value = ConnectionState.Disconnected
+            remembered = target
+        }
+    }
+
+    /**
+     * Connects again, quietly, to the head unit whose link was ended when the app left the foreground: one try,
+     * shown as [ConnectionState.Connecting]. A failure leaves [ConnectionState.Disconnected] and shows nothing; a
+     * phone that has to be paired ends in [ConnectionState.NeedsPairing], as any connect does. A head unit that is
+     * no longer saved is forgotten. The user's [connect] and [disconnect] take its place.
+     */
+    private fun comeBack() {
+        val headUnitId = remembered ?: return
+        val work = scope.launch(start = CoroutineStart.LAZY) {
+            connectLock.withLock {
+                currentCoroutineContext().ensureActive()
+                if (remembered != headUnitId) return@withLock
+                remembered = null
+                val result = attempt(headUnitId, quiet = true)
+                if (result.isFailure && result.exceptionOrNull() !is PairingNeeded) connectionState.value = ConnectionState.Disconnected
+            }
+        }
+        returning = work
+        dialling += work
+        work.invokeOnCompletion {
+            dialling -= work
+            if (returning === work) returning = null
+        }
+        work.start()
     }
 
     /**
@@ -365,7 +513,7 @@ class JobRepository(
             val result = connectLock.withLock {
                 // Taking a free lock asks nothing of the caller: one that was told to stop must not connect.
                 currentCoroutineContext().ensureActive()
-                attempt(headUnitId, rejoining = true)
+                attempt(headUnitId, quiet = true)
             }
             if (result.isSuccess) return
             if (result.exceptionOrNull() is PairingNeeded) return lost(headUnitId)
@@ -412,7 +560,10 @@ class JobRepository(
      * ([AgentText.pairing]) and leaves the link waiting, for another try. A caller that is cancelled meanwhile
      * takes the link with it, as with [connect].
      */
-    suspend fun pair(code: String): Result<Unit> = connectLock.withLock {
+    suspend fun pair(code: String): Result<Unit> = using { pairOver(code) }
+
+    /** What [pair] does, while it counts as a use of the link. */
+    private suspend fun pairOver(code: String): Result<Unit> = connectLock.withLock {
         val waiting = unpaired ?: return@withLock Result.failure(IOException("No link to a head unit is waiting to be paired"))
         val next = waiting.session
         val agentId = requireNotNull(waiting.hello.headUnitId)
@@ -452,8 +603,13 @@ class JobRepository(
         }
     }
 
-    /** Ends the link. A job that is fetching pauses on the head unit; one that is installing finishes there. */
+    /**
+     * Ends the link. A job that is fetching pauses on the head unit; one that is installing finishes there. The app
+     * does not connect again by itself when it comes back to the foreground.
+     */
     suspend fun disconnect() {
+        remembered = null
+        returning?.cancel()
         stopRejoining()
         connectLock.withLock {
             // As in [connect]: a wait that began meanwhile ends here.
@@ -485,7 +641,7 @@ class JobRepository(
      * Where the agent refuses, the failure is an [AgentRefusal] in the app's words ([AgentText.autostart]), and
      * how things stand is read again: a refusal means that they are not as the app had them.
      */
-    suspend fun setAutostart(on: Boolean): Result<Unit> {
+    suspend fun setAutostart(on: Boolean): Result<Unit> = using {
         val current = session ?: return Result.failure(IOException(NOT_CONNECTED))
         return try {
             try {
@@ -520,17 +676,19 @@ class JobRepository(
      * Null where nothing is kept and they cannot be run now: no link, an agent without them, a job that runs (the
      * agent answers `busy` then), or a run that failed. Nothing is kept then, and the next link tries again.
      */
-    suspend fun ensureChecked(): HeadUnitChecks? = checksLock.withLock {
-        val current = session ?: return@withLock null
-        val connected = connectionState.value as? ConnectionState.Connected ?: return@withLock null
-        headUnits.headUnit(connected.headUnitId).first()?.checks?.let { return@withLock it }
-        if (!connected.checks || jobRunsOn(connected.headUnitId)) return@withLock null
-        try {
-            runAll(current, connected.headUnitId)
-        } catch (e: RemoteException) {
-            null
-        } catch (e: IOException) {
-            null
+    suspend fun ensureChecked(): HeadUnitChecks? = using {
+        checksLock.withLock {
+            val current = session ?: return@withLock null
+            val connected = connectionState.value as? ConnectionState.Connected ?: return@withLock null
+            headUnits.headUnit(connected.headUnitId).first()?.checks?.let { return@withLock it }
+            if (!connected.checks || jobRunsOn(connected.headUnitId)) return@withLock null
+            try {
+                runAll(current, connected.headUnitId)
+            } catch (e: RemoteException) {
+                null
+            } catch (e: IOException) {
+                null
+            }
         }
     }
 
@@ -563,7 +721,7 @@ class JobRepository(
      * A refusal is an [AgentRefusal] in the app's words ([AgentText.check]). With `stale` the list is no longer
      * the one the token is of: the caller runs the check again and shows the user the new list.
      */
-    suspend fun fixCheck(id: String, token: String): Result<CheckFixResult> {
+    suspend fun fixCheck(id: String, token: String): Result<CheckFixResult> = using {
         val result = checksLock.withLock {
             checksSession { current, connected ->
                 val outcome = current.client.checksFix(id, token)
@@ -625,7 +783,7 @@ class JobRepository(
      * [block] over the link to the connected head unit, on an agent that has the checks. A refusal comes out in
      * the words of [AgentText.check].
      */
-    private suspend fun <T> checksSession(block: suspend (AgentSession, ConnectionState.Connected) -> T): Result<T> {
+    private suspend fun <T> checksSession(block: suspend (AgentSession, ConnectionState.Connected) -> T): Result<T> = using {
         val current = session ?: return Result.failure(IOException(NOT_CONNECTED))
         val connected = connectionState.value as? ConnectionState.Connected ?: return Result.failure(IOException(NOT_CONNECTED))
         if (!connected.checks) return Result.failure(IOException(NO_CHECKS))
@@ -1042,7 +1200,25 @@ class JobRepository(
         jobState.update { it?.takeIf { view -> !view.ended }?.copy(linkLost = true) ?: it }
     }
 
-    private suspend fun <T> withSession(block: suspend (AgentSession) -> T): Result<T> {
+    /**
+     * Runs [block] as a use of the link: while it runs, the app leaving the foreground does not end the link, and
+     * once it is over the link goes if the app is out of sight then ([watchForeground]). For app-scoped code that
+     * waits for the agent's answer, over one call or over several in a row; not for a wait for the user's answer.
+     * The repository's own calls to the agent count as uses already.
+     */
+    suspend fun <T> usingLink(block: suspend () -> T): T = using { block() }
+
+    /** [usingLink], for the repository's own calls: inline, so that a call returns from within it. */
+    private inline fun <T> using(block: () -> T): T {
+        inUse.update { it.copy(now = it.now + 1) }
+        try {
+            return block()
+        } finally {
+            inUse.update { Uses(it.now - 1, it.ended + 1) }
+        }
+    }
+
+    private suspend fun <T> withSession(block: suspend (AgentSession) -> T): Result<T> = using {
         val current = session ?: return Result.failure(IOException(NOT_CONNECTED))
         return try {
             Result.success(block(current))
@@ -1060,6 +1236,10 @@ class JobRepository(
         const val NO_FILES = "This head unit's agent can't send log files. Update the agent first."
         const val NO_CHECKS = "This head unit's agent has no checks. Update the agent first."
         const val PULL_BUSY = "Wait for the install to finish, then try again."
+
+        /** Why the link is ended, and a connect given up, when the app leaves the foreground with nothing using the link. */
+        const val LEFT = "The app was left, with nothing using the link"
+        const val LEFT_WHILE_CONNECTING = "The app was left before the link was up"
 
         /** The time in a ZIP's name: the phone's own, as the user reads it. */
         val ZIP_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")

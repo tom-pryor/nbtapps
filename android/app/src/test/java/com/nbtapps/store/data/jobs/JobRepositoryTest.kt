@@ -3,6 +3,7 @@
 package com.nbtapps.store.data.jobs
 
 import com.nbtapps.store.AgentVectors
+import com.nbtapps.store.data.FakeForeground
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.MemoryPairingKeys
 import com.nbtapps.store.data.PhoneIdentity
@@ -41,6 +42,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -1406,5 +1408,205 @@ class JobRepositoryTest {
         assertEquals(AgentText.check("stale"), failure.message)
         assertEquals(demoFiles + "/opt/demo/new", problem.found)
         assertEquals(demoFiles, headUnits.headUnit("car").first()?.checks?.problem("aa-fix")?.paths)
+    }
+
+    // ---- the app out of the user's sight ---------------------------------------------------------------------------
+
+    private val shown = FakeForeground()
+
+    /** A repository that follows [shown], over [connector]. */
+    private fun watched(connector: LinkConnector = this.connector) = JobRepository(
+        headUnits, connector, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L }, rejoin = patient, foreground = shown,
+    )
+
+    /** Every state [jobs] publishes from now on, as far as a collector sees them. */
+    private fun states(jobs: JobRepository): MutableList<ConnectionState> =
+        CopyOnWriteArrayList<ConnectionState>().also { seen -> scope.launch { jobs.connection.collect { seen += it } } }
+
+    /** Counts the connects, those that fail included, and hands them on to [inner]. */
+    private class Tries(private val inner: LinkConnector) : LinkConnector by inner {
+        val count = AtomicInteger()
+        override suspend fun connect(endpoint: Endpoint): Link {
+            count.incrementAndGet()
+            return inner.connect(endpoint)
+        }
+    }
+
+    private suspend fun until(what: String, condition: () -> Boolean) {
+        withTimeoutOrNull(10_000) { while (!condition()) delay(10) } ?: throw AssertionError("never came: $what")
+    }
+
+    @Test
+    fun `an idle link is ended from the phone's side when the app leaves, and made again when it comes back`() = test {
+        val jobs = watched()
+        assertTrue(jobs.connect("car").isSuccess)
+        val first = connector.agent
+        val asked = first.requests.size
+
+        shown.state.value = false
+
+        assertTrue("the phone held the link", first.phoneLeft())
+        assertEquals(asked, first.requests.size)
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        delay(200)
+        assertEquals(1, connector.agents.size)
+
+        val seen = states(jobs)
+        shown.state.value = true
+
+        await(jobs.connection, "the link again") { it is ConnectionState.Connected }
+        assertEquals(2, connector.agents.size)
+        assertTrue("$seen", seen.none { it is ConnectionState.Failed })
+    }
+
+    @Test
+    fun `a connect on coming back that fails leaves the app disconnected, with nothing shown`() = test {
+        val tries = Tries(connector)
+        val jobs = watched(tries)
+        assertTrue(jobs.connect("car").isSuccess)
+        shown.state.value = false
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        connector.unreachable = "No route to the car"
+        val seen = states(jobs)
+
+        shown.state.value = true
+
+        until("the connect on coming back") { tries.count.get() == 2 }
+        await(jobs.connection, "the quiet end") { it == ConnectionState.Disconnected }
+        assertTrue("$seen", seen.none { it is ConnectionState.Failed })
+        // One try, and no more.
+        delay(300)
+        assertEquals(2, tries.count.get())
+        assertEquals(ConnectionState.Disconnected, jobs.connection.value)
+    }
+
+    @Test
+    fun `after a disconnect of the user's the app does not connect again when it comes back`() = test {
+        val jobs = watched()
+        assertTrue(jobs.connect("car").isSuccess)
+        jobs.disconnect()
+
+        shown.state.value = false
+        delay(200)
+        shown.state.value = true
+        delay(300)
+
+        assertEquals(1, connector.agents.size)
+        assertEquals(ConnectionState.Disconnected, jobs.connection.value)
+    }
+
+    @Test
+    fun `a link that waits to be paired is ended too, and on coming back the app is held for pairing again`() = test {
+        guarded()
+        val jobs = watched()
+        assertTrue(jobs.connect("car").exceptionOrNull() is PairingNeeded)
+
+        shown.state.value = false
+
+        assertTrue(connector.agent.phoneLeft())
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+
+        shown.state.value = true
+
+        assertEquals(
+            ConnectionState.NeedsPairing("car", overTcp, stale = false),
+            await(jobs.connection, "the link held for pairing") { it is ConnectionState.NeedsPairing },
+        )
+        assertEquals(2, connector.agents.size)
+    }
+
+    @Test
+    fun `a job that needs the phone keeps the link while the app is away, and the link goes once the job has ended`() = test {
+        val stored = stored()
+        connector.onConnect = { planning(it, stored) }
+        val jobs = watched()
+        startedJob(stored, jobs)
+        val agent = connector.agent
+
+        shown.state.value = false
+        delay(300)
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+        assertArrayEquals(runtimeFile.readBytes(), agent.fetch(stored.sha256, 0))
+
+        agent.event("job.done", 1, done)
+
+        assertTrue("the phone held the link", agent.phoneLeft())
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        assertEquals(JobState.SUCCEEDED, jobs.job.value?.job?.state)
+
+        connector.onConnect = {}
+        shown.state.value = true
+        await(jobs.connection, "the link again") { it is ConnectionState.Connected }
+    }
+
+    @Test
+    fun `a call that waits for the agent keeps the link until it has its answer`() = test {
+        val jobs = watched()
+        assertTrue(jobs.connect("car").isSuccess)
+        val answer = CountDownLatch(1)
+        connector.agent.handlers["system.restart"] = {
+            answer.await(30, TimeUnit.SECONDS)
+            "{}"
+        }
+        val call = scope.launch { jobs.restart("hmi") }
+        until("the request") { connector.agent.requestsOf("system.restart").isNotEmpty() }
+
+        shown.state.value = false
+        delay(300)
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+        // And app-scoped code that says it uses the link, over a call and what follows it.
+        val using = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        val other = scope.launch {
+            jobs.usingLink {
+                entered.complete(Unit)
+                using.await()
+            }
+        }
+        entered.await()
+        answer.countDown()
+        call.join()
+        delay(300)
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+
+        using.complete(Unit)
+        other.join()
+
+        assertTrue(connector.agent.phoneLeft())
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+    }
+
+    @Test
+    fun `a connect under way when the app leaves is given up, and made on coming back`() = test {
+        val counting = Counting(connector).apply { hold = CompletableDeferred() }
+        val jobs = watched(counting)
+        val result = scope.async { jobs.connect("car") }
+        counting.waiting.await()
+
+        shown.state.value = false
+
+        assertTrue(result.await().isFailure)
+        assertEquals(ConnectionState.Disconnected, jobs.connection.value)
+        assertEquals(0, counting.opened.get())
+
+        counting.hold = null
+        shown.state.value = true
+        await(jobs.connection, "the link") { it is ConnectionState.Connected }
+        assertEquals(1, counting.opened.get())
+    }
+
+    @Test
+    fun `a head unit removed while the app was away is not connected to on coming back`() = test {
+        val jobs = watched()
+        assertTrue(jobs.connect("car").isSuccess)
+        shown.state.value = false
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+
+        headUnits.remove("car")
+        shown.state.value = true
+        delay(300)
+
+        assertEquals(1, connector.agents.size)
+        assertEquals(ConnectionState.Disconnected, jobs.connection.value)
     }
 }
