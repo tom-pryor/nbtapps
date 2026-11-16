@@ -66,15 +66,22 @@ class CarPickerStateTest {
         assertEquals(van, defaultCar(listOf(car, van, headphones), setOf("aa:bb:cc:dd:ee:01", headphones.address)))
         // Both are, or neither is: the user picks.
         assertNull(defaultCar(listOf(car, van), setOf(car.address, van.address)))
+        assertNull(defaultCar(listOf(car, van), emptySet()))
         assertNull(defaultCar(listOf(car, van, headphones), setOf(headphones.address)))
-        // The only car, connected or not; other devices do not count.
+        // The only car, connected or not; other devices do not count, even a connected one.
         assertEquals(car, defaultCar(listOf(car, headphones), setOf(headphones.address)))
+        assertEquals(car, defaultCar(listOf(car, headphones), emptySet()))
         assertNull(defaultCar(emptyList(), emptySet()))
+    }
 
-        // Where no device says it is a car, every device counts, as in the list.
+    @Test
+    fun `where no device says it is a car, none is picked to begin with, though the list has them all`() {
         val plain = car.copy(car = false)
-        assertEquals(plain, defaultCar(listOf(plain), emptySet()))
-        assertEquals(headphones, defaultCar(listOf(plain, headphones), setOf(headphones.address)))
+        // A lone paired device.
+        assertNull(defaultCar(listOf(headphones), emptySet()))
+        assertNull(defaultCar(listOf(plain), setOf(plain.address)))
+        // One of two is connected.
+        assertNull(defaultCar(listOf(plain, headphones), setOf(headphones.address)))
         assertNull(defaultCar(listOf(plain, headphones), emptySet()))
     }
 

@@ -62,11 +62,12 @@ fun carPickerState(
 
 /**
  * The car to pick before the user does, among [devices], with [connected] as in [carPickerState]: the connected car,
- * if exactly one car is connected; else the only car, if there is exactly one; else none. The cars are the devices
- * that say they are one, or, where none does, every device, as the picker lists them.
+ * if exactly one car is connected; else the only car, if there is exactly one; else none. The cars are only the
+ * devices that say they are one ([PairedDevice.car]): where none does, nothing is picked, though the picker still
+ * lists every device for the user to pick from.
  */
 fun defaultCar(devices: List<PairedDevice>, connected: Set<String>): PairedDevice? {
-    val cars = devices.filter { it.car }.ifEmpty { devices }
+    val cars = devices.filter { it.car }
     cars.filter { car -> connected.any { it.equals(car.address, ignoreCase = true) } }.singleOrNull()?.let { return it }
     return cars.singleOrNull()
 }
