@@ -69,6 +69,15 @@ const uint32_t kSettingsMinFrame = 4096;
 // (tests/agent/test_agent.cpp measures it).
 const size_t kSettingsMaxRawBytes = 200;
 
+// The words a bool reads (above), in any case: 1 for true, 0 for false, -1 for a word that is neither. nbtctl
+// reads what it is given for a bool option by the same words.
+int settingBoolWord(const std::string& text);
+
+// The text of an int, -?[0-9]+ with leading zeros, into *out; false for any other text. The limits are not checked
+// here. A number far outside what an option's limits can be is read as the edge it is beyond, so that it fails the
+// range check and nothing overflows.
+bool settingIntText(const std::string& text, int64_t* out);
+
 // How an option stands in the file.
 enum SettingState { kSettingUnset, kSettingSet, kSettingByHand };
 const char* settingStateName(SettingState state);   // "unset", "set", "by-hand"

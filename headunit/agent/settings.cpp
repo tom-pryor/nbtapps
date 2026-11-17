@@ -31,17 +31,22 @@ std::string lower(const std::string& text) {
     return out;
 }
 
-// 1 true, 0 false, -1 neither.
-int boolWord(const std::string& text) {
+std::string decimal(int64_t value) {
+    char text[32];
+    snprintf(text, sizeof text, "%lld", (long long)value);
+    return text;
+}
+
+}  // namespace
+
+int settingBoolWord(const std::string& text) {
     std::string word = lower(text);
     if (word == "1" || word == "on" || word == "yes" || word == "true") return 1;
     if (word == "0" || word == "off" || word == "no" || word == "false") return 0;
     return -1;
 }
 
-// -?[0-9]+, into *out. A number far outside what an option's limits can be is read as the edge it is beyond, so
-// that it fails the range check and nothing overflows.
-bool intText(const std::string& text, int64_t* out) {
+bool settingIntText(const std::string& text, int64_t* out) {
     size_t at = !text.empty() && text[0] == '-' ? 1 : 0;
     if (at == text.size()) return false;
     const int64_t kCap = 1LL << 40;
@@ -53,14 +58,6 @@ bool intText(const std::string& text, int64_t* out) {
     *out = at == 1 ? -value : value;
     return true;
 }
-
-std::string decimal(int64_t value) {
-    char text[32];
-    snprintf(text, sizeof text, "%lld", (long long)value);
-    return text;
-}
-
-}  // namespace
 
 const char* settingStateName(SettingState state) {
     switch (state) {
@@ -85,7 +82,7 @@ SettingState readSettingValue(const ManifestSetting& option, const std::string& 
     bool taken = false;
     switch (option.type) {
     case kSettingBool: {
-        int word = boolWord(text);
+        int word = settingBoolWord(text);
         if (word >= 0) {
             w.boolean(word == 1);
             taken = true;
@@ -94,7 +91,7 @@ SettingState readSettingValue(const ManifestSetting& option, const std::string& 
     }
     case kSettingInt: {
         int64_t value = 0;
-        if (intText(text, &value) && value >= option.min && value <= option.max) {
+        if (settingIntText(text, &value) && value >= option.min && value <= option.max) {
             w.integer(value);
             taken = true;
         }

@@ -36,7 +36,19 @@
 //                                          --list, every folder each one would move and every path it would remove
 //   checks  fix ID                         runs that check, and its fix on what it found
 //   serial  reset                          has the car end the phone's Bluetooth serial link (serial.reset)
+//   settings ID                            the settings of an installed package, and how each stands in its file
+//   set     ID KEY VALUE                   one setting changed: VALUE as the option's type takes it
+//   unset   ID KEY                         one setting's line taken out of the file, so that the package's own
+//                                          default holds
 //   call METHOD [JSON]                     any request, the reply printed as it came
+//
+// `settings` prints a line for each option, in the manifest's order: its key, its state (set, unset or by-hand),
+// when a change to it applies (now, app-start, hmi-restart, reboot), and then, for a value that is set, the value
+// as JSON (true, 25, "text"), and for one set by hand, what the file has as a JSON string. `set` asks settings.get
+// for the option's type first: a bool takes 1, on, yes, true or 0, off, no, false, an int its digits, a text or a
+// select the word as it is; a VALUE its type does not read is a usage error. Both `set` and `unset` print "set KEY"
+// or "unset KEY" when it is done; where the agent says the setting is not allowed, a line "KEY REASON" follows the
+// error, for each key at fault (unknown-key, wrong-type, out-of-range, too-long, bad-characters, not-a-choice).
 //
 // `autostart` prints three lines: "autostart on" or "autostart off"; "available yes", or "available no" with the
 // reason and, where it is the iDrive plugin that is wanting, its package and the versions that would do; and
@@ -97,6 +109,8 @@
 #include "package.hpp"
 #include "peer.hpp"
 #include "semver.hpp"
+#include "settings.hpp"
+#include "utf8.hpp"
 
 using namespace nbt;
 
@@ -366,14 +380,11 @@ public:
         }
         Reply reply;
         reply.ok = ok;
-        if (ok) {
-            reply.text = jsonText(result);
-        } else {
+        // The error object as a whole: some codes carry more than a message (settings.set's `invalid` has keys).
+        reply.text = jsonText(result);
+        if (!ok) {
             reply.code = code;
             reply.message = message;
-            json::Writer w;
-            w.beginObject().key("code").string(code).key("message").string(message).endObject();
-            reply.text = w.text();
         }
         replies_[id] = reply;
     }
@@ -580,6 +591,9 @@ int usage() {
             "  checks  [--list]         what was put onto the head unit by hand\n"
             "  checks  fix ID           that check's fix, on the list it finds\n"
             "  serial  reset            have the car end the phone's Bluetooth serial link\n"
+            "  settings ID              the settings of an installed package\n"
+            "  set     ID KEY VALUE     change one of them\n"
+            "  unset   ID KEY           take one out of its file: the package's default holds\n"
             "  call METHOD [JSON]\n"
             "The socket is $NBT_AGENT_SOCKET if --socket is not given"
 #ifdef __QNXNTO__
@@ -674,6 +688,48 @@ void printCheck(json::Value check) {
     if (state == "unknown") printf("%s unknown: %s\n", id.c_str(), text(check, "why").c_str());
     else if (state == "problem") printf("%s problem %lld%s\n", id.c_str(), integer(check, "count"), check.find("fix").isObject() ? "" : " no fix");
     else printf("%s %s\n", id.c_str(), state.c_str());
+}
+
+// Every option of a package's settings, a page at a time, as JSON texts. False with *status if the agent refused a
+// page or the link broke.
+bool settingsOptions(Controller* c, const std::string& package, std::vector<std::string>* out, int* status) {
+    int64_t from = 0;
+    for (;;) {
+        json::Writer w;
+        w.beginObject().key("package").string(package).key("from").integer(from).endObject();
+        Reply reply;
+        if (!c->call("settings.get", w.text(), &reply)) {
+            *status = 3;
+            return false;
+        }
+        if (!reply.ok) {
+            *status = refused("settings.get", reply);
+            return false;
+        }
+        json::Document doc;
+        doc.parse(reply.text, 0);
+        json::Value options = doc.root().find("options"), next = doc.root().find("next");
+        for (size_t i = 0; i < options.size(); ++i) out->push_back(jsonText(options.at(i)));
+        // A page that takes the list no further ends it, so that a list that changes under it is not asked for ever.
+        if (!next.isInteger() || next.integer() <= from || options.size() == 0) return true;
+        from = next.integer();
+    }
+}
+
+// settings.set with these params; prints "DONE KEY" when it is done, and each key's reason when it is not allowed.
+int settingsChange(Controller* c, const std::string& params, const char* done, const std::string& key) {
+    Reply reply;
+    if (!c->call("settings.set", params, &reply)) return 3;
+    if (!reply.ok) {
+        int status = refused("settings.set", reply);
+        json::Document doc;
+        doc.parse(reply.text, 0);
+        json::Value keys = doc.root().find("keys");
+        for (size_t i = 0; i < keys.size(); ++i) printf("%s %s\n", text(keys.at(i), "key").c_str(), text(keys.at(i), "reason").c_str());
+        return status;
+    }
+    printf("%s %s\n", done, key.c_str());
+    return 0;
 }
 
 void printSteps(json::Value steps, bool withResult) {
@@ -1067,6 +1123,73 @@ int main(int argc, char** argv) {
             printf("%s\n", reply.text.c_str());
         }
         return 0;
+    }
+
+    if (command == "settings") {
+        if (args.size() != 1) return usage();
+        std::vector<std::string> options;
+        int status = 0;
+        if (!settingsOptions(&c, args[0], &options, &status)) return status;
+        for (size_t i = 0; i < options.size(); ++i) {
+            json::Document one;
+            one.parse(options[i], 0);
+            json::Value o = one.root();
+            std::string line = text(o, "key") + " " + text(o, "state") + " " + text(o, "applies");
+            // The value last: a text may hold a space.
+            if (o.find("value").present()) line += " " + jsonText(o.find("value"));
+            if (o.find("raw").present()) line += " " + jsonText(o.find("raw"));
+            printf("%s\n", line.c_str());
+        }
+        return 0;
+    }
+
+    if (command == "set" || command == "unset") {
+        if (args.size() != (command == "set" ? 3u : 2u)) return usage();
+        const std::string& package = args[0];
+        const std::string& key = args[1];
+        json::Writer w;
+        w.beginObject().key("package").string(package);
+        if (command == "unset") {
+            w.key("reset").beginArray().string(key).endArray().endObject();
+            return settingsChange(&c, w.text(), "unset", key);
+        }
+        // The option's type, so that the value goes as the JSON it takes. A key with no option goes as a string,
+        // and the agent says what it makes of it.
+        std::vector<std::string> options;
+        int status = 0;
+        if (!settingsOptions(&c, package, &options, &status)) return status;
+        std::string type;
+        for (size_t i = 0; i < options.size() && type.empty(); ++i) {
+            json::Document one;
+            one.parse(options[i], 0);
+            if (text(one.root(), "key") == key) type = text(one.root(), "type");
+        }
+        const std::string& value = args[2];
+        w.key("set").beginObject().key(key);
+        // Read by the agent's own rules for a file's value (settings.hpp), so that nbtctl takes what a file can hold.
+        int64_t number = 0;
+        int word = settingBoolWord(value);
+        if (type == "bool") {
+            if (word < 0) {
+                fprintf(stderr, "nbtctl: %s is a bool: 1, on, yes, true or 0, off, no, false\n", key.c_str());
+                return 2;
+            }
+            w.boolean(word == 1);
+        } else if (type == "int") {
+            if (!settingIntText(value, &number)) {
+                fprintf(stderr, "nbtctl: %s is an int: digits, with a - before them for one below 0\n", key.c_str());
+                return 2;
+            }
+            w.integer(number);
+        } else {
+            if (!validUtf8(value)) {
+                fprintf(stderr, "nbtctl: the value is not UTF-8\n");
+                return 2;
+            }
+            w.string(value);
+        }
+        w.endObject().endObject();
+        return settingsChange(&c, w.text(), "set", key);
     }
 
     if (command == "restart") {

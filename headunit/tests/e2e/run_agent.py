@@ -12,7 +12,8 @@ runs here, and reaches the agent through the socket. It plays the phone: it offe
 the packages of a folder (the "stick") and serves them when the agent asks. The script drives a plan, an install
 with a dependency, an upgrade, an upgrade that fails and is undone, a fetch that the controller cancels, a fetch
 whose link drops and is resumed, removals, the logs of a package pulled (`nbtctl logs` and `nbtctl pull`, and once
-read off the local socket here, with Python's own inflate), the checks of what was put on by hand and the fix of a
+read off the local socket here, with Python's own inflate), a package's settings listed, set, set by hand and taken
+out again (`nbtctl settings`, `set` and `unset`), the checks of what was put on by hand and the fix of a
 made-up app (`nbtctl checks` and `nbtctl checks fix`), and a restart of the agent, and after each looks at what
 the agent says and at what is on disk. It also is a phone on the agent's debug TCP link, which the phone app on an emulator uses:
 refused until it is paired, paired by the code `nbtctl pair` prints, let in by `auth`, and forgotten again, and
@@ -487,12 +488,48 @@ def run():
         check(data == log_bytes and result["size"] == len(log_bytes) and frames >= 2, "the log, read here", repr(result))
         check(ok("logs", "org.nbtapp.agent") == "", "the agent's own logs, where no launcher named one")
 
+        # ---- a package's settings: listed, set, set by hand, refused, and taken out again. The file is the
+        # package's: the agent changes the lines of the keys it is given and leaves every other line as it stands.
+        shutil.copy(os.path.join(DATA, "good", "org.nbtapp.dial-1.0.0.nbtpkg"), STICK)
+        out = ok("install", "--from", STICK, "org.nbtapp.dial")
+        check("job succeeded" in out, "install the dial", out)
+        dial, conf = "org.nbtapp.dial", os.path.join(HU, "data", "org.nbtapp.dial", "dial.conf")
+        out = ok("settings", dial)
+        check(out == "CHIME unset now\nDIAL_SPEED unset app-start\nGREETING unset reboot\nLAMP_HOST unset now\n"
+                     "FACE unset hmi-restart\nLAMP_COLOUR unset now\n", "nbtctl settings with no file", out)
+        check(ok("set", dial, "CHIME", "Off") == "set CHIME\n", "nbtctl set of a bool")
+        ok("set", dial, "DIAL_SPEED", "007")
+        ok("set", dial, "GREETING", "Hi there, é")
+        with open(conf, "rb") as f:
+            written = f.read()
+        check(written == b"CHIME=0\nDIAL_SPEED=7\nGREETING=Hi there, \xc3\xa9\n", "the file nbtctl set made", repr(written))
+        with open(conf, "wb") as f:
+            f.write(b"# by hand\r\n" + written + b"FACE=oval\nNBT_KEEP=1\n")
+        out = ok("settings", dial)
+        check(out == "CHIME set now false\nDIAL_SPEED set app-start 7\nGREETING set reboot \"Hi there, é\"\nLAMP_HOST unset now\n"
+                     "FACE by-hand hmi-restart \"oval\"\nLAMP_COLOUR unset now\n", "nbtctl settings of a file set by hand", out)
+        # Values the agent does not take, and values nbtctl cannot make into the option's type: nothing is written.
+        for args, status, said in ((("DIAL_SPEED", "51"), 1, "DIAL_SPEED out-of-range"), (("FACE", "oval"), 1, "FACE not-a-choice"),
+                                   (("NOPE", "1"), 1, "NOPE unknown-key"), (("LAMP_HOST", "a b"), 1, "LAMP_HOST bad-characters"),
+                                   (("DIAL_SPEED", "fast"), 2, "is an int"), (("CHIME", "maybe"), 2, "is a bool")):
+            code, out = ctl("set", dial, *args)
+            check(code == status and said in out, "nbtctl set %s" % " ".join(args), out)
+        check(ctl("set", dial, "CHIME")[0] == 2 and ctl("unset", dial)[0] == 2, "nbtctl set and unset with a word missing")
+        ok("set", dial, "FACE", "square")
+        check(ok("unset", dial, "GREETING") == "unset GREETING\n", "nbtctl unset")
+        with open(conf, "rb") as f:
+            written = f.read()
+        check(written == b"# by hand\r\nCHIME=0\nDIAL_SPEED=7\nFACE=square\nNBT_KEEP=1\n", "the file after set and unset", repr(written))
+        code, out = ctl("settings", "org.nbtapp.hello")
+        check(code == 1 and "not-found" in out, "nbtctl settings of a package that has none", out)
+        check("settings" in ok("call", "packages.list"), "packages.list says the dial has settings")
+
         # ---- removal
         code, out = ctl("remove", "org.nbtapp.runtime")
         check(code == 1 and "required-by" in out, "removing a package that is depended on", out)
         code, out = ctl("remove", "org.nbtapp.nothere")
         check(code == 1 and "not-installed" in out, "removing a package that is not there", out)
-        out = ok("remove", "--delete-data", "org.nbtapp.runtime", "org.nbtapp.hello", "org.nbtapp.bulk", "org.nbtapp.logger")
+        out = ok("remove", "--delete-data", "org.nbtapp.runtime", "org.nbtapp.hello", "org.nbtapp.bulk", "org.nbtapp.logger", "org.nbtapp.dial")
         check("job succeeded" in out and "postRemove|" in out, "removal", out)
         check(installed() == [], "after removal", "\n".join(installed()))
         check(not os.path.exists(hello) and not os.path.exists(os.path.join(HU, "data", "org.nbtapp.hello")), "files were left behind")
@@ -573,6 +610,9 @@ def run():
     check("DEBUG TCP" in log and "paired in the clear" in log, "the agent did not say what its TCP link is")
     check("files.fetch org.nbtapp.logger ${data}/log/logger.log: stream" in log and " bytes as " in log,
           "the agent's log has no line for a files stream")
+    check("settings of org.nbtapp.dial: set FACE" in log and "settings of org.nbtapp.dial: reset GREETING" in log,
+          "the agent's log has no line for a change of settings")
+    check("Hi there" not in log and "square" not in log, "the agent's log has a setting's value in it")
     shutil.rmtree(WORK, ignore_errors=True)
 
 
