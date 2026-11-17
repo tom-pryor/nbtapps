@@ -2,7 +2,6 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.catalogue
 
-import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.InMemoryPrereleaseRepository
@@ -28,7 +27,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -37,7 +35,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -49,7 +46,7 @@ import org.junit.rules.TemporaryFolder
 /** The catalogue screen's view model over the real job repository and a stand-in agent: what a pull on the list reads again. */
 class CatalogueRefreshTest {
 
-    @get:Rule
+    @get:Rule(order = 1)
     val mainDispatcherRule = MainDispatcherRule()
 
     @get:Rule
@@ -82,9 +79,9 @@ class CatalogueRefreshTest {
         ),
     )
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
     private val headUnits = InMemoryHeadUnitRepository()
-    private val connector = FakeConnector()
+    private val connector = mainDispatcherRule.track(FakeConnector())
     private val identity = object : PhoneIdentity {
         override suspend fun id() = "5f2c9a1e07b34d6688a0c1d2e3f40516"
         override val name = "Pixel 9"
@@ -92,32 +89,16 @@ class CatalogueRefreshTest {
     private val jobs by lazy {
         JobRepository(headUnits, connector, identity, MemoryPairingKeys(), PackageStore(folder.newFolder("packages")), {}, scope, now = { 1234L })
     }
-    private val made = lazy {
-        CatalogueViewModel(catalogue, headUnits, jobs, idleUpdater(folder.newFolder("update"), scope), RUNNING, InMemoryPrereleaseRepository())
+    private val viewModel by lazy {
+        mainDispatcherRule.track(
+            CatalogueViewModel(catalogue, headUnits, jobs, idleUpdater(folder.newFolder("update"), scope), RUNNING, InMemoryPrereleaseRepository()),
+        )
     }
-    private val viewModel by made
 
     private val car = HeadUnit("car", "Car", listOf(TcpEndpoint("192.168.0.1", 7144)))
 
     private fun row(version: String) =
         """[{"id":"org.nbtapp.runtime","name":"NBT Runtime","version":"$version","key":"${"ab".repeat(32)}","flags":[]}]"""
-
-    /**
-     * Waits for the view model and the links to end, not only cancels them: see `SettingsViewModelTest.tearDown`. Its
-     * state is shared for 5 seconds after the last collector goes, on the main dispatcher, which the rule unsets once
-     * this returns.
-     */
-    @After
-    fun tearDown() = runBlocking {
-        if (made.isInitialized()) viewModel.viewModelScope.cancel()
-        scope.cancel()
-        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
-        connector.agents.forEach { it.drop() }
-        withTimeout(5_000) {
-            if (made.isInitialized()) viewModel.viewModelScope.coroutineContext.job.join()
-            scope.coroutineContext.job.join()
-        }
-    }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {

@@ -32,7 +32,6 @@ import com.nbtapps.store.model.PackageVersion
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -40,7 +39,6 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -51,25 +49,22 @@ import org.junit.rules.TemporaryFolder
 
 class CatalogueViewModelTest {
 
-    @get:Rule
+    @get:Rule(order = 1)
     val mainDispatcherRule = MainDispatcherRule()
 
     @get:Rule
     val folder = TemporaryFolder()
 
     // No head unit is saved and no link is opened: the list is the catalogue alone, as it was before it knew of any.
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
     private val headUnits = InMemoryHeadUnitRepository()
     private val identity = object : PhoneIdentity {
         override suspend fun id() = "5f2c9a1e07b34d6688a0c1d2e3f40516"
         override val name = "Pixel 9"
     }
     private val jobs by lazy {
-        JobRepository(headUnits, FakeConnector(), identity, MemoryPairingKeys(), PackageStore(folder.newFolder("packages")), {}, scope)
+        JobRepository(headUnits, mainDispatcherRule.track(FakeConnector()), identity, MemoryPairingKeys(), PackageStore(folder.newFolder("packages")), {}, scope)
     }
-
-    @After
-    fun tearDown() = scope.cancel()
 
     private class FakeCatalogueRepository(private val result: CatalogueState) : CatalogueRepository {
         override val catalogue = MutableStateFlow(CatalogueState())
@@ -107,7 +102,7 @@ class CatalogueViewModelTest {
     private val prereleases = InMemoryPrereleaseRepository()
     // Lazy so the ViewModel is created after the rule has installed the test Main dispatcher.
     private val updater by lazy { idleUpdater(folder.newFolder("update"), scope) }
-    private val viewModel by lazy { CatalogueViewModel(repository, headUnits, jobs, updater, RUNNING, prereleases) }
+    private val viewModel by lazy { mainDispatcherRule.track(CatalogueViewModel(repository, headUnits, jobs, updater, RUNNING, prereleases)) }
 
     private fun TestScope.collectUiState() {
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
@@ -143,7 +138,7 @@ class CatalogueViewModelTest {
     @Test
     fun `a failed load is reported and not shown as loaded`() = runTest {
         val failing = FakeCatalogueRepository(CatalogueState(error = "no network"))
-        val viewModel = CatalogueViewModel(failing, headUnits, jobs, updater, RUNNING, prereleases)
+        val viewModel = mainDispatcherRule.track(CatalogueViewModel(failing, headUnits, jobs, updater, RUNNING, prereleases))
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
 
         assertFalse(viewModel.uiState.value.loaded)
@@ -222,7 +217,7 @@ class CatalogueViewModelTest {
             scope = scope,
         )
         val offering = FakeCatalogueRepository(CatalogueState(index = index.copy(app = newer)))
-        val viewModel = CatalogueViewModel(offering, headUnits, jobs, updater, RUNNING, prereleases)
+        val viewModel = mainDispatcherRule.track(CatalogueViewModel(offering, headUnits, jobs, updater, RUNNING, prereleases))
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
 
         val card = requireNotNull(viewModel.uiState.value.appUpdate)

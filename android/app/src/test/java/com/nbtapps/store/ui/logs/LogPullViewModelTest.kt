@@ -2,7 +2,6 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.logs
 
-import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.MemoryPairingKeys
@@ -16,11 +15,9 @@ import com.nbtapps.store.data.logs.LogPullState
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.TcpEndpoint
-import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
@@ -28,7 +25,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -39,14 +35,14 @@ import org.junit.rules.TemporaryFolder
 
 class LogPullViewModelTest {
 
-    @get:Rule
+    @get:Rule(order = 1)
     val mainDispatcherRule = MainDispatcherRule()
 
     @get:Rule
     val folder = TemporaryFolder()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val connector = FakeConnector()
+    private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
+    private val connector = mainDispatcherRule.track(FakeConnector())
     private val headUnits = InMemoryHeadUnitRepository()
     private val identity = object : PhoneIdentity {
         override suspend fun id() = "5f2c9a1e07b34d6688a0c1d2e3f40516"
@@ -68,26 +64,7 @@ class LogPullViewModelTest {
         }
     }
 
-    private val viewModels = CopyOnWriteArrayList<LogPullViewModel>()
-
-    private fun screen(packageId: String = "com.example.radio") =
-        LogPullViewModel("car", packageId, jobs, "0.4.0").also { viewModels += it }
-
-    /**
-     * Waits for the view models and the links to end, not only cancels them: see `SettingsViewModelTest.tearDown`. A
-     * stream that a test leaves stalled ends with its link.
-     */
-    @After
-    fun tearDown() = runBlocking {
-        viewModels.forEach { it.viewModelScope.cancel() }
-        scope.cancel()
-        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
-        connector.agents.forEach { it.drop() }
-        withTimeout(5_000) {
-            viewModels.forEach { it.viewModelScope.coroutineContext.job.join() }
-            scope.coroutineContext.job.join()
-        }
-    }
+    private fun screen(packageId: String = "com.example.radio") = mainDispatcherRule.track(LogPullViewModel("car", packageId, jobs, "0.4.0"))
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {

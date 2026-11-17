@@ -3,9 +3,8 @@
 package com.nbtapps.store.ui.setup
 
 import androidx.lifecycle.SavedStateHandle
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.AgentVectors
+import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.FakePhoneBluetooth
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.InMemoryPrereleaseRepository
@@ -36,9 +35,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -46,12 +43,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -59,8 +53,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import org.junit.rules.TestWatcher
-import org.junit.runner.Description
 
 /**
  * A code another app handed over that pairs a car while the set-up for a new user is open: the real screens' view
@@ -70,12 +62,8 @@ import org.junit.runner.Description
 class HandoverDuringSetupTest {
 
     /** As in [SetupViewModelTest]: the main dispatcher runs at once and waits in real time. */
-    @get:Rule
-    val mainDispatcherRule = object : TestWatcher() {
-        override fun starting(description: Description) = Dispatchers.setMain(Dispatchers.Unconfined)
-
-        override fun finished(description: Description) = Dispatchers.resetMain()
-    }
+    @get:Rule(order = 1)
+    val mainDispatcherRule = MainDispatcherRule(main = Dispatchers.Unconfined)
 
     @get:Rule
     val folder = TemporaryFolder()
@@ -93,9 +81,9 @@ class HandoverDuringSetupTest {
         }
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
     private val headUnits = InMemoryHeadUnitRepository()
-    private val connector = FakeConnector(serial = true)
+    private val connector = mainDispatcherRule.track(FakeConnector(serial = true))
     private val gated = Gated(connector)
     private val keys = MemoryPairingKeys()
     private val identity = object : PhoneIdentity {
@@ -125,32 +113,16 @@ class HandoverDuringSetupTest {
         }
     }
 
-    private val made = CopyOnWriteArrayList<ViewModel>()
-    private val watchers = CopyOnWriteArrayList<Job>()
-
-    /** Waits for the view models and the links to end, not only cancels them: see [SetupViewModelTest.tearDown]. */
-    @After
-    fun tearDown() = runBlocking {
-        watchers.forEach { it.cancel() }
-        made.forEach { it.viewModelScope.cancel() }
-        scope.cancel()
-        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
-        connector.agents.forEach { it.drop() }
-        withTimeout(5_000) {
-            made.forEach { it.viewModelScope.coroutineContext.job.join() }
-            scope.coroutineContext.job.join()
-        }
-    }
-
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) { block() }
     }
 
     private fun wizard(furtherCar: Boolean = false) =
-        SetupViewModel(SavedStateHandle(mapOf(SetupViewModel.FURTHER_CAR to furtherCar)), headUnits, jobs, setup, phone, choice, gated, scope)
-            .also { made += it }
+        mainDispatcherRule.track(
+            SetupViewModel(SavedStateHandle(mapOf(SetupViewModel.FURTHER_CAR to furtherCar)), headUnits, jobs, setup, phone, choice, gated, scope),
+        )
 
-    private fun handover() = PairRequestViewModel(SavedStateHandle(), headUnits, jobs, setup, phone, gated, scope, clock).also { made += it }
+    private fun handover() = mainDispatcherRule.track(PairRequestViewModel(SavedStateHandle(), headUnits, jobs, setup, phone, gated, scope, clock))
 
     private suspend fun <T> await(flow: Flow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) }
@@ -159,7 +131,7 @@ class HandoverDuringSetupTest {
     /** Every page [wizard] shows from now on. Watched on [scope], so the test does not wait for the watch to end. */
     private fun pages(wizard: SetupViewModel): List<SetupStep> {
         val seen = CopyOnWriteArrayList<SetupStep>()
-        watchers += scope.launch(Dispatchers.Unconfined) { wizard.uiState.collect { seen += it.step } }
+        scope.launch(Dispatchers.Unconfined) { wizard.uiState.collect { seen += it.step } }
         return seen
     }
 

@@ -2,7 +2,6 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.detail
 
-import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.FakePhoneBluetooth
@@ -22,18 +21,14 @@ import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.SerialEndpoint
-import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -44,15 +39,15 @@ import org.junit.rules.TemporaryFolder
 /** The head unit's page and its Troubleshooting card: when it is there, and what it says a reset came to. */
 class HeadUnitTroubleshootingTest {
 
-    @get:Rule
+    @get:Rule(order = 1)
     val mainDispatcherRule = MainDispatcherRule()
 
     @get:Rule
     val folder = TemporaryFolder()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
     private val headUnits = InMemoryHeadUnitRepository()
-    private val connector = FakeConnector(serial = true)
+    private val connector = mainDispatcherRule.track(FakeConnector(serial = true))
     private val identity = object : PhoneIdentity {
         override suspend fun id() = "5f2c9a1e07b34d6688a0c1d2e3f40516"
         override val name = "Test phone"
@@ -66,21 +61,6 @@ class HeadUnitTroubleshootingTest {
 
     private val car = HeadUnit("car", "Test car", listOf(SerialEndpoint("00:11:22:33:44:55", "Test car")))
 
-    private val viewModels = CopyOnWriteArrayList<HeadUnitDetailViewModel>()
-
-    /** Waits for the view models and the links to end, not only cancels them: see [HeadUnitSettingsEntryTest.tearDown]. */
-    @After
-    fun tearDown() = runBlocking {
-        viewModels.forEach { it.viewModelScope.cancel() }
-        scope.cancel()
-        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
-        connector.agents.forEach { it.drop() }
-        withTimeout(5_000) {
-            viewModels.forEach { it.viewModelScope.coroutineContext.job.join() }
-            scope.coroutineContext.job.join()
-        }
-    }
-
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {
             headUnits.add(car)
@@ -89,7 +69,7 @@ class HeadUnitTroubleshootingTest {
     }
 
     private fun viewModel() =
-        HeadUnitDetailViewModel("car", headUnits, jobs, connector, FakePhoneBluetooth(), setup, scope).also { viewModels += it }
+        mainDispatcherRule.track(HeadUnitDetailViewModel("car", headUnits, jobs, connector, FakePhoneBluetooth(), setup, scope))
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; last was ${flow.value}")

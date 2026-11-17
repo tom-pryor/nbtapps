@@ -3,9 +3,9 @@
 package com.nbtapps.store.ui.setup
 
 import androidx.lifecycle.SavedStateHandle
-import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.AgentBench
 import com.nbtapps.store.CarScreen
+import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.FakePhoneBluetooth
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.InMemoryPrereleaseRepository
@@ -36,8 +36,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
@@ -47,8 +45,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TestWatcher
-import org.junit.runner.Description
 
 /**
  * The set-up for a new user against the real agent: the agent repo's `nbtagent`, on a folder that stands in for a
@@ -66,11 +62,7 @@ class SetupRealAgentTest {
 
     /** The view model's own connect runs on the main dispatcher: here it runs at once, as the app's does. */
     @get:Rule
-    val mainDispatcherRule = object : TestWatcher() {
-        override fun starting(description: Description) = Dispatchers.setMain(Dispatchers.Unconfined)
-
-        override fun finished(description: Description) = Dispatchers.resetMain()
-    }
+    val mainDispatcherRule = MainDispatcherRule(main = Dispatchers.Unconfined)
 
     private val sampleRoot = File("src/debug/assets/catalogue/official")
 
@@ -80,9 +72,8 @@ class SetupRealAgentTest {
     private var agent: Process? = null
     private var port = 0
     private var screen: CarScreen? = null
-    private var viewModel: SetupViewModel? = null
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
     private val connector = DebugTcpLinkConnector()
 
     private object Phone : PhoneIdentity {
@@ -118,21 +109,16 @@ class SetupRealAgentTest {
     }
 
     /**
-     * Waits for the view model and the link to end, not only cancels them: see the unit tests' `SetupViewModelTest`
-     * for why. The agent stopping ends the link, which a cancel alone does not.
+     * Ends the view model and the link, and waits for them, before the agent's folder goes: see [MainDispatcherRule].
+     * The agent stopping ends the link, which a cancel alone does not.
      */
     @After
     fun tearDown() {
-        viewModel?.viewModelScope?.cancel()
-        scope.cancel()
-        screen?.close()
-        agent?.let { AgentBench.stop(it) }
-        runBlocking {
-            withTimeout(5_000) {
-                viewModel?.viewModelScope?.coroutineContext?.job?.join()
-                scope.coroutineContext.job.join()
-            }
+        mainDispatcherRule.closeAtEnd {
+            screen?.close()
+            agent?.let { AgentBench.stop(it) }
         }
+        mainDispatcherRule.end()
         if (::work.isInitialized) work.deleteRecursively()
     }
 
@@ -155,7 +141,7 @@ class SetupRealAgentTest {
             val setup = AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
             val choice = InMemorySetupRepository()
             val carScreen = CarScreen(socket).also { screen = it }
-            val wizard = SetupViewModel(SavedStateHandle(), headUnits, jobs, setup, FakePhoneBluetooth(), choice, connector, scope).also { viewModel = it }
+            val wizard = mainDispatcherRule.track(SetupViewModel(SavedStateHandle(), headUnits, jobs, setup, FakePhoneBluetooth(), choice, connector, scope))
 
             assertEquals(SetupStep.Welcome, wizard.await("the first page") { true }.step)
             wizard.answer(true)

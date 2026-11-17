@@ -3,8 +3,8 @@
 package com.nbtapps.store.ui.setup
 
 import androidx.lifecycle.SavedStateHandle
-import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.AgentVectors
+import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.FakePhoneBluetooth
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.InMemoryPrereleaseRepository
@@ -31,7 +31,6 @@ import com.nbtapps.store.model.PairedDevice
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -45,12 +44,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -58,8 +54,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import org.junit.rules.TestWatcher
-import org.junit.runner.Description
 
 /** The set-up for a new user, against a stand-in agent over the app's real job repository and set-up. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -69,12 +63,8 @@ class SetupViewModelTest {
      * The view model's own connect runs on the main dispatcher, and a connect over Bluetooth serial waits between
      * its tries: here the main dispatcher runs at once and waits in real time, as the app's does.
      */
-    @get:Rule
-    val mainDispatcherRule = object : TestWatcher() {
-        override fun starting(description: Description) = Dispatchers.setMain(Dispatchers.Unconfined)
-
-        override fun finished(description: Description) = Dispatchers.resetMain()
-    }
+    @get:Rule(order = 1)
+    val mainDispatcherRule = MainDispatcherRule(main = Dispatchers.Unconfined)
 
     @get:Rule
     val folder = TemporaryFolder()
@@ -92,9 +82,9 @@ class SetupViewModelTest {
         }
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
     private val headUnits = InMemoryHeadUnitRepository()
-    private val connector = FakeConnector(serial = true)
+    private val connector = mainDispatcherRule.track(FakeConnector(serial = true))
     private val gated = Gated(connector)
     private val keys = MemoryPairingKeys()
     private val phoneId = "5f2c9a1e07b34d6688a0c1d2e3f40516"
@@ -131,32 +121,12 @@ class SetupViewModelTest {
         }
     }
 
-    /** The view models made, whose scopes end with the test: nothing of theirs may run on into the next one. */
-    private val made = CopyOnWriteArrayList<SetupViewModel>()
-
-    /**
-     * Waits for the view models and the links to end, not only cancels them. A view model's coroutine that a
-     * link's reader thread is running as it is cancelled goes on there, and can still reach for the main
-     * dispatcher, which the rule unsets once this returns: the next test that uses `runTest` then fails with it.
-     */
-    @After
-    fun tearDown() = runBlocking {
-        made.forEach { it.viewModelScope.cancel() }
-        scope.cancel()
-        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
-        connector.agents.forEach { it.drop() }
-        withTimeout(5_000) {
-            made.forEach { it.viewModelScope.coroutineContext.job.join() }
-            scope.coroutineContext.job.join()
-        }
-    }
-
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) { block() }
     }
 
     private fun viewModel(state: SavedStateHandle = SavedStateHandle(), tcp: LinkConnector = connector) =
-        SetupViewModel(state, headUnits, jobs, setup, phone, choice, tcp, scope).also { made += it }
+        mainDispatcherRule.track(SetupViewModel(state, headUnits, jobs, setup, phone, choice, tcp, scope))
 
     private suspend fun <T> await(flow: Flow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; the link was ${jobs.connection.value}; last was ${(flow as? kotlinx.coroutines.flow.StateFlow<*>)?.value}")
@@ -480,7 +450,7 @@ class SetupViewModelTest {
 
     @Test
     fun `a head unit added by network address is the one connected to`() = test {
-        val tcp = FakeConnector()
+        val tcp = mainDispatcherRule.track(FakeConnector())
         assertFalse(viewModel().uiState.value.takesAddress)
         val viewModel = viewModel(tcp = tcp)
         assertTrue(viewModel.uiState.value.takesAddress)

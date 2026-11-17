@@ -2,7 +2,6 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.settings
 
-import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.MemoryPairingKeys
@@ -20,14 +19,12 @@ import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.InstalledPackage
 import com.nbtapps.store.model.SettingApplies
 import com.nbtapps.store.model.TcpEndpoint
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -39,7 +36,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -51,14 +47,14 @@ import org.junit.rules.TemporaryFolder
 /** The settings screen's states, against a stand-in agent behind the app's own repository. */
 class SettingsViewModelTest {
 
-    @get:Rule
+    @get:Rule(order = 1)
     val mainDispatcherRule = MainDispatcherRule()
 
     @get:Rule
     val folder = TemporaryFolder()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val connector = FakeConnector()
+    private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
+    private val connector = mainDispatcherRule.track(FakeConnector())
     private val headUnits = InMemoryHeadUnitRepository()
     private val identity = object : PhoneIdentity {
         override suspend fun id() = "5f2c9a1e07b34d6688a0c1d2e3f40516"
@@ -67,7 +63,6 @@ class SettingsViewModelTest {
     private val jobs by lazy {
         JobRepository(headUnits, connector, identity, MemoryPairingKeys(), PackageStore(folder.newFolder("packages")), {}, scope)
     }
-    private val viewModels = CopyOnWriteArrayList<SettingsViewModel>()
 
     private val dial = FakeSettings(
         "org.nbtapp.dial",
@@ -89,29 +84,8 @@ class SettingsViewModelTest {
         }
     }
 
-    /** The latches the tests hold the stand-in agents' answers on: each is let go at the end, should a test fail first. */
-    private val held = CopyOnWriteArrayList<CountDownLatch>()
-
-    private fun latch() = CountDownLatch(1).also { held += it }
-
-    /**
-     * Waits for the view models and the links to end, not only cancels them. An answer that comes as a test ends is
-     * taken on the link's reader thread, and the screen's coroutines that it wakes run on there: one that is cancelled
-     * meanwhile still reaches for the main dispatcher as it ends, which the rule unsets once this returns, and the next
-     * test that uses `runTest` then fails with it.
-     */
-    @After
-    fun tearDown() = runBlocking {
-        held.forEach { it.countDown() }
-        viewModels.forEach { it.viewModelScope.cancel() }
-        scope.cancel()
-        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
-        connector.agents.forEach { it.drop() }
-        withTimeout(5_000) {
-            viewModels.forEach { it.viewModelScope.coroutineContext.job.join() }
-            scope.coroutineContext.job.join()
-        }
-    }
+    /** A latch a test holds a stand-in agent's answer on: it is let go at the end, should the test fail first. */
+    private fun latch() = CountDownLatch(1).also { mainDispatcherRule.letGo(it::countDown) }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {
@@ -120,7 +94,7 @@ class SettingsViewModelTest {
         }
     }
 
-    private fun screen(packageId: String = "org.nbtapp.dial") = SettingsViewModel("car", packageId, jobs, headUnits).also { viewModels += it }
+    private fun screen(packageId: String = "org.nbtapp.dial") = mainDispatcherRule.track(SettingsViewModel("car", packageId, jobs, headUnits))
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; last was ${flow.value}")
