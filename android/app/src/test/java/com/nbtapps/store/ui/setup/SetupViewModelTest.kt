@@ -42,6 +42,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
@@ -133,10 +134,21 @@ class SetupViewModelTest {
     /** The view models made, whose scopes end with the test: nothing of theirs may run on into the next one. */
     private val made = CopyOnWriteArrayList<SetupViewModel>()
 
+    /**
+     * Waits for the view models and the links to end, not only cancels them. A view model's coroutine that a
+     * link's reader thread is running as it is cancelled goes on there, and can still reach for the main
+     * dispatcher, which the rule unsets once this returns: the next test that uses `runTest` then fails with it.
+     */
     @After
-    fun tearDown() {
+    fun tearDown() = runBlocking {
         made.forEach { it.viewModelScope.cancel() }
         scope.cancel()
+        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
+        connector.agents.forEach { it.drop() }
+        withTimeout(5_000) {
+            made.forEach { it.viewModelScope.coroutineContext.job.join() }
+            scope.coroutineContext.job.join()
+        }
     }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {

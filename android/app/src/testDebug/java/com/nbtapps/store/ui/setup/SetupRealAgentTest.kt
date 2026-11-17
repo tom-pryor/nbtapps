@@ -34,6 +34,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -116,12 +117,22 @@ class SetupRealAgentTest {
         }
     }
 
+    /**
+     * Waits for the view model and the link to end, not only cancels them: see the unit tests' `SetupViewModelTest`
+     * for why. The agent stopping ends the link, which a cancel alone does not.
+     */
     @After
     fun tearDown() {
         viewModel?.viewModelScope?.cancel()
         scope.cancel()
         screen?.close()
         agent?.let { AgentBench.stop(it) }
+        runBlocking {
+            withTimeout(5_000) {
+                viewModel?.viewModelScope?.coroutineContext?.job?.join()
+                scope.coroutineContext.job.join()
+            }
+        }
         if (::work.isInitialized) work.deleteRecursively()
     }
 

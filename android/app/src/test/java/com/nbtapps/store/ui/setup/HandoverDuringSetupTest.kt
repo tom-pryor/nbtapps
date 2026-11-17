@@ -43,6 +43,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
@@ -127,11 +128,18 @@ class HandoverDuringSetupTest {
     private val made = CopyOnWriteArrayList<ViewModel>()
     private val watchers = CopyOnWriteArrayList<Job>()
 
+    /** Waits for the view models and the links to end, not only cancels them: see [SetupViewModelTest.tearDown]. */
     @After
-    fun tearDown() {
+    fun tearDown() = runBlocking {
         watchers.forEach { it.cancel() }
         made.forEach { it.viewModelScope.cancel() }
         scope.cancel()
+        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
+        connector.agents.forEach { it.drop() }
+        withTimeout(5_000) {
+            made.forEach { it.viewModelScope.coroutineContext.job.join() }
+            scope.coroutineContext.job.join()
+        }
     }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
