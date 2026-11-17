@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
@@ -67,8 +68,13 @@ class AgentSettingsTest {
         }
     }
 
+    /** Ends the links too, which a cancel does not: their reader threads would outlive the test otherwise. */
     @After
-    fun tearDown() = scope.cancel()
+    fun tearDown() = runBlocking {
+        scope.cancel()
+        connector.agents.forEach { it.drop() }
+        withTimeout(5_000) { scope.coroutineContext.job.join() }
+    }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {

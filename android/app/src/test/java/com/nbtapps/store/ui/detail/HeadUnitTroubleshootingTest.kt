@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.detail
 
+import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.FakePhoneBluetooth
@@ -21,12 +22,14 @@ import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.SerialEndpoint
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -63,8 +66,20 @@ class HeadUnitTroubleshootingTest {
 
     private val car = HeadUnit("car", "Test car", listOf(SerialEndpoint("00:11:22:33:44:55", "Test car")))
 
+    private val viewModels = CopyOnWriteArrayList<HeadUnitDetailViewModel>()
+
+    /** Waits for the view models and the links to end, not only cancels them: see [HeadUnitSettingsEntryTest.tearDown]. */
     @After
-    fun tearDown() = scope.cancel()
+    fun tearDown() = runBlocking {
+        viewModels.forEach { it.viewModelScope.cancel() }
+        scope.cancel()
+        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
+        connector.agents.forEach { it.drop() }
+        withTimeout(5_000) {
+            viewModels.forEach { it.viewModelScope.coroutineContext.job.join() }
+            scope.coroutineContext.job.join()
+        }
+    }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {
@@ -73,7 +88,8 @@ class HeadUnitTroubleshootingTest {
         }
     }
 
-    private fun viewModel() = HeadUnitDetailViewModel("car", headUnits, jobs, connector, FakePhoneBluetooth(), setup, scope)
+    private fun viewModel() =
+        HeadUnitDetailViewModel("car", headUnits, jobs, connector, FakePhoneBluetooth(), setup, scope).also { viewModels += it }
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; last was ${flow.value}")

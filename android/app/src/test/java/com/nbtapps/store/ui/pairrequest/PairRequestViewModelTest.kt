@@ -3,6 +3,7 @@
 package com.nbtapps.store.ui.pairrequest
 
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.FakePhoneBluetooth
@@ -31,6 +32,7 @@ import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.PairedDevice
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -40,6 +42,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -129,8 +132,24 @@ class PairRequestViewModelTest {
     private val device = PairedDevice("BMW 12345", "AA:BB:CC:DD:EE:FF", car = true)
     private val phone = FakePhoneBluetooth(devices = listOf(device, PairedDevice("Headphones", "11:22:33:44:55:66")))
 
+    private val viewModels = CopyOnWriteArrayList<PairRequestViewModel>()
+
+    /**
+     * Waits for the view models and the links to end, not only cancels them: see `SettingsViewModelTest.tearDown`. A
+     * connect a test held at the gate is let through first, should the test have failed before it did.
+     */
     @After
-    fun tearDown() = scope.cancel()
+    fun tearDown() = runBlocking {
+        gated.gate?.complete(Unit)
+        viewModels.forEach { it.viewModelScope.cancel() }
+        scope.cancel()
+        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
+        (connector.agents + serial.agents).forEach { it.drop() }
+        withTimeout(5_000) {
+            viewModels.forEach { it.viewModelScope.coroutineContext.job.join() }
+            scope.coroutineContext.job.join()
+        }
+    }
 
     private fun test(saved: List<HeadUnit> = listOf(car), block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {
@@ -140,7 +159,7 @@ class PairRequestViewModelTest {
     }
 
     private fun viewModel(state: SavedStateHandle = SavedStateHandle(), links: LinkConnector = gated) =
-        PairRequestViewModel(state, headUnits, jobs, setup, phone, links, scope, clock)
+        PairRequestViewModel(state, headUnits, jobs, setup, phone, links, scope, clock).also { viewModels += it }
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; last was ${flow.value}")

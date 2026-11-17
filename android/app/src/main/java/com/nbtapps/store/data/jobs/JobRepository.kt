@@ -401,7 +401,9 @@ class JobRepository(
      * A caller that is cancelled is cancelled as it was before.
      */
     private suspend fun <T> dialled(block: suspend () -> T): T? = coroutineScope {
-        val work = async { block() }
+        // Known to [leave] before it begins: begun at once, it could reach the link and wait there, the lock held, before
+        // it was added, and a leave that came then would miss it and wait for the lock behind it.
+        val work = async(start = CoroutineStart.LAZY) { block() }
         dialling += work
         try {
             work.await()

@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.headunits
 
+import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.MemoryPairingKeys
@@ -22,10 +23,13 @@ import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -168,16 +172,35 @@ class HeadUnitIndicatorTest {
         override val name = "Pixel 9"
     }
     private val jobs by lazy { JobRepository(headUnits, connector, identity, MemoryPairingKeys(), PackageStore(folder.newFolder("packages")), {}, scope, now = { 1234L }) }
-    private val viewModel by lazy { HeadUnitIndicatorViewModel(headUnits, jobs, connector, scope) }
+    private val made = lazy { HeadUnitIndicatorViewModel(headUnits, jobs, connector, scope) }
+    private val viewModel by made
 
+    /**
+     * Waits for the view model and the links to end, not only cancels them: see `SettingsViewModelTest.tearDown`. Its
+     * state is shared for 5 seconds after the last collector goes, on the main dispatcher, which the rule unsets once
+     * this returns.
+     */
     @After
-    fun tearDown() = scope.cancel()
+    fun tearDown() = runBlocking {
+        if (made.isInitialized()) viewModel.viewModelScope.cancel()
+        scope.cancel()
+        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
+        connector.agents.forEach { it.drop() }
+        withTimeout(5_000) {
+            if (made.isInitialized()) viewModel.viewModelScope.coroutineContext.job.join()
+            scope.coroutineContext.job.join()
+        }
+    }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {
-            val collecting = launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
-            block()
-            collecting.cancel()
+            // Collected here, not on the main dispatcher, so that no link's thread runs the collector there.
+            val collecting = launch(start = CoroutineStart.UNDISPATCHED) { viewModel.uiState.collect {} }
+            try {
+                block()
+            } finally {
+                collecting.cancelAndJoin()
+            }
         }
     }
 

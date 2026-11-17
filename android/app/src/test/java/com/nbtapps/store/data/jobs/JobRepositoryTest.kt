@@ -42,6 +42,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
@@ -96,13 +97,29 @@ class JobRepositoryTest {
     @After
     fun tearDown() = scope.cancel()
 
+    /**
+     * Runs a test for at most 60 seconds. One that is not done by then fails with every thread's stack, so that a hang
+     * seen only elsewhere, on CI say, shows what was waiting on what.
+     */
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
-            headUnits.add(car)
-            store.load()
-            block()
+        try {
+            withTimeout(60_000) {
+                headUnits.add(car)
+                store.load()
+                block()
+            }
+        } catch (e: TimeoutCancellationException) {
+            val stacks = allStacks()
+            System.err.println(stacks)
+            throw AssertionError("the test did not end within 60 seconds; every thread's stack then:\n$stacks", e)
         }
     }
+
+    /** Every live thread's name, state and stack, by name. */
+    private fun allStacks(): String =
+        Thread.getAllStackTraces().entries.sortedBy { it.key.name }.joinToString("\n\n") { (thread, stack) ->
+            "\"${thread.name}\" ${thread.state}" + stack.joinToString("") { "\n    at $it" }
+        }
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; last was ${flow.value}")

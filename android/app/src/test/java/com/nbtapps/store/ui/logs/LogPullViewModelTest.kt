@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.logs
 
+import androidx.lifecycle.viewModelScope
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.MemoryPairingKeys
@@ -15,12 +16,14 @@ import com.nbtapps.store.data.logs.LogPullState
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.TcpEndpoint
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -65,8 +68,26 @@ class LogPullViewModelTest {
         }
     }
 
+    private val viewModels = CopyOnWriteArrayList<LogPullViewModel>()
+
+    private fun screen(packageId: String = "com.example.radio") =
+        LogPullViewModel("car", packageId, jobs, "0.4.0").also { viewModels += it }
+
+    /**
+     * Waits for the view models and the links to end, not only cancels them: see `SettingsViewModelTest.tearDown`. A
+     * stream that a test leaves stalled ends with its link.
+     */
     @After
-    fun tearDown() = scope.cancel()
+    fun tearDown() = runBlocking {
+        viewModels.forEach { it.viewModelScope.cancel() }
+        scope.cancel()
+        // A cancel does not end a read that waits on a link: the stand-in agents end their side of each.
+        connector.agents.forEach { it.drop() }
+        withTimeout(5_000) {
+            viewModels.forEach { it.viewModelScope.coroutineContext.job.join() }
+            scope.coroutineContext.job.join()
+        }
+    }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
         withTimeout(60_000) {
@@ -77,7 +98,7 @@ class LogPullViewModelTest {
 
     private suspend fun connected(): LogPullViewModel {
         assertTrue(jobs.connect("car").isSuccess)
-        return LogPullViewModel("car", "com.example.radio", jobs, "0.4.0")
+        return screen()
     }
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
@@ -134,12 +155,12 @@ class LogPullViewModelTest {
         assertEquals("but when asked", zip, after.zip)
 
         // A screen opened later shows the last pull to share again, and hands nothing on by itself.
-        val later = LogPullViewModel("car", "com.example.radio", jobs, "0.4.0")
+        val later = screen()
         val shown = await(later.uiState, "the listing") { it.listing is Listing.Ready }
         assertEquals(zip, shown.zip)
         assertNull(shown.shareNow)
         // Another package's screen shows none of it.
-        val other = LogPullViewModel("car", "org.nbtapp.agent", jobs, "0.4.0")
+        val other = screen("org.nbtapp.agent")
         assertNull(await(other.uiState, "the agent's listing") { it.listing !is Listing.Loading }.pull)
     }
 
@@ -158,7 +179,7 @@ class LogPullViewModelTest {
 
     @Test
     fun `without a link there is nothing to list or pull`() = test {
-        val viewModel = LogPullViewModel("car", "com.example.radio", jobs, "0.4.0")
+        val viewModel = screen()
         val state = await(viewModel.uiState, "the failed listing") { it.listing is Listing.Failed }
         assertFalse(state.available)
         assertFalse(state.canPull)
