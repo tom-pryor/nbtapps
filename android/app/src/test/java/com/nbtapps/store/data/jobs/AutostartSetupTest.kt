@@ -31,13 +31,16 @@ import com.nbtapps.store.model.TcpEndpoint
 import com.nbtapps.store.model.VersionRange
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -191,8 +194,16 @@ class AutostartSetupTest {
         private val state = MutableStateFlow(CatalogueState())
         override val catalogue: StateFlow<CatalogueState> = state
 
+        /**
+         * When set, each refresh leaves a coroutine of its caller's going until this completes: a set-up's run that
+         * refreshed is then still active once it has shown how it ended, as any run is for a moment as it returns.
+         */
+        @Volatile
+        var holding: CompletableDeferred<Unit>? = null
+
         override suspend fun refresh() {
             refreshes.incrementAndGet()
+            holding?.let { held -> CoroutineScope(currentCoroutineContext()).launch { held.await() } }
             state.value = loaded?.let { CatalogueState(index = it) } ?: CatalogueState(error = "no network")
         }
 
@@ -602,6 +613,28 @@ class AutostartSetupTest {
 
         setup.dismiss("car")
         assertEquals(null, setup.state.value)
+    }
+
+    @Test
+    fun `Retry, a begin and Hide are taken as soon as the set-up has ended, though its run has not yet returned`() = test {
+        val held = CompletableDeferred<Unit>()
+        catalogue.holding = held
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        val unloaded = ended() as AutostartStep.Failed
+        assertTrue(unloaded.reason, unloaded.reason.startsWith("The catalogue couldn't be loaded."))
+
+        setup.retry()
+        assertTrue(ended() is AutostartStep.Failed)
+        assertEquals("Retry ran the set-up again", 2, catalogue.refreshes.get())
+
+        setup.begin("car")
+        assertTrue(ended() is AutostartStep.Failed)
+        assertEquals("the begin ran it again", 3, catalogue.refreshes.get())
+
+        setup.dismiss("car")
+        assertEquals(null, setup.state.value)
+        held.complete(Unit)
     }
 
     // ---- what the checks found, last ----

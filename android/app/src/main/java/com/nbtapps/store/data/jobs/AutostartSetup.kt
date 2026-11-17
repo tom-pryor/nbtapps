@@ -240,8 +240,16 @@ class AutostartSetup(
 
     private val lock = Any()
 
-    /** The run or the ask to restart that is under way, if any. */
+    /**
+     * The run or the ask to restart that is under way, if any. It is let go as it shows how it ended ([finish]), a
+     * moment before its coroutine returns, so that a Retry, a begin or a Hide that comes on seeing that end is taken,
+     * not lost to that moment. For a run that is when the set-up has [ended][AutostartSetupState.ended]; the state
+     * alone would not do for an ask to restart, which shows the set-up done throughout.
+     */
     private var work: Job? = null
+
+    /** Whether a run or an ask to restart is under way: see [work]. Call with [lock] held. */
+    private val underWay: Boolean get() = work?.isActive == true
 
     /** Rises with each run, so one that was replaced publishes nothing more. */
     private var generation = 0
@@ -267,7 +275,7 @@ class AutostartSetup(
      */
     fun begin(headUnitId: String) {
         synchronized(lock) {
-            if (current.value?.headUnitId == headUnitId && work?.isActive == true) return
+            if (current.value?.headUnitId == headUnitId && underWay) return
             startRun(headUnitId)
         }
     }
@@ -280,7 +288,7 @@ class AutostartSetup(
     fun retry() {
         synchronized(lock) {
             val last = current.value ?: return
-            if (work?.isActive == true) return
+            if (underWay) return
             startRun(last.headUnitId, fresh = true)
         }
     }
@@ -293,12 +301,12 @@ class AutostartSetup(
     fun restart() {
         synchronized(lock) {
             val done = current.value?.step as? AutostartStep.Done ?: return
-            if (work?.isActive == true) return
+            if (underWay) return
             val mine = ++generation
             publish(mine, done.copy(restartError = null))
             work = scope.launch {
                 val failure = jobs.restart("hmi").exceptionOrNull()
-                publish(mine, if (failure == null) AutostartStep.Restarting else done.copy(restartError = failure.message ?: "The head unit didn't answer"))
+                finish(mine, if (failure == null) AutostartStep.Restarting else done.copy(restartError = failure.message ?: "The head unit didn't answer"))
             }
         }
     }
@@ -333,7 +341,7 @@ class AutostartSetup(
         synchronized(lock) {
             val last = current.value ?: return
             if (headUnitId != null && last.headUnitId != headUnitId) return
-            if (last.ended && work?.isActive != true) current.value = null
+            if (last.ended && !underWay) current.value = null
         }
     }
 
@@ -348,7 +356,18 @@ class AutostartSetup(
         current.value = AutostartSetupState(headUnitId, AutostartStep.Checking, listOf(AutostartStage.CHECKING))
         work = scope.launch {
             val end = run(headUnitId, fresh, mine) { step -> publish(mine, step) }
-            publish(mine, end)
+            finish(mine, end)
+        }
+    }
+
+    /**
+     * Shows [step] as how the run or the ask to restart [mine] ended, and lets it go ([work]), unless it has been
+     * replaced meanwhile.
+     */
+    private fun finish(mine: Int, step: AutostartStep) {
+        synchronized(lock) {
+            publish(mine, step)
+            if (mine == generation) work = null
         }
     }
 
