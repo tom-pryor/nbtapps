@@ -46,6 +46,13 @@ const char* const kCapabilityChecks = "checks";
 // A capability: this agent has serial.reset, which has the car end the phone's Bluetooth serial link
 // (serial_reset.hpp). Only an agent with a Bluetooth serial listener lists it.
 const char* const kCapabilitySerialReset = "serial-reset";
+// A capability: this agent has settings.get and settings.set, for the settings a package's manifest names. No agent
+// lists it yet.
+const char* const kCapabilitySettings = "settings";
+
+// The most bytes one setting's value has in a package's settings file, and so the most a `text` option's maxLength
+// may be.
+const size_t kSettingsMaxValueBytes = 255;
 
 }  // namespace nbt
 

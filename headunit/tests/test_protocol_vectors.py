@@ -278,6 +278,8 @@ CONSTANTS = {
     "capability.files": "name",
     "capability.checks": "name",
     "capability.serialReset": "name",
+    "capability.settings": "name",
+    "settings.maxValueBytes": "number",
 }
 
 

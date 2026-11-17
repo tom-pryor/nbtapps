@@ -94,4 +94,16 @@ object ProtocolConstants {
      * that takes Bluetooth serial links lists it; one that does not list it answers `serial.reset` with `unsupported`.
      */
     const val CAPABILITY_SERIAL_RESET = "serial-reset"
+
+    /**
+     * A capability: the agent has `settings.get` and `settings.set`, which give and change the settings an installed
+     * package's manifest names in `settings`. One that does not list it answers them with `unsupported`.
+     */
+    const val CAPABILITY_SETTINGS = "settings"
+
+    /**
+     * The most bytes one setting's value has, in UTF-8, as it stands in the package's settings file: so also the most
+     * a `text` option's `maxLength` may be.
+     */
+    const val SETTINGS_MAX_VALUE_BYTES = 255
 }

@@ -70,6 +70,8 @@ int main(int argc, char** argv) {
     code["capability.files"] = kCapabilityFiles;
     code["capability.checks"] = kCapabilityChecks;
     code["capability.serialReset"] = kCapabilitySerialReset;
+    code["capability.settings"] = kCapabilitySettings;
+    code["settings.maxValueBytes"] = num((long long)kSettingsMaxValueBytes);
 
     for (std::map<std::string, std::string>::const_iterator it = code.begin(); it != code.end(); ++it) {
         CHECK_IN(path + " has no " + it->first, file.count(it->first) != 0);
@@ -89,6 +91,8 @@ int main(int argc, char** argv) {
     CHECK(kPairingCodeDigits >= 6 && kPairingCodeDigits <= 9 && kPairingTries >= 1 && kPairingTries <= 5);
     CHECK(kPairingWindowSeconds >= 30 && kPairingPauseSeconds >= 1);
     CHECK(kAuthNonceBytes >= 16);
+    // A setting's value holds a select's value (64 characters) and fits a serial frame many times over.
+    CHECK(kSettingsMaxValueBytes >= 64 && kSettingsMaxValueBytes * 4 <= kSerialMaxFrame);
     // The listener registers exactly this service, and decides on a link in exactly this time.
     SerialConfig config;
     CHECK(config.name == kSerialServiceName && config.uuid == kSerialServiceUuid);

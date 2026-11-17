@@ -79,3 +79,11 @@ capability.checks checks
 # the open of the next one. Only an agent that takes Bluetooth serial links lists it; one that does not list it
 # answers serial.reset with `unsupported`.
 capability.serialReset serial-reset
+# An agent that lists this one has settings.get and settings.set, which give and change the settings an installed
+# package's manifest names in `settings` (spec/manifest.schema.json). One that does not list it answers them with
+# `unsupported`.
+capability.settings settings
+
+# Package settings: the most bytes one setting's value has, as it stands in the package's settings file. A `text`
+# option's maxLength is at most this.
+settings.maxValueBytes 255

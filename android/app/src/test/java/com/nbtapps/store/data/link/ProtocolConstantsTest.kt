@@ -49,6 +49,8 @@ class ProtocolConstantsTest {
         "capability.files" to ProtocolConstants.CAPABILITY_FILES,
         "capability.checks" to ProtocolConstants.CAPABILITY_CHECKS,
         "capability.serialReset" to ProtocolConstants.CAPABILITY_SERIAL_RESET,
+        "capability.settings" to ProtocolConstants.CAPABILITY_SETTINGS,
+        "settings.maxValueBytes" to ProtocolConstants.SETTINGS_MAX_VALUE_BYTES.toString(),
     )
 
     /** What only the agent needs. Nothing at present: the app reads manifests, and so needs the service's name too. */
@@ -82,6 +84,9 @@ class ProtocolConstantsTest {
         assertTrue(ProtocolConstants.PAIRING_WINDOW_SECONDS >= 60 && ProtocolConstants.PAIRING_PAUSE_SECONDS > 0)
         assertEquals(ProtocolConstants.AUTH_NONCE_BYTES, AgentClient.newNonce().size)
         assertFalse(AgentClient.newNonce().contentEquals(AgentClient.newNonce()))
+
+        // A setting's value holds a select's value (64 characters) and fits a serial frame many times over.
+        assertTrue(ProtocolConstants.SETTINGS_MAX_VALUE_BYTES in 64..ProtocolConstants.SERIAL_MAX_FRAME / 4)
 
         assertEquals(ProtocolConstants.FRAME_MAX_PAYLOAD, FrameCodec.MAX_PAYLOAD)
         assertEquals(ProtocolConstants.FRAME_MIN_PAYLOAD, FrameCodec.MIN_PAYLOAD)
