@@ -302,7 +302,7 @@
       "pattern": "^(?!/tmp/nbtapp(/|$))(?!/var/opt/nbtapp(/|$))(\\$\\{[a-z0-9_]+\\})?(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f*?]+)*/(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f]+$"
     },
     "log": {
-      "description": "A log file of the package that a controller may pull from the head unit (files.list, files.fetch): one file, or the files of one folder that a wildcard in the last segment matches (* any characters, ? one). It is under ${app}, ${data} or ${tmp}, the package's own folder on the RAM disk; or an absolute path under /tmp or /var, but never the agent's own folders /tmp/nbtapp and /var/opt/nbtapp. A path of the right shape ($defs/logShape) in another folder is refused here and skipped by the agent and the phone app. The object is open: keys other than path are ignored.",
+      "description": "A log file of the package that a controller may pull from the head unit (files.list, files.fetch): one file, or the files of one folder that a wildcard in the last segment matches (* any characters, ? one). It is under ${app}, ${data} or ${tmp}, the package's own folder on the RAM disk; or an absolute path under /tmp or /var, but never the agent's own folders /tmp/nbtapp and /var/opt/nbtapp; or one file named in full in /dev/shmem, QNX's shared memory, with no folder under it and no wildcard, as other programs' shared objects are there. A path of the right shape ($defs/logShape) in another folder is refused here and skipped by the agent and the phone app. The object is open: keys other than path are ignored.",
       "type": "object",
       "required": [
         "path"
@@ -311,7 +311,7 @@
         "path": {
           "type": "string",
           "maxLength": 255,
-          "pattern": "^(\\$\\{(app|data|tmp)\\}|/tmp(?!/nbtapp(/|$))|/var(?!/opt/nbtapp(/|$)))(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f*?]+)*/(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f]+$"
+          "pattern": "^((\\$\\{(app|data|tmp)\\}|/tmp(?!/nbtapp(/|$))|/var(?!/opt/nbtapp(/|$)))(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f*?]+)*/(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f]+|/dev/shmem/(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f*?]+)$"
         }
       }
     },

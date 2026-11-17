@@ -324,7 +324,7 @@ def build_all(out_dir):
     # ---- logs: the files a controller may pull ----
     every_form = [{"path": "${data}/log/*.log"}, {"path": "${app}/state.txt"}, {"path": "${tmp}/crash-?.txt"},
                   {"path": "/var/log/hello.log", "label": "an unknown key in an entry is ignored"},
-                  {"path": "/tmp/hello.log"}]
+                  {"path": "/tmp/hello.log"}, {"path": "/dev/shmem/hello.log"}]
     good["logs"] = (with_changed_manifest(field(["logs"], every_form)),
                     "logs in each place one may be, one entry with a key this version does not know")
     for label, logs, why in (

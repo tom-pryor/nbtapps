@@ -141,6 +141,30 @@ int main(int argc, char** argv) {
         CHECK(listed(manifest(id, "/tmp/state/*", "/tmp/state/phones.json"), platform).empty());
     }
 
+    // 3b. /dev/shmem: only the files named in full there, which open like any other; a link there is not listed, and
+    //     a wildcard or a folder there is skipped. (On the host they are regular files; on a car a file there may be
+    //     a QNX shared memory object, which is listed too.)
+    {
+        std::string root = work + "/shmem";
+        HostPlatform platform(root);
+        CHECK_IN(why, platform.prepare(&why));
+        const char* id = "org.nbtapp.logger";
+        std::string shm = root + "/system/dev/shmem";
+        put(shm + "/logger.log", "shared memory", 2000);
+        put(shm + "/logger-app.log", "app", 3000);
+        put(shm + "/sub/x.log", "in a folder", 4000);
+        symlinkAt("logger.log", shm + "/link.log");
+        std::vector<LogFile> files = listed(manifest(id, "/dev/shmem/logger.log", "/dev/shmem/logger-app.log",
+                                                     "/dev/shmem/link.log", "/dev/shmem/gone.log"), platform);
+        CHECK_IN(paths(files), paths(files) == "/dev/shmem/logger-app.log /dev/shmem/logger.log");
+        CHECK(files[1].real == shm + "/logger.log" && files[1].size == 13);
+        int fd = -1;
+        uint64_t size = 0;
+        CHECK_IN(why, openLogFile(files[1], &fd, &size, &why) && fd >= 0 && size == 13);
+        close(fd);
+        CHECK(listed(manifest(id, "/dev/shmem/*", "/dev/shmem/sub/x.log"), platform).empty());
+    }
+
     // 4. An absolute entry whose folder is the agent's own lists nothing, whatever its text: the state, staging and
     //    the run folder, here where they are under /tmp and /var as on a car.
     {

@@ -49,10 +49,20 @@ bool newerFirst(const LogFile& a, const LogFile& b) {
     return a.path < b.path;
 }
 
-// Adds the file at `real` if it is a regular file, and not a link.
+// A file of a kind a controller may pull: a regular file, or a QNX shared memory object (a file in /dev/shmem may be
+// one; it reads like a file). Never a link, a folder, a device or a FIFO.
+bool pullable(const struct stat& st) {
+    if (S_ISREG(st.st_mode)) return true;
+#ifdef S_TYPEISSHM
+    if (S_TYPEISSHM(&st)) return true;
+#endif
+    return false;
+}
+
+// Adds the file at `real` if it is of a kind listed (pullable), and not a link.
 bool addIfFile(const std::string& path, const std::string& real, std::vector<LogFile>* out) {
     struct stat st;
-    if (lstat(real.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
+    if (lstat(real.c_str(), &st) != 0 || !pullable(st)) return false;
     LogFile f;
     f.path = path;
     f.real = real;
@@ -190,7 +200,7 @@ void listAgentLogs(const std::string& ownLog, const Platform& platform, std::vec
 
 bool openLogFile(const LogFile& file, int* fd, uint64_t* size, std::string* error) {
     struct stat named, opened;
-    if (lstat(file.real.c_str(), &named) != 0 || !S_ISREG(named.st_mode)) {
+    if (lstat(file.real.c_str(), &named) != 0 || !pullable(named)) {
         if (error != 0) *error = file.path + " is no longer there";
         return false;
     }
@@ -200,7 +210,7 @@ bool openLogFile(const LogFile& file, int* fd, uint64_t* size, std::string* erro
         if (error != 0) *error = file.path + " cannot be opened: " + strerror(errno);
         return false;
     }
-    if (fstat(f, &opened) != 0 || !S_ISREG(opened.st_mode) || opened.st_dev != named.st_dev || opened.st_ino != named.st_ino) {
+    if (fstat(f, &opened) != 0 || !pullable(opened) || opened.st_dev != named.st_dev || opened.st_ino != named.st_ino) {
         close(f);
         if (error != 0) *error = file.path + " changed while it was opened";
         return false;

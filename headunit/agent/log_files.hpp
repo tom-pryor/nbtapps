@@ -8,18 +8,19 @@
 //
 // A `logs` entry names one file, or the files of one folder that a wildcard in its last part matches: * any
 // characters, ? one. It is under ${app}, ${data} or ${tmp}, the package's own folders, or an absolute path in a log
-// root (logRootOf: /tmp or /var) outside the agent's folders (manifest.hpp checks the text; an entry in a folder
-// this agent does not know is in the record and is not listed). Here the text meets the disk:
+// root (logRootOf: /tmp, /var or /dev/shmem) outside the agent's folders (manifest.hpp checks the text; an entry in
+// a folder this agent does not know is in the record and is not listed). Here the text meets the disk:
 //
-//   - Only regular files are listed. A symbolic link is left out, whatever it leads to, and so is a file whose
-//     name is not UTF-8: the protocol's text could not name it.
+//   - Only regular files are listed, and QNX's shared memory objects: a file a program made in /dev/shmem with
+//     open() and write() may be one, and is read like a file. A symbolic link is left out, whatever it leads to,
+//     and so is a file whose name is not UTF-8: the protocol's text could not name it.
 //   - The folder an entry names has to be where its text says, with nothing on the way that is a link: its real
 //     path is the real path of the folder the entry starts from (the folder that holds every ${app}, ${data} or
 //     ${tmp}, or the log root) and then the entry's own text. So a link in a package's folder, or a package's
 //     folder that is a link itself, leads nowhere.
 //   - An absolute entry whose real folder is in the agent's state, staging, run folder or own folder is left out,
 //     whatever the manifest's text said: the pairing keys are in the state.
-//   - A file is opened only as the listing of that moment has it: the same path, still a regular file, and the
+//   - A file is opened only as the listing of that moment has it: the same path, still of a kind listed, and the
 //     same file (device and inode) that lstat saw just before. QNX 6.5 has no O_NOFOLLOW to say that in one call.
 //
 // The agent's own logs are package org.nbtapp.agent's: agent.log, the file the launcher names in NBTAGENT_LOG

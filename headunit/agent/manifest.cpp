@@ -242,7 +242,9 @@ LogPathForm logPathFormOf(const std::string& text) {
         for (size_t i = 0; kAgentFolders[i] != 0; ++i) {
             if (inFolder(text, kAgentFolders[i])) return kLogPathBad;
         }
-        known = logRootOf(text) != 0;
+        const LogRoot* root = logRootOf(text);
+        size_t name = root == 0 ? 0 : strlen(root->path) + 1;
+        known = root != 0 && (!root->oneFile || text.find_first_of("/*?", name) == std::string::npos);
     }
     if (rest >= text.size() || text[rest] != '/' || !segments(text, rest + 1, false)) return kLogPathBad;
     size_t last = text.rfind('/');
@@ -893,7 +895,9 @@ LogPathForm logPathForm(const std::string& path) { return logPathFormOf(path); }
 bool validLogPath(const std::string& path) { return logPathFormOf(path) == kLogPathOk; }
 
 namespace {
-const LogRoot kLogRoots[] = {{"/tmp"}, {"/var"}};
+// /dev/shmem is QNX's shared memory, where other programs keep their shared objects too: one file named in full, so
+// that no listing ever reaches theirs.
+const LogRoot kLogRoots[] = {{"/tmp", false}, {"/var", false}, {"/dev/shmem", true}};
 }  // namespace
 
 const LogRoot* logRootOf(const std::string& path) {

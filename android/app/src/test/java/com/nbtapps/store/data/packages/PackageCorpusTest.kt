@@ -69,7 +69,10 @@ class PackageCorpusTest {
             PackageArchive.verify(AgentVectors.file("packages/good/$file"), listOf(AgentVectors.packageKey)).manifest.logs
 
         assertEquals(
-            listOf("\${data}/log/*.log", "\${app}/state.txt", "\${tmp}/crash-?.txt", "/var/log/hello.log", "/tmp/hello.log"),
+            listOf(
+                "\${data}/log/*.log", "\${app}/state.txt", "\${tmp}/crash-?.txt", "/var/log/hello.log",
+                "/tmp/hello.log", "/dev/shmem/hello.log",
+            ),
             logs("logs.nbtpkg"),
         )
         assertTrue(logs("org.nbtapp.hello-1.2.0.nbtpkg").isEmpty())

@@ -181,11 +181,11 @@ bool validProgramName(const std::string& program);
 // path is not in /tmp/nbtapp or /var/opt/nbtapp, the agent's own folders. A path of another shape is bad, and the
 // manifest is refused.
 //
-// Its folder, which grows with the agent: one of the package's own (${app}, ${data}, ${tmp}) or a log root
-// (kLogRoots in manifest.cpp: /tmp and /var). A path of the right shape in another folder is skipped: the manifest is
-// taken, the entry is kept in the record and is never listed. So a package can name a log in a folder a newer agent
-// knows, and still install on this one, while nbtpkg.py, which knows every folder of its schema, refuses it to the
-// package's author.
+// Its folder, which grows with the agent: one of the package's own (${app}, ${data}, ${tmp}) or a log root (kLogRoots
+// in manifest.cpp: /tmp, /var and /dev/shmem), within the root's own limits. A path of the right shape in another
+// folder, or beyond its root's limits, is skipped: the manifest is taken, the entry is kept in the record and is never
+// listed. So a package can name a log in a folder a newer agent knows, and still install on this one, while nbtpkg.py,
+// which knows every folder of its schema, refuses it to the package's author.
 enum LogPathForm { kLogPathBad, kLogPathSkip, kLogPathOk };
 LogPathForm logPathForm(const std::string& path);
 
@@ -196,6 +196,7 @@ bool validLogPath(const std::string& path);
 // (log_files.cpp) both take it from here, so a new root is one line of kLogRoots.
 struct LogRoot {
     const char* path;   // the folder, with no slash at the end
+    bool oneFile;       // only a file named in full directly in it: no folder under it, no wildcard
 };
 
 // The root an absolute path starts in: the root's folder, then a slash. 0 when it starts in none.

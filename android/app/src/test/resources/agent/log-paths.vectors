@@ -66,6 +66,21 @@ bad /var/opt/nbtapp
 bad /var/opt/nbtapp/
 bad /var/opt/nbtapp/phones.json
 
+# ---- /dev/shmem, QNX's shared memory: one file named in full, as other programs' shared objects are there
+ok /dev/shmem/nbt-aad.log
+ok /dev/shmem/a b
+ok /dev/shmem/...
+skip /dev/shmem/*  # a wildcard there is beyond the root's limits
+skip /dev/shmem/x?.log
+skip /dev/shmem/a/b  # and so is a folder under it
+skip /dev/shmem  # a file in /dev, which is no log root
+skip /dev/shmemx/y
+skip /dev/x
+bad /dev/shmem/
+bad /dev/shmem/.
+bad /dev/shmem/..
+bad /dev/shmem//x
+
 # ---- Neither
 bad  # empty
 bad x

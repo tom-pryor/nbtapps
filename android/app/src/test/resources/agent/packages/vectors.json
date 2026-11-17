@@ -38,13 +38,13 @@
       "id": "org.nbtapp.hello",
       "version": "1.2.0",
       "name": "Hello NBT",
-      "sha256": "dbaf73cff49c9eeab1cf91cc15f9bc879bf0509254bb4ab48eff3508b694a207",
-      "size": 2484,
-      "manifestSha256": "dbbd88df0467515e4a9e75487d22a0e1217cf16a1506373b2658ce5dc39559bc",
+      "sha256": "788834731e09f6c39647dd483ba9964ff8dfe0c85571e66bfe1a97a63405d8ad",
+      "size": 2494,
+      "manifestSha256": "99a2dac57c41dcf869403835c429ef161cffbb315b03be28f80b54f201601787",
       "flags": [
         "runs-scripts"
       ],
-      "signature": "30e17b5b2fdc177b5f6eb80a0c326b6ef5d910cbaf58588007e7ce0a51b4f9753e04654e3005c199e8f449c6ec76e930ee8cb76ade3bd7b34a60174373d6a204",
+      "signature": "63fd0ce02f76c6976285386313ee852a0fbe8b8e8f94216546b07dcd3804ed20f2bbedb79851774d611a86edcd30e912d670cdd3a76d07723f88b606a0307c07",
       "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
       "file": "good/logs.nbtpkg",
       "what": "logs in each place one may be, one entry with a key this version does not know"
