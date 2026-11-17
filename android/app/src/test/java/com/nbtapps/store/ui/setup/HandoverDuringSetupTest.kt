@@ -30,6 +30,7 @@ import com.nbtapps.store.ui.pairrequest.ElapsedClock
 import com.nbtapps.store.ui.pairrequest.PairRequest
 import com.nbtapps.store.ui.pairrequest.PairRequestStep
 import com.nbtapps.store.ui.pairrequest.PairRequestViewModel
+import com.nbtapps.store.withTestTimeout
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -43,7 +44,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -114,7 +114,7 @@ class HandoverDuringSetupTest {
     }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) { block() }
+        withTestTimeout(60_000) { block() }
     }
 
     private fun wizard(furtherCar: Boolean = false) =

@@ -21,13 +21,13 @@ import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.SerialEndpoint
+import com.nbtapps.store.withTestTimeout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -62,7 +62,7 @@ class HeadUnitTroubleshootingTest {
     private val car = HeadUnit("car", "Test car", listOf(SerialEndpoint("00:11:22:33:44:55", "Test car")))
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             headUnits.add(car)
             block()
         }

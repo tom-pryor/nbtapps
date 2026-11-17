@@ -22,6 +22,7 @@ import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.PackageDetails
 import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.withTestTimeout
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -33,7 +34,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -101,7 +101,7 @@ class CatalogueRefreshTest {
         """[{"id":"org.nbtapp.runtime","name":"NBT Runtime","version":"$version","key":"${"ab".repeat(32)}","flags":[]}]"""
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             headUnits.add(car)
             // Collected here, not on the main dispatcher, so that no link's thread runs the collector there.
             val collecting = launch(start = CoroutineStart.UNDISPATCHED) { viewModel.uiState.collect {} }

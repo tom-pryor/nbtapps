@@ -16,6 +16,7 @@ import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.AgentFile
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.withTestTimeout
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipFile
@@ -86,7 +87,7 @@ class LogPullTest {
     }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             headUnits.add(HeadUnit("car", "Test car", listOf(TcpEndpoint("192.168.0.1", 7144))))
             block()
         }

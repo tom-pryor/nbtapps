@@ -19,6 +19,7 @@ import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.withTestTimeout
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,7 +28,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
@@ -71,7 +71,7 @@ class CodePairingTest {
 
     /** Runs [block] with the link to the car up and waiting for a code, which is [code] on the car's screen. */
     private fun test(code: String = "420042", block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             headUnits.add(HeadUnit("car", "Test car", listOf(TcpEndpoint("192.168.0.1", 7144))))
             phones.code = code
             connector.onConnect = { agent ->

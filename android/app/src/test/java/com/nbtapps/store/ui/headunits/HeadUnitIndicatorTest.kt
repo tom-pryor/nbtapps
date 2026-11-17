@@ -21,6 +21,7 @@ import com.nbtapps.store.model.JobSnapshot
 import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.withTestTimeout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +31,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -172,7 +172,7 @@ class HeadUnitIndicatorTest {
     private val viewModel by lazy { mainDispatcherRule.track(HeadUnitIndicatorViewModel(headUnits, jobs, connector, scope)) }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             // Collected here, not on the main dispatcher, so that no link's thread runs the collector there.
             val collecting = launch(start = CoroutineStart.UNDISPATCHED) { viewModel.uiState.collect {} }
             try {

@@ -14,6 +14,7 @@ import com.nbtapps.store.model.SettingFault
 import com.nbtapps.store.model.SettingState
 import com.nbtapps.store.model.SettingValue
 import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.withTestTimeout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -77,7 +78,7 @@ class AgentSettingsTest {
     }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             headUnits.add(HeadUnit("car", "Test car", listOf(TcpEndpoint("192.168.0.1", 7144))))
             block()
         }

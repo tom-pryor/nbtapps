@@ -20,6 +20,7 @@ import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.LinkClosing
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.withTestTimeout
 import java.io.File
 import java.net.ServerSocket
 import java.nio.file.Files
@@ -30,7 +31,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -138,7 +138,7 @@ class DebugTcpLinkTest {
     @Test
     fun `the phone is paired by the code of the agent's pairing window, and a sample package then installs over TCP`() = runBlocking(Dispatchers.Default) {
         startAgent()
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             val headUnits = InMemoryHeadUnitRepository()
             headUnits.add(HeadUnit("bench", "Test bench", listOf(TcpEndpoint("127.0.0.1", port))))
             val store = PackageStore(File(work, "phone")).also { it.load() }

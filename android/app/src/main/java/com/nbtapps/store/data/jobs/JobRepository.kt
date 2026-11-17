@@ -60,6 +60,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -328,9 +329,12 @@ class JobRepository(
     @Volatile
     private var held: Planned? = null
 
-    /** The app's own wait to connect again after the agent said it restarts: see [rejoin]. Null when there is none. */
-    @Volatile
-    private var rejoining: Job? = null
+    /**
+     * The app's own wait to connect again after the agent said it restarts: see [rejoin]. Null when there is none.
+     * Taken and emptied in one step ([stopRejoining]), since a caller without [connectLock] may do so while a wait
+     * is begun under it: one that read it empty and then emptied it would lose a wait set in between.
+     */
+    private val rejoining = AtomicReference<Job?>()
 
     /**
      * The head unit, by this app's id, whose agent said on a link that it has forgotten this phone. The next
@@ -585,8 +589,7 @@ class JobRepository(
      * only a caller that holds it knows there is none; one that does not hold it ends a try that is under way.
      */
     private fun stopRejoining() {
-        rejoining?.cancel()
-        rejoining = null
+        rejoining.getAndSet(null)?.cancel()
         jobState.update { view -> if (view != null && view.reconnecting) view.copy(reconnecting = false, linkLost = true) else view }
     }
 
@@ -1351,9 +1354,11 @@ class JobRepository(
             if (told == LinkClosing.RESTARTING) {
                 // The job is not lost with the link: the app goes after it. The service that keeps the process
                 // alive for a job goes on doing so meanwhile.
+                // The wait is there to be ended before anything shows it: a disconnect that follows what is shown
+                // finds it.
+                rejoining.set(scope.launch { rejoin(headUnitId) })
                 jobState.update { if (unfinished(it)) it?.copy(reconnecting = true, linkLost = false) else it }
                 connectionState.value = ConnectionState.Connecting(headUnitId)
-                rejoining = scope.launch { rejoin(headUnitId) }
                 return@withLock
             }
             if (told == LinkClosing.FORGOTTEN) {

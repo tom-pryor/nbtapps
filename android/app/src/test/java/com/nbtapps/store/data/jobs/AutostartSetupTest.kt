@@ -29,6 +29,7 @@ import com.nbtapps.store.model.PackageRequirements
 import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.model.TcpEndpoint
 import com.nbtapps.store.model.VersionRange
+import com.nbtapps.store.withTestTimeout
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -42,7 +43,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
@@ -313,7 +313,7 @@ class AutostartSetupTest {
     fun tearDown() = scope.cancel()
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             headUnits.add(car)
             store.load()
             connector.onConnect = ::withSwitch

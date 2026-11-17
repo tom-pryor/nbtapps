@@ -31,13 +31,13 @@ import com.nbtapps.store.ui.headunits.checkFixSummary
 import com.nbtapps.store.ui.headunits.movesHeading
 import com.nbtapps.store.ui.headunits.removesHeading
 import com.nbtapps.store.ui.headunits.checksLine
+import com.nbtapps.store.withTestTimeout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -83,7 +83,7 @@ class HeadUnitChecksTest {
     }
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             headUnits.add(car)
             block()
         }

@@ -31,6 +31,7 @@ import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.PairedDevice
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.withTestTimeout
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -41,7 +42,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertArrayEquals
@@ -134,7 +134,7 @@ class PairRequestViewModelTest {
     }
 
     private fun test(saved: List<HeadUnit> = listOf(car), block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) {
-        withTimeout(60_000) {
+        withTestTimeout(60_000) {
             saved.forEach { headUnits.add(it) }
             block()
         }

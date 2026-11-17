@@ -5,6 +5,7 @@ package com.nbtapps.store.data.link
 import com.nbtapps.store.data.crypto.sha256Hex
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.LinkClosing
+import com.nbtapps.store.withTestTimeout
 import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,7 +43,7 @@ class SerialSessionTest {
         scope.cancel()
     }
 
-    private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) { withTimeout(60_000) { block() } }
+    private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) { withTestTimeout(60_000) { block() } }
 
     /** A session and the agent's end of its link. Left alone, the keep-alive times are far beyond a test's length. */
     private fun session(
