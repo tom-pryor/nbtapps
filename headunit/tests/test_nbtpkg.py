@@ -177,7 +177,7 @@ def main():
         assert len(vectors["skipped"]) >= 3
         for entry in vectors["skipped"]:
             message = refused(entry["code"], nbtpkg.verify_package, data_of(entry), [public])
-            assert "logs[1].path" in message, "%s: %s" % (entry["file"], message)
+            assert "logs[1].path" in message and "does not know" in message, "%s: %s" % (entry["file"], message)
         hello = next(e for e in vectors["good"] if e["file"] == "good/org.nbtapp.hello-1.2.0.nbtpkg")
         assert hello["flags"] == ["runs-scripts"]
         print("[ok] test packages: %d good, %d bad, %d skipped"

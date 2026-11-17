@@ -745,6 +745,12 @@ asked, the starter finds `trial.started` and runs the launcher of the version in
 old one. That agent undoes the step, removes the new version's folder and `trial.started`, and reports the job
 as failed with `not-confirmed`. The starter in place is as it was. The update can be run again.
 
+Once a version is confirmed nothing goes back by itself. Going back by hand, by writing an older version's name to
+`current`, has one limit: the agent reads each installed package's manifest again from its record, and an older
+agent refuses a manifest whose form it does not know. A package installed by a newer agent with, for example, a
+`logs` path in `/dev/shmem` or in a folder only that agent knows (skipped there) is then a record the older agent
+cannot read, so it cannot list, update or remove that package until the newer version is back.
+
 What an agent accepts of its own package:
 
 - Only where a starter starts it: `current` names the version that runs, and that version's program and its

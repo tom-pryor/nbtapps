@@ -223,7 +223,8 @@ bool inFolder(const std::string& text, const char* folder) {
 const char* const kLogVariables[] = {"${app}", "${data}", "${tmp}", 0};
 
 // $defs/logShape and $defs/log/path: see LogPathForm in manifest.hpp.
-LogPathForm logPathFormOf(const std::string& text) {
+LogPathForm logPathFormOf(const std::string& text, const LogRoot** found) {
+    if (found != 0) *found = 0;
     if (utf8Length(text) > 255) return kLogPathBad;
     size_t rest = 0;
     bool known = false;
@@ -245,6 +246,7 @@ LogPathForm logPathFormOf(const std::string& text) {
         const LogRoot* root = logRootOf(text);
         size_t name = root == 0 ? 0 : strlen(root->path) + 1;
         known = root != 0 && (!root->oneFile || text.find_first_of("/*?", name) == std::string::npos);
+        if (known && found != 0) *found = root;
     }
     if (rest >= text.size() || text[rest] != '/' || !segments(text, rest + 1, false)) return kLogPathBad;
     size_t last = text.rfind('/');
@@ -255,7 +257,7 @@ LogPathForm logPathFormOf(const std::string& text) {
 }
 
 // What the parser takes: every path of the right shape, whether this agent knows its folder or not.
-bool isLogShape(const std::string& text) { return logPathFormOf(text) != kLogPathBad; }
+bool isLogShape(const std::string& text) { return logPathFormOf(text, 0) != kLogPathBad; }
 
 // $defs/settingsFile: ${data}/ and a relative path, no slash at the end.
 bool isSettingsFile(const std::string& text) {
@@ -891,13 +893,13 @@ bool validSha256Hex(const std::string& text) { return isSha256(text); }
 bool validVersion(const std::string& version) { return isVersion(version); }
 bool validSerialServiceName(const std::string& name) { return isSerialServiceName(name); }
 bool validProgramName(const std::string& program) { return isProgramName(program); }
-LogPathForm logPathForm(const std::string& path) { return logPathFormOf(path); }
-bool validLogPath(const std::string& path) { return logPathFormOf(path) == kLogPathOk; }
+LogPathForm logPathForm(const std::string& path, const LogRoot** root) { return logPathFormOf(path, root); }
+bool validLogPath(const std::string& path) { return logPathFormOf(path, 0) == kLogPathOk; }
 
 namespace {
 // /dev/shmem is QNX's shared memory, where other programs keep their shared objects too: one file named in full, so
 // that no listing ever reaches theirs.
-const LogRoot kLogRoots[] = {{"/tmp", false}, {"/var", false}, {"/dev/shmem", true}};
+const LogRoot kLogRoots[] = {{"/tmp", false, false}, {"/var", false, false}, {"/dev/shmem", true, true}};
 }  // namespace
 
 const LogRoot* logRootOf(const std::string& path) {

@@ -187,7 +187,9 @@ bool validProgramName(const std::string& program);
 // listed. So a package can name a log in a folder a newer agent knows, and still install on this one, while nbtpkg.py,
 // which knows every folder of its schema, refuses it to the package's author.
 enum LogPathForm { kLogPathBad, kLogPathSkip, kLogPathOk };
-LogPathForm logPathForm(const std::string& path);
+struct LogRoot;
+// With `root`, *root is the log root an absolute path that is kLogPathOk is in, and 0 for any other path.
+LogPathForm logPathForm(const std::string& path, const LogRoot** root = 0);
 
 // A path this agent lists the files of ($defs/log/path): logPathForm is kLogPathOk.
 bool validLogPath(const std::string& path);
@@ -195,8 +197,9 @@ bool validLogPath(const std::string& path);
 // A folder an absolute logs entry may start in. The one list of them: logPathForm and the listing of the files
 // (log_files.cpp) both take it from here, so a new root is one line of kLogRoots.
 struct LogRoot {
-    const char* path;   // the folder, with no slash at the end
-    bool oneFile;       // only a file named in full directly in it: no folder under it, no wildcard
+    const char* path;    // the folder, with no slash at the end
+    bool oneFile;        // only a file named in full directly in it: no folder under it, no wildcard
+    bool sharedMemory;   // QNX's shared memory: a shared memory object there is listed and read like a file
 };
 
 // The root an absolute path starts in: the root's folder, then a slash. 0 when it starts in none.

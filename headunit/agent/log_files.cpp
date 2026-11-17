@@ -49,21 +49,23 @@ bool newerFirst(const LogFile& a, const LogFile& b) {
     return a.path < b.path;
 }
 
-// A file of a kind a controller may pull: a regular file, or a QNX shared memory object (a file in /dev/shmem may be
-// one; it reads like a file). Never a link, a folder, a device or a FIFO.
-bool pullable(const struct stat& st) {
+// A file of a kind a controller may pull: a regular file, or with `sharedMemory` (a log root of QNX's shared memory,
+// where a file a program wrote may be one) a QNX shared memory object, which reads like a file. Never a link, a
+// folder, a device or a FIFO.
+bool pullable(const struct stat& st, bool sharedMemory) {
     if (S_ISREG(st.st_mode)) return true;
 #ifdef S_TYPEISSHM
-    if (S_TYPEISSHM(&st)) return true;
+    if (sharedMemory && S_TYPEISSHM(&st)) return true;
 #endif
     return false;
 }
 
 // Adds the file at `real` if it is of a kind listed (pullable), and not a link.
-bool addIfFile(const std::string& path, const std::string& real, std::vector<LogFile>* out) {
+bool addIfFile(const std::string& path, const std::string& real, bool sharedMemory, std::vector<LogFile>* out) {
     struct stat st;
-    if (lstat(real.c_str(), &st) != 0 || !pullable(st)) return false;
+    if (lstat(real.c_str(), &st) != 0 || !pullable(st, sharedMemory)) return false;
     LogFile f;
+    f.sharedMemory = sharedMemory;
     f.path = path;
     f.real = real;
     f.size = (uint64_t)st.st_size;
@@ -134,11 +136,12 @@ void listPackageLogs(const Manifest& m, const Store& store, const Platform& plat
     std::set<std::string> seen;
     for (size_t e = 0; e < m.logs.size(); ++e) {
         const std::string& entry = m.logs[e];
-        if (!validLogPath(entry)) continue;   // a folder this agent does not know, or a record from before the check
+        const LogRoot* root = 0;
+        if (logPathForm(entry, &root) != kLogPathOk) continue;   // a folder this agent does not know, or an old record
         // The entry's text on this machine, and the folder it starts from: the one that holds every package's
         // folder of that kind, or the log root it starts in.
         std::string full, anchor;
-        bool absolute = false;
+        bool absolute = false, sharedMemory = false;
         if (startsWith(entry, "${app}/")) {
             std::string base = store.appDir(m);
             full = base + entry.substr(6);
@@ -152,11 +155,10 @@ void listPackageLogs(const Manifest& m, const Store& store, const Platform& plat
             full = base + entry.substr(6);
             anchor = fs::parentOf(base);
         } else {
-            const LogRoot* root = logRootOf(entry);
-            if (root == 0) continue;
-            full = platform.systemPath(entry);
+            full = platform.systemPath(entry);   // absolute and kLogPathOk: `root` is its log root
             anchor = platform.systemPath(root->path);
             absolute = true;
+            sharedMemory = root->sharedMemory;
         }
         size_t slash = full.rfind('/');
         std::string folder = full.substr(0, slash), pattern = full.substr(slash + 1);
@@ -181,7 +183,7 @@ void listPackageLogs(const Manifest& m, const Store& store, const Platform& plat
             if (!validUtf8(names[i]) || !matchName(pattern, names[i])) continue;
             std::string real = realFolder + "/" + names[i];
             if (seen.count(real) != 0) continue;
-            if (addIfFile(shown + names[i], real, out)) seen.insert(real);
+            if (addIfFile(shown + names[i], real, sharedMemory, out)) seen.insert(real);
         }
     }
     newestFirst(out);
@@ -190,17 +192,17 @@ void listPackageLogs(const Manifest& m, const Store& store, const Platform& plat
 void listAgentLogs(const std::string& ownLog, const Platform& platform, std::vector<LogFile>* out) {
     out->clear();
     if (!ownLog.empty()) {
-        addIfFile("agent.log", ownLog, out);
-        addIfFile("agent.log.1", ownLog + ".1", out);
-        addIfFile("agent.log.2", ownLog + ".2", out);
+        addIfFile("agent.log", ownLog, false, out);
+        addIfFile("agent.log.1", ownLog + ".1", false, out);
+        addIfFile("agent.log.2", ownLog + ".2", false, out);
     }
-    addIfFile("trial.log", platform.agentHome() + "/log/trial.log", out);
+    addIfFile("trial.log", platform.agentHome() + "/log/trial.log", false, out);
     newestFirst(out);
 }
 
 bool openLogFile(const LogFile& file, int* fd, uint64_t* size, std::string* error) {
     struct stat named, opened;
-    if (lstat(file.real.c_str(), &named) != 0 || !pullable(named)) {
+    if (lstat(file.real.c_str(), &named) != 0 || !pullable(named, file.sharedMemory)) {
         if (error != 0) *error = file.path + " is no longer there";
         return false;
     }
@@ -210,7 +212,8 @@ bool openLogFile(const LogFile& file, int* fd, uint64_t* size, std::string* erro
         if (error != 0) *error = file.path + " cannot be opened: " + strerror(errno);
         return false;
     }
-    if (fstat(f, &opened) != 0 || !pullable(opened) || opened.st_dev != named.st_dev || opened.st_ino != named.st_ino) {
+    if (fstat(f, &opened) != 0 || !pullable(opened, file.sharedMemory) || opened.st_dev != named.st_dev ||
+        opened.st_ino != named.st_ino) {
         close(f);
         if (error != 0) *error = file.path + " changed while it was opened";
         return false;

@@ -152,8 +152,12 @@ def with_known_log_folders(data, seed_key):
     same each time, so that a log named twice is still named twice. None when it names no such path."""
     try:
         entries = nbtpkg.read_zip(data)
+        if len(entries) < 2 or entries[0]["name"] != nbtpkg.MANIFEST or entries[1]["name"] != nbtpkg.SIGNATURE:
+            return None
         manifest = nbtpkg.parse_json(entries[0]["data"])
-    except (nbtpkg.PkgError, ValueError, IndexError, KeyError):
+        members = [{"name": e["name_bytes"], "method": e["method"], "crc": e["crc"], "usize": e["usize"],
+                    "raw": e["raw"], "flags": e["flags"]} for e in entries[2:]]
+    except (nbtpkg.PkgError, ValueError, IndexError, KeyError, TypeError):
         return None
     logs = manifest.get("logs") if isinstance(manifest, dict) else None
     changed = False
@@ -164,9 +168,7 @@ def with_known_log_folders(data, seed_key):
             changed = True
     if not changed:
         return None
-    text = (json.dumps(manifest) + "\n").encode()
-    members = [{"name": e["name_bytes"], "method": e["method"], "crc": e["crc"], "usize": e["usize"], "raw": e["raw"],
-                "flags": e["flags"]} for e in entries[2:]]
+    text = (json.dumps(manifest, ensure_ascii=False) + "\n").encode("utf-8")
     return nbtpkg.write_zip([nbtpkg.make_member(nbtpkg.MANIFEST, text),
                              nbtpkg.make_member(nbtpkg.SIGNATURE, nbtpkg.sign(seed_key, text), store=True)] + members)
 

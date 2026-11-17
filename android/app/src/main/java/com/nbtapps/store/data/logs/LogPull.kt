@@ -296,7 +296,7 @@ class LogPull(
          * gets no file outside where they open it.
          */
         fun entryName(packageId: String, path: String): String {
-            val variable = Regex("""^\$\{([a-z]+)\}/""").find(path)
+            val variable = Regex("""^\$\{([a-z0-9_]+)\}/""").find(path)   // ManifestParser.isLogPath's variables
             val rest = when {
                 variable != null -> variable.groupValues[1] + "/" + path.substring(variable.value.length)
                 path.startsWith("/") -> "system$path"

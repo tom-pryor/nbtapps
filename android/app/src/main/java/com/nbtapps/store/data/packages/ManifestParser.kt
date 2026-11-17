@@ -612,7 +612,7 @@ object ManifestParser {
     }
 
     /** A variable a `logs` entry may start with: `${`, a name of `[a-z0-9_]`, `}`. */
-    private val LOG_VARIABLE = Regex("""\$\{[a-z0-9_]+}""")
+    private val LOG_VARIABLE = Regex("""\$\{[a-z0-9_]+\}""")
 
     /**
      * A `logs` entry's path of the right shape (`$defs/logShape`): a variable `${name}` or nothing, then segments that

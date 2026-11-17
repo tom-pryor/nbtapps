@@ -137,6 +137,7 @@ _patterns = {}
 class SchemaError(ValueError):
     def __init__(self, where, message, unknown_key=False):
         super().__init__("%s %s" % (where, message))
+        self.where = where
         self.unknown_key = unknown_key
 
 
@@ -235,6 +236,19 @@ def log_path_form(path):
     return "bad"
 
 
+def skipped_log_message(manifest, error):
+    """The message for a schema error: for a logs path of the right shape in a folder the schema does not know, one
+    that says so, as the agent and the phone app would take the manifest and skip that log."""
+    match = re.match(r"manifest\.logs\[(\d+)\]\.path\Z", error.where)
+    if match:
+        path = manifest["logs"][int(match.group(1))]["path"]
+        if log_path_form(path) == "skip":
+            return ("%s %r names a folder this version of the schema does not know, or is beyond what its folder "
+                    "allows (a wildcard or a folder in /dev/shmem): an agent would install the package and never "
+                    "list that log" % (error.where, path[:80]))
+    return str(error)
+
+
 # ---- manifest --------------------------------------------------------------------------------------------------
 
 def check_manifest(manifest):
@@ -247,7 +261,7 @@ def check_manifest(manifest):
     try:
         validate(manifest, manifest_schema(), manifest_schema(), "manifest")
     except SchemaError as e:
-        raise PkgError("unsupported-manifest" if e.unknown_key else "bad-manifest", str(e))
+        raise PkgError("unsupported-manifest" if e.unknown_key else "bad-manifest", skipped_log_message(manifest, e))
 
     def bad(message):
         raise PkgError("bad-manifest", "manifest " + message)

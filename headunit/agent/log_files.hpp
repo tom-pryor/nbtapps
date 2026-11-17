@@ -11,8 +11,8 @@
 // root (logRootOf: /tmp, /var or /dev/shmem) outside the agent's folders (manifest.hpp checks the text; an entry in
 // a folder this agent does not know is in the record and is not listed). Here the text meets the disk:
 //
-//   - Only regular files are listed, and QNX's shared memory objects: a file a program made in /dev/shmem with
-//     open() and write() may be one, and is read like a file. A symbolic link is left out, whatever it leads to,
+//   - Only regular files are listed, and in /dev/shmem QNX's shared memory objects: a file a program made there
+//     with open() and write() may be one, and is read like a file. A symbolic link is left out, whatever it leads to,
 //     and so is a file whose name is not UTF-8: the protocol's text could not name it.
 //   - The folder an entry names has to be where its text says, with nothing on the way that is a link: its real
 //     path is the real path of the folder the entry starts from (the folder that holds every ${app}, ${data} or
@@ -47,8 +47,9 @@ struct LogFile {
     std::string real;     // where it is on this machine
     uint64_t size;
     int64_t modified;     // seconds since 1970, by this machine's clock
+    bool sharedMemory;    // in a log root of QNX's shared memory, where a shared memory object counts as a file
 
-    LogFile() : size(0), modified(0) {}
+    LogFile() : size(0), modified(0), sharedMemory(false) {}
 };
 
 // Whether a name matches the last part of an entry: * any characters, ? one character (UTF-8), anything else

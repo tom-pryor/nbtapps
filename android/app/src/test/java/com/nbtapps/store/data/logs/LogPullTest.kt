@@ -243,6 +243,9 @@ class LogPullTest {
         assertEquals("p/app/state.txt", LogPull.entryName("p", "\${app}/state.txt"))
         assertEquals("p/tmp/crash-1.txt", LogPull.entryName("p", "\${tmp}/crash-1.txt"))
         assertEquals("p/system/var/log/x.log", LogPull.entryName("p", "/var/log/x.log"))
+        assertEquals("p/system/dev/shmem/nbt-aad.log", LogPull.entryName("p", "/dev/shmem/nbt-aad.log"))
+        // A variable a newer agent may know has a folder of its own as well.
+        assertEquals("p/new_2/a.log", LogPull.entryName("p", "\${new_2}/a.log"))
         assertEquals("org.nbtapp.agent/agent.log.1", LogPull.entryName("org.nbtapp.agent", "agent.log.1"))
         assertEquals("p/data/etc/passwd", LogPull.entryName("p", "\${data}/../../etc/passwd"))
         assertEquals("p/system/a_b_c", LogPull.entryName("p", "/a\\b:c"))

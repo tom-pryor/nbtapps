@@ -116,6 +116,8 @@ int main(int argc, char** argv) {
         CHECK_IN(paths(files), paths(files) == "${app}/state.txt ${data}/log/b.log ${tmp}/crash-1.txt /tmp/logger.log ${data}/log/a.log");
         CHECK(files[1].real == data + "/log/b.log" && files[1].size == 2 && files[1].modified == 3000);
         CHECK(files[3].real == root + "/system/tmp/logger.log" && files[3].size == 11);
+        // Only a log root of shared memory takes a QNX shared memory object as a file (none on the host).
+        for (size_t i = 0; i < files.size(); ++i) CHECK(!files[i].sharedMemory);
 
         // A file two entries name is listed once.
         files = listed(manifest(id, "${data}/log/*.log", "${data}/log/a.log"), platform);
@@ -157,7 +159,7 @@ int main(int argc, char** argv) {
         std::vector<LogFile> files = listed(manifest(id, "/dev/shmem/logger.log", "/dev/shmem/logger-app.log",
                                                      "/dev/shmem/link.log", "/dev/shmem/gone.log"), platform);
         CHECK_IN(paths(files), paths(files) == "/dev/shmem/logger-app.log /dev/shmem/logger.log");
-        CHECK(files[1].real == shm + "/logger.log" && files[1].size == 13);
+        CHECK(files[1].real == shm + "/logger.log" && files[1].size == 13 && files[1].sharedMemory);
         int fd = -1;
         uint64_t size = 0;
         CHECK_IN(why, openLogFile(files[1], &fd, &size, &why) && fd >= 0 && size == 13);

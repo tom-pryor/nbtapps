@@ -42,7 +42,6 @@ static std::string code(const std::string& text, Manifest* out = 0) {
     return error.code;
 }
 
-// The code for a manifest whose `member` (of the top level, of a file entry, ...) is given as JSON text.
 // One case of spec/log-paths.vectors.
 struct LogPathCase {
     int line;
@@ -96,6 +95,7 @@ static std::vector<LogPathCase> logPathCases(const char* file) {
     return cases;
 }
 
+// The code for a manifest whose `member` (of the top level, of a file entry, ...) is given as JSON text.
 static std::string head(const std::string& members) { return code(make(members, "", "")); }
 static std::string file(const std::string& members) {
     return code(make(kHead, content("a/b"), "\"files\":[{" + members + "}]"));
@@ -326,9 +326,8 @@ int main() {
         assert(validProgramName("radiod") && !validProgramName("bin/radiod") && !validProgramName(".."));
     }
 
-    // 11b. Logs: the package's own folders or a path under /tmp or /var outside the agent's, a wildcard in the last
-    //      segment only, at most 16 entries, none twice. An entry is open, and old agents skip the key: a top-level
-    //      key they do not know is ignored.
+    // 11b. Logs: each path of spec/log-paths.vectors (ok and skip taken, bad refused), at most 16 entries, none
+    //      twice. An entry is open, and old agents skip the key: a top-level key they do not know is ignored.
     {
         struct Logs {
             static std::string code(const std::string& list, Manifest* out = 0) {
