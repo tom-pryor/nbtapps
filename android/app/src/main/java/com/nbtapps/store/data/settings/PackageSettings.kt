@@ -29,6 +29,9 @@ object SettingRules {
     const val NOT_A_CHOICE = "not-a-choice"
     const val UNKNOWN_KEY = "unknown-key"
 
+    /** The reasons this app knows. The agent may give one of a later version, which [refusal] shows with its code. */
+    private val REASONS = setOf(WRONG_TYPE, OUT_OF_RANGE, TOO_LONG, BAD_CHARACTERS, NOT_A_CHOICE, UNKNOWN_KEY)
+
     /** What a `bool` option's switch stands for, as an input of [check]. */
     const val ON = "true"
     const val OFF = "false"
@@ -39,7 +42,9 @@ object SettingRules {
      *  - `bool` takes a boolean, `int` an integer from `min` to `max`, `text` and `select` a string
      *  - `text`: 1 to `maxLength` bytes of UTF-8, of the safe set, or with characters `any` with no control
      *    character and no space at either end. One that is too long and of characters the rule refuses is too long.
+     *    With a characters rule of a later version, only no control character: the agent checks the rest.
      *  - `select`: one of its values, exactly
+     *  - an option this app cannot read ([SettingType.UNKNOWN]) takes nothing from the phone
      */
     fun checkJson(option: SettingOption, value: JsonElement?): String? =
         reason(option, AgentClient.settingValue(option.type, value))
@@ -56,7 +61,7 @@ object SettingRules {
             value !is SettingValue.Text -> WRONG_TYPE
             value.value.isEmpty() || !wellFormed(value.value) -> BAD_CHARACTERS
             value.value.encodeToByteArray().size > option.maxLength -> TOO_LONG
-            !ManifestParser.isSettingText(value.value, option.maxLength, option.anyCharacters) -> BAD_CHARACTERS
+            !ManifestParser.isSettingText(value.value, option.maxLength, option.anyCharacters, option.unknownCharacters) -> BAD_CHARACTERS
             else -> null
         }
         SettingType.SELECT -> when {
@@ -64,6 +69,7 @@ object SettingRules {
             option.values.none { it.value == value.value } -> NOT_A_CHOICE
             else -> null
         }
+        SettingType.UNKNOWN -> WRONG_TYPE
     }
 
     /** The text the agent writes after `KEY=` for [value]: a bool as 1 or 0, an integer's digits, a string as it is. */
@@ -89,15 +95,17 @@ object SettingRules {
             SettingType.INT -> "Enter a whole number"
             SettingType.TEXT -> "Enter some text"
             SettingType.SELECT -> "Pick one of the choices"
+            SettingType.UNKNOWN -> "The head unit doesn't take this value"
         }
         OUT_OF_RANGE -> "Use a number from ${option.min} to ${option.max}"
-        TOO_LONG -> if (option.anyCharacters) {
+        TOO_LONG -> if (option.anyCharacters || option.unknownCharacters) {
             "Too long: at most ${option.maxLength} bytes, and a letter such as é takes two"
         } else {
             "Too long: at most ${option.maxLength} characters"
         }
         BAD_CHARACTERS -> when {
             input?.isEmpty() == true -> "Enter some text"
+            option.unknownCharacters -> "Some of these characters aren't allowed"
             option.anyCharacters -> "No space at the start or the end, and no control characters"
             else -> "Only letters A to Z, digits and . _ : / @ + , - are allowed"
         }
@@ -105,6 +113,18 @@ object SettingRules {
         UNKNOWN_KEY -> "The head unit doesn't know this setting"
         else -> "The head unit doesn't take this value"
     }
+
+    /**
+     * What the user reads under [option] when the head unit refused the value sent for it for [reason]: the reason in
+     * words, or for a reason of a later version, which this app does not know, that it was refused and the reason's
+     * code.
+     */
+    fun refusal(option: SettingOption, reason: String, input: String? = null): String =
+        if (reason in REASONS) {
+            "The head unit refused this: " + explain(option, reason, input).replaceFirstChar { it.lowercase() } + "."
+        } else {
+            "The head unit refused this value ($reason)."
+        }
 
     /** [value] as an input of [check]: the opposite of what [check] makes of one. */
     fun input(value: SettingValue): String = when (value) {
@@ -122,6 +142,7 @@ object SettingRules {
         // Digits that are too many for a Long are far outside any option's limits.
         SettingType.INT -> if (isDigits(input)) input.toLongOrNull()?.let { SettingValue.Number(it) } else null
         SettingType.TEXT, SettingType.SELECT -> SettingValue.Text(input)
+        SettingType.UNKNOWN -> null
     }
 
     /** `-?[0-9]+`, as the agent reads a number. */
@@ -245,14 +266,17 @@ data class SettingsEdit(
     /**
      * Gives the option [key] the value [input], as the field has it now. An input that is just what the field showed
      * as read (the value, the text set by hand, empty for one not set, a switch's position) leaves no input at all,
-     * as the field shows that anyway.
+     * as the field shows that anyway. An option shown read-only ([SettingEntry.readOnly]) takes none.
      */
     fun set(key: String, input: String): SettingsEdit {
-        val entry = entry(key) ?: return this
+        val entry = entry(key)?.takeIf { !it.readOnly } ?: return this
         return if (input == shownAsRead(entry)) copy(inputs = inputs - key, resets = resets - key) else copy(inputs = inputs + (key to input), resets = resets - key)
     }
 
-    /** Takes the option [key] back to its default: its line goes from the file. One that is not set stays so. */
+    /**
+     * Takes the option [key] back to its default: its line goes from the file. One that is not set stays so. An option
+     * shown read-only can be reset too, since only its key is sent.
+     */
     fun reset(key: String): SettingsEdit {
         val entry = entry(key) ?: return this
         return copy(inputs = inputs - key, resets = if (entry.state == SettingState.UNSET) resets - key else resets + key)
@@ -294,10 +318,14 @@ data class SettingsEdit(
             (SettingRules.check(entry.option, input) as? SettingCheck.Refused)?.let { key to it.reason }
         }.toMap()
 
-    /** The changes as `settings.set` sends them, in the order of the options. Null while an input would be refused. */
+    /**
+     * The changes as `settings.set` sends them, in the order of the options. Null while an input would be refused. An
+     * option shown read-only is never given a value, only reset.
+     */
     fun changes(): SettingsChanges? {
         val set = LinkedHashMap<String, SettingValue>()
         for (entry in entries) {
+            if (entry.readOnly) continue
             val input = inputs[entry.option.key]?.takeIf { !asRead(entry, it) } ?: continue
             set[entry.option.key] = (SettingRules.check(entry.option, input) as? SettingCheck.Ok)?.value ?: return null
         }
@@ -321,13 +349,15 @@ data class SettingsEdit(
          * nothing, except a switch, which is at its default or off, and a choice, which shows its default.
          */
         fun shownAsRead(entry: SettingEntry): String = when (entry.state) {
-            SettingState.SET -> SettingRules.input(requireNotNull(entry.value))
+            // Of an option this app cannot read, set to a value it cannot read, nothing is shown.
+            SettingState.SET -> entry.value?.let { SettingRules.input(it) }.orEmpty()
             SettingState.BY_HAND -> entry.raw.orEmpty()
             SettingState.UNSET -> when (entry.option.type) {
                 SettingType.BOOL -> entry.option.default?.let { SettingRules.input(it) } ?: SettingRules.OFF
                 SettingType.SELECT -> entry.option.default?.let { SettingRules.input(it) }.orEmpty()
-                SettingType.INT, SettingType.TEXT -> ""
+                SettingType.INT, SettingType.TEXT, SettingType.UNKNOWN -> ""
             }
+            SettingState.UNKNOWN -> ""
         }
 
         /**
@@ -340,7 +370,7 @@ data class SettingsEdit(
             return when (entry.state) {
                 SettingState.SET -> value != null && value == entry.value
                 SettingState.UNSET -> input.isEmpty() || (value != null && value == entry.option.default)
-                SettingState.BY_HAND -> false
+                SettingState.BY_HAND, SettingState.UNKNOWN -> false
             }
         }
     }

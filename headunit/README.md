@@ -308,6 +308,9 @@ The manifest's `settings` names the file and the options:
 - `advanced` puts the option under a folded section on the phone.
 - At most 64 options. One option's strings together hold at most 1,024 bytes, and a value 255.
   `spec/manifest.schema.json` has every rule, and `nbtpkg.py build` checks them.
+- A package that uses a later format of `settings` (a type, an `applies`, a `characters` rule or a limit that a
+  later agent adds) sets `requires.agent` to that agent's version: an older agent refuses it with `agent-too-old`
+  instead of as a bad manifest, and an older phone app still installs it, showing what it cannot read as read-only.
 
 What the agent does with the file:
 

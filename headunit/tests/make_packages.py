@@ -5,7 +5,9 @@
 
   OUTDIR/good/*.nbtpkg   the sources in tests/packages, signed with tests/keys/test-package.key, plus variants a
                          reader must also accept
-  OUTDIR/bad/*.nbtpkg    hello 1.2.0 with one defect each; every reader must refuse each of them
+  OUTDIR/bad/*.nbtpkg    hello 1.2.0 with one defect each; every reader must refuse each of them, except that the
+                         phone app takes those named bad/settings-* with no settings, so that a later format of
+                         settings, behind requires.agent, never stops it downloading a package
   OUTDIR/skipped/*.nbtpkg  hello 1.2.0 naming a log in a folder the schema does not know: nbtpkg.py refuses each
                          with its code, and the agent and the app take it and skip that log (spec/log-paths.vectors)
   OUTDIR/detached/*.nbtpkg  hello 1.2.0 as an author might sign it, each read with a detached signature over its

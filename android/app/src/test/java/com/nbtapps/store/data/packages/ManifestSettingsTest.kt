@@ -3,6 +3,8 @@
 package com.nbtapps.store.data.packages
 
 import com.nbtapps.store.AgentVectors
+import com.nbtapps.store.data.json.StrictJson
+import com.nbtapps.store.data.settings.FutureSettings
 import com.nbtapps.store.model.PackageSettings
 import com.nbtapps.store.model.SettingApplies
 import com.nbtapps.store.model.SettingChoice
@@ -17,20 +19,23 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * A manifest's `settings`, as [ManifestParser] reads it: the test packages the agent repo builds, which every reader
- * must take or refuse alike (`PackageCorpusTest` runs the refused ones), and the edges they do not reach.
+ * A manifest's `settings`, as [ManifestParser] reads it: the test packages the agent repo builds (`PackageCorpusTest`
+ * runs the broken ones, which the agent refuses and the app takes with no settings), the edges they do not reach, and
+ * the options a later agent may send ([FutureSettings]).
  */
 class ManifestSettingsTest {
 
     private fun settings(file: String): PackageSettings? =
         PackageArchive.verify(AgentVectors.file("packages/good/$file"), listOf(AgentVectors.packageKey)).manifest.settings
 
-    /** The code a manifest with this `settings` gets, and "" when it is taken. */
+    /**
+     * What a manifest with this `settings` comes to: "kept" where its settings are read, "dropped" where they break the
+     * agent's rules, which the agent refuses (see [ManifestParser]), or the code it is refused with.
+     */
     private fun code(settings: String, install: String = ""): String = try {
         val text = """{"manifestVersion":1,"id":"org.nbtapp.t","name":"T","version":"1.0.0","settings":$settings,""" +
             """"contents":[]${if (install.isEmpty()) "" else ""","install":{$install}"""}}"""
-        ManifestParser.parse(text.encodeToByteArray())
-        ""
+        if (ManifestParser.parse(text.encodeToByteArray()).settings != null) "kept" else "dropped"
     } catch (e: PackageFormatException) {
         e.code
     }
@@ -87,30 +92,35 @@ class ManifestSettingsTest {
 
     @Test
     fun `the edges of each member`() {
-        assertEquals("", lamp(""""type":"bool""""))
-        assertEquals("", lamp(""""type":"colour","default":{},"unset":"","description":7"""))
-        assertEquals("bad-manifest", lamp(""""type":1"""))
-        assertEquals("bad-manifest", code("""{"options":[{"key":"lamp","label":"Lamp","type":"colour"}]}"""))
-        assertEquals("bad-manifest", code("""{"options":[{"key":"A","label":"A","type":"bool"},{"key":"A","label":"B","type":"x"}]}"""))
-        assertEquals("bad-manifest", lamp(""""type":"bool","default":true,"unset":"Off""""))
-        assertEquals("", lamp(""""type":"int","min":5,"max":5,"default":5"""))
-        assertEquals("bad-manifest", lamp(""""type":"int","min":5,"max":4"""))
-        assertEquals("bad-manifest", lamp(""""type":"int","min":0,"max":2147483648"""))
-        assertEquals("", lamp(""""type":"bool","min":"x","unit":"""""))   // an int's members on a bool are ignored
-        assertEquals("bad-manifest", lamp(""""type":"text","maxLength":256"""))
-        assertEquals("bad-manifest", lamp(""""type":"text","maxLength":5,"characters":"any","default":"ééé""""))
-        assertEquals("", lamp(""""type":"text","maxLength":6,"characters":"any","default":"ééé""""))
-        assertEquals("bad-manifest", lamp(""""type":"select","values":[{"value":"a","label":"A"}]"""))
-        assertEquals("bad-manifest", lamp(""""type":"bool","applies":"later""""))
+        assertEquals("kept", lamp(""""type":"bool""""))
+        assertEquals("kept", lamp(""""type":"colour","default":{},"unset":"","description":7"""))
+        assertEquals("dropped", lamp(""""type":1"""))
+        assertEquals("dropped", code("""{"options":[{"key":"lamp","label":"Lamp","type":"colour"}]}"""))
+        assertEquals("dropped", code("""{"options":[{"key":"A","label":"A","type":"bool"},{"key":"A","label":"B","type":"x"}]}"""))
+        assertEquals("dropped", lamp(""""type":"bool","default":true,"unset":"Off""""))
+        assertEquals("kept", lamp(""""type":"int","min":5,"max":5,"default":5"""))
+        assertEquals("dropped", lamp(""""type":"int","min":5,"max":4"""))
+        assertEquals("dropped", lamp(""""type":"int","min":0,"max":2147483648"""))
+        assertEquals("kept", lamp(""""type":"bool","min":"x","unit":"""""))   // an int's members on a bool are ignored
+        assertEquals("dropped", lamp(""""type":"text","maxLength":256"""))
+        assertEquals("dropped", lamp(""""type":"text","maxLength":5,"characters":"any","default":"ééé""""))
+        assertEquals("kept", lamp(""""type":"text","maxLength":6,"characters":"any","default":"ééé""""))
+        assertEquals("dropped", lamp(""""type":"text","maxLength":6,"characters":"latin""""))
+        assertEquals("dropped", lamp(""""type":"select","values":[{"value":"a","label":"A"}]"""))
+        assertEquals("dropped", lamp(""""type":"bool","applies":"later""""))
+        assertEquals("dropped", code("7"))
+        assertEquals("dropped", code("""{"options":[]}"""))
 
         // At most 1,024 bytes of UTF-8 in one option's strings: bytes, not characters.
         val accents = "é".repeat(500)
-        assertEquals("", code("""{"options":[{"key":"LAMP","label":"${"L".repeat(20)}","type":"bool","description":"$accents"}]}"""))
-        assertEquals("bad-manifest", code("""{"options":[{"key":"LAMP","label":"${"L".repeat(21)}","type":"bool","description":"$accents"}]}"""))
+        assertEquals("kept", code("""{"options":[{"key":"LAMP","label":"${"L".repeat(20)}","type":"bool","description":"$accents"}]}"""))
+        assertEquals("dropped", code("""{"options":[{"key":"LAMP","label":"${"L".repeat(21)}","type":"bool","description":"$accents"}]}"""))
 
-        // The rules of an option's type come after the walk: a key unknown in install, later in the text, decides.
+        // Settings never refuse a manifest, so whatever they hold, a key unknown in install decides.
         assertEquals("unsupported-manifest", code("""{"options":[{"key":"A","label":"A","type":"bool","default":1}]}""", "\"later\":1"))
-        assertEquals("bad-manifest", code("""{"options":[{"key":"a","label":"A","type":"bool"}]}""", "\"later\":1"))
+        assertEquals("unsupported-manifest", code("""{"options":[{"key":"a","label":"A","type":"bool"}]}""", "\"later\":1"))
+        // Nor do they hide a fault elsewhere.
+        assertEquals("bad-manifest", code("""{"options":[{"key":"a","label":"A","type":"bool"}]}""", "\"reboot\":\"soon\""))
     }
 
     @Test
@@ -137,9 +147,51 @@ class ManifestSettingsTest {
         for (key in listOf("", "a", "Lamp", "1A", "_A", "A-B", "K".repeat(65))) assertFalse(key, ManifestParser.isSettingKey(key))
     }
 
+    private fun option(json: String): SettingOption = ManifestParser.settingOption(StrictJson.parseObject(json.encodeToByteArray()))
+
     @Test
-    fun `a broken settings block is refused as the agent refuses it`() {
-        // PackageCorpusTest runs every refused package; this only makes sure the settings ones are there.
+    fun `an option a later agent sends is read leniently, and one this app cannot read is of no type it knows`() {
+        val glow = option(FutureSettings.GLOW)
+        assertEquals(
+            SettingOption("GLOW", "Glow colour", SettingType.UNKNOWN, description = "The colour of the dial's glow."),
+            glow,
+        )
+        val volume = option(FutureSettings.VOLUME)
+        assertEquals(SettingType.INT, volume.type)
+        assertEquals(SettingApplies.UNKNOWN, volume.applies)
+        assertEquals(SettingValue.Number(5), volume.default)
+        val callSign = option(FutureSettings.CALL_SIGN)
+        assertTrue(callSign.type == SettingType.TEXT && callSign.unknownCharacters && !callSign.anyCharacters)
+        assertEquals(1000, option(FutureSettings.BANNER).maxLength)
+        val offset = option(FutureSettings.OFFSET)
+        assertEquals(-10_000_000_000L..10_000_000_000L, offset.min..offset.max)
+        assertEquals(20, option(FutureSettings.STATION).values.size)
+        assertEquals(SettingType.BOOL, option(FutureSettings.MODE).type)
+        val sound = option(FutureSettings.SOUND)
+        assertEquals(SettingOption("SOUND", "Sound", SettingType.UNKNOWN), sound)
+
+        // As far as each can be read: a key of a later form, a label that cannot be shown, advanced and applies.
+        assertEquals(
+            SettingOption("lamp.colour", "lamp.colour", SettingType.UNKNOWN, applies = SettingApplies.HMI_RESTART, advanced = true),
+            option("""{"key":"lamp.colour","label":"","type":"bool","applies":"hmi-restart","advanced":true}"""),
+        )
+        assertEquals(
+            SettingOption("", ManifestParser.UNREADABLE_LABEL, SettingType.UNKNOWN, applies = SettingApplies.UNKNOWN),
+            option("""{"key":7,"type":"bool","applies":1,"advanced":"yes"}"""),
+        )
+        // Still held to the rules that are not limits: a default outside them, a value twice.
+        assertEquals(SettingType.UNKNOWN, option("""{"key":"A","label":"A","type":"int","min":0,"max":9,"default":10}""").type)
+        assertEquals(SettingType.UNKNOWN, option("""{"key":"A","label":"A","type":"text","maxLength":0}""").type)
+
+        // A manifest that gives such options has its settings dropped: the app holds a manifest to today's rules.
+        assertEquals("dropped", code("""{"options":[${FutureSettings.VOLUME}]}"""))
+        assertEquals("dropped", code("""{"options":[${FutureSettings.BANNER}]}"""))
+        assertEquals("kept", code("""{"options":[${FutureSettings.GLOW}]}"""))
+    }
+
+    @Test
+    fun `the broken settings blocks the agent refuses are in the corpus`() {
+        // PackageCorpusTest runs every one of them, and expects the app to take each with no settings.
         val names = AgentVectors.file("packages/vectors.json").readText()
         for (label in listOf("settings-bytes-description", "settings-bytes-select", "settings-select-too-many-values")) {
             if ("bad/$label.nbtpkg" !in names) fail("$label is not in the corpus")

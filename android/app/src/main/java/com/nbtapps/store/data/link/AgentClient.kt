@@ -6,7 +6,6 @@ import com.nbtapps.store.data.PairingKeys
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.crypto.newSha256
 import com.nbtapps.store.data.packages.ManifestParser
-import com.nbtapps.store.data.packages.PackageFormatException
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.Check
@@ -422,7 +421,8 @@ class AgentClient(
 
     /**
      * One page of the settings of the installed package [packageId], from its option [from] on (0 when null): see
-     * [SettingsPage]. Each option is read under the manifest's rules for it. Only an agent that lists
+     * [SettingsPage]. Each option is read under the manifest's rules for it, leniently: one this app cannot read is
+     * shown read-only, never an error ([ManifestParser.settingOption]). Only an agent that lists
      * [ProtocolConstants.CAPABILITY_SETTINGS] has it, and it needs a link whose frame holds 4,096 bytes.
      *
      * @throws RemoteException with `not-found` for a package that is not installed or names no options, `busy` while
@@ -452,19 +452,25 @@ class AgentClient(
         call<JsonObject>("settings.set", settingsSetParams(packageId, set, reset))
     }
 
-    /** One option of a page of `settings.get`. */
+    /**
+     * One option of a page of `settings.get`. Never an error, since a later agent may send what this app cannot read:
+     * an option it cannot read ([ManifestParser.settingOption]), a state it does not know, or a value it cannot read
+     * for the option's type, makes an entry that is [SettingEntry.readOnly].
+     */
     private fun settingEntry(item: JsonElement): SettingEntry {
-        val obj = item as? JsonObject ?: throw ProtocolException(UNREADABLE)
-        val option = try {
-            ManifestParser.settingOption(obj)
-        } catch (e: PackageFormatException) {
-            null
-        } ?: throw ProtocolException(UNREADABLE)
+        val obj = item as? JsonObject ?: JsonObject(emptyMap())
+        val option = ManifestParser.settingOption(obj)
         return when (obj["state"].stringOrNull()?.let(SettingState::of)) {
             SettingState.UNSET -> SettingEntry(option, SettingState.UNSET)
-            SettingState.SET -> SettingEntry(option, SettingState.SET, value = settingValue(option.type, obj["value"]) ?: throw ProtocolException(UNREADABLE))
-            SettingState.BY_HAND -> SettingEntry(option, SettingState.BY_HAND, raw = obj["raw"].stringOrNull() ?: throw ProtocolException(UNREADABLE))
-            null -> throw ProtocolException(UNREADABLE)
+            SettingState.SET -> when {
+                // Set, to a value of a type this app does not know.
+                option.type == SettingType.UNKNOWN -> SettingEntry(option, SettingState.SET)
+                else -> settingValue(option.type, obj["value"])?.let { SettingEntry(option, SettingState.SET, value = it) }
+                    ?: SettingEntry(option, SettingState.UNKNOWN)
+            }
+            SettingState.BY_HAND -> obj["raw"].stringOrNull()?.let { SettingEntry(option, SettingState.BY_HAND, raw = it) }
+                ?: SettingEntry(option, SettingState.UNKNOWN)
+            SettingState.UNKNOWN, null -> SettingEntry(option, SettingState.UNKNOWN)
         }
     }
 
@@ -534,6 +540,7 @@ class AgentClient(
                 SettingType.BOOL -> primitive.takeIf { !it.isString }?.booleanOrNull?.let { SettingValue.Bool(it) }
                 SettingType.INT -> element.integerOrNull()?.let { SettingValue.Number(it) }
                 SettingType.TEXT, SettingType.SELECT -> element.stringOrNull()?.let { SettingValue.Text(it) }
+                SettingType.UNKNOWN -> null
             }
         }
 

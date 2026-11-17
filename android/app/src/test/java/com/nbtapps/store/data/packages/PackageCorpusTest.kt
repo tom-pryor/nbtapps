@@ -14,6 +14,7 @@ import kotlinx.serialization.json.long
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -96,11 +97,19 @@ class PackageCorpusTest {
         assertFalse(ManifestParser.isLogPath("\${data}/" + "x".repeat(248)))
     }
 
+    /**
+     * Every broken package is refused with the code the agent gives, except one whose only fault is in `settings`: the
+     * one planned difference between the readers (see [ManifestParser]). The agent refuses it, and the app takes it
+     * with no settings, so that a later format of `settings`, which an agent that knows it takes behind
+     * `requires.agent`, does not stop this app from downloading the package.
+     */
     @Test
-    fun `every broken package is refused, with the code the agent gives`() {
+    fun `every broken package is refused, with the code the agent gives, but one whose fault is in its settings`() {
         val bad = vectors.getValue("bad").jsonArray.map { it.jsonObject }
         assertTrue("the corpus looks cut short", bad.size >= 71)
-        for (entry in bad) {
+        val (settings, others) = bad.partition { it.text("file").startsWith("bad/settings-") }
+        assertTrue("the corpus has no broken settings", settings.size >= 50)
+        for (entry in others) {
             val what = "${entry.text("file")} (${entry.text("what")})"
             try {
                 PackageArchive.verify(AgentVectors.file("packages/${entry.text("file")}"), listOf(AgentVectors.packageKey))
@@ -108,6 +117,13 @@ class PackageCorpusTest {
             } catch (e: PackageFormatException) {
                 assertEquals(what, entry.text("code"), e.code)
             }
+        }
+        for (entry in settings) {
+            val what = "${entry.text("file")} (${entry.text("what")})"
+            assertEquals(what, "bad-manifest", entry.text("code"))
+            val manifest = PackageArchive.verify(AgentVectors.file("packages/${entry.text("file")}"), listOf(AgentVectors.packageKey)).manifest
+            assertEquals(what, "org.nbtapp.hello", manifest.id)
+            assertNull(what, manifest.settings)
         }
     }
 

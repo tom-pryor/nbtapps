@@ -76,7 +76,15 @@ data class OptionRow(
     /** When a change takes effect, where the options do not all say the same. Null where they do. */
     val takesEffect: String?,
     val advanced: Boolean,
+    /**
+     * The app cannot read all of the option or how it stands ([SettingEntry.readOnly]): the row has no field, says
+     * that a newer version of the app is needed, and offers only Reset.
+     */
+    val readOnly: Boolean = false,
 )
+
+/** What a read-only row says in place of its field. */
+internal const val READ_ONLY_NOTE = "This setting needs a newer version of the app. It can only be reset from here."
 
 data class SettingsUiState(
     val packageId: String,
@@ -297,6 +305,7 @@ internal fun takesEffect(applies: SettingApplies, name: String): String = when (
     SettingApplies.APP_START -> "when $name is next started"
     SettingApplies.HMI_RESTART -> "when iDrive next restarts"
     SettingApplies.REBOOT -> "when the head unit next restarts"
+    SettingApplies.UNKNOWN -> "later"
 }
 
 /** The options of [keys] that were saved, counted by when they take effect, in the order of [SettingApplies]. */
@@ -317,7 +326,7 @@ private fun fallback(option: SettingOption): String? = option.default?.let { sho
 /** The option's limits, as its row's line ends with them. */
 private fun limits(option: SettingOption): String? = when (option.type) {
     SettingType.INT -> "${option.min} to ${option.max}"
-    SettingType.TEXT -> if (option.anyCharacters) "up to ${option.maxLength} bytes" else "up to ${option.maxLength} characters"
+    SettingType.TEXT -> if (option.anyCharacters || option.unknownCharacters) "up to ${option.maxLength} bytes" else "up to ${option.maxLength} characters"
     else -> null
 }
 
@@ -328,6 +337,7 @@ internal fun optionRows(edit: SettingsEdit, refused: Map<String, String>, name: 
 }
 
 private fun optionRow(entry: SettingEntry, edit: SettingsEdit, problem: String?, refused: String?, name: String, mixed: Boolean): OptionRow {
+    if (entry.readOnly) return readOnlyRow(entry, edit, refused, name, mixed)
     val option = entry.option
     val key = option.key
     // What was typed or picked: the field keeps it, whether or not it is a change.
@@ -350,6 +360,7 @@ private fun optionRow(entry: SettingEntry, edit: SettingsEdit, problem: String?,
             SettingState.SET -> read
             SettingState.UNSET -> "not set"
             SettingState.BY_HAND -> "set by hand"
+            SettingState.UNKNOWN -> "not known"
         }
         resetting -> "Changed · back to not set" + (option.default?.let { " · uses ${shown(option, it)}" } ?: option.unset?.let { " · $it" }).orEmpty()
         entry.state == SettingState.UNSET -> "Not set" + (option.default?.let { " · uses ${shown(option, it)}" } ?: option.unset?.let { " · $it" }).orEmpty()
@@ -357,7 +368,7 @@ private fun optionRow(entry: SettingEntry, edit: SettingsEdit, problem: String?,
     }
     val error = when {
         problem != null -> SettingRules.explain(option, problem, pending)
-        refused != null -> "The head unit refused this: " + SettingRules.explain(option, refused, pending).replaceFirstChar { it.lowercase() } + "."
+        refused != null -> SettingRules.refusal(option, refused, pending)
         else -> null
     }
     return OptionRow(
@@ -383,5 +394,43 @@ private fun optionRow(entry: SettingEntry, edit: SettingsEdit, problem: String?,
         unit = option.unit,
         takesEffect = if (mixed) "Takes effect " + takesEffect(option.applies, name) else null,
         advanced = option.advanced,
+    )
+}
+
+/**
+ * The row of an option the app cannot read all of: no field and no value, the state as far as it is known, and Reset
+ * where the option may be set and has a key to send.
+ */
+private fun readOnlyRow(entry: SettingEntry, edit: SettingsEdit, refused: String?, name: String, mixed: Boolean): OptionRow {
+    val option = entry.option
+    val resetting = option.key in edit.resets
+    val status = when {
+        resetting -> "Changed · back to not set"
+        else -> when (entry.state) {
+            SettingState.SET -> "Set"
+            SettingState.UNSET -> "Not set"
+            SettingState.BY_HAND -> "Set by hand"
+            SettingState.UNKNOWN -> "Can't be shown"
+        }
+    }
+    return OptionRow(
+        key = option.key,
+        label = option.label,
+        description = option.description,
+        type = option.type,
+        input = "",
+        placeholder = null,
+        on = false,
+        muted = true,
+        byHand = false,
+        changed = resetting,
+        error = refused?.let { SettingRules.refusal(option, it) },
+        meta = status,
+        canReset = option.key.isNotEmpty() && entry.state != SettingState.UNSET && !resetting,
+        choices = emptyList(),
+        unit = null,
+        takesEffect = if (mixed) "Takes effect " + takesEffect(option.applies, name) else null,
+        advanced = option.advanced,
+        readOnly = true,
     )
 }

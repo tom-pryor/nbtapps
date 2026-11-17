@@ -453,10 +453,17 @@ enum class SettingState(val id: String) {
 
     /** The file has a value the option's type does not take, put there by hand: [SettingEntry.raw]. */
     BY_HAND("by-hand"),
+
+    /**
+     * Not a state of the agent's: one of a later version, or one whose value this app cannot read. The option is shown
+     * read-only.
+     */
+    UNKNOWN(""),
     ;
 
     companion object {
-        fun of(id: String): SettingState? = entries.firstOrNull { it.id == id }
+        /** The state the agent names [id]; null for one this app does not know. */
+        fun of(id: String): SettingState? = entries.firstOrNull { it != UNKNOWN && it.id == id }
     }
 }
 
@@ -474,7 +481,13 @@ data class SettingEntry(
      * it was cut.
      */
     val raw: String? = null,
-)
+) {
+    /**
+     * This app cannot read all of the option or how it stands, as a later version of the agent may send them: its row
+     * is shown read-only, it is never sent in a `settings.set`, and only Reset is offered on it.
+     */
+    val readOnly: Boolean get() = option.type == SettingType.UNKNOWN || state == SettingState.UNKNOWN
+}
 
 /** One answer of `settings.get`: options from the one asked for on, as many as the link's frame took. */
 data class SettingsPage(
@@ -485,7 +498,8 @@ data class SettingsPage(
 
 /**
  * A key the agent would not take, from the `keys` of the error `invalid` of `settings.set`. [reason] is one of
- * `unknown-key`, `wrong-type`, `out-of-range`, `too-long`, `bad-characters` and `not-a-choice`.
+ * `unknown-key`, `wrong-type`, `out-of-range`, `too-long`, `bad-characters` and `not-a-choice`, or one of a later
+ * version, which the app shows with its code.
  */
 @Serializable
 data class SettingFault(val key: String, val reason: String)

@@ -299,16 +299,16 @@ private fun OptionRowView(row: OptionRow, onSet: (String) -> Unit, onReset: () -
     Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Text(row.label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-            if (row.type == SettingType.BOOL) {
+            if (row.type == SettingType.BOOL && !row.readOnly) {
                 Switch(checked = row.on, onCheckedChange = { onSet(if (it) SettingRules.ON else SettingRules.OFF) })
             }
         }
         row.description?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         row.takesEffect?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        when (row.type) {
-            SettingType.SELECT -> Choice(row, onSet)
-            SettingType.INT, SettingType.TEXT -> Field(row, onSet)
-            SettingType.BOOL -> Unit
+        when {
+            row.readOnly -> Text(READ_ONLY_NOTE, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary)
+            row.type == SettingType.SELECT -> Choice(row, onSet)
+            row.type == SettingType.INT || row.type == SettingType.TEXT -> Field(row, onSet)
         }
         if (row.byHand) {
             Text(

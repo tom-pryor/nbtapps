@@ -106,10 +106,17 @@ enum class SettingType(val id: String) {
     INT("int"),
     TEXT("text"),
     SELECT("select"),
+
+    /**
+     * Not a type of the manifest's: an option the agent sent that this app cannot read, of a type or under rules of a
+     * later version. The settings screen shows it read-only, and never sends a value for it.
+     */
+    UNKNOWN(""),
     ;
 
     companion object {
-        fun of(id: String): SettingType? = entries.firstOrNull { it.id == id }
+        /** The type the manifest names [id]; null for one this app does not know. */
+        fun of(id: String): SettingType? = entries.firstOrNull { it != UNKNOWN && it.id == id }
     }
 }
 
@@ -119,10 +126,14 @@ enum class SettingApplies(val id: String) {
     APP_START("app-start"),
     HMI_RESTART("hmi-restart"),
     REBOOT("reboot"),
+
+    /** Not a value of the manifest's: one of a later version, which the agent sent. Shown as "later". */
+    UNKNOWN(""),
     ;
 
     companion object {
-        fun of(id: String): SettingApplies? = entries.firstOrNull { it.id == id }
+        /** The value the manifest names [id]; null for one this app does not know. */
+        fun of(id: String): SettingApplies? = entries.firstOrNull { it != UNKNOWN && it.id == id }
     }
 }
 
@@ -141,7 +152,9 @@ sealed interface SettingValue {
 data class SettingChoice(val value: String, val label: String)
 
 /**
- * One option of `settings.options`, of a known type. Members another type has keep the values they are made with.
+ * One option of `settings.options`, of a known type, or of [SettingType.UNKNOWN] for one the agent sent that this app
+ * cannot read, which has only what of [key], [label], [description], [applies] and [advanced] it could read. Members
+ * another type has keep the values they are made with.
  */
 data class SettingOption(
     /** The name in the settings file: `[A-Z][A-Z0-9_]{0,63}`. */
@@ -156,6 +169,11 @@ data class SettingOption(
     /** `text`: the most bytes of UTF-8 a value has, and whether it may hold any characters or the safe set only. */
     val maxLength: Int = 0,
     val anyCharacters: Boolean = false,
+    /**
+     * `text`: the agent sent a `characters` rule of a later version. The app checks only that a value is not empty and
+     * has no control character, and leaves the rest to the agent. Never so in a manifest the app reads.
+     */
+    val unknownCharacters: Boolean = false,
     /** `select`: in the order of the manifest. */
     val values: List<SettingChoice> = emptyList(),
     val default: SettingValue? = null,

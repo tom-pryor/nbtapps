@@ -33,7 +33,13 @@ import kotlinx.serialization.json.longOrNull
 /**
  * Reads `manifest.json` under the rules of `spec/manifest.schema.json` in the agent repo, plus the rules that
  * span fields and that a schema cannot express. It is the same walk as the agent's `agent/manifest.cpp`, and
- * it must give the same verdict: a manifest one of them takes and the other refuses is a bug in one of them.
+ * outside `settings` it must give the same verdict: a manifest one of them takes and the other refuses is a bug in
+ * one of them.
+ *
+ * `settings` is the one planned difference. The agent refuses a manifest whose `settings` breaks its rules, and the
+ * app takes it with [PackageManifest.settings] null: a later agent may extend the format behind `requires.agent`, and
+ * an app that refused it could not be loosened for those who do not update it. Nothing in the app acts on a manifest's
+ * settings (the settings screen reads the options from the agent, see [settingOption]), so none are lost.
  *
  * Unknown keys are refused inside `requires` and `install`, because an install key that is skipped could
  * place a file wrongly, and ignored everywhere else, a `logs` entry, `settings` and its options included. An option
@@ -94,7 +100,7 @@ object ManifestParser {
         var contents = emptyList<PackageContent>()
         var install = Install()
         var logs = emptyList<String>()
-        var settings: SettingsWalk? = null
+        var settings: PackageSettings? = null
         // Members are checked in the order of the text, as the agent does, so both name the same first fault.
         for ((key, value) in root) {
             when (key) {
@@ -107,7 +113,7 @@ object ManifestParser {
                 "contents" -> contents = contents(value)
                 "install" -> install = install(value)
                 "logs" -> logs = logs(value)
-                "settings" -> settings = settings(value)
+                "settings" -> settings = settingsOrNull(value)
             }
         }
         val manifest = PackageManifest(
@@ -125,7 +131,7 @@ object ManifestParser {
             reboot = install.reboot,
             serialServices = install.serialServices,
             logs = logs,
-            settings = settings?.let(::settingsRules),
+            settings = settings,
         )
         crossFields(manifest)
         return manifest
@@ -253,10 +259,16 @@ object ManifestParser {
     private class PendingSetting(val at: String, val key: String, val label: String, val type: String, val obj: JsonObject)
 
     /**
-     * `settings`: open, with `file` and 1 to 64 options. Here only what every option has, whatever its type; the
-     * rest waits for [settingsRules], after the walk, as the agent and `nbtpkg.py` do it, so that a key refused in
-     * `install` further down the text still decides the code.
+     * `settings` held to the rules the agent holds it to, or null where it breaks or extends them: see the class's
+     * comment. Never a refusal of the manifest.
      */
+    private fun settingsOrNull(value: JsonElement): PackageSettings? = try {
+        settingsRules(settings(value))
+    } catch (e: PackageFormatException) {
+        null
+    }
+
+    /** `settings`: open, with `file` and 1 to 64 options. Here only what every option has, whatever its type. */
     private fun settings(value: JsonElement): SettingsWalk {
         val obj = value as? JsonObject ?: bad("settings must be an object")
         if ("options" !in obj) bad("settings has no \"options\"")
@@ -303,7 +315,7 @@ object ManifestParser {
         for (pending in walk.options) {
             if (!keys.add(pending.key)) bad("names the setting ${pending.key} twice")
             val type = SettingType.of(pending.type)
-            val option = type?.let { setting(pending, it) }
+            val option = type?.let { setting(pending, it, lenient = false) }
             var bytes = utf8Bytes(pending.key) + utf8Bytes(pending.label)
             if (option != null) {
                 bytes += listOfNotNull(option.description, option.unset, option.unit).sumOf(::utf8Bytes)
@@ -318,23 +330,58 @@ object ManifestParser {
 
     /**
      * One option as the agent's `settings.get` sends it: the members its manifest gave it, held to the rules [parse]
-     * holds an option of a known type to. The members the agent adds (`state`, `value`, `raw`) are not read here.
-     * Null for an option of a type this app does not know, which the agent leaves out.
+     * holds an option of a known type to, but read leniently, since a later agent may send what a later manifest
+     * format allows. The members the agent adds (`state`, `value`, `raw`) are not read here. Never an error:
      *
-     * @throws PackageFormatException with the code `bad-manifest` where the option breaks those rules.
+     *  - an `applies` this app does not know is [SettingApplies.UNKNOWN], shown as "later"
+     *  - a `text` option's `characters` rule this app does not know is [SettingOption.unknownCharacters]
+     *  - limits larger than today's (`maxLength`, the number of a `select`'s values, an `int`'s range) are taken as
+     *    given
+     *  - an option of a type this app does not know, or one that breaks a rule otherwise, is of [SettingType.UNKNOWN],
+     *    with what of its key, label, description, `applies` and `advanced` can be read: its row is read-only
      */
-    fun settingOption(obj: JsonObject): SettingOption? {
-        for (required in listOf("key", "label", "type")) {
-            if (required !in obj) bad("the option has no \"$required\"")
+    fun settingOption(obj: JsonObject): SettingOption {
+        val type = (obj["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.let(SettingType::of)
+        if (type != null) {
+            try {
+                val key = text(obj["key"] ?: bad("the option has no \"key\""), "key", ::isSettingKey)
+                val label = text(obj["label"] ?: bad("the option has no \"label\""), "$key.label", ::isName)
+                return setting(PendingSetting(key, key, label, type.id, obj), type, lenient = true)
+            } catch (e: PackageFormatException) {
+                // Read as far as it can be, below.
+            }
         }
-        val key = text(obj.getValue("key"), "key", ::isSettingKey)
-        val label = text(obj.getValue("label"), "$key.label", ::isName)
-        val type = text(obj.getValue("type"), "$key.type") { true }
-        return SettingType.of(type)?.let { setting(PendingSetting(key, key, label, type, obj), it) }
+        return unreadableOption(obj)
     }
 
-    /** One option of a known type: its type's members in the order of the text, then the rules across them. */
-    private fun setting(pending: PendingSetting, type: SettingType): SettingOption {
+    /** What can be read of an option this app cannot read whole: see [settingOption]. */
+    private fun unreadableOption(obj: JsonObject): SettingOption {
+        fun string(name: String): String? = (obj[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        // A key of a later form is still the agent's to take back to its default.
+        val key = string("key")?.takeIf { it.isNotEmpty() && noControls(it) && Utf8.length(it) <= 255 }.orEmpty()
+        val label = string("label")?.takeIf(::isName) ?: key.takeIf(::isName) ?: UNREADABLE_LABEL
+        val applies = when (val member = obj["applies"]) {
+            null -> SettingApplies.NOW
+            else -> (member as? JsonPrimitive)?.takeIf { it.isString }?.content?.let(SettingApplies::of) ?: SettingApplies.UNKNOWN
+        }
+        return SettingOption(
+            key = key,
+            label = label,
+            type = SettingType.UNKNOWN,
+            description = string("description")?.takeIf(::isSettingDescription),
+            applies = applies,
+            advanced = (obj["advanced"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: false,
+        )
+    }
+
+    /** The label of an option whose own cannot be read, nor its key. */
+    const val UNREADABLE_LABEL = "A setting this app can't read"
+
+    /**
+     * One option of a known type: its type's members in the order of the text, then the rules across them. [lenient]
+     * for one the agent sent: see [settingOption].
+     */
+    private fun setting(pending: PendingSetting, type: SettingType, lenient: Boolean): SettingOption {
         val at = pending.at
         val obj = pending.obj
         val required = when (type) {
@@ -342,10 +389,15 @@ object ManifestParser {
             SettingType.INT -> listOf("min", "max")
             SettingType.TEXT -> listOf("maxLength")
             SettingType.SELECT -> listOf("values")
+            SettingType.UNKNOWN -> bad("$at is of no type this app knows")
         }
         for (key in required) {
             if (key !in obj) bad("$at has no \"$key\"")
         }
+        // Limits larger than today's are taken as given from the agent.
+        val intMin = if (lenient) Long.MIN_VALUE else INT_MIN
+        val intMax = if (lenient) Long.MAX_VALUE else INT_MAX
+        val maxLengthMax = if (lenient) Int.MAX_VALUE.toLong() else ProtocolConstants.SETTINGS_MAX_VALUE_BYTES.toLong()
         var description: String? = null
         var unset: String? = null
         var applies = SettingApplies.NOW
@@ -356,32 +408,34 @@ object ManifestParser {
         var unit: String? = null
         var maxLength = 0
         var anyCharacters = false
+        var unknownCharacters = false
         var values = emptyList<SettingChoice>()
         for ((key, member) in obj) {
             val where = "$at.$key"
+            val string = (member as? JsonPrimitive)?.takeIf { it.isString }?.content
             when {
                 key == "description" -> description = text(member, where, ::isSettingDescription)
                 key == "unset" -> unset = text(member, where, ::isName)
-                key == "applies" -> applies = (member as? JsonPrimitive)?.takeIf { it.isString }?.let { SettingApplies.of(it.content) }
+                key == "applies" -> applies = string?.let { SettingApplies.of(it) ?: SettingApplies.UNKNOWN.takeIf { lenient } }
                     ?: bad("$where must be one of: now, app-start, hmi-restart, reboot")
                 key == "advanced" -> advanced = boolean(member, where)
                 key == "default" -> default = when (type) {
                     SettingType.BOOL -> SettingValue.Bool(boolean(member, where))
-                    SettingType.INT -> SettingValue.Number(integer(member, where, INT_MIN, INT_MAX))
+                    SettingType.INT -> SettingValue.Number(integer(member, where, intMin, intMax))
                     SettingType.TEXT, SettingType.SELECT -> SettingValue.Text(text(member, where) { true })
+                    SettingType.UNKNOWN -> null
                 }
-                type == SettingType.INT && key == "min" -> min = integer(member, where, INT_MIN, INT_MAX)
-                type == SettingType.INT && key == "max" -> max = integer(member, where, INT_MIN, INT_MAX)
+                type == SettingType.INT && key == "min" -> min = integer(member, where, intMin, intMax)
+                type == SettingType.INT && key == "max" -> max = integer(member, where, intMin, intMax)
                 type == SettingType.INT && key == "unit" -> unit = text(member, where, ::isSettingUnit)
-                type == SettingType.TEXT && key == "maxLength" ->
-                    maxLength = integer(member, where, 1, ProtocolConstants.SETTINGS_MAX_VALUE_BYTES.toLong()).toInt()
-                type == SettingType.TEXT && key == "characters" -> anyCharacters =
-                    when ((member as? JsonPrimitive)?.takeIf { it.isString }?.content) {
-                        "safe" -> false
-                        "any" -> true
-                        else -> bad("$where must be one of: safe, any")
-                    }
-                type == SettingType.SELECT && key == "values" -> values = choices(member, where)
+                type == SettingType.TEXT && key == "maxLength" -> maxLength = integer(member, where, 1, maxLengthMax).toInt()
+                type == SettingType.TEXT && key == "characters" -> when {
+                    string == "safe" -> anyCharacters = false
+                    string == "any" -> anyCharacters = true
+                    string != null && lenient -> unknownCharacters = true
+                    else -> bad("$where must be one of: safe, any")
+                }
+                type == SettingType.SELECT && key == "values" -> values = choices(member, where, lenient)
             }
         }
 
@@ -395,7 +449,9 @@ object ManifestParser {
             }
             SettingType.TEXT -> {
                 val text = (default as? SettingValue.Text)?.value
-                if (text != null && !isSettingText(text, maxLength, anyCharacters)) bad("gives the setting $key a default it does not take")
+                if (text != null && !isSettingText(text, maxLength, anyCharacters, unknownCharacters)) {
+                    bad("gives the setting $key a default it does not take")
+                }
             }
             SettingType.SELECT -> {
                 if (values.map { it.value }.toSet().size != values.size) bad("gives the setting $key a value twice")
@@ -404,7 +460,7 @@ object ManifestParser {
                     bad("gives the setting $key a default that is not one of its values")
                 }
             }
-            SettingType.BOOL -> Unit
+            SettingType.BOOL, SettingType.UNKNOWN -> Unit
         }
         return SettingOption(
             key = key,
@@ -416,6 +472,7 @@ object ManifestParser {
             unit = unit,
             maxLength = maxLength,
             anyCharacters = anyCharacters,
+            unknownCharacters = unknownCharacters,
             values = values,
             default = default,
             unset = unset,
@@ -424,11 +481,11 @@ object ManifestParser {
         )
     }
 
-    /** A `select` option's `values`: 2 to 16, each open, with a `value` and a `label`. */
-    private fun choices(value: JsonElement, where: String): List<SettingChoice> {
+    /** A `select` option's `values`: 2 to 16 ([lenient]: 2 or more), each open, with a `value` and a `label`. */
+    private fun choices(value: JsonElement, where: String, lenient: Boolean): List<SettingChoice> {
         val array = value as? JsonArray ?: bad("$where must be an array")
         if (array.size < 2) bad("$where needs at least two values")
-        if (array.size > MAX_SETTING_VALUES) bad("$where has more than $MAX_SETTING_VALUES values")
+        if (!lenient && array.size > MAX_SETTING_VALUES) bad("$where has more than $MAX_SETTING_VALUES values")
         return array.mapIndexed { i, item ->
             val at = "$where[$i]"
             val obj = item as? JsonObject ?: bad("$at must be an object")
@@ -683,10 +740,12 @@ object ManifestParser {
 
     /**
      * Whether a `text` option takes [value]: 1 to [maxLength] bytes of UTF-8, of the safe set `A-Z a-z 0-9 . _ : / @ + , -`
-     * or, with [anyCharacters], with no control character and no space at its start or end.
+     * or, with [anyCharacters], with no control character and no space at its start or end. With [unknownCharacters],
+     * a rule of a later version, only that there is no control character: the rest is the agent's to check.
      */
-    fun isSettingText(value: String, maxLength: Int, anyCharacters: Boolean): Boolean {
+    fun isSettingText(value: String, maxLength: Int, anyCharacters: Boolean, unknownCharacters: Boolean = false): Boolean {
         if (value.isEmpty() || utf8Bytes(value) > maxLength) return false
+        if (unknownCharacters) return noControls(value)
         if (anyCharacters) return noControls(value) && !value.startsWith(' ') && !value.endsWith(' ')
         return value.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it in "._:/@+,-" }
     }

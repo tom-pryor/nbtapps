@@ -11,6 +11,7 @@ import com.nbtapps.store.data.jobs.FakeConnector
 import com.nbtapps.store.data.jobs.FakeSettings
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.packages.PackageStore
+import com.nbtapps.store.data.settings.FutureSettings
 import com.nbtapps.store.data.settings.SettingRules
 import com.nbtapps.store.data.settings.SettingsFailure
 import com.nbtapps.store.model.FreeSpace
@@ -35,6 +36,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -116,14 +120,14 @@ class SettingsViewModelTest {
         }
     }
 
-    private fun screen() = SettingsViewModel("car", "org.nbtapp.dial", jobs, headUnits).also { viewModels += it }
+    private fun screen(packageId: String = "org.nbtapp.dial") = SettingsViewModel("car", packageId, jobs, headUnits).also { viewModels += it }
 
     private suspend fun <T> await(flow: StateFlow<T>, what: String, predicate: (T) -> Boolean): T =
         withTimeoutOrNull(10_000) { flow.first(predicate) } ?: throw AssertionError("never came: $what; last was ${flow.value}")
 
-    private suspend fun loaded(): SettingsViewModel {
+    private suspend fun loaded(packageId: String = "org.nbtapp.dial"): SettingsViewModel {
         assertTrue(jobs.connect("car").isSuccess)
-        val viewModel = screen()
+        val viewModel = screen(packageId)
         await(viewModel.uiState, "the settings") { it.edit != null }
         return viewModel
     }
@@ -476,6 +480,84 @@ class SettingsViewModelTest {
         val stale = withTimeoutOrNull(1_000) { viewModel.uiState.first { it.row("DIAL_SPEED").input != "30" } }
         assertNull("the read from before the save is not taken", stale)
         assertEquals("Default: 10 °/s · 1 to 50", viewModel.uiState.value.row("DIAL_SPEED").meta)
+    }
+
+    @Test
+    fun `a reason for a refusal that the app does not know is shown with its code`() = test {
+        dial.faults["FACE"] = "too-cold"
+        val viewModel = loaded()
+        viewModel.set("FACE", "hex")
+        await(viewModel.uiState, "a change") { it.count == 1 }
+        viewModel.save()
+        val state = await(viewModel.uiState, "the refusal") { it.refused.isNotEmpty() && !it.saving }
+        assertEquals("The head unit refused this value (too-cold).", state.row("FACE").error)
+        assertEquals(1, state.count)
+    }
+
+    @Test
+    fun `options of a later version are shown, those the app cannot read only to be reset, and never sent`() = test {
+        val future = FakeSettings(FutureSettings.PACKAGE, FutureSettings.OPTIONS)
+        future.values["GLOW"] = "\"#0088ff\""
+        future.states["MODE"] = FutureSettings.MODE_STATE
+        connector.onConnect = { agent ->
+            agent.capabilities = """["settings"]"""
+            agent.installed = """[{"id":"${FutureSettings.PACKAGE}","name":"Future","version":"1.0.0","settings":true}]"""
+            agent.settings = future
+        }
+        val viewModel = loaded(FutureSettings.PACKAGE)
+        var state = viewModel.uiState.value
+        assertEquals(listOf("GLOW", "VOLUME", "CALL_SIGN", "BANNER", "OFFSET", "STATION", "MODE", "SOUND"), state.rows.map { it.key })
+        assertEquals(listOf("GLOW", "MODE", "SOUND"), state.rows.filter { it.readOnly }.map { it.key })
+
+        val glow = state.row("GLOW")
+        assertEquals("Set", glow.meta)
+        assertEquals("The colour of the dial's glow.", glow.description)
+        assertTrue(glow.canReset && glow.input.isEmpty() && glow.error == null)
+        val mode = state.row("MODE")
+        assertEquals("Can't be shown", mode.meta)
+        assertTrue(mode.canReset)
+        val sound = state.row("SOUND")
+        assertEquals("Not set", sound.meta)
+        assertFalse("nothing to reset", sound.canReset)
+        assertEquals("Takes effect later", state.row("VOLUME").takesEffect)
+        assertEquals("Not set · up to 1000 bytes", state.row("BANNER").meta)
+        assertEquals("Not set · -10000000000 to 10000000000", state.row("OFFSET").meta)
+        assertEquals(20, state.row("STATION").choices.size)
+
+        // A read-only row takes no value.
+        viewModel.set("GLOW", "#ffffff")
+        viewModel.set("MODE", SettingRules.ON)
+        // A rule of characters the app does not know: only control characters are refused here.
+        viewModel.set("CALL_SIGN", "Ä b")
+        viewModel.set("BANNER", "x".repeat(1000))
+        viewModel.set("OFFSET", "-9000000000")
+        viewModel.set("STATION", "s17")
+        viewModel.set("VOLUME", "7")
+        state = await(viewModel.uiState, "five changes") { it.count == 5 }
+        assertTrue(state.canSave)
+        assertFalse(state.row("GLOW").changed || state.row("MODE").changed)
+        viewModel.set("CALL_SIGN", "a\tb")
+        state = await(viewModel.uiState, "a control character") { it.row("CALL_SIGN").error != null }
+        assertEquals("Some of these characters aren't allowed", state.row("CALL_SIGN").error)
+        viewModel.set("CALL_SIGN", "Ä b")
+
+        // Reset is offered on them, and sent.
+        viewModel.reset("GLOW")
+        viewModel.reset("MODE")
+        state = await(viewModel.uiState, "seven changes") { it.count == 7 }
+        assertEquals("Changed · back to not set", state.row("GLOW").meta)
+        assertFalse(state.row("GLOW").canReset)
+        viewModel.save()
+        state = await(viewModel.uiState, "the saved card") { it.saved != null && !it.saving }
+        val sent = future.sets.single()
+        assertEquals(setOf("VOLUME", "CALL_SIGN", "BANNER", "OFFSET", "STATION"), sent.getValue("set").jsonObject.keys)
+        assertEquals(listOf("GLOW", "MODE"), sent.getValue("reset").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals("1 change takes effect later.", state.saved!!.map { savedLine(it, "Future") }.last())
+        assertEquals(SavedGroup(SettingApplies.REBOOT, 1), state.saved!!.first { it.applies == SettingApplies.REBOOT })
+        // MODE, not set now, is a switch this app knows.
+        state = await(viewModel.uiState, "the settings read again") { !it.row("MODE").readOnly }
+        assertTrue(state.row("GLOW").readOnly)
+        assertEquals("Not set", state.row("GLOW").meta)
     }
 
     @Test

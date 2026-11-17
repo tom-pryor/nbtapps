@@ -56,6 +56,9 @@ class FakeSettings(
     /** The raw text of each option set by hand to a value its type does not take. */
     val byHand = ConcurrentHashMap<String, String>()
 
+    /** A `state` to send for an option in place of the one it has, such as one of a later version. */
+    val states = ConcurrentHashMap<String, String>()
+
     /** How many options one answer of `settings.get` holds at most. Null for all of them. */
     @Volatile
     var pageSize: Int? = null
@@ -88,7 +91,8 @@ class FakeSettings(
         val next = (from + page.size).takeIf { it < options.size }?.let { ""","next":$it""" }.orEmpty()
         return page.joinToString(",", """{"options":[""", "]$next}") { option ->
             val key = key(option)
-            val state = values[key]?.let { ""","state":"set","value":$it""" }
+            val state = states[key]?.let { ""","state":"$it"""" }
+                ?: values[key]?.let { ""","state":"set","value":$it""" }
                 ?: byHand[key]?.let { ""","state":"by-hand","raw":"$it"""" }
                 ?: ""","state":"unset""""
             option.trimEnd().removeSuffix("}") + state + "}"
@@ -112,10 +116,12 @@ class FakeSettings(
         for ((key, value) in set) {
             values[key] = value.toString()
             byHand.remove(key)
+            states.remove(key)
         }
         for (key in reset) {
             values.remove(key)
             byHand.remove(key)
+            states.remove(key)
         }
         return "{}"
     }
