@@ -1675,6 +1675,45 @@ static void testPlan() {
     planOk(f, q, kRuntime, "", kRuntime);
 }
 
+// requires.agent is read before the rest of an offered manifest. hello 1.2.0 (requires.agent >=1.0.0) with settings
+// this agent refuses stands in for a package of a later format: an agent the range leaves out plans it as
+// agent-too-old, not bad-manifest, and one the range takes still refuses it.
+static void testPlanForLaterAgent() {
+    Pkg later;
+    later.bytes = testutil::readFile(gData + "/bad/settings-applies-unknown.nbtpkg");
+    {
+        // What a phone offers of it, read as nbtctl reads it.
+        std::vector<TrustedKey> keys(1, gPackageKey);
+        MemorySource source(later.bytes.data(), later.bytes.size());
+        Package package;
+        Error error;
+        CHECK_IN(error.message, !package.open(&source, keys, std::string(), "0.9.0", &error) && error.code == "agent-too-old");
+        later.id = "org.nbtapp.hello";
+        later.version = "1.2.0";
+        later.sha256 = package.sha256();
+        later.size = package.size();
+        later.manifestSha256 = package.manifestSha256();
+        later.manifest = package.manifestBytes();
+        later.signature = toHex((const uint8_t*)package.signatureBytes().data(), package.signatureBytes().size());
+    }
+    std::string params = "{\"install\":[{\"id\":\"org.nbtapp.hello\",\"version\":\"1.2.0\"}],\"offers\":[" + offer(later) + "," +
+                         offer(pkg(kRuntime)) + "]}";
+
+    Bench old("plan-later-old", false, false, "0.9.0");
+    Phone* p = old.phone();
+    p->blobs[later.manifestSha256] = later.manifest;
+    std::string text = old.call(p, "job.plan", params);
+    planRefused(old, p, params, "agent-too-old", "org.nbtapp.hello");
+    CHECK_IN(text, has(text, "needs agent >=1.0.0; this is 0.9.0"));
+    // It fetched the manifest and nothing else.
+    CHECK(!p->fetches.empty() && p->fetches.back() == later.manifestSha256 + " 0 -");
+
+    Bench taken("plan-later-taken");
+    Phone* q = taken.phone();
+    q->blobs[later.manifestSha256] = later.manifest;
+    planRefused(taken, q, params, "bad-manifest", "org.nbtapp.hello");
+}
+
 // ---- a job from start to end --------------------------------------------------------------------------------------
 
 static void testJob() {
@@ -4053,6 +4092,7 @@ int main(int argc, char** argv) {
     testLinkClosing();
     testInfo();
     testPlan();
+    testPlanForLaterAgent();
     testJob();
     testJobFails();
     testHookOutput();

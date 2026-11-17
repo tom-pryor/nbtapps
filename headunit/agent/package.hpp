@@ -16,6 +16,7 @@
 //      with a key of their own, that signature is the one checked. manifest.sig is then not read: it may be
 //      missing or signed by any key, and only has to be the second entry if it is there.
 //   4. the manifest itself, see manifest.hpp                               bad-manifest, unsupported-manifest
+//      and, opened for an agent of a version a requires.agent leaves out, first        agent-too-old
 //   5. the files are exactly the ones `contents` lists, with those sizes and hashes        bad-archive
 //
 // The signature is checked before the manifest is parsed, so only authenticated bytes reach the JSON parser.
@@ -85,6 +86,12 @@ public:
     // The same with a detached signature over the manifest (64 bytes), checked instead of manifest.sig. An empty
     // `signature` is the same as the call above.
     bool open(ByteSource* source, const std::vector<TrustedKey>& keys, const std::string& signature, Error* error);
+    // The same for the agent of version `agentVersion` that is to install the package: a manifest whose
+    // requires.agent leaves that version out is refused with agent-too-old before the rest of it is read (see
+    // parseManifest). An empty `agentVersion` is the call above. After that refusal, manifestBytes(),
+    // signatureBytes(), sha256(), size() and manifestSha256() are what they would be, and manifest() is not.
+    bool open(ByteSource* source, const std::vector<TrustedKey>& keys, const std::string& signature,
+              const std::string& agentVersion, Error* error);
 
     const Manifest& manifest() const { return manifest_; }
     const std::string& manifestBytes() const { return manifestBytes_; }     // as signed

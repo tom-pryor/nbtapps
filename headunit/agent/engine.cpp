@@ -930,7 +930,7 @@ StepReport InstallStep::run(const std::string& archivePath, const std::string& e
                 break;
             }
         }
-        if (!package_.open(&source_, engine_->keys_, signature, &report_.error)) break;
+        if (!package_.open(&source_, engine_->keys_, signature, engine_->agentVersion_, &report_.error)) break;
         report_.id = m().id;
         report_.version = m().version;
         if (!expectedManifestSha256.empty() && expectedManifestSha256 != package_.manifestSha256()) {

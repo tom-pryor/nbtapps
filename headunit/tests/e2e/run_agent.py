@@ -10,7 +10,8 @@ The agent runs on a folder that stands in for a head unit and trusts the test ke
 is handed the head unit's folder, the socket's folder and the key, and nothing else of this machine. nbtctl is BIN's,
 runs here, and reaches the agent through the socket. It plays the phone: it offers
 the packages of a folder (the "stick") and serves them when the agent asks. The script drives a plan, an install
-with a dependency, an upgrade, an upgrade that fails and is undone, a fetch that the controller cancels, a fetch
+with a dependency, an upgrade, an upgrade that fails and is undone, a package for a later agent whose settings
+this agent does not read (agent-too-old, not bad-manifest), a fetch that the controller cancels, a fetch
 whose link drops and is resumed, removals, the logs of a package pulled (`nbtctl logs` and `nbtctl pull`, and once
 read off the local socket here, with Python's own inflate), a package's settings listed, set, set by hand and taken
 out again (`nbtctl settings`, `set` and `unset`), the checks of what was put on by hand and the fix of a
@@ -38,6 +39,7 @@ SOCKET_DIR = tempfile.mkdtemp(prefix="nbt_e2e_")
 SOCKET = os.path.join(SOCKET_DIR, "agent.sock")
 STICK = os.path.join(WORK, "stick")
 STICK2 = os.path.join(WORK, "stick2")
+STICK3 = os.path.join(WORK, "stick3")
 BULK_BYTES = 2500000
 BENCH = [sys.executable, os.path.join(ROOT, "tools", "bench.py"), "agent"]
 IMAGE = os.environ.get("NBT_BENCH_IMAGE", "nbtapp-bench")    # as tools/bench.py names it
@@ -295,6 +297,27 @@ def make_bulk():
     return sha256_of(os.path.join(source, "payload", "bulk.bin"))
 
 
+def make_later():
+    """hello 1.4.0 as a package of a later format might be: settings with an `applies` this agent does not know,
+    behind a requires.agent this agent is too old for. nbtpkg.py would not build it, so it is made from hello 1.2.0
+    here and signed with the test key."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import nbtpkg
+    with open(os.path.join(DATA, "good", "org.nbtapp.hello-1.2.0.nbtpkg"), "rb") as f:
+        entries = nbtpkg.read_zip(f.read())
+    manifest = json.loads(entries[0]["data"])
+    manifest["version"] = "1.4.0"
+    manifest["requires"] = {"agent": ">=99.0.0"}
+    manifest["settings"] = {"options": [{"key": "GLOW", "label": "Glow", "type": "bool", "applies": "next-drive"}]}
+    text = (json.dumps(manifest, indent=2) + "\n").encode()
+    seed = nbtpkg.read_key(os.path.join(ROOT, "tests", "keys", "test-package.key"))
+    members = [{"name": e["name_bytes"], "method": e["method"], "crc": e["crc"], "usize": e["usize"], "raw": e["raw"],
+                "flags": e["flags"]} for e in entries[2:]]
+    with open(os.path.join(STICK3, "org.nbtapp.hello-1.4.0.nbtpkg"), "wb") as f:
+        f.write(nbtpkg.write_zip([nbtpkg.make_member(nbtpkg.MANIFEST, text),
+                                  nbtpkg.make_member(nbtpkg.SIGNATURE, nbtpkg.sign(seed, text), store=True)] + members))
+
+
 def pull_here(package, path):
     """files.fetch over the local socket, read with a frame codec and an inflate that are not the agent's, in frames
     of 4,096 bytes: returns (the reply's result, the bytes the stream inflates to, the number of DATA frames)."""
@@ -347,6 +370,8 @@ def run():
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(STICK)
     os.makedirs(STICK2)
+    os.makedirs(STICK3)
+    make_later()
     for name in ("org.nbtapp.runtime-2.1.0", "org.nbtapp.hello-1.1.0", "org.nbtapp.hello-1.2.0"):
         shutil.copy(os.path.join(DATA, "good", name + ".nbtpkg"), STICK)
     shutil.copy(os.path.join(DATA, "good", "org.nbtapp.hello-1.3.0.nbtpkg"), STICK2)
@@ -422,6 +447,12 @@ def run():
         check(code == 1 and "job failed" in out and "hook-failed" in out, "a failing upgrade", out)
         check("skipped signature-flipped.nbtpkg: bad-signature" in out, "a package with a bad signature", out)
         check("org.nbtapp.hello 1.2.0 runs-scripts" in installed(), "the failed upgrade was not undone")
+
+        # ---- a package of a later format, for a later agent: offered all the same, and planned as agent-too-old
+        code, out = ctl("install", "--from", STICK3, "org.nbtapp.hello")
+        check(code == 1 and "problem: agent-too-old org.nbtapp.hello: needs agent >=99.0.0; this is %s" % VERSION in out
+              and "skipped" not in out and "job " not in out, "a package that needs a later agent", out)
+        check("org.nbtapp.hello 1.2.0 runs-scripts" in installed(), "a package for a later agent changed something")
 
         # ---- the controller stops a fetch part-way
         code, out = ctl("install", "--from", STICK, "org.nbtapp.bulk", "--cancel-after", "1500000")

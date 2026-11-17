@@ -167,6 +167,10 @@ public:
             fprintf(stderr, "nbtctl: the agent refused hello: %s: %s\n", reply.code.c_str(), reply.message.c_str());
             return false;
         }
+        json::Document doc;
+        if (doc.parse(reply.text, 0) && doc.root().find("agentVersion").isString()) {
+            agentVersion_ = doc.root().find("agentVersion").string();
+        }
         return true;
     }
 
@@ -252,7 +256,9 @@ public:
     const std::string& pairingClosed() const { return pairingClosed_; }
 
     // Reads the folder's packages. One that the agent's keys do not verify is left out, with a remark: the agent
-    // would refuse it anyway.
+    // would refuse it anyway. Each is read for the agent this is linked to, and one that needs a later agent is
+    // offered all the same, with the id and version its manifest names, even where the rest of its manifest has a
+    // format only that later agent reads: the agent's plan then says agent-too-old, as it does for any such package.
     bool scan(const std::string& dir, const std::vector<TrustedKey>& keys) {
         std::vector<std::string> names;
         std::string why;
@@ -270,14 +276,29 @@ public:
                 fprintf(stderr, "nbtctl: skipped %s: %s\n", name.c_str(), why.c_str());
                 continue;
             }
-            if (!package.open(&source, keys, &error)) {
-                fprintf(stderr, "nbtctl: skipped %s: %s: %s\n", name.c_str(), error.code.c_str(), error.message.c_str());
-                continue;
+            bool tooOld = false;
+            if (!package.open(&source, keys, std::string(), agentVersion_, &error)) {
+                tooOld = error.code == "agent-too-old";
+                if (!tooOld) {
+                    fprintf(stderr, "nbtctl: skipped %s: %s: %s\n", name.c_str(), error.code.c_str(), error.message.c_str());
+                    continue;
+                }
             }
             Archive a;
             a.path = dir + "/" + name;
-            a.id = package.manifest().id;
-            a.version = package.manifest().version;
+            if (tooOld) {
+                json::Document doc;
+                doc.parse(package.manifestBytes(), 0);
+                a.id = doc.root().find("id").isString() ? doc.root().find("id").string() : std::string();
+                a.version = doc.root().find("version").isString() ? doc.root().find("version").string() : std::string();
+                if (!validPackageId(a.id) || !validVersion(a.version)) {
+                    fprintf(stderr, "nbtctl: skipped %s: %s: %s\n", name.c_str(), error.code.c_str(), error.message.c_str());
+                    continue;
+                }
+            } else {
+                a.id = package.manifest().id;
+                a.version = package.manifest().version;
+            }
             a.sha256 = package.sha256();
             a.size = package.size();
             a.manifestSha256 = package.manifestSha256();
@@ -537,6 +558,7 @@ public:
 
 private:
     Peer* peer_;
+    std::string agentVersion_;   // from the agent's hello
     std::map<int64_t, Reply> replies_;
     std::vector<Archive> archives_;
 

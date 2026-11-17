@@ -294,6 +294,11 @@ bool Package::open(ByteSource* source, const std::vector<TrustedKey>& keys, Erro
 }
 
 bool Package::open(ByteSource* source, const std::vector<TrustedKey>& keys, const std::string& signature, Error* error) {
+    return open(source, keys, signature, std::string(), error);
+}
+
+bool Package::open(ByteSource* source, const std::vector<TrustedKey>& keys, const std::string& signature,
+                   const std::string& agentVersion, Error* error) {
     source_ = source;
     size_ = source->size();
     entries_.clear();
@@ -350,8 +355,9 @@ bool Package::open(ByteSource* source, const std::vector<TrustedKey>& keys, cons
     if (keyIndex_ < 0) return error->fail("bad-signature", "no trusted key verifies the signature");
 
     // 4. The manifest.
-    if (!parseManifest(manifestBytes_.data(), manifestBytes_.size(), &manifest_, error)) return false;
+    // Its hash first, which a refusal as agent-too-old still offers on.
     manifestSha256_ = toHex(entries_[0].sha256, kSha256Bytes);
+    if (!parseManifest(manifestBytes_.data(), manifestBytes_.size(), &manifest_, error, agentVersion)) return false;
 
     // 5. The files are exactly the ones the manifest lists.
     for (size_t i = hasSig ? 2 : 1; i < entries_.size(); ++i) {

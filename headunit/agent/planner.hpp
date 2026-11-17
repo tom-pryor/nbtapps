@@ -13,6 +13,8 @@
 //   1. each install target needs an offer with its id and version               no-offer
 //      and that offer's manifest: fetched, hashed, its signature checked against the trusted keys, parsed
 //                                    fetch-failed, bad-signature, bad-manifest, unsupported-manifest, offer-mismatch
+//      (a requires.agent that leaves this agent out is read first, so a manifest of a later format behind it is
+//      agent-too-old rather than bad-manifest)
 //   2. a dependency that no installed package will satisfy is taken from the offers: the highest offered version
 //      in range, whose manifest is fetched and checked the same way. With no such offer it is listed as missing
 //   3. removals come first, a package before the ones it depends on              not-installed, required-by
@@ -85,9 +87,10 @@ struct OfferedManifest {
 };
 
 // Checks the bytes fetched for an offer's manifestSha256: their hash, the offer's signature over them, and the
-// manifest itself. The offer's id and version are compared later, by the planner.
+// manifest itself, for the agent of version `agentVersion`: one whose requires.agent leaves that out is agent-too-old
+// before the rest of it is read (see parseManifest). The offer's id and version are compared later, by the planner.
 void checkOfferedManifest(const Offer& offer, const std::string& bytes, const std::vector<TrustedKey>& keys,
-                          OfferedManifest* out);
+                          const std::string& agentVersion, OfferedManifest* out);
 
 struct PlanStep {
     std::string action;             // "install", "upgrade" or "remove"

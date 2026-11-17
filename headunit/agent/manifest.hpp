@@ -152,6 +152,14 @@ struct Manifest {
 // bad-manifest or unsupported-manifest; *out is then unspecified.
 bool parseManifest(const void* data, size_t len, Manifest* out, Error* error);
 
+// The same for the agent that is to install the package, of version `agentVersion`: between steps 2 and 3, a
+// requires.agent that is a range `agentVersion` is outside is refused with agent-too-old, before anything else of
+// the manifest is read. A later agent may take a later format of the manifest (of settings, say) behind
+// requires.agent, which this one would otherwise refuse as bad-manifest, where updating the agent is all it takes.
+// Only requires.agent is read early: a requires that is not an object, or an agent that is not a range, is left to
+// step 3. An empty `agentVersion` is the call above.
+bool parseManifest(const void* data, size_t len, Manifest* out, Error* error, const std::string& agentVersion);
+
 // The flags shown before an install (runs-scripts, modifies-system, needs-reboot), worked out from the manifest
 // so that a source cannot understate them.
 std::vector<std::string> riskFlags(const Manifest& manifest);

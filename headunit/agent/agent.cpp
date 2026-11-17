@@ -1799,7 +1799,7 @@ void Agent::endFetch(bool ok, std::string code, std::string message) {
         const Offer& offer = building_->request.offers[building_->offer];
         OfferedManifest& into = building_->fetched[offer.manifestSha256];
         if (ok) {
-            checkOfferedManifest(offer, building_->bytes, keys_, &into);
+            checkOfferedManifest(offer, building_->bytes, keys_, agentVersion_, &into);
         } else {
             into = OfferedManifest();
             into.error.fail(code == "bad-manifest" ? "bad-manifest" : "fetch-failed", message);

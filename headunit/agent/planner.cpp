@@ -200,7 +200,7 @@ bool parsePlanRequest(const json::Value& params, PlanRequest* out, std::string* 
 }
 
 void checkOfferedManifest(const Offer& offer, const std::string& bytes, const std::vector<TrustedKey>& keys,
-                          OfferedManifest* out) {
+                          const std::string& agentVersion, OfferedManifest* out) {
     *out = OfferedManifest();
     uint8_t digest[kSha256Bytes];
     sha256(bytes.data(), bytes.size(), digest);
@@ -220,7 +220,7 @@ void checkOfferedManifest(const Offer& offer, const std::string& bytes, const st
         out->error.fail("bad-signature", "no key the agent trusts verifies the manifest's signature");
         return;
     }
-    if (!parseManifest(bytes.data(), bytes.size(), &out->manifest, &out->error)) return;
+    if (!parseManifest(bytes.data(), bytes.size(), &out->manifest, &out->error, agentVersion)) return;
     out->keyHex = toHex(keys[(size_t)key].key, sizeof keys[(size_t)key].key);
     out->keyEmbedded = keys[(size_t)key].embedded;
 }

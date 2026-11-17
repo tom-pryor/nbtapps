@@ -751,6 +751,13 @@ static void testKeysAndChecks() {
         refused(pre.engine.install(good("org.nbtapp.runtime-2.1.0"), "", 0), "agent-too-old");
         Bench newer("agent-new", keys(), false, "2.3.4");
         installDone(newer, "org.nbtapp.runtime-2.1.0");
+        // requires.agent is read before the rest of the manifest: an agent it leaves out says agent-too-old of a
+        // manifest whose settings it would otherwise refuse, as it would those of a later format; one it takes
+        // still refuses them.
+        Snapshot before = snap(old);
+        refused(old.engine.install(bad("settings-applies-unknown"), "", 0), "agent-too-old");
+        CHECK(same(snap(old), before));
+        refused(newer.engine.install(bad("settings-applies-unknown"), "", 0), "bad-manifest");
     }
     {
         // Not enough room: refused before anything is written outside staging.

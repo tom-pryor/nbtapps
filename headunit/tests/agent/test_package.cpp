@@ -142,7 +142,41 @@ int main(int argc, char** argv) {
                  code == v.find("code").string());
     }
 
-    // 2a. A log in a folder this agent does not know: the package is taken, and the entry kept, never listed.
+    // 2a. Opened for an agent that the manifest's requires.agent (hello's: >=1.0.0) leaves out, a package whose
+    // settings break this agent's rules, as a later format's would, is agent-too-old, not bad-manifest; and what an
+    // offer of it carries is there all the same. For an agent the range takes, it is bad-manifest as before.
+    size_t later = 0;
+    for (size_t i = 0; i < bad.size(); ++i) {
+        std::string file = bad.at(i).find("file").string();
+        if (file.compare(0, 13, "bad/settings-") != 0) continue;
+        ++later;
+        std::string data = readFile(dir + "/" + file);
+        MemorySource source(data.data(), data.size());
+        Package package;
+        Error error;
+        CHECK_IN(file, !package.open(&source, packageOnly, std::string(), "0.9.0", &error) && error.code == "agent-too-old");
+        CHECK_IN(file + ": " + error.message, error.message == "needs agent >=1.0.0; this is 0.9.0");
+        CHECK_IN(file, package.sha256() == hashOf(data) && package.size() == data.size());
+        CHECK_IN(file, package.manifestSha256() == hashOf(package.manifestBytes()) && package.signatureBytes().size() == 64);
+        MemorySource again(data.data(), data.size());
+        Package taken;
+        Error refused;
+        CHECK_IN(file, !taken.open(&again, packageOnly, std::string(), "1.0.0", &refused) && refused.code == "bad-manifest");
+    }
+    CHECK(later >= 50);
+    // Not before the signature: a package no trusted key signed is that, whatever agent it is for.
+    {
+        MemorySource source(hello.data(), hello.size());
+        Package package;
+        Error wrongKey, tooOld, none;
+        CHECK(!package.open(&source, otherOnly, std::string(), "0.9.0", &wrongKey) && wrongKey.code == "bad-signature");
+        MemorySource again(hello.data(), hello.size());
+        CHECK(!package.open(&again, packageOnly, std::string(), "0.9.0", &tooOld) && tooOld.code == "agent-too-old");
+        MemorySource third(hello.data(), hello.size());
+        CHECK(package.open(&third, packageOnly, std::string(), "1.0.0", &none));
+    }
+
+    // 2b. A log in a folder this agent does not know: the package is taken, and the entry kept, never listed.
     json::Value skipped = root.find("skipped");
     CHECK(skipped.size() >= 3);
     for (size_t i = 0; i < skipped.size(); ++i) {
@@ -157,7 +191,7 @@ int main(int argc, char** argv) {
         CHECK_IN(file, m.logs.size() == 2 && validLogPath(m.logs[0]) && logPathForm(m.logs[1]) == kLogPathSkip);
     }
 
-    // 2b. Detached signatures: the one given is checked, and manifest.sig is not read.
+    // 2c. Detached signatures: the one given is checked, and manifest.sig is not read.
     json::Value detached = root.find("detached");
     CHECK(detached.size() >= 7);
     for (size_t i = 0; i < detached.size(); ++i) {

@@ -585,6 +585,41 @@ int main() {
     std::string large = "{\"manifestVersion\":1,\"pad\":\"" + std::string(kMaxManifestBytes, 'x') + "\"}";
     assert(code(large) == bad);
 
+    // 14. Read for an agent of a version: a requires.agent that leaves it out is agent-too-old before anything else
+    // of the manifest is read, so that a later format behind it is not called bad by an agent that is too old for it.
+    {
+        struct For {
+            static std::string code(const std::string& text, const char* agentVersion) {
+                Manifest m;
+                Error error;
+                bool ok = parseManifest(text.data(), text.size(), &m, &error, agentVersion);
+                assert(ok == error.code.empty() && (ok || !error.message.empty()));
+                return error.code;
+            }
+        };
+        // A key this agent does not know in requires, and settings of a later format.
+        const std::string later = make(kHead + std::string("\"requires\":{\"later\":true,\"agent\":\">=2.0.0\"},"
+                                       "\"settings\":{\"options\":[{\"key\":\"LAMP\",\"label\":\"Lamp\",\"type\":\"bool\",\"applies\":\"later\"}]},"),
+                                       "", "");
+        assert(For::code(later, "1.9.9") == "agent-too-old");
+        assert(For::code(later, "2.0.0-rc.1") == "agent-too-old");   // a pre-release is older than its release
+        Manifest m;
+        Error error;
+        assert(!parseManifest(later.data(), later.size(), &m, &error, "1.4.1") && error.message == "needs agent >=2.0.0; this is 1.4.1");
+        // An agent the range takes, or none, reads the rest as ever.
+        assert(For::code(later, "2.0.0") == unsupported && For::code(later, "") == unsupported && code(later) == unsupported);
+        // Only a requires.agent that is a range is read early; whatever else is wrong is the walk's to say.
+        assert(For::code(make(kHead + std::string("\"requires\":{\"agent\":\">=2.0\"},"), "", ""), "1.0.0") == bad);
+        assert(For::code(make(kHead + std::string("\"requires\":{\"agent\":2},"), "", ""), "1.0.0") == bad);
+        assert(For::code(make(kHead + std::string("\"requires\":[\">=2.0.0\"],"), "", ""), "1.0.0") == bad);
+        assert(For::code(make(kHead + std::string("\"requires\":{\"agent\":\">=1.0.0\"},"), "", ""), "1.0.0") == "");
+        assert(For::code(make(kHead, "", ""), "0.0.1") == "");
+        // Not before the JSON profile and manifestVersion.
+        assert(For::code("{\"manifestVersion\":2,\"requires\":{\"agent\":\">=2.0.0\"}}", "1.0.0") == unsupported);
+        assert(For::code("{\"manifestVersion\":1,\"requires\":{\"agent\":\">=2.0.0\",\"agent\":\">=2.0.0\"}}", "1.0.0") == bad);
+        assert(For::code("[1]", "1.0.0") == bad);
+    }
+
     printf("test_manifest: ok\n");
     return 0;
 }

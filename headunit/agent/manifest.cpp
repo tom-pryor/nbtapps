@@ -925,6 +925,10 @@ bool validSettingText(const std::string& value, size_t maxLength, bool anyCharac
 }
 
 bool parseManifest(const void* data, size_t len, Manifest* out, Error* error) {
+    return parseManifest(data, len, out, error, std::string());
+}
+
+bool parseManifest(const void* data, size_t len, Manifest* out, Error* error, const std::string& agentVersion) {
     if (len > kMaxManifestBytes) return error->fail("bad-manifest", "manifest is larger than 1 MiB");
     json::Document doc;
     std::string why;
@@ -934,6 +938,14 @@ bool parseManifest(const void* data, size_t len, Manifest* out, Error* error) {
     if (!version.isInteger()) return error->fail("bad-manifest", "manifest has no integer manifestVersion");
     if (version.integer() != kManifestVersion) {
         return error->fail("unsupported-manifest", "this manifestVersion is not supported");
+    }
+    if (!agentVersion.empty()) {
+        // As engine.cpp's checkInstall says it, which says it again of a manifest this check lets through.
+        Value needs = doc.root().find("requires");
+        Value range = needs.isObject() ? needs.find("agent") : Value();
+        if (range.isString() && isRange(range.string()) && !versionInRange(agentVersion, range.string())) {
+            return error->fail("agent-too-old", "needs agent " + range.string() + "; this is " + agentVersion);
+        }
     }
 
     *out = Manifest();
