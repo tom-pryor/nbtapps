@@ -1,0 +1,172 @@
+# The value rules of package settings (see the plan document, "Message reference", Settings, and the agent's
+# agent/settings.hpp): how a value that stands in a package's settings file reads, and what a value a phone
+# sends with settings.set is written as, or refused with. Every implementation must agree with every line: the
+# agent (tests/agent/test_settings.cpp) and the Android app's checks before it saves.
+#
+#   option JSON                   an option, as a manifest's settings.options has it. A reader puts it into a
+#                                 manifest of its own and reads it as it reads any; the cases name it by its key
+#   read KEY =TEXT set JSON       the line KEY=TEXT in the file: the type takes it, and settings.get gives the
+#                                 state set and JSON as the value
+#   read KEY =TEXT by-hand =RAW   the type does not take it: settings.get gives the state by-hand and RAW as raw
+#   write KEY =TEXT JSON          settings.set with JSON as the key's value: the agent writes the line KEY=TEXT
+#   write KEY REASON JSON         settings.set with JSON as the key's value: refused, the key's reason is REASON
+#
+# TEXT and RAW are bytes. A byte from ! to ~ (0x21 to 0x7E) stands for itself, but for %; every other byte is
+# %HH, its value in hex. A bare = is no bytes at all. RAW is the text after the cut to 200 bytes and the repair
+# of what is not UTF-8, as UTF-8. JSON is the rest of the line, one JSON value (a reader that takes only
+# objects reads {"v": JSON}); a string in it compares by its characters, whatever the escapes. Lines that start
+# with # and empty lines say nothing.
+#
+# The rules the cases hold to:
+#   bool    reads 1, on, yes, true as true and 0, off, no, false as false, in any case; writes 1 or 0
+#   int     reads -?[0-9]+ inside min..max, leading zeros too; writes its decimal digits
+#   text    reads and takes valid UTF-8 of 1 to maxLength bytes: of the safe set A-Z a-z 0-9 . _ : / @ + , -, or
+#           with characters "any", with no control character (U+0000 to U+001F, U+007F) and no space at
+#           either end. A text that is both too long and of characters the rule refuses is too-long; an empty
+#           one is bad-characters
+#   select  reads and takes one of the option's values exactly
+#   raw     a value that is not taken is given as it stands, cut to its first 200 bytes (not into the middle
+#           of a character: the cut moves back to where that character starts), with every byte that is not
+#           part of well-formed UTF-8 as U+FFFD
+#
+# The reasons: wrong-type (not a boolean, an integer, a string as the type has it), out-of-range, too-long,
+# bad-characters, not-a-choice. unknown-key, for a key the manifest has no option for, needs no option and is
+# not here.
+
+option {"key":"B","label":"A bool","type":"bool"}
+option {"key":"N","label":"An int","type":"int","min":-5,"max":100}
+option {"key":"WIDE","label":"The widest int","type":"int","min":-2147483648,"max":2147483647}
+option {"key":"T","label":"A text of the safe set","type":"text","maxLength":8}
+option {"key":"TA","label":"A text of any characters","type":"text","maxLength":8,"characters":"any"}
+option {"key":"S","label":"A select","type":"select","values":[{"value":"round","label":"Round"},{"value":"Square.2","label":"Square"}]}
+option {"key":"LONG","label":"The longest text","type":"text","maxLength":255,"characters":"any"}
+
+# ---- bool
+read B =1 set true
+read B =on set true
+read B =ON set true
+read B =Yes set true
+read B =TRUE set true
+read B =0 set false
+read B =off set false
+read B =No set false
+read B =fAlsE set false
+read B = by-hand =
+read B =2 by-hand =2
+read B =y by-hand =y
+read B =enabled by-hand =enabled
+read B =%20on by-hand =%20on
+read B =on%20 by-hand =on%20
+read B ="1" by-hand ="1"
+write B =1 true
+write B =0 false
+write B wrong-type 1
+write B wrong-type "true"
+write B wrong-type null
+
+# ---- int
+read N =0 set 0
+read N =100 set 100
+read N =-5 set -5
+read N =007 set 7
+read N =-0 set 0
+read N =-005 set -5
+read N =101 by-hand =101
+read N =-6 by-hand =-6
+read N =+5 by-hand =+5
+read N =5.0 by-hand =5.0
+read N =1e2 by-hand =1e2
+read N =0x10 by-hand =0x10
+read N =%205 by-hand =%205
+read N =- by-hand =-
+read N = by-hand =
+read N =99999999999999999999999999 by-hand =99999999999999999999999999
+read N =-99999999999999999999999999 by-hand =-99999999999999999999999999
+read WIDE =2147483647 set 2147483647
+read WIDE =-2147483648 set -2147483648
+read WIDE =2147483648 by-hand =2147483648
+read WIDE =-2147483649 by-hand =-2147483649
+write N =0 0
+write N =-5 -5
+write N =100 100
+write N out-of-range 101
+write N out-of-range -6
+write N wrong-type "5"
+write N wrong-type true
+write N wrong-type [5]
+write WIDE =-2147483648 -2147483648
+write WIDE =2147483647 2147483647
+write WIDE out-of-range 2147483648
+write WIDE out-of-range -9007199254740991
+
+# ---- text of the safe set
+read T =abc-1.2 set "abc-1.2"
+read T =a:b/@+,_ set "a:b/@+,_"
+read T =12345678 set "12345678"
+read T =123456789 by-hand =123456789
+read T = by-hand =
+read T =a%20b by-hand =a%20b
+read T =a=b by-hand =a=b
+read T =a#b by-hand =a#b
+read T =%C3%A9 by-hand =%C3%A9
+write T =abc-1.2 "abc-1.2"
+write T =12345678 "12345678"
+write T too-long "123456789"
+write T too-long "a b c d e"
+write T bad-characters ""
+write T bad-characters "a b"
+write T bad-characters "a=b"
+write T bad-characters "é"
+write T wrong-type 5
+write T wrong-type false
+
+# ---- text of any characters
+read TA =a%20b set "a b"
+read TA =%C3%A9t%C3%A9 set "été"
+read TA =%C3%A9%C3%A9%C3%A9%C3%A9 set "éééé"
+read TA =%22a\b%22 set "\"a\\b\""
+read TA =#x=y set "#x=y"
+read TA =%20a by-hand =%20a
+read TA =a%20 by-hand =a%20
+read TA =a%09b by-hand =a%09b
+read TA =a%7Fb by-hand =a%7Fb
+read TA =%E2%82%AC%E2%82%AC%E2%82%AC by-hand =%E2%82%AC%E2%82%AC%E2%82%AC
+read TA =%FF by-hand =%EF%BF%BD
+read TA =a%C3 by-hand =a%EF%BF%BD
+read TA =%ED%A0%80 by-hand =%EF%BF%BD%EF%BF%BD%EF%BF%BD
+write TA =a%20b "a b"
+write TA =%C3%A9t%C3%A9 "été"
+write TA =%22a\b%22 "\"a\\b\""
+write TA =#x=y "#x=y"
+write TA bad-characters " a"
+write TA bad-characters "a "
+write TA bad-characters "a\tb"
+write TA bad-characters "a\u007fb"
+write TA bad-characters "\n"
+write TA bad-characters ""
+write TA too-long "€€€"
+write TA too-long "123456789"
+
+# ---- select
+read S =round set "round"
+read S =Square.2 set "Square.2"
+read S =Round by-hand =Round
+read S =round%20 by-hand =round%20
+read S = by-hand =
+write S =round "round"
+write S =Square.2 "Square.2"
+write S not-a-choice "Round"
+write S not-a-choice "hex"
+write S not-a-choice ""
+write S wrong-type 1
+write S wrong-type ["round"]
+
+# ---- the longest text, and raw cut to 200 bytes: after 200 bytes, after 199 where the 200th starts a character
+# of two, and 256 control bytes (each %01) as the first 200 of them
+read LONG =aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+read LONG =aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab by-hand =aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+read LONG =aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%C3%A9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa by-hand =aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+read LONG =aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%C3%A9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa by-hand =aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+read LONG =%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01 by-hand =%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01
+write LONG =aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+write LONG too-long "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"

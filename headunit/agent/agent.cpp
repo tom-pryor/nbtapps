@@ -20,6 +20,8 @@
 #include "inflate.hpp"
 #include "json_writer.hpp"
 #include "semver.hpp"
+#include "settings.hpp"
+#include "settings_file.hpp"
 #include "sha256.hpp"
 #include "utf8.hpp"
 
@@ -249,6 +251,12 @@ void Agent::answer(Session* s, int64_t id, const std::string& result) {
 void Agent::refuse(Session* s, int64_t id, const char* code, const std::string& message) {
     s->peer->respondError(id, code, message);
     noteAnswer(s, id, std::string(code) + ": " + message);
+}
+
+void Agent::refuse(Session* s, int64_t id, const char* code, const std::string& message, const char* name, const std::string& json,
+                   const std::string& logged) {
+    s->peer->respondError(id, code, message, name, json);
+    noteAnswer(s, id, std::string(code) + ": " + message + logged);
 }
 
 // A job's events, as lines. They are made for controllers, as JSON; the log reads them back so that it shows what
@@ -1087,6 +1095,8 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "checks.run") checksRun(s, id, params);
     else if (method == "checks.fix") checksFix(s, id, params);
     else if (method == "serial.reset") serialReset(s, id, params);
+    else if (method == "settings.get") settingsGet(s, id, params);
+    else if (method == "settings.set") settingsSet(s, id, params);
     else refuse(s, id, "unsupported", "this agent has no method " + sanitizeUtf8(method.substr(0, 64), 0));
 }
 
@@ -1147,10 +1157,10 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     w.beginObject().key("protocolMin").integer(kProtocolVersion).key("protocolMax").integer(kProtocolVersion);
     w.key("role").string("agent").key("headUnitId").string(headUnitId_).key("agentVersion").string(agentVersion_);
     // What this agent has beyond the protocol's first version: autostart.get and autostart.set, installs checked
-    // with the offer's signature, the files of a package, the compatibility checks, and, with Bluetooth serial,
-    // serial.reset.
+    // with the offer's signature, the files of a package, the compatibility checks, the settings of a package,
+    // and, with Bluetooth serial, serial.reset.
     w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart);
-    w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks);
+    w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks).string(kCapabilitySettings);
     if (serialReset_ != 0) w.string(kCapabilitySerialReset);
     w.endArray().endObject();
     // What `auth` signs: the two payloads as they travel. The reply's is what respond() sends for this result.
@@ -1518,6 +1528,8 @@ void Agent::packagesList(Session* s, int64_t id, const json::Value& params) {
         // Whether files.list has anything to say about it: logs its manifest names in folders this agent knows, or
         // the agent's own.
         if (namesLogs(p.manifest) || p.manifest.id == kAgentPackageId) one.key("logs").boolean(true);
+        // Whether settings.get has anything to say about it: an option of a type this agent knows.
+        if (!p.manifest.settings.empty()) one.key("settings").boolean(true);
         one.endObject();
         if (listed == kMaxListed || (listed > 0 && w.text().size() + one.text().size() + 1 > room)) {
             more = true;
@@ -2178,6 +2190,185 @@ void Agent::endOutgoing(Session* s, const std::string& how, const std::string& e
     close(o->fd);
     delete o->deflater;
     delete o;
+}
+
+// ---- settings -----------------------------------------------------------------------------------------------------
+
+namespace {
+
+// A key as a controller sent it, for the log: short, and text.
+std::string shownKey(const std::string& key) { return sanitizeUtf8(key.substr(0, 64), 0); }
+
+}  // namespace
+
+bool Agent::settingsOf(const std::string& package, InstalledPackage* out, const char** code, std::string* message) {
+    std::string why;
+    if (!engine_.store().isInstalled(package)) {
+        *code = "not-found";
+        *message = "no such package is installed";
+        return false;
+    }
+    if (!engine_.store().load(package, out, &why)) {
+        *code = "internal";
+        *message = "the record of " + package + " cannot be read: " + why;
+        return false;
+    }
+    if (out->manifest.settings.empty()) {
+        *code = "not-found";
+        *message = package + " names no settings this agent knows";
+        return false;
+    }
+    return true;
+}
+
+void Agent::settingsGet(Session* s, int64_t id, const json::Value& params) {
+    if (s->peer->maxFrame() < kSettingsMinFrame) {
+        refuse(s, id, "unsupported", "settings need a link whose frame holds " + number(kSettingsMinFrame) + " bytes");
+        return;
+    }
+    json::Value package = params.find("package"), from = params.find("from");
+    if (!package.isString() || !validPackageId(package.string()) || (from.present() && (!from.isInteger() || from.integer() < 0))) {
+        refuse(s, id, "bad-request", "settings.get takes a package id, and a from of 0 or more");
+        return;
+    }
+    if (inStep_) {
+        refuse(s, id, "busy", "a job is installing; the packages are changing");
+        return;
+    }
+    InstalledPackage installed;
+    const char* code = 0;
+    std::string message;
+    if (!settingsOf(package.string(), &installed, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    const std::vector<ManifestSetting>& options = installed.manifest.settings;
+    uint64_t first = from.present() ? (uint64_t)from.integer() : 0;
+    if (first >= options.size()) {
+        refuse(s, id, "bad-request", "from is past the last option: " + package.string() + " has " + countOf(options.size(), "option"));
+        return;
+    }
+    // The file once, for the whole page.
+    std::string text, why;
+    bool exists = false;
+    if (!readSettingsFile(installed.manifest, *platform_, &text, &exists, &why)) {
+        refuse(s, id, "io-error", "the settings file cannot be read: " + why);
+        return;
+    }
+    SettingsFile file(text);
+    // From `first` on, as many as the link's frame takes, and the first whatever it takes: an option fits a frame
+    // of kSettingsMinFrame however long its strings are (tests/agent/test_agent.cpp).
+    size_t room = s->peer->maxFrame() > kEnvelopeRoom + 32 ? s->peer->maxFrame() - kEnvelopeRoom - 32 : 0;
+    json::Writer w;
+    w.beginObject().key("options").beginArray();
+    size_t next = (size_t)first;
+    for (; next < options.size(); ++next) {
+        std::string one = settingJson(options[next], file);
+        if (next > first && w.text().size() + one.size() + 1 > room) break;
+        w.raw(one);
+    }
+    w.endArray();
+    if (next < options.size()) w.key("next").integer((int64_t)next);
+    w.endObject();
+    answer(s, id, w.text());
+}
+
+void Agent::settingsSet(Session* s, int64_t id, const json::Value& params) {
+    if (s->peer->maxFrame() < kSettingsMinFrame) {
+        refuse(s, id, "unsupported", "settings need a link whose frame holds " + number(kSettingsMinFrame) + " bytes");
+        return;
+    }
+    json::Value package = params.find("package"), set = params.find("set"), reset = params.find("reset");
+    bool usable = package.isString() && validPackageId(package.string()) && (!set.present() || set.isObject()) &&
+                  (!reset.present() || reset.isArray());
+    for (size_t i = 0; usable && i < reset.size(); ++i) usable = reset.at(i).isString();
+    if (!usable || set.size() + reset.size() == 0) {
+        refuse(s, id, "bad-request", "settings.set takes a package id, and keys to set as an object or to reset as an array, one at least");
+        return;
+    }
+    for (size_t i = 0; i < reset.size(); ++i) {
+        if (set.find(reset.at(i).string()).present()) {
+            refuse(s, id, "bad-request", shownKey(reset.at(i).string()) + " is both set and reset");
+            return;
+        }
+    }
+    if (job_.active() || inStep_) {
+        refuse(s, id, "busy", "a job is running");
+        return;
+    }
+    if (onTrial_) {
+        refuse(s, id, "busy", "this version of the agent is on trial, and changes nothing until it is confirmed");
+        return;
+    }
+    InstalledPackage installed;
+    const char* code = 0;
+    std::string message;
+    if (!settingsOf(package.string(), &installed, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    const Manifest& m = installed.manifest;
+    std::map<std::string, const ManifestSetting*> byKey;
+    for (size_t i = 0; i < m.settings.size(); ++i) byKey[m.settings[i].key] = &m.settings[i];
+
+    // Every key and value before anything is written. An option of a type this agent does not know is not in
+    // m.settings, and so is unknown here.
+    std::vector<std::pair<std::string, std::string> > lines;    // key, the text after KEY=
+    std::vector<std::pair<std::string, const char*> > faults;   // key, reason
+    for (size_t i = 0; i < set.size(); ++i) {
+        std::map<std::string, const ManifestSetting*>::const_iterator option = byKey.find(set.key(i));
+        std::string line;
+        const char* reason = option == byKey.end() ? "unknown-key" : checkSettingValue(*option->second, set.at(i), &line);
+        if (reason != 0) faults.push_back(std::make_pair(set.key(i), reason));
+        else lines.push_back(std::make_pair(set.key(i), line));
+    }
+    for (size_t i = 0; i < reset.size(); ++i) {
+        if (byKey.count(reset.at(i).string()) == 0) faults.push_back(std::make_pair(reset.at(i).string(), "unknown-key"));
+    }
+    if (!faults.empty()) {
+        std::string said = countOf(faults.size(), "setting") + (faults.size() == 1 ? " is" : " are") + " not allowed";
+        // The keys at fault, as many as the frame takes beside the rest of the error.
+        size_t room = s->peer->maxFrame() > kEnvelopeRoom + 96 ? s->peer->maxFrame() - kEnvelopeRoom - 96 : 0;
+        json::Writer keys;
+        keys.beginArray();
+        std::string logged;
+        for (size_t i = 0; i < faults.size(); ++i) {
+            json::Writer one;
+            one.beginObject().key("key").string(faults[i].first).key("reason").string(faults[i].second).endObject();
+            if (keys.text().size() + one.text().size() + 2 > room) break;
+            keys.raw(one.text());
+            logged += std::string(i == 0 ? " (" : ", ") + shownKey(faults[i].first) + " " + faults[i].second;
+        }
+        keys.endArray();
+        refuse(s, id, "invalid", said, "keys", keys.text(), logged.empty() ? logged : logged + ")");
+        return;
+    }
+
+    std::string before, why;
+    bool exists = false;
+    if (!readSettingsFile(m, *platform_, &before, &exists, &why)) {
+        refuse(s, id, "io-error", "the settings file cannot be read: " + why);
+        return;
+    }
+    SettingsFile file(before);
+    std::string changed;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        file.set(lines[i].first, lines[i].second);
+        changed += (i == 0 ? "set " : ", ") + lines[i].first;
+    }
+    for (size_t i = 0; i < reset.size(); ++i) {
+        file.remove(reset.at(i).string());
+        changed += (i == 0 ? std::string(lines.empty() ? "" : "; ") + "reset " : ", ") + reset.at(i).string();
+    }
+    // Written once, whole, and only if the text has changed: a reset of a key that has no line writes nothing, and
+    // neither makes a file.
+    std::string after = file.text();
+    if (after != before && !writeSettingsFile(m, *platform_, after, &why)) {
+        refuse(s, id, "io-error", "the settings file cannot be written: " + why);
+        return;
+    }
+    note(linkName(s->number) + ": settings of " + m.id + ": " + changed + (after == before ? " (the file was so already)" : ""));
+    answer(s, id, "{}");
 }
 
 }  // namespace nbt

@@ -32,6 +32,7 @@
 //                                   and stands in the way, each with what it found, a page at a time
 //   checks.fix                      a check's fix, with the token of the lists the user was shown
 //   serial.reset                    has the car end the phone's Bluetooth serial link (serial_reset.hpp): see below
+//   settings.get, settings.set      the settings of an installed package (settings.hpp): see below
 //   job.progress, job.log, job.done the agent's events, to every controller
 //   link.closing                    the agent's event to a phone whose link it is about to end; the last thing it
 //                                   says on that link
@@ -152,6 +153,29 @@
 // very link has its answer first. "armed": none is, and the next serial link whose node opens within forMs is ended
 // at the open, once. The three strings, 1 to 32 printable characters each, put other values into the request in
 // place of the agent's own, so that they can be tried without a new build.
+//
+// The settings (settings.hpp). A package's settings are the options of a known type its installed manifest names,
+// in the manifest's order; their values are lines of its settings file, which the agent reads for every request and
+// keeps no copy of. Both methods need a link whose frame holds kSettingsMinFrame, and answer `unsupported` on a
+// smaller one; both answer `not-found` for a package that is not installed or names no option, and `io-error` for a
+// file that is there and cannot be read or written.
+//
+//   settings.get { "package", "from"? }   -> { "options": [ option... ], "next"? }
+//   settings.set { "package", "set"?: { KEY: value }, "reset"?: [ KEY ] }   -> { }
+//
+// settings.get gives the options from `from` (0 when absent) on, as many as the link's frame takes and at least one,
+// each as settingJson() writes it; `next` is the `from` of the next page, and is absent on the last. A `from` past
+// the last option is bad-request. It is refused with `busy` while an install step runs. settings.set checks every
+// key and value against the manifest first: a key with no option, or a value its option does not take, and nothing
+// is written; the error is
+//
+//   { "code": "invalid", "message": "1 setting is not allowed", "keys": [ { "key", "reason" } ] }
+//
+// with the keys at fault in the order of the request, `set` before `reset`, as many as the frame takes. Otherwise
+// the file is written once, whole, where the text has changed: a key set takes the place of its first line and
+// loses its others, a new key goes at the end, a reset takes the key's lines away. At least one key is named, and
+// none both in `set` and in `reset`, or the request is bad-request. It is refused with `busy` while a job runs and
+// on an agent on trial. The log says which keys were set and which reset, never their values.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdint.h>
@@ -395,6 +419,9 @@ private:
     // The answer to a request, and its line in the log. Every answer goes through one of these two.
     void answer(Session* s, int64_t id, const std::string& result);
     void refuse(Session* s, int64_t id, const char* code, const std::string& message);
+    // An error with one more member after the message (Peer::respondError), and `logged` after it in the log.
+    void refuse(Session* s, int64_t id, const char* code, const std::string& message, const char* name, const std::string& json,
+                const std::string& logged);
     void noteAnswer(Session* s, int64_t id, const std::string& outcome);
     void noteJobEvent(const std::string& name, const std::string& params);
     void serve(int timeoutMs);
@@ -450,6 +477,11 @@ private:
     CheckContext checkContext();
     // See the top of this file.
     void serialReset(Session* s, int64_t id, const json::Value& params);
+    // The settings of an installed package: see the top of this file, and settings.hpp.
+    void settingsGet(Session* s, int64_t id, const json::Value& params);
+    void settingsSet(Session* s, int64_t id, const json::Value& params);
+    // The installed record of a package that has settings. False with the error's code and message if there is none.
+    bool settingsOf(const std::string& package, InstalledPackage* out, const char** code, std::string* message);
     void autostartGet(Session* s, int64_t id);
     void autostartSet(Session* s, int64_t id, const json::Value& params);
     // Whether something would start the agent with the head unit here if it were asked to. If not: the error's

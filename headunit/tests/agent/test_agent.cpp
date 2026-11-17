@@ -36,7 +36,9 @@
 #include "../../agent/fsutil.hpp"
 #include "../../agent/host_platform.hpp"
 #include "../../agent/json.hpp"
+#include "../../agent/json_text.hpp"
 #include "../../agent/json_writer.hpp"
+#include "../../agent/settings.hpp"
 #include "../../agent/sha256.hpp"
 #include "../../agent/utf8.hpp"
 #include "test_util.hpp"
@@ -719,11 +721,12 @@ static void testHello() {
     Parsed r(b.call(p, "hello", "{\"protocolMin\":1,\"protocolMax\":7,\"role\":\"cli\",\"maxFrame\":4096,\"capabilities\":[\"zstd\"],\"extra\":{\"a\":[1]}}"));
     CHECK(integer(r.result, "protocolMin") == 1 && integer(r.result, "protocolMax") == 1 && str(r.result, "role") == "agent");
     CHECK(str(r.result, "headUnitId") == kHeadUnitId && str(r.result, "agentVersion") == "1.0.0");
-    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 4 &&
+    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 5 &&
           r.result.find("capabilities").at(0).string() == kCapabilityAutostart &&
           r.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature &&
           r.result.find("capabilities").at(2).string() == kCapabilityFiles &&
-          r.result.find("capabilities").at(3).string() == kCapabilityChecks);
+          r.result.find("capabilities").at(3).string() == kCapabilityChecks &&
+          r.result.find("capabilities").at(4).string() == kCapabilitySettings);
     CHECK(Parsed(b.call(p, "hello", kGoodHello)).code() == "bad-state");
     // Methods that are not there.
     const char* missing[] = {"job.frobnicate", "pairing.frobnicate", ""};
@@ -2935,7 +2938,7 @@ static void testDetachedSignature() {
         Bench b("detached");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 4 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 5 &&
                                     hello.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature);
         // First the version before it, signed in the usual way: one key then verifies both, so the upgrade's key
         // matches the installed one.
@@ -3004,7 +3007,7 @@ static void testAutostart() {
         Bench b("autostart-nowhere", false, false, "1.1.0");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 4 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 5 &&
                                     hello.result.find("capabilities").at(0).string() == kCapabilityAutostart);
         Parsed state(b.call(p, "autostart.get", "{}"));
         CHECK(state.result.size() == 4 && !flag(state.result, "on") && !flag(state.result, "available"));
@@ -3622,7 +3625,7 @@ static void testSerialReset() {
         Bench b("serial-reset-none");
         Phone* p = b.connect();
         Parsed hello(b.call(p, "hello", kGoodHello));
-        CHECK(hello.result.find("capabilities").size() == 4 && !listsCapability(hello, kCapabilitySerialReset));
+        CHECK(hello.result.find("capabilities").size() == 5 && !listsCapability(hello, kCapabilitySerialReset));
         CHECK(Parsed(b.call(p, "serial.reset", "{}")).code() == "unsupported");
     }
     Bench b("serial-reset");
@@ -3630,7 +3633,8 @@ static void testSerialReset() {
     b.agent.setSerialReset(&reset);
     Phone* p = b.phone();
     Parsed hello(p->helloReply);
-    CHECK(hello.result.find("capabilities").size() == 5 && listsCapability(hello, kCapabilitySerialReset));
+    CHECK(hello.result.find("capabilities").size() == 6 && listsCapability(hello, kCapabilitySerialReset) &&
+          hello.result.find("capabilities").at(5).string() == kCapabilitySerialReset);
 
     // A node is open: sent. None is: armed, for as long as the listener says.
     Parsed sent(b.call(p, "serial.reset", "{}"));
@@ -3667,6 +3671,331 @@ static void testSerialReset() {
     p->serve = false;
     startJob(b, p, planId);
     CHECK(b.agent.job().active() && Parsed(b.call(p, "serial.reset", "{}")).code() == "busy" && reset.calls == 7);
+}
+
+// ---- settings -----------------------------------------------------------------------------------------------------
+
+static const char kDial[] = "org.nbtapp.dial-1.0.0";
+static const char kDialId[] = "org.nbtapp.dial";
+
+static std::string getParams(const std::string& package, long long from = -1) {
+    return "{\"package\":\"" + package + "\"" + (from >= 0 ? ",\"from\":" + num(from) : std::string()) + "}";
+}
+
+// settings.set; `set` is the text of an object and `reset` of an array, each left out when empty.
+static std::string setParams(const std::string& package, const std::string& set, const std::string& reset = "") {
+    return "{\"package\":\"" + package + "\"" + (set.empty() ? "" : ",\"set\":" + set) + (reset.empty() ? "" : ",\"reset\":" + reset) + "}";
+}
+
+// What a settings.get page says of each option: "KEY state" and then the value as JSON or the raw value as it is,
+// separated by "; ".
+static std::string statesOf(const Parsed& r) {
+    json::Value options = r.result.find("options");
+    std::string out;
+    for (size_t i = 0; i < options.size(); ++i) {
+        json::Value o = options.at(i);
+        out += (i == 0 ? "" : "; ") + str(o, "key") + " " + str(o, "state");
+        if (o.find("value").present()) out += " " + jsonText(o.find("value"));
+        if (o.find("raw").present()) out += " " + str(o, "raw");
+    }
+    return out;
+}
+
+// The reasons of an `invalid` error: "KEY reason" separated by "; ".
+static std::string faultsOf(const Parsed& r) {
+    json::Value keys = r.error.find("keys");
+    std::string out;
+    for (size_t i = 0; i < keys.size(); ++i) out += (i == 0 ? "" : "; ") + str(keys.at(i), "key") + " " + str(keys.at(i), "reason");
+    return out;
+}
+
+// A package put in the store by hand, as an install leaves its record: for manifests no test package has. The
+// record places nothing.
+static void recordByHand(Bench& b, const std::string& manifest) {
+    Manifest m;
+    Error error;
+    CHECK_IN(error.message, parseManifest(manifest.data(), manifest.size(), &m, &error));
+    InstalledPackage p;
+    p.manifest = m;
+    p.key = toHex(gPackageKey.key, sizeof gPackageKey.key);
+    std::string dir = b.agent.engine().store().recordDir(m.id), why;
+    CHECK_IN(why, fs::makeDirs(dir, &why) && fs::writeFile(dir + "/manifest.json", manifest, 0644, &why) &&
+                      fs::writeFile(dir + "/record.json", Store::encodeRecord(p), 0644, &why));
+}
+
+// A manifest of one package with these options, written out by a json::Writer.
+static std::string settingsManifest(const std::string& id, const std::string& options) {
+    return "{\"manifestVersion\":1,\"id\":\"" + id + "\",\"name\":\"Settings by hand\",\"version\":\"1.0.0\",\"contents\":[],"
+           "\"settings\":{\"file\":\"${data}/settings\",\"options\":[" + options + "]}}";
+}
+
+// The longest reply settings.get can give for one option: a select whose strings take the whole 1,024 bytes an
+// option may have, nearly all of them quotes (two bytes each in JSON), with the most values and the longest
+// `applies`, set by hand to bytes that are control characters (six bytes each in JSON). It has to fit one frame of
+// kSettingsMinFrame. Returns the size of the reply, which the test prints.
+static size_t worstOption() {
+    Bench b("settings-worst");
+    json::Writer o;
+    // The key and the values cannot hold a quote: one byte each. The label and the unset text take 64 characters,
+    // the description 500, and the labels of the values what is left.
+    const size_t kLeft = kMaxSettingBytes - 1 - 16 - 64 - 64 - 500;
+    o.beginObject().key("key").string("A").key("label").string(std::string(64, '"')).key("description").string(std::string(500, '"'));
+    o.key("type").string("select").key("values").beginArray();
+    size_t labels = 0;
+    for (int i = 0; i < 16; ++i) {
+        size_t n = kLeft - labels - (15 - i) >= 64 ? 64 : kLeft - labels - (15 - i);
+        labels += n;
+        o.beginObject().key("value").string(std::string(1, "0123456789abcdef"[i])).key("label").string(std::string(n, '\\')).endObject();
+    }
+    CHECK(labels == kLeft);
+    o.endArray().key("unset").string(std::string(64, '"')).key("applies").string("hmi-restart").endObject();
+    recordByHand(b, settingsManifest("org.nbtapp.worst", o.text()));
+    std::string why;
+    CHECK_IN(why, fs::makeDirs(b.platform.dataDir("org.nbtapp.worst"), &why) &&
+                      fs::writeFile(b.platform.dataDir("org.nbtapp.worst") + "/settings", "A=" + std::string(300, '\x01') + "\n", 0644, &why));
+    Phone* p = b.phone("1", kSettingsMinFrame, "serial");
+    Parsed r(b.call(p, "settings.get", getParams("org.nbtapp.worst")));
+    CHECK_IN(p->lastHeard.substr(0, 200), r.result.isObject() && r.result.find("options").size() == 1 && !r.result.find("next").present());
+    json::Value one = r.result.find("options").at(0);
+    CHECK(str(one, "state") == "by-hand" && str(one, "raw") == std::string(kSettingsMaxRawBytes, '\x01'));
+    // What came, and what the same reply would be with the longest request id a controller can use.
+    size_t size = p->lastHeard.size() + std::string("9007199254740991").size() - num(integer(r.root, "id")).size();
+    CHECK_IN(num((long long)size), size <= kSettingsMinFrame);
+    return size;
+}
+
+// A request asked from inside an install step: settings.get then is `busy`.
+class SettingsMidStep : public CrashHook {
+public:
+    SettingsMidStep() : phone(0), get(0), set(0), done(false) {}
+    virtual void point(const char*) {
+        if (done) return;
+        done = true;
+        get = phone->request("settings.get", getParams(kDialId));
+        set = phone->request("settings.set", setParams(kDialId, "{\"CHIME\":true}"));
+        phone->pump();
+    }
+    Phone* phone;
+    int64_t get, set;
+    bool done;
+};
+
+static void testSettings() {
+    Bench b("settings");
+    Phone* p = b.phone();
+    // Nothing installed, and requests that are no use.
+    CHECK(Parsed(b.call(p, "settings.get", getParams(kDialId))).code() == "not-found");
+    CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "{\"CHIME\":true}"))).code() == "not-found");
+    const char* badGet[] = {"{}", "{\"package\":\"../state\"}", "{\"package\":5}", "{\"package\":\"org.nbtapp.dial\",\"from\":-1}",
+                            "{\"package\":\"org.nbtapp.dial\",\"from\":\"0\"}"};
+    for (size_t i = 0; i < sizeof badGet / sizeof badGet[0]; ++i) CHECK_IN(badGet[i], Parsed(b.call(p, "settings.get", badGet[i])).code() == "bad-request");
+
+    install(b, p, kDial, kDial);
+    std::string conf = b.platform.dataDir(kDialId) + "/dial.conf";
+    CHECK(fs::kindOf(conf) == fs::kNone);
+    // packages.list says which packages have settings to give; one without has no such member.
+    install(b, p, kRuntime, kRuntime);
+    {
+        Parsed list(b.call(p, "packages.list", "{}"));
+        json::Value packages = list.result.find("packages");
+        CHECK_IN(p->lastHeard, packages.size() == 2 && str(packages.at(0), "id") == kDialId && flag(packages.at(0), "settings") &&
+                                   !packages.at(0).find("logs").present() && !packages.at(1).find("settings").present());
+    }
+
+    // No file: every option of a known type, in the manifest's order, unset, with what the manifest says of it.
+    {
+        Parsed r(b.call(p, "settings.get", getParams(kDialId)));
+        CHECK_IN(p->lastHeard, statesOf(r) == "CHIME unset; DIAL_SPEED unset; GREETING unset; LAMP_HOST unset; FACE unset; LAMP_COLOUR unset");
+        CHECK(!r.result.find("next").present() && r.result.size() == 1);
+        json::Value o = r.result.find("options");
+        CHECK_IN(p->lastHeard, jsonText(o.at(0)) == "{\"key\":\"CHIME\",\"label\":\"Chime\",\"description\":\"Play a chime when the dial turns.\","
+                                                    "\"type\":\"bool\",\"default\":true,\"applies\":\"now\",\"advanced\":false,\"state\":\"unset\"}");
+        CHECK_IN(p->lastHeard, jsonText(o.at(1)) == "{\"key\":\"DIAL_SPEED\",\"label\":\"Dial speed\",\"description\":\"How far the dial turns each second.\","
+                                                    "\"type\":\"int\",\"min\":1,\"max\":50,\"unit\":\"\xc2\xb0/s\",\"default\":10,\"applies\":\"app-start\","
+                                                    "\"advanced\":false,\"state\":\"unset\"}");
+        CHECK_IN(p->lastHeard, jsonText(o.at(2)) == "{\"key\":\"GREETING\",\"label\":\"Greeting\",\"description\":\"Shown on the dial when the head unit starts.\","
+                                                    "\"type\":\"text\",\"maxLength\":40,\"characters\":\"any\",\"default\":\"Hello, dial \xc3\xa9\","
+                                                    "\"applies\":\"reboot\",\"advanced\":false,\"state\":\"unset\"}");
+        CHECK_IN(p->lastHeard, jsonText(o.at(3)) == "{\"key\":\"LAMP_HOST\",\"label\":\"Lamp address\",\"type\":\"text\",\"maxLength\":64,"
+                                                    "\"characters\":\"safe\",\"unset\":\"No lamp\",\"applies\":\"now\",\"advanced\":true,\"state\":\"unset\"}");
+        CHECK_IN(p->lastHeard, jsonText(o.at(4)) == "{\"key\":\"FACE\",\"label\":\"Dial face\",\"type\":\"select\",\"values\":[{\"value\":\"round\","
+                                                    "\"label\":\"Round\"},{\"value\":\"square\",\"label\":\"Square\"},{\"value\":\"hex\",\"label\":\"Hexagon\"}],"
+                                                    "\"default\":\"round\",\"applies\":\"hmi-restart\",\"advanced\":false,\"state\":\"unset\"}");
+        // From an option on; past the last is no page.
+        Parsed last(b.call(p, "settings.get", getParams(kDialId, 5)));
+        CHECK(statesOf(last) == "LAMP_COLOUR unset" && !last.result.find("next").present());
+        CHECK(Parsed(b.call(p, "settings.get", getParams(kDialId, 0))).result.find("options").size() == 6);
+        CHECK(Parsed(b.call(p, "settings.get", getParams(kDialId, 6))).code() == "bad-request");
+    }
+
+    // A first set makes the file, a line for each key in the order of the request, and nothing else.
+    CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "{\"CHIME\":false,\"DIAL_SPEED\":25,\"GREETING\":\"Hi there, \\u00e9\",\"FACE\":\"hex\"}"))).result.isObject());
+    CHECK_IN(testutil::readFile(conf), testutil::readFile(conf) == "CHIME=0\nDIAL_SPEED=25\nGREETING=Hi there, \xc3\xa9\nFACE=hex\n");
+    {
+        struct stat st;
+        CHECK(lstat(conf.c_str(), &st) == 0 && (st.st_mode & 07777) == 0644);
+    }
+    CHECK_IN(p->lastHeard, statesOf(Parsed(b.call(p, "settings.get", getParams(kDialId)))) ==
+                               "CHIME set false; DIAL_SPEED set 25; GREETING set \"Hi there, \xc3\xa9\"; LAMP_HOST unset; FACE set \"hex\"; LAMP_COLOUR unset");
+
+    // A file the package or a person wrote: comments, CRs, lines of keys the manifest does not name, a key twice
+    // (the last wins), values set by hand, no line end at the end. The agent reads it as it stands.
+    const std::string byHand = "# dial settings\r\nCHIME=yes\r\nDIAL_SPEED=fast\nNBT_KEEP=1\n\nDIAL_SPEED=012\nFACE=hex\nFACE=oval\n"
+                               "LAMP_COLOUR=\xff\n# end";
+    put(conf, byHand);
+    CHECK_IN(p->lastHeard, statesOf(Parsed(b.call(p, "settings.get", getParams(kDialId)))) ==
+                               "CHIME set true; DIAL_SPEED set 12; GREETING unset; LAMP_HOST unset; FACE by-hand oval; LAMP_COLOUR by-hand \xef\xbf\xbd");
+    // A set and a reset change the lines of their keys, and every other byte stays: the key's first line takes the
+    // new value and its later ones go, a new key goes at the end, a reset takes every line of its key away.
+    CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "{\"DIAL_SPEED\":30,\"LAMP_HOST\":\"lamp.local\"}", "[\"FACE\",\"GREETING\"]"))).result.isObject());
+    CHECK_IN(testutil::readFile(conf), testutil::readFile(conf) == "# dial settings\r\nCHIME=yes\r\nDIAL_SPEED=30\nNBT_KEEP=1\n\nLAMP_COLOUR=\xff\n# end\n"
+                                                                   "LAMP_HOST=lamp.local\n");
+
+    // All or nothing: one value that is not allowed, and nothing is written. Every key at fault is named, in the
+    // order of the request, the resets after the sets; an option of a type the agent does not know is unknown.
+    {
+        std::string before = testutil::readFile(conf);
+        Parsed r(b.call(p, "settings.set", setParams(kDialId, "{\"CHIME\":\"yes\",\"DIAL_SPEED\":51,\"GREETING\":\"" + std::string(41, 'x') + "\","
+                                                               "\"LAMP_HOST\":\"a b\",\"NOPE\":1,\"DIAL_COLOUR\":\"#000000\",\"FACE\":\"oval\",\"LAMP_COLOUR\":\"cool\"}",
+                                                    "[\"GONE\"]")));
+        CHECK_IN(p->lastHeard, r.code() == "invalid" && str(r.error, "message") == "8 settings are not allowed");
+        CHECK_IN(p->lastHeard, faultsOf(r) == "CHIME wrong-type; DIAL_SPEED out-of-range; GREETING too-long; LAMP_HOST bad-characters; "
+                                              "NOPE unknown-key; DIAL_COLOUR unknown-key; FACE not-a-choice; GONE unknown-key");
+        CHECK(testutil::readFile(conf) == before);
+        Parsed one(b.call(p, "settings.set", setParams(kDialId, "{\"DIAL_SPEED\":0}")));
+        CHECK_IN(p->lastHeard, one.code() == "invalid" && str(one.error, "message") == "1 setting is not allowed" &&
+                                   faultsOf(one) == "DIAL_SPEED out-of-range" && one.error.size() == 3);
+        CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "", "[\"COLOUR\"]"))).code() == "invalid");
+        CHECK(testutil::readFile(conf) == before);
+    }
+    // Requests that are no use.
+    {
+        const std::string id = kDialId;
+        const std::string bad[] = {setParams(id, ""), setParams(id, "{}"), setParams(id, "", "[]"), setParams(id, "{}", "[]"),
+                                   setParams(id, "[]"), setParams(id, "", "{}"), setParams(id, "", "[1]"), setParams(id, "", "[\"A\",2]"),
+                                   setParams(id, "{\"CHIME\":true}", "[\"CHIME\"]"), "{\"set\":{\"CHIME\":true}}",
+                                   setParams("org.nbtapp.Dial", "{\"CHIME\":true}")};
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) CHECK_IN(bad[i], Parsed(b.call(p, "settings.set", bad[i])).code() == "bad-request");
+    }
+
+    // A reset of a key that has no line, and a set to what the file says already, write nothing: no new file, and no
+    // new copy of the old one.
+    {
+        struct stat before, after;
+        CHECK(lstat(conf.c_str(), &before) == 0);
+        CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "{\"LAMP_HOST\":\"lamp.local\"}", "[\"FACE\"]"))).result.isObject());
+        CHECK(lstat(conf.c_str(), &after) == 0 && after.st_ino == before.st_ino);
+        CHECK(fs::removeFile(conf, 0));
+        CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "", "[\"CHIME\"]"))).result.isObject() && fs::kindOf(conf) == fs::kNone);
+        // A file's permission bits are kept when it is written anew.
+        put(conf, "CHIME=1\n", 0600);
+        CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "{\"CHIME\":false}"))).result.isObject());
+        CHECK(lstat(conf.c_str(), &after) == 0 && (after.st_mode & 07777) == 0600 && testutil::readFile(conf) == "CHIME=0\n");
+    }
+
+    // A file that is a link, or a data folder that is one, is neither read nor written through.
+    {
+        std::string target = b.root + "/elsewhere.conf";
+        put(target, "CHIME=1\n");
+        CHECK(fs::removeFile(conf, 0) && fs::makeLink(target, conf, 0));
+        Parsed got(b.call(p, "settings.get", getParams(kDialId)));
+        CHECK_IN(p->lastHeard, got.code() == "io-error" && has(str(got.error, "message"), "a link"));
+        CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "{\"CHIME\":false}"))).code() == "io-error");
+        CHECK(testutil::readFile(target) == "CHIME=1\n" && fs::kindOf(conf) == fs::kLink);
+        CHECK(fs::removeFile(conf, 0));
+        // A file larger than 64 KiB.
+        put(conf, std::string(70000, '#'));
+        CHECK(Parsed(b.call(p, "settings.get", getParams(kDialId))).code() == "io-error");
+        CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "{\"CHIME\":false}"))).code() == "io-error");
+        CHECK(fs::removeFile(conf, 0));
+    }
+
+    // A frame smaller than 4,096 bytes: there are no settings on such a link. And not before auth on a phone's own.
+    {
+        Phone* small = b.phone("2", kSettingsMinFrame - 1);
+        CHECK(Parsed(b.call(small, "settings.get", getParams(kDialId))).code() == "unsupported");
+        CHECK(Parsed(b.call(small, "settings.set", setParams(kDialId, "{\"CHIME\":true}"))).code() == "unsupported");
+        Phone* stranger = b.greeted("3", 4096, "serial");
+        CHECK(Parsed(b.call(stranger, "settings.get", getParams(kDialId))).code() == "unauthenticated");
+        CHECK(Parsed(b.call(stranger, "settings.set", setParams(kDialId, "{\"CHIME\":true}"))).code() == "unauthenticated");
+        Phone* serial = b.phone("4", 4096, "serial");
+        CHECK(Parsed(b.call(serial, "settings.get", getParams(kDialId))).result.isObject());
+    }
+
+    // While a job runs nothing is changed, and while an install step runs nothing is read either.
+    {
+        SettingsMidStep mid;
+        mid.phone = p;
+        std::string planId = planOk(b, p, kHelloOld, "", kHelloOld);
+        b.agent.engine().setCrashHook(&mid);
+        p->events.clear();
+        startJob(b, p, planId);
+        b.agent.engine().setCrashHook(0);
+        CHECK(mid.done && has(outcome(p), "succeeded"));
+        CHECK(Parsed(p->reply(mid.get)).code() == "busy" && Parsed(p->reply(mid.set)).code() == "busy");
+        std::string planId2 = planOk(b, p, kHello, "", kHello);
+        p->serve = false;
+        startJob(b, p, planId2);
+        CHECK(b.agent.job().active() && Parsed(b.call(p, "settings.get", getParams(kDialId))).result.isObject());
+        CHECK(Parsed(b.call(p, "settings.set", setParams(kDialId, "{\"CHIME\":true}"))).code() == "busy" && fs::kindOf(conf) == fs::kNone);
+        p->serve = true;
+        p->answerHeld();
+        b.settle();
+    }
+
+    // Many options, on the smallest frame there are settings on: pages of as many as fit, each with the `from` of
+    // the next, and every option once, in order.
+    {
+        std::string options;
+        for (int i = 0; i < 64; ++i) {
+            json::Writer o;
+            o.beginObject().key("key").string("K" + num(i)).key("label").string("Option " + num(i));
+            o.key("description").string(std::string(400, 'd')).key("type").string(i % 2 == 0 ? "bool" : "int");
+            if (i % 2 == 1) o.key("min").integer(0).key("max").integer(1000);
+            o.endObject();
+            options += (i == 0 ? "" : ",") + o.text();
+        }
+        recordByHand(b, settingsManifest("org.nbtapp.many", options));
+        put(b.platform.dataDir("org.nbtapp.many") + "/settings", "K1=7\nK62=on\n");
+        Phone* q = b.phone("5", kSettingsMinFrame, "serial");
+        std::string seen;
+        long long from = 0;
+        int pages = 0;
+        while (from >= 0) {
+            Parsed r(b.call(q, "settings.get", getParams("org.nbtapp.many", from)));
+            json::Value list = r.result.find("options");
+            long long next = integer(r.result, "next");
+            // A page that is not the last is full: one more option, of some 480 bytes, would not have fitted.
+            CHECK_IN(q->lastHeard.substr(0, 200), (list.size() >= 2 || next == -1) && q->lastHeard.size() <= kSettingsMinFrame &&
+                                                      (next == -1 || q->lastHeard.size() > 3400));
+            for (size_t i = 0; i < list.size(); ++i) seen += str(list.at(i), "key") + " ";
+            CHECK(next == -1 || next == from + (long long)list.size());
+            from = next;
+            ++pages;
+        }
+        std::string all;
+        for (int i = 0; i < 64; ++i) all += "K" + num(i) + " ";
+        CHECK_IN(seen, seen == all && pages > 3);
+        Parsed tail(b.call(q, "settings.get", getParams("org.nbtapp.many", 62)));
+        CHECK(statesOf(tail) == "K62 set true; K63 unset");
+    }
+
+    // An agent on trial gives the settings, and changes none.
+    {
+        Bench t("settings-trial", false, false, "1.2.0");
+        makeHome(t.root, "1.1.0");
+        put(t.root + "/agent/1.2.0/nbtagent", "#!/bin/sh\n", 0755);
+        put(t.root + "/agent/launcher", "#!/bin/sh\n", 0755);
+        put(t.root + "/agent/trial.started", "1.2.0\n");
+        Phone* q = t.phone();
+        install(t, q, kDial, kDial);
+    }
+    Bench t("settings-trial", true, false, "1.2.0");
+    Phone* q = t.connect();
+    CHECK(Parsed(t.call(q, "hello", kGoodHello)).result.isObject() && t.agent.onTrial());
+    CHECK(Parsed(t.call(q, "settings.get", getParams(kDialId))).result.isObject());
+    CHECK(Parsed(t.call(q, "settings.set", setParams(kDialId, "{\"CHIME\":true}"))).code() == "busy" && t.agent.onTrial());
+    CHECK(fs::kindOf(t.platform.dataDir(kDialId) + "/dial.conf") == fs::kNone);
 }
 
 static void testSession(const std::string& path) {
@@ -3731,8 +4060,10 @@ int main(int argc, char** argv) {
     testChecks();
     testChecksBusy();
     testSerialReset();
+    testSettings();
+    size_t worst = worstOption();
     testSession(session);
     fs::removeTree(gWork, 0);
-    printf("test_agent: ok\n");
+    printf("test_agent: ok (the longest settings.get reply for one option: %u bytes of %u)\n", (unsigned)worst, (unsigned)kSettingsMinFrame);
     return 0;
 }

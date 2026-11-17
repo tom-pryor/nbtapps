@@ -33,6 +33,9 @@ class AgentVectorsInSyncTest {
     fun `the log path vectors are the agent repo's`() = assertSame("log-paths.vectors", "spec/log-paths.vectors")
 
     @Test
+    fun `the settings vectors are the agent repo's`() = assertSame("settings.vectors", "spec/settings.vectors")
+
+    @Test
     fun `the frame vectors are the agent repo's`() = assertSame("protocol/frames.vectors", "spec/protocol/frames.vectors")
 
     @Test

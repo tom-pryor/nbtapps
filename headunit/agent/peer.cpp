@@ -32,10 +32,14 @@ std::string resultText(int64_t id, const std::string& result) {
     return w.text();
 }
 
-std::string errorText(int64_t id, const std::string& code, const std::string& message) {
+std::string errorText(int64_t id, const std::string& code, const std::string& message) { return errorText(id, code, message, 0, ""); }
+
+std::string errorText(int64_t id, const std::string& code, const std::string& message, const char* name, const std::string& json) {
     json::Writer w;
     w.beginObject().key("id").integer(id).key("error").beginObject();
-    w.key("code").string(code).key("message").string(sanitizeUtf8(message, 0)).endObject().endObject();
+    w.key("code").string(code).key("message").string(sanitizeUtf8(message, 0));
+    if (name != 0) w.key(name).raw(json);
+    w.endObject().endObject();
     return w.text();
 }
 
@@ -188,7 +192,7 @@ void Peer::handleMessage(const std::string& text) {
                 close("an error with no code");
                 return;
             }
-            handler_->onResponse(this, id.integer(), false, json::Value(), code.string(),
+            handler_->onResponse(this, id.integer(), false, error, code.string(),
                                  message.isString() ? message.string() : std::string());
         }
         return;
@@ -222,9 +226,12 @@ void Peer::respond(int64_t id, const std::string& result) {
     sendMessage(text);
 }
 
-void Peer::respondError(int64_t id, const char* code, const std::string& message) {
-    std::string text = errorText(id, code, message);
-    // An error is short unless its message is long, and the code is the part that matters.
+void Peer::respondError(int64_t id, const char* code, const std::string& message) { respondError(id, code, message, 0, ""); }
+
+void Peer::respondError(int64_t id, const char* code, const std::string& message, const char* name, const std::string& json) {
+    std::string text = errorText(id, code, message, name, json);
+    // An error is short unless what it carries is long, and the code is the part that matters.
+    if (text.size() > maxFrame_) text = errorText(id, code, "", name, json);
     if (text.size() > maxFrame_) text = errorText(id, code, "");
     sendMessage(text);
 }

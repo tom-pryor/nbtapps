@@ -41,7 +41,8 @@ public:
     // respond() or respondError(), now or later.
     virtual void onRequest(Peer* peer, int64_t id, const std::string& method, const json::Value& params) = 0;
     // The answer to a request made with request(). With `ok`, `result` is the result object; otherwise `code` and
-    // `message` are the error's.
+    // `message` are the error's, and `result` is the whole error object, for the members an error of some codes
+    // has beside them (settings.set's `invalid` has `keys`).
     virtual void onResponse(Peer* peer, int64_t id, bool ok, const json::Value& result, const std::string& code,
                             const std::string& message) = 0;
     // `seq` is below 0 if the event carried none.
@@ -78,6 +79,9 @@ public:
     int64_t request(const std::string& method, const std::string& params);
     void respond(int64_t id, const std::string& result);
     void respondError(int64_t id, const char* code, const std::string& message);
+    // An error with one member more after the message: `name`, with `json`, the text of a JSON value, as its value.
+    // Should it not fit the frame, the message goes first, and then the member.
+    void respondError(int64_t id, const char* code, const std::string& message, const char* name, const std::string& json);
     bool event(const std::string& name, int64_t seq, const std::string& params);   // seq below 0: none
     void data(uint16_t stream, const void* bytes, size_t len, bool last);
 
@@ -124,6 +128,8 @@ private:
 std::string requestText(int64_t id, const std::string& method, const std::string& params);
 std::string resultText(int64_t id, const std::string& result);
 std::string errorText(int64_t id, const std::string& code, const std::string& message);
+// With a member `name` after the message, whose value is the JSON text `json`; none when `name` is 0.
+std::string errorText(int64_t id, const std::string& code, const std::string& message, const char* name, const std::string& json);
 std::string eventText(const std::string& name, int64_t seq, const std::string& params);
 
 }  // namespace nbt

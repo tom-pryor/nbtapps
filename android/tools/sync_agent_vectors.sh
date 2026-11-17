@@ -18,7 +18,7 @@ out="$here/app/src/test/resources/agent"
 
 rm -rf "$out"
 mkdir -p "$out/protocol" "$out/packages" "$out/keys"
-cp "$agent/spec/json-profile.vectors" "$agent/spec/log-paths.vectors" "$out/"
+cp "$agent/spec/json-profile.vectors" "$agent/spec/log-paths.vectors" "$agent/spec/settings.vectors" "$out/"
 cp "$agent/spec/protocol/frames.vectors" "$agent/spec/protocol/session.vectors" "$agent/spec/protocol/constants.txt" \
     "$out/protocol/"
 # Public halves only. The private halves stay in the agent repo, which signs the test packages.
@@ -32,6 +32,7 @@ Copied from the agent repo by tools/sync_agent_vectors.sh. Do not edit here: cha
 
   json-profile.vectors      cases for the strict JSON profile (spec/json-profile.vectors)
   log-paths.vectors         cases for the path of a manifest's logs entry (spec/log-paths.vectors)
+  settings.vectors          the value rules of package settings, read and written (spec/settings.vectors)
   protocol/frames.vectors   good and bad frames (spec/protocol/frames.vectors)
   protocol/session.vectors  one conversation between a phone and the agent (spec/protocol/session.vectors)
   protocol/constants.txt    the names and numbers both sides must hold alike (spec/protocol/constants.txt)
