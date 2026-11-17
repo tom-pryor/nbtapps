@@ -5,7 +5,7 @@
 `cryptography` module. Exits non-zero on the first failure.
 
   1. the strict JSON profile agrees with every line of spec/json-profile.vectors
-  2. the manifest schema uses only keywords the tool implements
+  2. the manifest schema uses only keywords the tool implements, and agrees with every line of spec/log-paths.vectors
   3. every good test package verifies and every bad one is refused with the code vectors.json gives it, and each
      detached-signature case gets the verdict it gives
   4. the same source builds the same bytes, and `build` + `sign` equals a signed `build`
@@ -31,16 +31,16 @@ TOOL = os.path.join(ROOT, "tools", "nbtpkg.py")
 KEYS = os.path.join(ROOT, "tests", "keys")
 
 
-def json_cases():
-    """spec/json-profile.vectors -> (line number, expected ok, input bytes)."""
-    with open(os.path.join(ROOT, "spec", "json-profile.vectors"), "r", encoding="ascii") as f:
+def vector_cases(name, verdicts=("ok", "bad")):
+    """spec/NAME, in the form json-profile.vectors and log-paths.vectors share -> (line number, verdict, bytes)."""
+    with open(os.path.join(ROOT, "spec", name), "r", encoding="ascii") as f:
         for number, line in enumerate(f, 1):
             line = line.rstrip("\n")
             if not line or line.startswith("#"):
                 continue
             line = line.split("  #", 1)[0]
             verdict, _, text = line.partition(" ")
-            assert verdict in ("ok", "bad"), "line %d" % number
+            assert verdict in verdicts, "%s line %d" % (name, number)
             data = bytearray()
             i = 0
             while i < len(text):
@@ -50,7 +50,13 @@ def json_cases():
                 else:
                     data.append(ord(text[i]))
                     i += 1
-            yield number, verdict == "ok", bytes(data)
+            yield number, verdict, bytes(data)
+
+
+def json_cases():
+    """spec/json-profile.vectors -> (line number, expected ok, input bytes)."""
+    for number, verdict, data in vector_cases("json-profile.vectors"):
+        yield number, verdict == "ok", data
 
 
 def refused(code, call, *args, **kwargs):
@@ -82,6 +88,19 @@ def main():
 
     # 2. Schema.
     schema = nbtpkg.manifest_schema()
+    # The path of a logs entry, as the agent and the phone app read it.
+    count = 0
+    for number, verdict, data in vector_cases("log-paths.vectors"):
+        try:
+            nbtpkg.validate({"path": data.decode("utf-8")}, schema["$defs"]["log"], schema, "log")
+            accepted = True
+        except nbtpkg.SchemaError:
+            accepted = False
+        assert accepted == (verdict == "ok"), \
+            "log-paths.vectors line %d: %s" % (number, "accepted" if accepted else "refused")
+        count += 1
+    assert count > 40
+    print("[ok] log paths: %d cases" % count)
     assert schema["properties"]["manifestVersion"]["const"] == nbtpkg.SUPPORTED_MANIFEST_VERSION
     # `$` must not accept a trailing newline, which Python's own `$` would.
     for good in ("1.2.0", "1.2.0-beta.1", "10.20.30+build.5"):

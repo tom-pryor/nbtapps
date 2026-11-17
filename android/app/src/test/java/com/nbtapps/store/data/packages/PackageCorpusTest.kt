@@ -76,16 +76,16 @@ class PackageCorpusTest {
     }
 
     @Test
-    fun `a log path is in the package's own folders, or under tmp or var and outside the agent's`() {
-        for (path in listOf("\${data}/*", "\${tmp}/a", "/tmp/a/b", "/var/opt/nbtappx/y", "/tmp/nbtapps/a", "\${data}/.x")) {
-            assertTrue(path, ManifestParser.isLogPath(path))
-        }
-        for (path in listOf(
-            "", "\${data}", "\${data}/", "\${data}/x/", "\${data}/../x", "\${data}/*/x", "\${data}x/y", "\${plugins}/x",
-            "\${home}/x", "x", "/etc/passwd", "/tmp", "/tmpx/y", "/tmp/nbtapp", "/tmp/nbtapp/x", "/var/opt/nbtapp",
-            "/var/opt/nbtapp/phones.json", "\${data}/a\\b", "\${data}/a\nb",
-        )) {
-            assertFalse(path, ManifestParser.isLogPath(path))
+    fun `a log path is read as every case of the shared log path vectors says`() {
+        val cases = AgentVectors.cases("log-paths.vectors")
+        assertTrue(cases.size > 40)
+        for (case in cases) {
+            val path = case.input.decodeToString()
+            when (case.verdict) {
+                "ok" -> assertTrue("line ${case.line}: $path", ManifestParser.isLogPath(path))
+                "bad" -> assertFalse("line ${case.line}: $path", ManifestParser.isLogPath(path))
+                else -> fail("line ${case.line} is neither ok nor bad")
+            }
         }
         // 255 characters, not bytes, as the agent counts them.
         assertTrue(ManifestParser.isLogPath("\${data}/" + "é".repeat(247)))

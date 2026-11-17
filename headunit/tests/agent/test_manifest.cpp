@@ -4,13 +4,16 @@
 // the code a refusal carries, and the risk flags. The deliberately broken packages (test_package) cover the same
 // checker from the outside; this test reaches the cases they do not.
 
+#include "../../agent/json_writer.hpp"
 #include "../../agent/manifest.hpp"
 #include "../../agent/utf8.hpp"
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include <string>
+#include <vector>
 
 using namespace nbt;
 
@@ -40,6 +43,59 @@ static std::string code(const std::string& text, Manifest* out = 0) {
 }
 
 // The code for a manifest whose `member` (of the top level, of a file entry, ...) is given as JSON text.
+// One case of spec/log-paths.vectors.
+struct LogPathCase {
+    int line;
+    std::string verdict;   // ok or bad
+    std::string path;      // with each %HH made the byte HH
+};
+
+static int hexDigit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+static std::vector<LogPathCase> logPathCases(const char* file) {
+    std::vector<LogPathCase> cases;
+    FILE* f = fopen(file, "rb");
+    if (f == 0) {
+        fprintf(stderr, "test_manifest: cannot open %s\n", file);
+        exit(1);
+    }
+    std::string line;
+    int number = 0;
+    for (;;) {
+        line.clear();
+        int c;
+        while ((c = fgetc(f)) != EOF && c != '\n') line += (char)c;
+        if (c == EOF && line.empty()) break;
+        ++number;
+        if (line.empty() || line[0] == '#') continue;
+        size_t note = line.find("  #");
+        if (note != std::string::npos) line.erase(note);
+        size_t space = line.find(' ');
+        LogPathCase one;
+        one.line = number;
+        one.verdict = line.substr(0, space);
+        assert(one.verdict == "ok" || one.verdict == "bad");
+        std::string text = space == std::string::npos ? "" : line.substr(space + 1);
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '%') {
+                assert(i + 2 < text.size() && hexDigit(text[i + 1]) >= 0 && hexDigit(text[i + 2]) >= 0);
+                one.path += (char)(hexDigit(text[i + 1]) * 16 + hexDigit(text[i + 2]));
+                i += 2;
+            } else {
+                one.path += text[i];
+            }
+        }
+        cases.push_back(one);
+    }
+    fclose(f);
+    return cases;
+}
+
 static std::string head(const std::string& members) { return code(make(members, "", "")); }
 static std::string file(const std::string& members) {
     return code(make(kHead, content("a/b"), "\"files\":[{" + members + "}]"));
@@ -283,20 +339,20 @@ int main() {
         assert(Logs::code("[]", &m) == "" && m.logs.empty());
         assert(Logs::code("[{\"path\":\"${data}/log/*.log\"},{\"path\":\"/tmp/radio.log\",\"label\":\"x\"}]", &m) == "");
         assert(m.logs.size() == 2 && m.logs[0] == "${data}/log/*.log" && m.logs[1] == "/tmp/radio.log" && riskFlags(m).empty());
-        const char* const good[] = {"${app}/x", "${data}/*", "${tmp}/crash.txt", "${data}/log/radio.?.log", "/var/log/x.log",
-                                    "/tmp/a/b/c", "/var/opt/nbtappx/y", "/tmp/nbtapps/a", "/tmp/...", "${data}/.hidden",
-                                    "${data}/a b/c.log", 0};
-        for (int i = 0; good[i] != 0; ++i) {
-            assert(Logs::one(good[i]) == "" && validLogPath(good[i]));
+        // Each path of spec/log-paths.vectors, which nbtpkg.py and the phone app are held to as well, in a manifest
+        // and alone.
+        std::vector<LogPathCase> cases = logPathCases("spec/log-paths.vectors");
+        assert(cases.size() > 40);
+        for (size_t i = 0; i < cases.size(); ++i) {
+            json::Writer w;
+            w.beginArray().beginObject().key("path").string(cases[i].path).endObject().endArray();
+            bool ok = cases[i].verdict == "ok";
+            if (Logs::code(w.text()) != (ok ? "" : bad) || validLogPath(cases[i].path) != ok) {
+                fprintf(stderr, "test_manifest: spec/log-paths.vectors line %d: %s is not %s\n", cases[i].line,
+                        cases[i].path.c_str(), cases[i].verdict.c_str());
+                return 1;
+            }
         }
-        const char* const noPaths[] = {"", "${data}", "${data}/", "${data}/log/", "${data}//x", "${data}/../x",
-                                       "${data}/./x", "${data}/x/..", "${data}/*/x", "${data}/l?g/x", "${plugins}/x",
-                                       "${home}/x", "${data}x/y", "log/x", "/etc/passwd", "/tmp", "/tmp/", "/tmpx/y",
-                                       "/var", "/varx/y", "/tmp/nbtapp", "/tmp/nbtapp/x", "/tmp/nbtapp/apps/other/x",
-                                       "/var/opt/nbtapp", "/var/opt/nbtapp/", "/var/opt/nbtapp/phones.json",
-                                       "${data}/a\\\\b", "${data}/a\\nb", 0};
-        for (int i = 0; noPaths[i] != 0; ++i) assert(Logs::one(noPaths[i]) == bad);
-        assert(!validLogPath("/var/opt/nbtapp/phones.json") && !validLogPath("${data}/*/x"));
         // 255 characters, not bytes, as for a destination.
         std::string longest = "${data}/" + std::string(247, 'x');
         assert(longest.size() == 255 && Logs::one(longest) == "" && Logs::one(longest + "x") == bad);

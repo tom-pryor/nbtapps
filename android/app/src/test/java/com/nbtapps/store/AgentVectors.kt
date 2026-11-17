@@ -3,6 +3,7 @@
 package com.nbtapps.store
 
 import com.nbtapps.store.data.crypto.Hex
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 /** The files copied from the agent repo by `tools/sync_agent_vectors.sh`: what both sides are tested against. */
@@ -23,4 +24,29 @@ object AgentVectors {
     val indexKey: ByteArray get() = key("test-index")
 
     fun hex(text: String): ByteArray = requireNotNull(Hex.decodeOrNull(text, text.length / 2)) { "not hex: $text" }
+
+    /** One case of a `.vectors` file: its line number, its verdict and its input. */
+    class Case(val line: Int, val verdict: String, val input: ByteArray)
+
+    /**
+     * The cases of a `.vectors` file such as `log-paths.vectors`: a verdict, a space and the input, where `%HH` stands
+     * for the byte HH. `#` lines are comments, and a note may follow two spaces and a #.
+     */
+    fun cases(path: String): List<Case> = file(path).readLines().mapIndexedNotNull { index, line ->
+        if (line.isBlank() || line.startsWith("#")) return@mapIndexedNotNull null
+        val text = line.substringBefore("  #")
+        val out = ByteArrayOutputStream()
+        val input = text.substringAfter(' ', "")
+        var i = 0
+        while (i < input.length) {
+            if (input[i] == '%') {
+                out.write(input.substring(i + 1, i + 3).toInt(16))
+                i += 3
+            } else {
+                out.write(input[i].toString().encodeToByteArray())
+                i++
+            }
+        }
+        Case(index + 1, text.substringBefore(' '), out.toByteArray())
+    }
 }

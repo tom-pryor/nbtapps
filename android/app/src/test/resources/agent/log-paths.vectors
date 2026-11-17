@@ -1,0 +1,57 @@
+# Cases for the path of a manifest's logs entry ($defs/log/path in manifest.schema.json). Every reader of a manifest
+# must agree with every line: tools/nbtpkg.py and the schema (tests/test_nbtpkg.py), the agent's agent/manifest.cpp
+# (tests/agent/test_manifest.cpp) and the phone app's ManifestParser (PackageCorpusTest).
+#
+# A case is `ok` or `bad`, a space, and the path. %HH stands for the byte HH; a literal percent sign is %25. A note
+# may follow two spaces and a #, since no path here holds that sequence. The 255-character limit is tested in each
+# reader's own code, where a long path can be built.
+
+# ---- The package's own folders
+ok ${app}/x
+ok ${data}/*
+ok ${data}/.x  # a hidden file
+ok ${data}/.hidden
+ok ${tmp}/a
+ok ${tmp}/crash.txt
+ok ${data}/log/radio.?.log
+ok ${data}/a b/c.log  # a space in a segment
+bad ${data}
+bad ${data}/
+bad ${data}/log/  # a slash at the end
+bad ${data}/x/
+bad ${data}//x  # an empty segment
+bad ${data}/../x
+bad ${data}/./x
+bad ${data}/x/..
+bad ${data}/*/x  # a wildcard outside the last segment
+bad ${data}/l?g/x
+bad ${data}x/y
+bad ${data}/a%5Cb  # a backslash
+bad ${data}/a%0Ab  # a control character
+bad ${plugins}/x  # a variable that is not a folder of the package's
+bad ${home}/x  # a variable that does not exist
+
+# ---- Absolute paths: the log roots, outside the agent's own folders
+ok /var/log/x.log
+ok /tmp/a/b/c
+ok /tmp/a/b
+ok /tmp/...
+ok /var/opt/nbtappx/y  # only the agent's folder itself is closed, not names that start like it
+ok /tmp/nbtapps/a
+bad /tmp
+bad /tmp/
+bad /tmpx/y
+bad /var
+bad /varx/y
+bad /etc/passwd  # not a log root
+bad /tmp/nbtapp
+bad /tmp/nbtapp/x
+bad /tmp/nbtapp/apps/other/x  # another package's ${tmp}, named by its path
+bad /var/opt/nbtapp
+bad /var/opt/nbtapp/
+bad /var/opt/nbtapp/phones.json
+
+# ---- Neither
+bad  # empty
+bad x
+bad log/x
