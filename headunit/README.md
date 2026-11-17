@@ -272,6 +272,93 @@ makes the agent's own package of that folder, `release/pkg/org.nbtapp.agent-<ver
 `make agent-check` holds the two together: the archive is byte for byte what `tools/agent_pkg.py` makes of the
 folder, and its manifest places the two programs, the launcher and the starter and does nothing else.
 
+### A package's settings
+
+A package whose program has settings can name them in its manifest, and a user then changes them in the phone
+app, on the package's own screen, instead of editing a file on the head unit. This is what a package's author
+does for that.
+
+The manifest's `settings` names the file and the options:
+
+```json
+"settings": {
+  "file": "${data}/chime.conf",
+  "options": [
+    { "key": "CHIME_ON", "label": "Chime", "type": "bool", "default": true },
+    { "key": "CHIME_SECONDS", "label": "Chime length", "description": "How long the chime sounds.",
+      "type": "int", "min": 1, "max": 30, "unit": "s", "default": 5, "applies": "app-start" },
+    { "key": "CHIME_TUNE", "label": "Tune", "type": "select", "default": "low",
+      "values": [ { "value": "low", "label": "Low" }, { "value": "high", "label": "High" } ] },
+    { "key": "CHIME_LOG", "label": "Log file", "type": "text", "maxLength": 120,
+      "unset": "No log file", "applies": "app-start", "advanced": true }
+  ]
+}
+```
+
+- `file` is under `${data}`, the package's own folder that an upgrade keeps (`${data}/settings` when it is left
+  out).
+- Each option has a `key` (capital letters, digits and `_`), a `label` and a `type`: `bool`; `int` with `min`,
+  `max` and an optional `unit`; `text` with `maxLength` in bytes and `characters`, `safe` (letters, digits and
+  `. _ : / @ + , -`, the default) or `any`; `select` with 2 to 16 `values`. A `description` says more.
+- `default` is what the program does when the file has no line for the key, and the phone shows it. When there is
+  no one value to show, because the program works it out, `unset` gives the words the phone shows instead, such
+  as "From the car". An option has one or the other, or neither.
+- `applies` says when a change takes effect: `now`, `app-start` (when the program next starts), `hmi-restart` or
+  `reboot`. It is a promise the program keeps: the agent writes the file and restarts nothing.
+- `advanced` puts the option under a folded section on the phone.
+- At most 64 options. One option's strings together hold at most 1,024 bytes, and a value 255.
+  `spec/manifest.schema.json` has every rule, and `nbtpkg.py build` checks them.
+
+What the agent does with the file:
+
+- It keeps no copy of the values. It reads the file each time the phone opens the package's settings, and when
+  the user saves, it checks every value against the manifest, then changes the lines of those keys only and puts
+  the whole file in place at once. Comments, blank lines and keys the manifest does not name stay as they are,
+  so the file can hold more than the phone shows, and a person may still edit it by hand.
+- A line it writes is the key, `=` and the value, with nothing around it: no quotes and no escapes. A `bool` is
+  `1` or `0`; it also reads `on`, `yes` and `true` and their opposites, in any case. Reset takes the key's line
+  out of the file. When a key is on several lines, the last one counts, and a save leaves one.
+- The file is not there until the first change. A missing file means every option takes its default.
+- A value the option's type does not take, written by hand, is shown on the phone as set by hand, and left as it
+  is until the user gives another or resets it.
+
+What the program does:
+
+- It reads the file from the package's data folder: `/var/opt/nbtapp/data/<id>/` on a car, `$NBT_DATA_DIR` in a
+  hook. It reads it again each time it needs the values, since a save puts a new file in place of the old one.
+- It reads each value as plain text, line by line. It never runs the file with `.` or `source`, never `eval`s a
+  line, and quotes a value it puts into a command (`"$value"`): a value is whatever a user typed. In a hook, with
+  what a head unit has:
+
+  ```sh
+  chime_on=1 chime_seconds=5                        # the manifest's defaults
+  file=$NBT_DATA_DIR/chime.conf
+  cr=$(print '\r')                                  # a carriage return; this ksh has no $'\r'
+  if [ -f "$file" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do  # a last line with no newline too
+          line=${line%$cr}                          # one carriage return at the end goes, as for the agent
+          case $line in
+              CHIME_ON=*) chime_on=${line#CHIME_ON=} ;;
+              CHIME_SECONDS=*) chime_seconds=${line#CHIME_SECONDS=} ;;
+          esac
+      done < "$file"
+  fi
+  ```
+
+- It checks a value as the agent does and takes the default for one it does not understand, because a person may
+  have written anything there. A line the agent writes is at most 320 bytes (a key of 64, `=`, a value of 255);
+  a line written by hand may be longer, or end in a carriage return. A program with a fixed-size buffer copes
+  with both.
+- Its defaults are the manifest's. The agent cannot check that they agree.
+- The package does not place the settings file with `install.files`: an upgrade would put the shipped one back
+  over the user's. If it must ship one, it marks it `config: true`.
+
+A package with `settings` installs on any agent, as older ones ignore the key. Its settings appear in the phone
+app once the head unit's agent lists the capability `settings`. They live in `${data}`, so they last through an
+upgrade, and through a removal unless the user has the package's data removed too. A new version that drops an
+option leaves its line in the file, and one that changes an option's type may find the old value shown as set by
+hand.
+
 ## Installing
 
 [INSTALL.md](INSTALL.md) sets up a car and a phone from nothing, step by step: the agent, the app and this
