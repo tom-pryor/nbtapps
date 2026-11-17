@@ -5,6 +5,8 @@ package com.nbtapps.store.data.link
 import com.nbtapps.store.data.PairingKeys
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.crypto.newSha256
+import com.nbtapps.store.data.packages.ManifestParser
+import com.nbtapps.store.data.packages.PackageFormatException
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.Check
@@ -23,6 +25,13 @@ import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.PlanRequest
 import com.nbtapps.store.model.SerialReset
 import com.nbtapps.store.model.SerialResetState
+import com.nbtapps.store.model.SettingEntry
+import com.nbtapps.store.model.SettingFault
+import com.nbtapps.store.model.SettingFaults
+import com.nbtapps.store.model.SettingState
+import com.nbtapps.store.model.SettingType
+import com.nbtapps.store.model.SettingValue
+import com.nbtapps.store.model.SettingsPage
 import com.nbtapps.store.model.TrustedSource
 import com.nbtapps.store.model.TrustedSources
 import java.io.IOException
@@ -31,6 +40,7 @@ import java.security.SecureRandom
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -410,6 +420,54 @@ class AgentClient(
         return answer
     }
 
+    /**
+     * One page of the settings of the installed package [packageId], from its option [from] on (0 when null): see
+     * [SettingsPage]. Each option is read under the manifest's rules for it. Only an agent that lists
+     * [ProtocolConstants.CAPABILITY_SETTINGS] has it, and it needs a link whose frame holds 4,096 bytes.
+     *
+     * @throws RemoteException with `not-found` for a package that is not installed or names no options, `busy` while
+     *   an install step runs, `unsupported` from an agent without settings or on a smaller frame, `io-error` for a
+     *   settings file that cannot be read, `bad-request` for a [from] past the last option.
+     */
+    suspend fun settingsGet(packageId: String, from: Int? = null): SettingsPage {
+        val result: JsonObject = call("settings.get", buildJsonObject {
+            put("package", packageId)
+            from?.let { put("from", it) }
+        })
+        val options = result["options"] as? JsonArray ?: throw ProtocolException(UNREADABLE)
+        val next = result["next"]?.let { it.integerOrNull()?.takeIf { n -> n in 1..Int.MAX_VALUE.toLong() }?.toInt() ?: throw ProtocolException(UNREADABLE) }
+        return SettingsPage(options.map(::settingEntry), next)
+    }
+
+    /**
+     * Changes the settings of the installed package [packageId]: each key of [set] to its value, and each key of
+     * [reset] out of the file, so that the package goes by its default. All or nothing: a key the agent does not take
+     * and nothing is written. The request has to fit one frame of the link: see [settingsSetParams].
+     *
+     * @throws RemoteException with `invalid` and the keys at fault in its [RemoteException.error] ([settingFaults]),
+     *   `busy` while a job runs or the agent is on trial, `not-found`, `unsupported` and `io-error` as for
+     *   [settingsGet], `bad-request` for a request that names no key or one key twice.
+     */
+    suspend fun settingsSet(packageId: String, set: Map<String, SettingValue>, reset: List<String> = emptyList()) {
+        call<JsonObject>("settings.set", settingsSetParams(packageId, set, reset))
+    }
+
+    /** One option of a page of `settings.get`. */
+    private fun settingEntry(item: JsonElement): SettingEntry {
+        val obj = item as? JsonObject ?: throw ProtocolException(UNREADABLE)
+        val option = try {
+            ManifestParser.settingOption(obj)
+        } catch (e: PackageFormatException) {
+            null
+        } ?: throw ProtocolException(UNREADABLE)
+        return when (obj["state"].stringOrNull()?.let(SettingState::of)) {
+            SettingState.UNSET -> SettingEntry(option, SettingState.UNSET)
+            SettingState.SET -> SettingEntry(option, SettingState.SET, value = settingValue(option.type, obj["value"]) ?: throw ProtocolException(UNREADABLE))
+            SettingState.BY_HAND -> SettingEntry(option, SettingState.BY_HAND, raw = obj["raw"].stringOrNull() ?: throw ProtocolException(UNREADABLE))
+            null -> throw ProtocolException(UNREADABLE)
+        }
+    }
+
     private fun planIdParams(planId: String) = buildJsonObject { put("planId", planId) }
 
     private fun jobOf(result: JsonObject): JobSnapshot? = (result["job"] as? JsonObject)?.let { decode(it) }
@@ -451,5 +509,41 @@ class AgentClient(
 
         /** A head-unit or phone id: 32 lowercase hex characters. */
         fun isId(text: String): Boolean = text.length == 32 && text.all { it in '0'..'9' || it in 'a'..'f' }
+
+        /**
+         * The params of `settings.set`: `set` and `reset` each left out where it would be empty. What a caller
+         * measures against the link's frame before it sends them.
+         */
+        fun settingsSetParams(packageId: String, set: Map<String, SettingValue>, reset: List<String>): JsonObject = buildJsonObject {
+            put("package", packageId)
+            if (set.isNotEmpty()) put("set", JsonObject(set.mapValues { (_, value) -> settingJson(value) }))
+            if (reset.isNotEmpty()) put("reset", JsonArray(reset.map(::JsonPrimitive)))
+        }
+
+        /** [value] as JSON: a boolean, an integer or a string. */
+        fun settingJson(value: SettingValue): JsonPrimitive = when (value) {
+            is SettingValue.Bool -> JsonPrimitive(value.value)
+            is SettingValue.Number -> JsonPrimitive(value.value)
+            is SettingValue.Text -> JsonPrimitive(value.value)
+        }
+
+        /** [element] as a value of an option of [type], or null where it is not of the JSON type that has. */
+        fun settingValue(type: SettingType, element: JsonElement?): SettingValue? {
+            val primitive = element as? JsonPrimitive ?: return null
+            return when (type) {
+                SettingType.BOOL -> primitive.takeIf { !it.isString }?.booleanOrNull?.let { SettingValue.Bool(it) }
+                SettingType.INT -> element.integerOrNull()?.let { SettingValue.Number(it) }
+                SettingType.TEXT, SettingType.SELECT -> element.stringOrNull()?.let { SettingValue.Text(it) }
+            }
+        }
+
+        /** The keys at fault of the error `invalid` of `settings.set`, from its error object. Empty where it has none. */
+        fun settingFaults(error: JsonObject): List<SettingFault> = try {
+            json.decodeFromJsonElement<SettingFaults>(error).keys
+        } catch (e: SerializationException) {
+            emptyList()
+        } catch (e: IllegalArgumentException) {
+            emptyList()
+        }
     }
 }

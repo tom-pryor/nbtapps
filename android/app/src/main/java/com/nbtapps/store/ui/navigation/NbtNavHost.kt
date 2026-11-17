@@ -27,6 +27,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.nbtapps.store.R
+import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.ui.catalogue.CataloguePackageScreen
 import com.nbtapps.store.ui.catalogue.CatalogueScreen
 import com.nbtapps.store.ui.detail.HeadUnitDetailScreen
@@ -34,6 +35,7 @@ import com.nbtapps.store.ui.headunits.HeadUnitsScreen
 import com.nbtapps.store.ui.job.JobScreen
 import com.nbtapps.store.ui.logs.LogPullScreen
 import com.nbtapps.store.ui.pairing.PairingScreen
+import com.nbtapps.store.ui.settings.SettingsScreen
 import com.nbtapps.store.ui.setup.SetupScreen
 import com.nbtapps.store.ui.spptest.SppTestScreen
 import java.util.concurrent.atomic.AtomicBoolean
@@ -52,6 +54,10 @@ data class PairingRoute(val headUnitId: String)
 /** The log files of the package [packageId] on the head unit [headUnitId], pulled into a ZIP to share. */
 @Serializable
 data class LogPullRoute(val headUnitId: String, val packageId: String)
+
+/** The settings of the installed package [packageId] on the head unit [headUnitId], read and changed over the link. */
+@Serializable
+data class SettingsRoute(val headUnitId: String, val packageId: String)
 
 @Serializable
 object SppTestRoute
@@ -201,10 +207,17 @@ fun NbtNavHost(
                     onPair = pairHeadUnit,
                     onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
                     onOpenLogs = { id -> navController.navigate(LogPullRoute(headUnitId, id)) },
+                    onOpenSettings = { id -> navController.navigate(SettingsRoute(headUnitId, id)) },
                 )
             }
             composable<LogPullRoute> {
                 LogPullScreen(onBack = { navController.popBackStack() })
+            }
+            composable<SettingsRoute> {
+                SettingsScreen(
+                    onBack = { navController.popBackStack() },
+                    onUpdateAgent = { navController.navigate(CataloguePackageRoute(AGENT_PACKAGE_ID)) },
+                )
             }
             composable<PairingRoute> {
                 PairingScreen(
@@ -243,6 +256,7 @@ fun NbtNavHost(
                     onOpenHeadUnit = openHeadUnit,
                     onSetUp = setUp,
                     onPairHeadUnit = pairHeadUnit,
+                    onOpenSettings = { headUnitId, id -> navController.navigate(SettingsRoute(headUnitId, id)) },
                 )
             }
         }

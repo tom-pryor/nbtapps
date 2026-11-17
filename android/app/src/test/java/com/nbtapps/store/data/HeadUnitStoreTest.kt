@@ -130,6 +130,35 @@ class HeadUnitStoreTest {
     }
 
     @Test
+    fun `which installed packages have settings is kept with the profile, and a profile saved before reads as none`() = runTest {
+        val profile = HeadUnitProfile(
+            agentVersion = "1.4.1",
+            manifestVersion = 1,
+            free = FreeSpace(),
+            restartNeeded = "none",
+            installed = listOf(
+                InstalledPackage("org.nbtapp.dial", "Dial", "1.0.0", settings = true),
+                InstalledPackage("org.nbtapp.runtime", "NBT Runtime", "2.1.0"),
+            ),
+            seenAt = 1_794_000_000_000,
+        )
+        opened { first ->
+            first.add(car)
+            first.update("one") { it.copy(profile = profile) }
+        }
+        assertEquals(listOf(true, false), opened { it.headUnit("one").first() }?.profile?.installed?.map { it.settings })
+
+        // As a version from before settings wrote it.
+        file.writeText(
+            """[{"id":"one","name":"Car","endpoints":[],"profile":{"agentVersion":"1.4.1","manifestVersion":1,""" +
+                """"free":{},"restartNeeded":"none","installed":[{"id":"org.nbtapp.dial","name":"Dial","version":"1.0.0","logs":true}],"seenAt":1}}]""",
+        )
+        val older = requireNotNull(opened { it.headUnit("one").first() }?.profile?.installed?.single())
+        assertEquals(false, older.settings)
+        assertEquals(true, older.logs)
+    }
+
+    @Test
     fun `removing a head unit is kept too`() = runTest {
         opened { first ->
             first.add(car)

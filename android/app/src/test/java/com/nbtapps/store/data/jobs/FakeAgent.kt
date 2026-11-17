@@ -27,14 +27,99 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.Deflater
 import kotlin.concurrent.thread
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /** A log file a [FakeAgent] lists and sends: see [FakeAgent.logs]. */
 class FakeLog(val path: String, val bytes: ByteArray, val modified: Long = 1_794_400_000)
 
-/** Thrown by a [FakeAgent] handler to answer a request with an error. */
-class Refusal(val code: String) : Exception(code)
+/**
+ * Thrown by a [FakeAgent] handler to answer a request with an error. [extra] is JSON text of more members of the
+ * error object, after its code and message, each with a comma before it: `,"keys":[...]` for `invalid`.
+ */
+class Refusal(val code: String, val extra: String = "") : Exception(code)
+
+/**
+ * A package's settings as a [FakeAgent] gives them with `settings.get` and changes them with `settings.set`: the
+ * options as its manifest has them, and how each stands in its file. It outlives a link, as the head unit's file does,
+ * so a test gives the same one to every agent of a connector. It checks no value: a test says what it refuses.
+ */
+class FakeSettings(
+    val packageId: String,
+    /** The options, each as the JSON text of its manifest's object for it, in the manifest's order. */
+    val options: List<String>,
+) {
+    /** The JSON text of the value of each option that is set. */
+    val values = ConcurrentHashMap<String, String>()
+
+    /** The raw text of each option set by hand to a value its type does not take. */
+    val byHand = ConcurrentHashMap<String, String>()
+
+    /** How many options one answer of `settings.get` holds at most. Null for all of them. */
+    @Volatile
+    var pageSize: Int? = null
+
+    /** The code `settings.get` is refused with, or null to answer. */
+    @Volatile
+    var refuseGet: String? = null
+
+    /** The code `settings.set` is refused with, or null to take it: after [setsBeforeRefusal] that were taken. */
+    @Volatile
+    var refuseSet: String? = null
+
+    @Volatile
+    var setsBeforeRefusal = 0
+
+    /** Keys whose values `settings.set` refuses as `invalid`, with the reason. */
+    val faults = ConcurrentHashMap<String, String>()
+
+    /** The params of every `settings.set`, refused or taken, on every link. */
+    val sets = CopyOnWriteArrayList<JsonObject>()
+
+    private fun key(option: String): String = StrictJson.parseObject(option.encodeToByteArray()).getValue("key").jsonPrimitive.content
+
+    fun get(params: JsonObject): String {
+        refuseGet?.let { throw Refusal(it) }
+        if (params["package"]?.jsonPrimitive?.content != packageId) throw Refusal("not-found")
+        val from = params["from"]?.jsonPrimitive?.content?.toInt() ?: 0
+        if (from >= options.size) throw Refusal("bad-request")
+        val page = options.drop(from).take(pageSize ?: options.size)
+        val next = (from + page.size).takeIf { it < options.size }?.let { ""","next":$it""" }.orEmpty()
+        return page.joinToString(",", """{"options":[""", "]$next}") { option ->
+            val key = key(option)
+            val state = values[key]?.let { ""","state":"set","value":$it""" }
+                ?: byHand[key]?.let { ""","state":"by-hand","raw":"$it"""" }
+                ?: ""","state":"unset""""
+            option.trimEnd().removeSuffix("}") + state + "}"
+        }
+    }
+
+    fun set(params: JsonObject): String {
+        sets += params
+        if (params["package"]?.jsonPrimitive?.content != packageId) throw Refusal("not-found")
+        refuseSet?.let { code -> if (sets.size > setsBeforeRefusal) throw Refusal(code) }
+        val set = params["set"] as? JsonObject ?: JsonObject(emptyMap())
+        val reset = (params["reset"] as? JsonArray)?.map { it.jsonPrimitive.content }.orEmpty()
+        val known = options.map(::key)
+        val wrong = (set.keys + reset).mapNotNull { key ->
+            val reason = if (key !in known) "unknown-key" else faults[key]
+            reason?.let { """{"key":"$key","reason":"$it"}""" }
+        }
+        if (wrong.isNotEmpty()) {
+            throw Refusal("invalid", wrong.joinToString(",", ""","keys":[""", "]"))
+        }
+        for ((key, value) in set) {
+            values[key] = value.toString()
+            byHand.remove(key)
+        }
+        for (key in reset) {
+            values.remove(key)
+            byHand.remove(key)
+        }
+        return "{}"
+    }
+}
 
 /**
  * What an agent that asks for `auth` knows of phones: the keys it issued, as the real agent's phones file holds
@@ -246,6 +331,17 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
     @Volatile
     var capabilities = "[]"
 
+    /** The largest frame `hello` gives. */
+    @Volatile
+    var maxFrame = 65536
+
+    /**
+     * The settings `settings.get` gives and `settings.set` changes, as an agent that lists `settings` has them. One
+     * that does not list it answers both `unsupported`, as the real one does.
+     */
+    @Volatile
+    var settings: FakeSettings? = null
+
     /** What `checks.run` finds and `checks.fix` removes: see [FakeChecks]. Nothing is found unless a test says so. */
     @Volatile
     var checks = FakeChecks()
@@ -305,7 +401,15 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
 
     init {
         handlers["hello"] = {
-            """{"protocolMin":1,"protocolMax":1,"role":"agent","headUnitId":"$headUnitId","agentVersion":"1.0.0","maxFrame":65536,"capabilities":$capabilities}"""
+            """{"protocolMin":1,"protocolMax":1,"role":"agent","headUnitId":"$headUnitId","agentVersion":"1.0.0","maxFrame":$maxFrame,"capabilities":$capabilities}"""
+        }
+        handlers["settings.get"] = { params ->
+            val known = settings?.takeIf { "\"${ProtocolConstants.CAPABILITY_SETTINGS}\"" in capabilities } ?: throw Refusal("unsupported")
+            known.get(params)
+        }
+        handlers["settings.set"] = { params ->
+            val known = settings?.takeIf { "\"${ProtocolConstants.CAPABILITY_SETTINGS}\"" in capabilities } ?: throw Refusal("unsupported")
+            known.set(params)
         }
         handlers["info.get"] = {
             """{"agentVersion":"1.0.0","headUnitId":"$headUnitId","manifestVersion":1,""" +
@@ -441,7 +545,7 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
             send(reply)
         } catch (e: Refusal) {
             try {
-                send("""{"id":$id,"error":{"code":"${e.code}","message":"the fake agent says ${e.code}"}}""")
+                send("""{"id":$id,"error":{"code":"${e.code}","message":"the fake agent says ${e.code}"${e.extra}}}""")
                 // As the real agent does: a link on which `auth` failed is ended once the answer is out.
                 if (e.code == "auth-failed") link.close()
             } catch (closed: IOException) {

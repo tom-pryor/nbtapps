@@ -22,8 +22,15 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
-/** The other side answered a request with an error. [code] is from the protocol's fixed list. */
-class RemoteException(val code: String, message: String) : Exception(message)
+/**
+ * The other side answered a request with an error. [code] is from the protocol's fixed list. [error] is the whole
+ * error object as it came, for an error that says more than its code and message, as `invalid` does with its `keys`.
+ */
+class RemoteException(
+    val code: String,
+    message: String,
+    val error: JsonObject = JsonObject(emptyMap()),
+) : Exception(message)
 
 /**
  * A request's answer together with the bytes the two went as: the payload of the frame that carried each. `auth`
@@ -364,7 +371,7 @@ class Peer(
                 answer.complete(result to payload)
             } else {
                 val code = (error as JsonObject)["code"].stringOrNull() ?: throw FrameException("an error with no code")
-                answer.completeExceptionally(RemoteException(code, error["message"].stringOrNull().orEmpty()))
+                answer.completeExceptionally(RemoteException(code, error["message"].stringOrNull().orEmpty(), error))
             }
             return
         }

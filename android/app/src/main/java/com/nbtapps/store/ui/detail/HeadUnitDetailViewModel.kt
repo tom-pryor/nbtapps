@@ -127,6 +127,11 @@ data class HeadUnitDetailUiState(
     val autostartError: String? = null,
     /** There is a link to this head unit, and its agent can send log files: see [com.nbtapps.store.ui.logs.LogPullScreen]. */
     val logs: Boolean = false,
+    /**
+     * There is a link to this head unit, and its agent gives and changes packages' settings: see
+     * [com.nbtapps.store.ui.settings.SettingsScreen].
+     */
+    val settings: Boolean = false,
     /** The set-up that has this head unit start the agent with the car, begun on pairing, if there is one: see [AutostartSetup]. */
     val setup: AutostartSetupState? = null,
     /** The agent says over the link to this head unit that iDrive has to restart. */
@@ -210,6 +215,7 @@ class HeadUnitDetailViewModel internal constructor(
                 autostartBusy = local.autostartBusy,
                 autostartError = local.autostartError,
                 logs = connected?.files == true,
+                settings = connected?.settings == true,
                 setup = setup?.takeIf { it.headUnitId == headUnitId },
                 restartNeeded = connected?.info?.restartNeeded == RestartKind.HMI,
                 checks = unit?.checks,

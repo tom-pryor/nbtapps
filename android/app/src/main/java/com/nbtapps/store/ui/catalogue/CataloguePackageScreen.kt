@@ -59,6 +59,7 @@ fun CataloguePackageScreen(
     onOpenHeadUnit: (String) -> Unit,
     onSetUp: () -> Unit,
     onPairHeadUnit: (String) -> Unit,
+    onOpenSettings: (headUnitId: String, packageId: String) -> Unit,
     viewModel: CataloguePackageViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -106,6 +107,7 @@ fun CataloguePackageScreen(
                         onInstall = { onInstall(pkg.id, get.version.version) },
                         onAskSwitch = { asking = self },
                         onAsk = { asking = it },
+                        onSettings = { get.headUnitId?.let { onOpenSettings(it, pkg.id) } },
                     )
                 }
                 if (uiState.showsPrereleaseSwitch) {
@@ -242,12 +244,25 @@ private fun CommunityCard(pkg: CataloguePackage, sourceName: String?) {
 /**
  * The way from the catalogue to the head unit: download to the phone at home, install in the car. A package out
  * only in pre-releases asks for its switch first ([onAskSwitch]), and a version that needs another package's
- * pre-release asks for that one's ([onAsk]).
+ * pre-release asks for that one's ([onAsk]). An installed package with settings has Settings at the right of the
+ * card's title, which needs a link to that head unit ([onSettings]).
  */
 @Composable
-private fun GetCard(get: GetState, onDownload: () -> Unit, onInstall: () -> Unit, onAskSwitch: () -> Unit, onAsk: (PrereleaseAsk) -> Unit) {
+private fun GetCard(
+    get: GetState,
+    onDownload: () -> Unit,
+    onInstall: () -> Unit,
+    onAskSwitch: () -> Unit,
+    onAsk: (PrereleaseAsk) -> Unit,
+    onSettings: () -> Unit,
+) {
     val context = LocalContext.current
-    Section(if (get.installedVersion != null) "Installed: ${get.installedVersion}" else "Get it") {
+    val settings: (@Composable () -> Unit)? = if (get.settings) {
+        { TextButton(onClick = onSettings, enabled = get.connected) { Text("Settings") } }
+    } else {
+        null
+    }
+    Section(if (get.installedVersion != null) "Installed: ${get.installedVersion}" else "Get it", trailing = settings) {
         get.installedAsOf?.let { seenAt ->
             Text(
                 "On ${get.headUnitName} ${asOf(seenAt)}",
@@ -398,11 +413,19 @@ private fun VersionTitle(version: String, prerelease: Boolean) {
     }
 }
 
+/** A card with a title, and with [trailing] at the right of the title's row where it is given. */
 @Composable
-private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
+private fun Section(title: String, trailing: (@Composable () -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
+            if (trailing == null) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    trailing()
+                }
+            }
             content()
         }
     }

@@ -60,6 +60,16 @@ object AgentText {
         else -> request(code)
     }
 
+    /**
+     * For the `error` of `settings.get` and `settings.set`, where the app has no state of its own for it: `busy`,
+     * `unsupported`, `not-found` and `invalid` each have one, with its own words (see
+     * [com.nbtapps.store.data.settings.SettingsFailure]), and never come here.
+     */
+    fun settings(code: String): String = when (code) {
+        "io-error" -> "The head unit couldn't read or write the package's settings file"
+        else -> request(code)
+    }
+
     /** Where on the car's screen a phone is paired: what the agent repo's plugin calls its menu and the row in it. */
     const val PAIR_ON_CAR = "On the car's screen, open NBTApp (in the Media/Radio menu) and choose Pair a phone."
 

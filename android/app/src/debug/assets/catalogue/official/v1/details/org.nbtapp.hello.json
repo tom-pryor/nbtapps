@@ -5,6 +5,12 @@
   "screenshots": [],
   "changelog": [
     {
+      "version": "1.2.1",
+      "notes": [
+        "Settings: the status interval, what the status file says and where it goes can be changed from the phone"
+      ]
+    },
+    {
       "version": "1.2.0",
       "notes": [
         "Status file now includes free memory",

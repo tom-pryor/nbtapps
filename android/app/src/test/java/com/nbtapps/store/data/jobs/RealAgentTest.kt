@@ -24,6 +24,11 @@ import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
+import com.nbtapps.store.data.settings.SettingRules
+import com.nbtapps.store.data.settings.SettingsChanges
+import com.nbtapps.store.data.settings.SettingsEdit
+import com.nbtapps.store.data.settings.SettingsException
+import com.nbtapps.store.data.settings.SettingsFailure
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.AutostartReason
 import com.nbtapps.store.model.CheckState
@@ -35,6 +40,9 @@ import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RemoveTarget
 import com.nbtapps.store.model.RestartKind
+import com.nbtapps.store.model.SettingFault
+import com.nbtapps.store.model.SettingState
+import com.nbtapps.store.model.SettingValue
 import com.nbtapps.store.model.TcpEndpoint
 import com.nbtapps.store.model.VersionRange
 import com.nbtapps.store.ui.catalogue.DetailsState
@@ -381,10 +389,10 @@ class RealAgentTest {
 
         // Hello NBT's stable version, with the runtime it brings, and every switch off.
         val stable = page(hello, emptySet())
-        assertEquals("1.2.0", stable.version.version)
+        assertEquals("1.2.1", stable.version.version)
         downloadFor(stable)
         assertEquals(JobState.SUCCEEDED, run(planFromPage(page(hello, emptySet()), hello, emptySet())).job.state)
-        awaitInstalled("$hello 1.2.0", "$runtime 2.1.0", "$screencap 0.1.0")
+        awaitInstalled("$hello 1.2.1", "$runtime 2.1.0", "$screencap 0.1.0")
 
         // Its pre-release switched on and the runtime's not: the one runtime that would do is a pre-release, which
         // is asked for and not taken. The page will not install, the list counts no update, and a job opened for it
@@ -415,7 +423,7 @@ class RealAgentTest {
         assertFalse(refused.runnable)
         assertEquals(listOf(runtime), refused.missing.map { it.id })
         assertTrue(jobs.refresh().isSuccess)
-        assertEquals(listOf("$hello 1.2.0", "$runtime 2.1.0", "$screencap 0.1.0"), installedNow())
+        assertEquals(listOf("$hello 1.2.1", "$runtime 2.1.0", "$screencap 0.1.0"), installedNow())
 
         // Both switched on: both go on, the runtime ahead of what needs it.
         val both = setOf(screencap, hello, runtime)
@@ -830,5 +838,62 @@ class RealAgentTest {
         val own = jobs.listLogs(AGENT_PACKAGE_ID).getOrThrow().files
         assertTrue(jobs.pullLogs(LogPullRequest(AGENT_PACKAGE_ID, own), "0.0.0-test").isSuccess)
         assertEquals(own.size, (jobs.logPull.value as LogPullState.Done).included)
+    }
+
+    /**
+     * The agent repo's test package with settings. The app reads them from the real agent and saves changes as its
+     * screen makes them; the file the agent writes is then edited by hand in the folder the bench's container holds
+     * as the head unit, and read back with what the agent does not take as set by hand. A save over that changes the
+     * lines of its keys and keeps every other line, and one the agent refuses changes nothing.
+     */
+    @Test
+    fun `a package's settings are read and saved on the real agent, and a file edited by hand keeps its other lines`() = test {
+        assertTrue(jobs.connect("bench").isSuccess)
+        assertTrue("the agent has settings", connected().settings)
+        val dial = AgentVectors.file("packages/good/org.nbtapp.dial-1.0.0.nbtpkg").inputStream().use { store.add(it, listOf(AgentVectors.packageKey)) }
+        val plan = jobs.plan(listOf(InstallTarget("org.nbtapp.dial", "1.0.0")), emptyList(), listOf(dial)).getOrThrow()
+        assertEquals(JobState.SUCCEEDED, run(plan).job.state)
+        awaitInstalled("org.nbtapp.dial 1.0.0")
+        assertTrue("packages.list says it has settings", connected().installed.single().settings)
+        assertTrue("and so does the saved profile", headUnits.headUnit("bench").first()?.profile?.installed?.single()?.settings == true)
+
+        val conf = File(root, "data/org.nbtapp.dial/dial.conf")
+        val first = jobs.loadSettings("bench", "org.nbtapp.dial").getOrThrow()
+        assertEquals(listOf("CHIME", "DIAL_SPEED", "GREETING", "LAMP_HOST", "FACE", "LAMP_COLOUR"), first.map { it.option.key })
+        assertTrue(first.all { it.state == SettingState.UNSET })
+        assertFalse(conf.exists())
+
+        val changed = SettingsEdit(first).set("CHIME", SettingRules.OFF).set("DIAL_SPEED", "25").set("GREETING", "Hi there, é").set("FACE", "hex")
+        assertTrue(jobs.saveSettings("bench", "org.nbtapp.dial", requireNotNull(changed.changes())).isSuccess)
+        assertEquals("CHIME=0\nDIAL_SPEED=25\nGREETING=Hi there, é\nFACE=hex\n", conf.readText())
+        val saved = jobs.loadSettings("bench", "org.nbtapp.dial").getOrThrow().associateBy { it.option.key }
+        assertEquals(SettingValue.Bool(false), saved.getValue("CHIME").value)
+        assertEquals(SettingValue.Text("Hi there, é"), saved.getValue("GREETING").value)
+
+        // By hand: a comment, a word for on, a speed the option does not take, a line of a key it has no option for.
+        conf.writeText("# dial settings\nCHIME=yes\nDIAL_SPEED=fast\nNBT_KEEP=1\nFACE=hex\n")
+        val read = jobs.loadSettings("bench", "org.nbtapp.dial").getOrThrow()
+        val byKey = read.associateBy { it.option.key }
+        assertEquals(SettingValue.Bool(true), byKey.getValue("CHIME").value)
+        assertEquals(SettingState.BY_HAND, byKey.getValue("DIAL_SPEED").state)
+        assertEquals("fast", byKey.getValue("DIAL_SPEED").raw)
+        assertEquals(SettingState.UNSET, byKey.getValue("GREETING").state)
+        assertEquals(SettingValue.Text("hex"), byKey.getValue("FACE").value)
+
+        val again = SettingsEdit(read).set("DIAL_SPEED", "30").set("LAMP_HOST", "lamp.local").reset("FACE")
+        assertTrue(jobs.saveSettings("bench", "org.nbtapp.dial", requireNotNull(again.changes())).isSuccess)
+        assertEquals("# dial settings\nCHIME=yes\nDIAL_SPEED=30\nNBT_KEEP=1\nLAMP_HOST=lamp.local\n", conf.readText())
+
+        // What the phone's own check would have stopped, sent anyway: the agent refuses it whole, and says why.
+        val refused = jobs.saveSettings(
+            "bench",
+            "org.nbtapp.dial",
+            SettingsChanges(mapOf("CHIME" to SettingValue.Bool(false), "DIAL_SPEED" to SettingValue.Number(51), "FACE" to SettingValue.Text("oval"))),
+        ).exceptionOrNull() as SettingsException
+        assertEquals(
+            SettingsFailure.Invalid(listOf(SettingFault("DIAL_SPEED", "out-of-range"), SettingFault("FACE", "not-a-choice"))),
+            refused.failure,
+        )
+        assertEquals("# dial settings\nCHIME=yes\nDIAL_SPEED=30\nNBT_KEEP=1\nLAMP_HOST=lamp.local\n", conf.readText())
     }
 }

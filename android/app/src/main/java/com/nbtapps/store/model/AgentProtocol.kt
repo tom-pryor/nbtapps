@@ -99,6 +99,11 @@ data class InstalledPackage(
      * False from an agent that has no `files`, which leaves it out.
      */
     val logs: Boolean = false,
+    /**
+     * The package has settings that `settings.get` gives: its manifest names some options. False from an agent that
+     * has no `settings`, which leaves it out, and in a head unit's profile saved before there were settings.
+     */
+    val settings: Boolean = false,
 )
 
 @Serializable
@@ -437,3 +442,54 @@ data class SerialReset(
     /** With `armed`: for how long, in milliseconds, the next serial link is ended at its open. */
     val forMs: Long? = null,
 )
+
+/** How an option stands in its package's settings file, as `settings.get` says: its `state`. */
+enum class SettingState(val id: String) {
+    /** The file has no line for it: the package goes by its default, or by what [SettingOption.unset] says. */
+    UNSET("unset"),
+
+    /** The file has a value the option's type takes: [SettingEntry.value]. */
+    SET("set"),
+
+    /** The file has a value the option's type does not take, put there by hand: [SettingEntry.raw]. */
+    BY_HAND("by-hand"),
+    ;
+
+    companion object {
+        fun of(id: String): SettingState? = entries.firstOrNull { it.id == id }
+    }
+}
+
+/**
+ * One option of an installed package as `settings.get` gives it: what its manifest says of it, which the agent
+ * sends as the manifest has it and the app reads with the manifest's rules, and how it stands in the file now.
+ */
+data class SettingEntry(
+    val option: SettingOption,
+    val state: SettingState,
+    /** With [SettingState.SET]: the value, of the option's type. */
+    val value: SettingValue? = null,
+    /**
+     * With [SettingState.BY_HAND]: the file's text for it, as UTF-8, cut to its first 200 bytes without a word that
+     * it was cut.
+     */
+    val raw: String? = null,
+)
+
+/** One answer of `settings.get`: options from the one asked for on, as many as the link's frame took. */
+data class SettingsPage(
+    val options: List<SettingEntry>,
+    /** Where the next page starts, the `from` to ask with. Null on the last page. */
+    val next: Int? = null,
+)
+
+/**
+ * A key the agent would not take, from the `keys` of the error `invalid` of `settings.set`. [reason] is one of
+ * `unknown-key`, `wrong-type`, `out-of-range`, `too-long`, `bad-characters` and `not-a-choice`.
+ */
+@Serializable
+data class SettingFault(val key: String, val reason: String)
+
+/** The extra members of the error `invalid` of `settings.set`: the keys at fault, in the order of the request. */
+@Serializable
+data class SettingFaults(val keys: List<SettingFault> = emptyList())

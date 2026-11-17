@@ -2882,6 +2882,16 @@ static std::string sessionText() {
         Parsed fetched(b.call(p, "files.fetch", fetchParams(kAgentId, "agent.log")));
         b.call(p, "files.cancel", "{\"stream\":" + num(integer(fetched.result, "stream")) + "}");
     }
+    // A package with settings: installed, its options read, three changed at once, a change of values its options
+    // do not take refused with each key at fault, which leaves the file as it was, and the options read again from
+    // the second on.
+    Parsed dial(b.call(p, "job.plan", planParams("org.nbtapp.dial-1.0.0", "", "org.nbtapp.dial-1.0.0")));
+    startJob(b, p, str(dial.result, "planId"));
+    b.call(p, "packages.list", "{}");
+    b.call(p, "settings.get", "{\"package\":\"org.nbtapp.dial\"}");
+    b.call(p, "settings.set", "{\"package\":\"org.nbtapp.dial\",\"set\":{\"CHIME\":false,\"DIAL_SPEED\":25},\"reset\":[\"FACE\"]}");
+    b.call(p, "settings.set", "{\"package\":\"org.nbtapp.dial\",\"set\":{\"DIAL_SPEED\":51,\"FACE\":\"oval\"}}");
+    b.call(p, "settings.get", "{\"package\":\"org.nbtapp.dial\",\"from\":1}");
     b.call(p, "system.restart", "{\"kind\":\"hmi\"}");
     // The phone's pairing is ended on the car's screen: the agent says that it closes the link, and why, and
     // closes it.
@@ -2915,7 +2925,10 @@ static std::string sessionText() {
            "# problem; the other finds nothing. The package is\n"
            "# tests/packages/runtime-2.1.0 as tests/make_packages.py builds it. Near the end the phone pulls the\n"
            "# agent's own log, a file of 40 lines the test writes, with files.list and files.fetch: the DATA frames\n"
-           "# from the agent are one raw deflate stream (RFC 1951), as the zlib of the test bench's image makes it.\n\n"
+           "# from the agent are one raw deflate stream (RFC 1951), as the zlib of the test bench's image makes it.\n"
+           "# Then it installs tests/packages/dial-1.0.0, a package with settings, and reads and changes them with\n"
+           "# settings.get and settings.set: one change goes through, and one is refused as `invalid`, with the\n"
+           "# keys at fault and why in the error.\n\n"
            "magic 4e42544c\n\n" +
            p->transcript;
 }

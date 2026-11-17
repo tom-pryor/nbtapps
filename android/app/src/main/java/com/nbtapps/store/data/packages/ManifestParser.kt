@@ -18,9 +18,9 @@ import com.nbtapps.store.model.PackageRequirements
 import com.nbtapps.store.model.PackageSettings
 import com.nbtapps.store.model.SettingApplies
 import com.nbtapps.store.model.SettingChoice
-import com.nbtapps.store.model.SettingDefault
 import com.nbtapps.store.model.SettingOption
 import com.nbtapps.store.model.SettingType
+import com.nbtapps.store.model.SettingValue
 import com.nbtapps.store.model.SemVer
 import com.nbtapps.store.model.VersionRange
 import kotlinx.serialization.json.JsonArray
@@ -307,13 +307,30 @@ object ManifestParser {
             var bytes = utf8Bytes(pending.key) + utf8Bytes(pending.label)
             if (option != null) {
                 bytes += listOfNotNull(option.description, option.unset, option.unit).sumOf(::utf8Bytes)
-                bytes += ((option.default as? SettingDefault.Text)?.value?.let(::utf8Bytes) ?: 0)
+                bytes += ((option.default as? SettingValue.Text)?.value?.let(::utf8Bytes) ?: 0)
                 bytes += option.values.sumOf { utf8Bytes(it.value) + utf8Bytes(it.label) }
             }
             if (bytes > MAX_SETTING_BYTES) bad("gives the setting ${pending.key} more than $MAX_SETTING_BYTES bytes of text")
             if (option != null) options.add(option)
         }
         return PackageSettings(walk.file, options)
+    }
+
+    /**
+     * One option as the agent's `settings.get` sends it: the members its manifest gave it, held to the rules [parse]
+     * holds an option of a known type to. The members the agent adds (`state`, `value`, `raw`) are not read here.
+     * Null for an option of a type this app does not know, which the agent leaves out.
+     *
+     * @throws PackageFormatException with the code `bad-manifest` where the option breaks those rules.
+     */
+    fun settingOption(obj: JsonObject): SettingOption? {
+        for (required in listOf("key", "label", "type")) {
+            if (required !in obj) bad("the option has no \"$required\"")
+        }
+        val key = text(obj.getValue("key"), "key", ::isSettingKey)
+        val label = text(obj.getValue("label"), "$key.label", ::isName)
+        val type = text(obj.getValue("type"), "$key.type") { true }
+        return SettingType.of(type)?.let { setting(PendingSetting(key, key, label, type, obj), it) }
     }
 
     /** One option of a known type: its type's members in the order of the text, then the rules across them. */
@@ -333,7 +350,7 @@ object ManifestParser {
         var unset: String? = null
         var applies = SettingApplies.NOW
         var advanced = false
-        var default: SettingDefault? = null
+        var default: SettingValue? = null
         var min = 0L
         var max = 0L
         var unit: String? = null
@@ -349,9 +366,9 @@ object ManifestParser {
                     ?: bad("$where must be one of: now, app-start, hmi-restart, reboot")
                 key == "advanced" -> advanced = boolean(member, where)
                 key == "default" -> default = when (type) {
-                    SettingType.BOOL -> SettingDefault.Bool(boolean(member, where))
-                    SettingType.INT -> SettingDefault.Number(integer(member, where, INT_MIN, INT_MAX))
-                    SettingType.TEXT, SettingType.SELECT -> SettingDefault.Text(text(member, where) { true })
+                    SettingType.BOOL -> SettingValue.Bool(boolean(member, where))
+                    SettingType.INT -> SettingValue.Number(integer(member, where, INT_MIN, INT_MAX))
+                    SettingType.TEXT, SettingType.SELECT -> SettingValue.Text(text(member, where) { true })
                 }
                 type == SettingType.INT && key == "min" -> min = integer(member, where, INT_MIN, INT_MAX)
                 type == SettingType.INT && key == "max" -> max = integer(member, where, INT_MIN, INT_MAX)
@@ -373,16 +390,16 @@ object ManifestParser {
         when (type) {
             SettingType.INT -> {
                 if (min > max) bad("gives the setting $key a min above its max")
-                val number = (default as? SettingDefault.Number)?.value
+                val number = (default as? SettingValue.Number)?.value
                 if (number != null && number !in min..max) bad("gives the setting $key a default outside its limits")
             }
             SettingType.TEXT -> {
-                val text = (default as? SettingDefault.Text)?.value
+                val text = (default as? SettingValue.Text)?.value
                 if (text != null && !isSettingText(text, maxLength, anyCharacters)) bad("gives the setting $key a default it does not take")
             }
             SettingType.SELECT -> {
                 if (values.map { it.value }.toSet().size != values.size) bad("gives the setting $key a value twice")
-                val text = (default as? SettingDefault.Text)?.value
+                val text = (default as? SettingValue.Text)?.value
                 if (text != null && values.none { it.value == text }) {
                     bad("gives the setting $key a default that is not one of its values")
                 }

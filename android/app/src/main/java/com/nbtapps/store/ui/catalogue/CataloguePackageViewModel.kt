@@ -91,6 +91,13 @@ data class GetState(
      * [PackageStatus.upToDate][com.nbtapps.store.data.jobs.PackageStatus.upToDate].
      */
     val upToDate: Boolean = false,
+    /** This app's id of that head unit, for its screens. Null when nothing is known of one. */
+    val headUnitId: String? = null,
+    /**
+     * The installed package has settings, as the head unit said over the link that is open or the last time there was
+     * one. Its settings are changed over a link to that head unit only ([connected]).
+     */
+    val settings: Boolean = false,
 ) {
     val canInstall: Boolean
         get() = stored && toDownload.isEmpty() && connected && incompatible == null && asks.isEmpty() && !needsSwitch && !upToDate
@@ -220,6 +227,8 @@ private fun getState(
         needsSwitch = status.needsSwitch,
         asks = status.asks,
         upToDate = status.upToDate,
+        headUnitId = head?.headUnitId,
+        settings = status.installed != null && head?.installed?.firstOrNull { it.id == pkg.id }?.settings == true,
     )
 }
 

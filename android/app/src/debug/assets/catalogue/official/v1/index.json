@@ -4,7 +4,7 @@
     "id": "official",
     "name": "NBTApp sample catalogue (test keys)"
   },
-  "serial": 8,
+  "serial": 9,
   "generated": "2026-11-14T12:00:00Z",
   "packages": [
     {
@@ -111,6 +111,26 @@
       "category": "utilities",
       "details": "details/org.nbtapp.hello.json",
       "versions": [
+        {
+          "version": "1.2.1",
+          "released": "2026-11-17",
+          "url": "https://example.invalid/packages/org.nbtapp.hello-1.2.1.nbtpkg",
+          "size": 2251,
+          "sha256": "c64f8730f9f7b88b420a193565541e2a035b6b4e35c34f2641e4a3c96ccb5420",
+          "manifestSha256": "8a33e8e2a3b1dab3f5e83f9e22f028bd9f66cef8b133cf4dce937783ddad9a01",
+          "requires": {
+            "agent": ">=1.0.0"
+          },
+          "depends": [
+            {
+              "id": "org.nbtapp.runtime",
+              "version": ">=2.0.0 <3.0.0"
+            }
+          ],
+          "flags": [
+            "runs-scripts"
+          ]
+        },
         {
           "version": "1.2.0",
           "released": "2026-11-01",

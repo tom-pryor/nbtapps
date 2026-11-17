@@ -6,9 +6,9 @@ import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.model.PackageSettings
 import com.nbtapps.store.model.SettingApplies
 import com.nbtapps.store.model.SettingChoice
-import com.nbtapps.store.model.SettingDefault
 import com.nbtapps.store.model.SettingOption
 import com.nbtapps.store.model.SettingType
+import com.nbtapps.store.model.SettingValue
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -44,22 +44,22 @@ class ManifestSettingsTest {
         assertEquals(listOf("CHIME", "DIAL_SPEED", "GREETING", "LAMP_HOST", "FACE", "LAMP_COLOUR"), dial.options.map { it.key })
         assertEquals(
             SettingOption("CHIME", "Chime", SettingType.BOOL, description = "Play a chime when the dial turns.",
-                default = SettingDefault.Bool(true)),
+                default = SettingValue.Bool(true)),
             dial.options[0],
         )
         assertEquals(
             SettingOption("DIAL_SPEED", "Dial speed", SettingType.INT, description = "How far the dial turns each second.",
-                min = 1, max = 50, unit = "°/s", default = SettingDefault.Number(10), applies = SettingApplies.APP_START),
+                min = 1, max = 50, unit = "°/s", default = SettingValue.Number(10), applies = SettingApplies.APP_START),
             dial.options[1],
         )
         val greeting = dial.options[2]
         assertTrue(greeting.anyCharacters && greeting.maxLength == 40 && greeting.applies == SettingApplies.REBOOT)
-        assertEquals(SettingDefault.Text("Hello, dial é"), greeting.default)
+        assertEquals(SettingValue.Text("Hello, dial é"), greeting.default)
         val host = dial.options[3]
         assertTrue(!host.anyCharacters && host.advanced && host.default == null && host.unset == "No lamp")
         val face = dial.options[4]
         assertEquals(listOf(SettingChoice("round", "Round"), SettingChoice("square", "Square"), SettingChoice("hex", "Hexagon")), face.values)
-        assertEquals(SettingDefault.Text("round"), face.default)
+        assertEquals(SettingValue.Text("round"), face.default)
         assertEquals(SettingApplies.HMI_RESTART, face.applies)
         val colour = dial.options[5]
         assertTrue(colour.type == SettingType.SELECT && colour.advanced && colour.unset == "As the lamp has it" && colour.default == null)
@@ -76,7 +76,7 @@ class ManifestSettingsTest {
             every.options.map { it.key },
         )
         val speed = every.options[2]
-        assertEquals(listOf(-2147483648L, 2147483647L, -5L), listOf(speed.min, speed.max, (speed.default as SettingDefault.Number).value))
+        assertEquals(listOf(-2147483648L, 2147483647L, -5L), listOf(speed.min, speed.max, (speed.default as SettingValue.Number).value))
         assertEquals(16, every.options[9].values.size)
         assertEquals("Automatic", every.options[9].unset)
 

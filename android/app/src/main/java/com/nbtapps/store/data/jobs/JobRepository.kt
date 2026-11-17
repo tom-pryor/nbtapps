@@ -7,6 +7,7 @@ import com.nbtapps.store.data.AppForeground
 import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.PairingKeys
 import com.nbtapps.store.data.PhoneIdentity
+import com.nbtapps.store.data.link.AgentClient
 import com.nbtapps.store.data.link.AgentProofException
 import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.Blob
@@ -22,8 +23,12 @@ import com.nbtapps.store.data.logs.LogPull
 import com.nbtapps.store.data.logs.LogPullAbout
 import com.nbtapps.store.data.logs.LogPullRequest
 import com.nbtapps.store.data.logs.LogPullState
+import com.nbtapps.store.data.packages.ManifestParser
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
+import com.nbtapps.store.data.settings.SettingsChanges
+import com.nbtapps.store.data.settings.SettingsException
+import com.nbtapps.store.data.settings.SettingsFailure
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
@@ -47,6 +52,7 @@ import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.PlanRequest
 import com.nbtapps.store.model.RemoveTarget
 import com.nbtapps.store.model.SerialResetState
+import com.nbtapps.store.model.SettingEntry
 import com.nbtapps.store.model.inConnectOrder
 import java.io.File
 import java.io.IOException
@@ -58,6 +64,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -72,7 +79,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonObject
 
 /** Whether the app has a link to a head unit's agent, and to which one. */
 sealed interface ConnectionState {
@@ -102,6 +111,9 @@ sealed interface ConnectionState {
 
         /** The agent can have the car end this phone's Bluetooth serial link: [JobRepository.resetSerial]. */
         val serialReset: Boolean get() = ProtocolConstants.CAPABILITY_SERIAL_RESET in capabilities
+
+        /** The agent gives and changes packages' settings: [JobRepository.loadSettings] and [JobRepository.saveSettings]. */
+        val settings: Boolean get() = ProtocolConstants.CAPABILITY_SETTINGS in capabilities
     }
 
     /**
@@ -159,8 +171,11 @@ data class JobView(
     val needsPhone: Boolean get() = !ended && !linkLost && !forgotten
 }
 
-/** A request the agent refused. [code] is the protocol's; the message is the app's own text for it. */
-class AgentRefusal(val code: String, message: String) : Exception(message)
+/**
+ * A request the agent refused. [code] is the protocol's; the message is the app's own text for it. [error] is the
+ * agent's error object as it came, for a refusal that says more than its code, as `invalid` does with its `keys`.
+ */
+class AgentRefusal(val code: String, message: String, val error: JsonObject = JsonObject(emptyMap())) : Exception(message)
 
 /**
  * How long the answer to `hello` is waited for, and how often a Bluetooth serial link that got none is opened
@@ -961,6 +976,96 @@ class JobRepository(
         return result
     }
 
+    /**
+     * Every option of the settings of the package [packageId] on the head unit [headUnitId], in the order of its manifest,
+     * read page by page as the agent sends them, with how each stands in its settings file now. Only an agent that
+     * lists [ProtocolConstants.CAPABILITY_SETTINGS] has them.
+     *
+     * A failure is a [SettingsException], whose [SettingsFailure] says why: [SettingsFailure.Busy] while an install
+     * step runs, for one.
+     */
+    suspend fun loadSettings(headUnitId: String, packageId: String): Result<List<SettingEntry>> = settingsSession(headUnitId) { current, _ ->
+        val all = ArrayList<SettingEntry>()
+        var from: Int? = null
+        do {
+            val page = current.client.settingsGet(packageId, from)
+            all += page.options
+            val next = page.next
+            // A page that brings nothing or goes back, or more options than a manifest has, would never end.
+            if (next != null && (page.options.isEmpty() || next <= (from ?: 0) || all.size >= ManifestParser.MAX_SETTINGS)) {
+                throw ProtocolException("The head unit sent an answer this app can't read")
+            }
+            from = next
+        } while (next != null)
+        all
+    }
+
+    /**
+     * Saves [changes] to the settings of the package [packageId] on the head unit [headUnitId]: in one `settings.set`
+     * where they fit one frame of the link, and otherwise in as few as they take, one after another
+     * ([SettingsChanges.parts]). The agent takes each whole or not at all. A part that fails ends the save, and its
+     * [SettingsException] names in [SettingsException.saved] the options of the parts before it, which are saved.
+     *
+     * Nothing is sent while a job runs on that head unit, which the agent changes no settings during. Once begun, the
+     * parts go on to the end or to the first failure even where the caller is cancelled, so that what was saved is
+     * known.
+     */
+    suspend fun saveSettings(headUnitId: String, packageId: String, changes: SettingsChanges): Result<Unit> = settingsSession(headUnitId) { current, connected ->
+        if (jobRunsOn(connected.headUnitId)) throw SettingsException(SettingsFailure.Busy)
+        val parts = try {
+            changes.parts(packageId, current.peer.maxFrame)
+        } catch (e: IllegalArgumentException) {
+            throw SettingsException(SettingsFailure.Failed("A change is too large to send to the head unit"))
+        }
+        val saved = HashSet<String>()
+        withContext(NonCancellable) {
+            for (part in parts) {
+                try {
+                    current.client.settingsSet(packageId, part.set, part.reset)
+                } catch (e: RemoteException) {
+                    throw SettingsException(settingsFailure(e), saved)
+                } catch (e: IOException) {
+                    throw SettingsException(settingsFailure(e), saved)
+                }
+                saved += part.keys
+            }
+        }
+    }
+
+    /**
+     * [block] over the link to the head unit [headUnitId], on an agent that has settings. A failure comes out as a
+     * [SettingsException]: [SettingsFailure.NotConnected] where the link is to another head unit, whose package of
+     * the same id is not the one asked about.
+     */
+    private suspend fun <T> settingsSession(headUnitId: String, block: suspend (AgentSession, ConnectionState.Connected) -> T): Result<T> = using {
+        val current = session
+        val connected = (connectionState.value as? ConnectionState.Connected)?.takeIf { it.headUnitId == headUnitId }
+        if (current == null || connected == null) return Result.failure(SettingsException(SettingsFailure.NotConnected))
+        if (!connected.settings) return Result.failure(SettingsException(SettingsFailure.TooOld))
+        return try {
+            Result.success(block(current, connected))
+        } catch (e: SettingsException) {
+            Result.failure(e)
+        } catch (e: RemoteException) {
+            Result.failure(SettingsException(settingsFailure(e)))
+        } catch (e: IOException) {
+            Result.failure(SettingsException(settingsFailure(e)))
+        }
+    }
+
+    /** What the screen is told of a refusal of `settings.get` or `settings.set`, or of a link that failed meanwhile. */
+    private fun settingsFailure(e: Exception): SettingsFailure = when (e) {
+        is RemoteException -> when (e.code) {
+            "unsupported" -> SettingsFailure.TooOld
+            "busy" -> SettingsFailure.Busy
+            "not-found" -> SettingsFailure.NotFound
+            "invalid" -> SettingsFailure.Invalid(AgentClient.settingFaults(e.error))
+            else -> SettingsFailure.Failed(AgentText.settings(e.code))
+        }
+        is ProtocolException -> SettingsFailure.Failed(e.message ?: "The head unit sent an answer this app can't read")
+        else -> SettingsFailure.LinkLost(e.message ?: "The link to the head unit was lost")
+    }
+
     /** Restarts iDrive ([kind] `hmi`) or the whole head unit (`reboot`). */
     suspend fun restart(kind: String): Result<Unit> = withSession { current -> current.client.restart(kind) }
 
@@ -1313,7 +1418,7 @@ class JobRepository(
         return try {
             Result.success(block(current))
         } catch (e: RemoteException) {
-            Result.failure(AgentRefusal(e.code, AgentText.request(e.code)))
+            Result.failure(AgentRefusal(e.code, AgentText.request(e.code), e.error))
         } catch (e: IOException) {
             Result.failure(e)
         }

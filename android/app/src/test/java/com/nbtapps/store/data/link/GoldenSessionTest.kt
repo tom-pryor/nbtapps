@@ -18,6 +18,11 @@ import com.nbtapps.store.model.Offer
 import com.nbtapps.store.model.PlanRequest
 import com.nbtapps.store.model.RemoveTarget
 import com.nbtapps.store.model.RestartKind
+import com.nbtapps.store.model.SettingApplies
+import com.nbtapps.store.model.SettingFault
+import com.nbtapps.store.model.SettingState
+import com.nbtapps.store.model.SettingType
+import com.nbtapps.store.model.SettingValue
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.zip.Inflater
@@ -323,6 +328,63 @@ class GoldenSessionTest {
                 assertTrue(stream.finished)
                 assertEquals(40, stream.bytes.toString().lines().count { it.isNotEmpty() })
                 client.filesCancel(1)
+
+                // A package with settings: installed, its options read, three changed at once, and a change with
+                // values its options do not take refused as a whole, with each key at fault and why.
+                val (dialFile, dial) = verified("org.nbtapp.dial-1.0.0.nbtpkg")
+                session.blobs.offer(blobs(dialFile, dial))
+                val dialPlan = client.plan(PlanRequest(install = listOf(InstallTarget("org.nbtapp.dial", "1.0.0")), offers = listOf(offer(dial))))
+                assertEquals("5455565758595a5b", dialPlan.planId)
+                session.blobs.jobStarted()
+                assertEquals(JobState.FETCHING, client.start(dialPlan.planId!!).state)
+                assertEquals(JobState.SUCCEEDED, (session.eventsUntilDone().last() as JobEvent.Done).result.state)
+                session.blobs.jobEnded()
+                val withSettings = client.packages().single()
+                assertEquals("org.nbtapp.dial", withSettings.id)
+                assertTrue(withSettings.settings)
+                assertFalse(withSettings.logs)
+
+                val page = client.settingsGet("org.nbtapp.dial")
+                assertNull(page.next)
+                // The option of a type the agent does not know, DIAL_COLOUR, is not among them.
+                assertEquals(listOf("CHIME", "DIAL_SPEED", "GREETING", "LAMP_HOST", "FACE", "LAMP_COLOUR"), page.options.map { it.option.key })
+                assertTrue(page.options.all { it.state == SettingState.UNSET && it.value == null && it.raw == null })
+                val (chime, speed, greetingOption, lamp, face) = page.options.map { it.option }
+                assertEquals(SettingType.BOOL, chime.type)
+                assertEquals(SettingValue.Bool(true), chime.default)
+                assertEquals(SettingApplies.NOW, chime.applies)
+                assertEquals(SettingType.INT, speed.type)
+                assertEquals(1L..50L, speed.min..speed.max)
+                assertEquals("°/s", speed.unit)
+                assertEquals(SettingValue.Number(10), speed.default)
+                assertEquals(SettingApplies.APP_START, speed.applies)
+                assertEquals(40, greetingOption.maxLength)
+                assertTrue(greetingOption.anyCharacters)
+                assertEquals(SettingValue.Text("Hello, dial é"), greetingOption.default)
+                assertEquals(SettingApplies.REBOOT, greetingOption.applies)
+                assertFalse(lamp.anyCharacters)
+                assertEquals("No lamp", lamp.unset)
+                assertNull(lamp.default)
+                assertTrue(lamp.advanced)
+                assertEquals(listOf("round", "square", "hex"), face.values.map { it.value })
+                assertEquals(SettingApplies.HMI_RESTART, face.applies)
+
+                client.settingsSet("org.nbtapp.dial", mapOf("CHIME" to SettingValue.Bool(false), "DIAL_SPEED" to SettingValue.Number(25)), listOf("FACE"))
+                val notTaken = try {
+                    client.settingsSet("org.nbtapp.dial", mapOf("DIAL_SPEED" to SettingValue.Number(51), "FACE" to SettingValue.Text("oval")))
+                    null
+                } catch (e: RemoteException) {
+                    e
+                }
+                assertEquals("invalid", notTaken?.code)
+                assertEquals(
+                    listOf(SettingFault("DIAL_SPEED", "out-of-range"), SettingFault("FACE", "not-a-choice")),
+                    AgentClient.settingFaults(requireNotNull(notTaken).error),
+                )
+                val rest = client.settingsGet("org.nbtapp.dial", from = 1)
+                assertEquals(listOf("DIAL_SPEED", "GREETING", "LAMP_HOST", "FACE", "LAMP_COLOUR"), rest.options.map { it.option.key })
+                assertEquals(SettingState.SET, rest.options.first().state)
+                assertEquals(SettingValue.Number(25), rest.options.first().value)
 
                 client.restart("hmi")
 

@@ -72,6 +72,7 @@ fun HeadUnitDetailScreen(
     onPair: (headUnitId: String) -> Unit,
     onOpenPackage: (packageId: String) -> Unit,
     onOpenLogs: (packageId: String) -> Unit,
+    onOpenSettings: (packageId: String) -> Unit,
     viewModel: HeadUnitDetailViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -142,7 +143,7 @@ fun HeadUnitDetailScreen(
                 val busy = uiState.autostartBusy || uiState.setup?.running == true
                 AutostartCard(state, busy, uiState.autostartError, viewModel::setAutostart, onOpenPackage)
             }
-            InstalledCard(uiState, connected, onUninstall, onOpenLogs)
+            InstalledCard(uiState, connected, onUninstall, onOpenLogs, onOpenSettings)
             TroubleshootingCard(uiState, viewModel::resetSerial)
         }
     }
@@ -403,14 +404,29 @@ private fun AutostartCard(state: Autostart, busy: Boolean, error: String?, onSet
     }
 }
 
+/** Whether a package's row offers its settings: there is a link to an agent that has them, and the package has some. */
+internal fun showsSettings(uiState: HeadUnitDetailUiState, pkg: InstalledPackage): Boolean = uiState.settings && pkg.settings
+
 @Composable
-private fun InstalledCard(uiState: HeadUnitDetailUiState, connected: Boolean, onUninstall: (String) -> Unit, onOpenLogs: (String) -> Unit) {
+private fun InstalledCard(
+    uiState: HeadUnitDetailUiState,
+    connected: Boolean,
+    onUninstall: (String) -> Unit,
+    onOpenLogs: (String) -> Unit,
+    onOpenSettings: (String) -> Unit,
+) {
     Section("Installed packages") {
         when {
             uiState.profile == null && !connected -> Text("Not known yet: the app hasn't been connected to this head unit's agent.")
             uiState.installed.isEmpty() -> Text("Nothing is installed.")
             else -> uiState.installed.forEach { pkg ->
-                InstalledRow(pkg, connected, onUninstall, onLogs = { onOpenLogs(pkg.id) }.takeIf { uiState.logs && pkg.logs })
+                InstalledRow(
+                    pkg,
+                    connected,
+                    onUninstall,
+                    onLogs = { onOpenLogs(pkg.id) }.takeIf { uiState.logs && pkg.logs },
+                    onSettings = { onOpenSettings(pkg.id) }.takeIf { showsSettings(uiState, pkg) },
+                )
             }
         }
         if (!connected && uiState.installed.isNotEmpty()) {
@@ -424,7 +440,13 @@ private fun InstalledCard(uiState: HeadUnitDetailUiState, connected: Boolean, on
 }
 
 @Composable
-private fun InstalledRow(pkg: InstalledPackage, connected: Boolean, onUninstall: (String) -> Unit, onLogs: (() -> Unit)?) {
+private fun InstalledRow(
+    pkg: InstalledPackage,
+    connected: Boolean,
+    onUninstall: (String) -> Unit,
+    onLogs: (() -> Unit)?,
+    onSettings: (() -> Unit)?,
+) {
     val flags = pkg.flags.mapNotNull(RiskFlag::fromId).joinToString(" · ") { it.label }
     ListItem(
         headlineContent = { Text(pkg.name) },
@@ -432,7 +454,12 @@ private fun InstalledRow(pkg: InstalledPackage, connected: Boolean, onUninstall:
         trailingContent = {
             Column(horizontalAlignment = Alignment.End) {
                 TextButton(onClick = { onUninstall(pkg.id) }, enabled = connected) { Text("Uninstall") }
-                onLogs?.let { TextButton(onClick = it) { Text("Get logs") } }
+                if (onLogs != null || onSettings != null) {
+                    Row {
+                        onSettings?.let { TextButton(onClick = it) { Text("Settings") } }
+                        onLogs?.let { TextButton(onClick = it) { Text("Get logs") } }
+                    }
+                }
             }
         },
     )

@@ -126,12 +126,15 @@ enum class SettingApplies(val id: String) {
     }
 }
 
-/** A default, of the kind its option's type has. */
-sealed interface SettingDefault {
-    data class Bool(val value: Boolean) : SettingDefault
-    data class Number(val value: Long) : SettingDefault
-    /** A `text` option's default, or a `select` option's, which is one of its values. */
-    data class Text(val value: String) : SettingDefault
+/**
+ * A value of the kind its option's type has: an option's default, a value the agent read from the settings file, or
+ * one the phone sends to be written there.
+ */
+sealed interface SettingValue {
+    data class Bool(val value: Boolean) : SettingValue
+    data class Number(val value: Long) : SettingValue
+    /** A `text` option's value, or a `select` option's, which is one of its values. */
+    data class Text(val value: String) : SettingValue
 }
 
 /** One value a `select` option may have: as it stands in the settings file, and what the phone shows for it. */
@@ -155,7 +158,7 @@ data class SettingOption(
     val anyCharacters: Boolean = false,
     /** `select`: in the order of the manifest. */
     val values: List<SettingChoice> = emptyList(),
-    val default: SettingDefault? = null,
+    val default: SettingValue? = null,
     /** What the phone shows when the option is not set. Never given together with [default]. */
     val unset: String? = null,
     val applies: SettingApplies = SettingApplies.NOW,
