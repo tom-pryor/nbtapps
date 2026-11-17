@@ -26,6 +26,10 @@ The format, as the plan document sets it:
     key of their own (verify --signature): the app and the agent then check that one and do not read manifest.sig
   - manifest.json follows the strict JSON profile and spec/manifest.schema.json, and its `contents` lists every
     other file with its size and the SHA-256 of its uncompressed bytes
+  - beside `install`, which an agent carries out, the manifest may name the package's `logs`, which a controller may
+    pull, and its `settings`, which a phone shows and changes: options of the types bool, int, text and select,
+    each held to its type's definition in the schema and to the rules that span its fields (check_settings). An
+    option of a type this version does not know is skipped, so a later type does not stop a package installing
 
 Key files are text: one line of 64 hex characters (the 32-byte Ed25519 seed or public key); lines starting with #
 are comments. A key's fingerprint is the first 16 hex characters of the SHA-256 of the 32 public key bytes.
@@ -286,6 +290,86 @@ def check_manifest(manifest):
         if log["path"] in logs:
             bad("names the log %s twice" % log["path"])
         logs.add(log["path"])
+    if "settings" in manifest:
+        check_settings(manifest["settings"]["options"])
+
+
+# ---- settings --------------------------------------------------------------------------------------------------
+
+# The option types this version knows, and the definition in the schema that each is held to. An option of any
+# other type is skipped.
+SETTING_TYPES = {"bool": "settingBool", "int": "settingInt", "text": "settingText", "select": "settingSelect"}
+DEFAULT_SETTINGS_FILE = "${data}/settings"
+MAX_SETTING_BYTES = 1024   # the UTF-8 of one option's strings, so that one option fits a 4,096-byte serial frame
+_SAFE_TEXT = re.compile(r"[A-Za-z0-9._:/@+,-]+\Z")
+
+
+def setting_text_ok(value, max_length, characters="safe"):
+    """Whether `value` is a value a text option takes: 1 to max_length bytes of UTF-8, of the safe set, or with
+    `any` no control character and no space at either end."""
+    if not value or len(value.encode("utf-8")) > max_length:
+        return False
+    if characters == "any":
+        return (not any(c < " " or c == "\x7f" for c in value)) and value[0] != " " and value[-1] != " "
+    return bool(_SAFE_TEXT.match(value))
+
+
+def setting_bytes(option):
+    """The UTF-8 bytes of the strings of an option, as far as its type has them."""
+    names = ["key", "label"]
+    kind = option["type"]
+    if kind in SETTING_TYPES:
+        names += ["description", "unset"]
+        if kind == "int":
+            names.append("unit")
+        if kind in ("text", "select"):
+            names.append("default")
+    strings = [option[n] for n in names if n in option]
+    if kind == "select":
+        for choice in option["values"]:
+            strings += [choice["value"], choice["label"]]
+    return sum(len(s.encode("utf-8")) for s in strings)
+
+
+def check_settings(options):
+    """The rules of `settings` that the schema's walk does not reach: each option's own type, and the rules that span
+    its fields. Raises PkgError."""
+    def bad(message):
+        raise PkgError("bad-manifest", "manifest " + message)
+
+    schema = manifest_schema()
+    keys = set()
+    for i, option in enumerate(options):
+        where = "manifest.settings.options[%d]" % i
+        if option["key"] in keys:
+            bad("names the setting %s twice" % option["key"])
+        keys.add(option["key"])
+        kind = option["type"]
+        if kind in SETTING_TYPES:
+            try:
+                validate(option, schema["$defs"][SETTING_TYPES[kind]], schema, where)
+            except SchemaError as e:
+                raise PkgError("bad-manifest", str(e))
+            if "default" in option and "unset" in option:
+                bad("gives the setting %s both a default and an unset text" % option["key"])
+            default = option.get("default")
+            if kind == "int":
+                if option["min"] > option["max"]:
+                    bad("gives the setting %s a min above its max" % option["key"])
+                if default is not None and not option["min"] <= default <= option["max"]:
+                    bad("gives the setting %s a default outside its limits" % option["key"])
+            elif kind == "text":
+                if default is not None and not setting_text_ok(default, option["maxLength"],
+                                                               option.get("characters", "safe")):
+                    bad("gives the setting %s a default it does not take" % option["key"])
+            elif kind == "select":
+                values = [choice["value"] for choice in option["values"]]
+                if len(set(values)) != len(values):
+                    bad("gives the setting %s a value twice" % option["key"])
+                if default is not None and default not in values:
+                    bad("gives the setting %s a default that is not one of its values" % option["key"])
+        if setting_bytes(option) > MAX_SETTING_BYTES:
+            bad("gives the setting %s more than %d bytes of text" % (option["key"], MAX_SETTING_BYTES))
 
 
 def load_manifest(data):

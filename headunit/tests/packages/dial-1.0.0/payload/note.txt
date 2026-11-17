@@ -1,0 +1,1 @@
+Test package: names its settings, kept in ${data}/dial.conf.

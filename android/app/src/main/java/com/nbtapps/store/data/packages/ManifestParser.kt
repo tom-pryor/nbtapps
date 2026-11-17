@@ -15,6 +15,12 @@ import com.nbtapps.store.model.PackageContent
 import com.nbtapps.store.model.PackageDependency
 import com.nbtapps.store.model.PackageManifest
 import com.nbtapps.store.model.PackageRequirements
+import com.nbtapps.store.model.PackageSettings
+import com.nbtapps.store.model.SettingApplies
+import com.nbtapps.store.model.SettingChoice
+import com.nbtapps.store.model.SettingDefault
+import com.nbtapps.store.model.SettingOption
+import com.nbtapps.store.model.SettingType
 import com.nbtapps.store.model.SemVer
 import com.nbtapps.store.model.VersionRange
 import kotlinx.serialization.json.JsonArray
@@ -30,7 +36,8 @@ import kotlinx.serialization.json.longOrNull
  * it must give the same verdict: a manifest one of them takes and the other refuses is a bug in one of them.
  *
  * Unknown keys are refused inside `requires` and `install`, because an install key that is skipped could
- * place a file wrongly, and ignored everywhere else, a `logs` entry included.
+ * place a file wrongly, and ignored everywhere else, a `logs` entry, `settings` and its options included. An option
+ * of a type this app does not know is skipped, with only its `key` and `label` checked.
  */
 object ManifestParser {
     const val SUPPORTED_MANIFEST_VERSION = 1
@@ -45,6 +52,19 @@ object ManifestParser {
 
     /** Entries in `logs`. */
     const val MAX_LOGS = 16
+
+    /** Options in `settings`, those of types this app does not know included. */
+    const val MAX_SETTINGS = 64
+
+    /** Values of a `select` option. */
+    const val MAX_SETTING_VALUES = 16
+
+    /** UTF-8 in one option's strings, so that one option fits a 4,096-byte serial frame when the agent sends it. */
+    const val MAX_SETTING_BYTES = 1024
+
+    /** The limits of an `int` option's numbers. */
+    private const val INT_MIN = -2147483648L
+    private const val INT_MAX = 2147483647L
 
     /** The agent's own folders, which no log path may name: its state, with the pairing keys, and its RAM folder. */
     private val AGENT_FOLDERS = listOf("/tmp/nbtapp", "/var/opt/nbtapp")
@@ -74,6 +94,7 @@ object ManifestParser {
         var contents = emptyList<PackageContent>()
         var install = Install()
         var logs = emptyList<String>()
+        var settings: SettingsWalk? = null
         // Members are checked in the order of the text, as the agent does, so both name the same first fault.
         for ((key, value) in root) {
             when (key) {
@@ -86,6 +107,7 @@ object ManifestParser {
                 "contents" -> contents = contents(value)
                 "install" -> install = install(value)
                 "logs" -> logs = logs(value)
+                "settings" -> settings = settings(value)
             }
         }
         val manifest = PackageManifest(
@@ -103,6 +125,7 @@ object ManifestParser {
             reboot = install.reboot,
             serialServices = install.serialServices,
             logs = logs,
+            settings = settings?.let(::settingsRules),
         )
         crossFields(manifest)
         return manifest
@@ -221,6 +244,189 @@ object ManifestParser {
             val obj = item as? JsonObject ?: bad("$at must be an object")
             val path = obj["path"] ?: bad("$at has no \"path\"")
             text(path, "$at.path", ::isLogPath)
+        }
+    }
+
+    /** `settings` as the walk finds it: the file, and per option what every option has and the object for the rest. */
+    private class SettingsWalk(val file: String, val options: List<PendingSetting>)
+
+    private class PendingSetting(val at: String, val key: String, val label: String, val type: String, val obj: JsonObject)
+
+    /**
+     * `settings`: open, with `file` and 1 to 64 options. Here only what every option has, whatever its type; the
+     * rest waits for [settingsRules], after the walk, as the agent and `nbtpkg.py` do it, so that a key refused in
+     * `install` further down the text still decides the code.
+     */
+    private fun settings(value: JsonElement): SettingsWalk {
+        val obj = value as? JsonObject ?: bad("settings must be an object")
+        if ("options" !in obj) bad("settings has no \"options\"")
+        var file = PackageSettings.DEFAULT_FILE
+        var options = emptyList<PendingSetting>()
+        for ((key, member) in obj) {
+            when (key) {
+                "file" -> file = text(member, "settings.file", ::isSettingsFile)
+                "options" -> {
+                    val array = member as? JsonArray ?: bad("settings.options must be an array")
+                    if (array.isEmpty()) bad("settings.options needs at least one option")
+                    if (array.size > MAX_SETTINGS) bad("settings.options has more than $MAX_SETTINGS options")
+                    options = array.mapIndexed { i, item ->
+                        val at = "settings.options[$i]"
+                        val option = item as? JsonObject ?: bad("$at must be an object")
+                        for (required in listOf("key", "label", "type")) {
+                            if (required !in option) bad("$at has no \"$required\"")
+                        }
+                        var settingKey = ""
+                        var label = ""
+                        var type = ""
+                        for ((name, field) in option) {
+                            when (name) {
+                                "key" -> settingKey = text(field, "$at.key", ::isSettingKey)
+                                "label" -> label = text(field, "$at.label", ::isName)
+                                "type" -> type = text(field, "$at.type") { true }
+                            }
+                        }
+                        PendingSetting(at, settingKey, label, type, option)
+                    }
+                }
+            }
+        }
+        return SettingsWalk(file, options)
+    }
+
+    /**
+     * Each option of a known type held to its type's definition, and the rules that span fields: no key twice, those
+     * of options of unknown types included, and at most [MAX_SETTING_BYTES] of UTF-8 in an option's strings.
+     */
+    private fun settingsRules(walk: SettingsWalk): PackageSettings {
+        val keys = HashSet<String>()
+        val options = ArrayList<SettingOption>()
+        for (pending in walk.options) {
+            if (!keys.add(pending.key)) bad("names the setting ${pending.key} twice")
+            val type = SettingType.of(pending.type)
+            val option = type?.let { setting(pending, it) }
+            var bytes = utf8Bytes(pending.key) + utf8Bytes(pending.label)
+            if (option != null) {
+                bytes += listOfNotNull(option.description, option.unset, option.unit).sumOf(::utf8Bytes)
+                bytes += ((option.default as? SettingDefault.Text)?.value?.let(::utf8Bytes) ?: 0)
+                bytes += option.values.sumOf { utf8Bytes(it.value) + utf8Bytes(it.label) }
+            }
+            if (bytes > MAX_SETTING_BYTES) bad("gives the setting ${pending.key} more than $MAX_SETTING_BYTES bytes of text")
+            if (option != null) options.add(option)
+        }
+        return PackageSettings(walk.file, options)
+    }
+
+    /** One option of a known type: its type's members in the order of the text, then the rules across them. */
+    private fun setting(pending: PendingSetting, type: SettingType): SettingOption {
+        val at = pending.at
+        val obj = pending.obj
+        val required = when (type) {
+            SettingType.BOOL -> emptyList()
+            SettingType.INT -> listOf("min", "max")
+            SettingType.TEXT -> listOf("maxLength")
+            SettingType.SELECT -> listOf("values")
+        }
+        for (key in required) {
+            if (key !in obj) bad("$at has no \"$key\"")
+        }
+        var description: String? = null
+        var unset: String? = null
+        var applies = SettingApplies.NOW
+        var advanced = false
+        var default: SettingDefault? = null
+        var min = 0L
+        var max = 0L
+        var unit: String? = null
+        var maxLength = 0
+        var anyCharacters = false
+        var values = emptyList<SettingChoice>()
+        for ((key, member) in obj) {
+            val where = "$at.$key"
+            when {
+                key == "description" -> description = text(member, where, ::isSettingDescription)
+                key == "unset" -> unset = text(member, where, ::isName)
+                key == "applies" -> applies = (member as? JsonPrimitive)?.takeIf { it.isString }?.let { SettingApplies.of(it.content) }
+                    ?: bad("$where must be one of: now, app-start, hmi-restart, reboot")
+                key == "advanced" -> advanced = boolean(member, where)
+                key == "default" -> default = when (type) {
+                    SettingType.BOOL -> SettingDefault.Bool(boolean(member, where))
+                    SettingType.INT -> SettingDefault.Number(integer(member, where, INT_MIN, INT_MAX))
+                    SettingType.TEXT, SettingType.SELECT -> SettingDefault.Text(text(member, where) { true })
+                }
+                type == SettingType.INT && key == "min" -> min = integer(member, where, INT_MIN, INT_MAX)
+                type == SettingType.INT && key == "max" -> max = integer(member, where, INT_MIN, INT_MAX)
+                type == SettingType.INT && key == "unit" -> unit = text(member, where, ::isSettingUnit)
+                type == SettingType.TEXT && key == "maxLength" ->
+                    maxLength = integer(member, where, 1, ProtocolConstants.SETTINGS_MAX_VALUE_BYTES.toLong()).toInt()
+                type == SettingType.TEXT && key == "characters" -> anyCharacters =
+                    when ((member as? JsonPrimitive)?.takeIf { it.isString }?.content) {
+                        "safe" -> false
+                        "any" -> true
+                        else -> bad("$where must be one of: safe, any")
+                    }
+                type == SettingType.SELECT && key == "values" -> values = choices(member, where)
+            }
+        }
+
+        val key = pending.key
+        if (default != null && unset != null) bad("gives the setting $key both a default and an unset text")
+        when (type) {
+            SettingType.INT -> {
+                if (min > max) bad("gives the setting $key a min above its max")
+                val number = (default as? SettingDefault.Number)?.value
+                if (number != null && number !in min..max) bad("gives the setting $key a default outside its limits")
+            }
+            SettingType.TEXT -> {
+                val text = (default as? SettingDefault.Text)?.value
+                if (text != null && !isSettingText(text, maxLength, anyCharacters)) bad("gives the setting $key a default it does not take")
+            }
+            SettingType.SELECT -> {
+                if (values.map { it.value }.toSet().size != values.size) bad("gives the setting $key a value twice")
+                val text = (default as? SettingDefault.Text)?.value
+                if (text != null && values.none { it.value == text }) {
+                    bad("gives the setting $key a default that is not one of its values")
+                }
+            }
+            SettingType.BOOL -> Unit
+        }
+        return SettingOption(
+            key = key,
+            label = pending.label,
+            type = type,
+            description = description,
+            min = min,
+            max = max,
+            unit = unit,
+            maxLength = maxLength,
+            anyCharacters = anyCharacters,
+            values = values,
+            default = default,
+            unset = unset,
+            applies = applies,
+            advanced = advanced,
+        )
+    }
+
+    /** A `select` option's `values`: 2 to 16, each open, with a `value` and a `label`. */
+    private fun choices(value: JsonElement, where: String): List<SettingChoice> {
+        val array = value as? JsonArray ?: bad("$where must be an array")
+        if (array.size < 2) bad("$where needs at least two values")
+        if (array.size > MAX_SETTING_VALUES) bad("$where has more than $MAX_SETTING_VALUES values")
+        return array.mapIndexed { i, item ->
+            val at = "$where[$i]"
+            val obj = item as? JsonObject ?: bad("$at must be an object")
+            for (key in listOf("value", "label")) {
+                if (key !in obj) bad("$at has no \"$key\"")
+            }
+            var choice = ""
+            var label = ""
+            for ((key, member) in obj) {
+                when (key) {
+                    "value" -> choice = text(member, "$at.value", ::isChoiceValue)
+                    "label" -> label = text(member, "$at.label", ::isName)
+                }
+            }
+            SettingChoice(choice, label)
         }
     }
 
@@ -430,6 +636,34 @@ object ManifestParser {
         text.length in 1..64 && text != "." && text != ".." &&
             text.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '_' || it == '+' || it == '-' }
 
+    /** `settings.file`: `${data}/` and a relative path, no slash at the end, at most 255 characters. */
+    internal fun isSettingsFile(text: String): Boolean =
+        Utf8.length(text) <= 255 && text.startsWith("\${data}/") && segments(text.substring("\${data}/".length), trailingSlash = false)
+
+    /** An option's key: `[A-Z][A-Z0-9_]{0,63}`. */
+    internal fun isSettingKey(text: String): Boolean =
+        text.length in 1..64 && text[0] in 'A'..'Z' && text.all { it in 'A'..'Z' || it in '0'..'9' || it == '_' }
+
+    private fun isSettingDescription(text: String): Boolean = Utf8.length(text) <= 500 && noControls(text)
+
+    private fun isSettingUnit(text: String): Boolean = Utf8.length(text) in 1..16 && noControls(text)
+
+    /** A `select` option's value: 1 to 64 of `[A-Za-z0-9._-]`. */
+    private fun isChoiceValue(text: String): Boolean =
+        text.length in 1..64 && text.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '_' || it == '-' }
+
+    /**
+     * Whether a `text` option takes [value]: 1 to [maxLength] bytes of UTF-8, of the safe set `A-Z a-z 0-9 . _ : / @ + , -`
+     * or, with [anyCharacters], with no control character and no space at its start or end.
+     */
+    fun isSettingText(value: String, maxLength: Int, anyCharacters: Boolean): Boolean {
+        if (value.isEmpty() || utf8Bytes(value) > maxLength) return false
+        if (anyCharacters) return noControls(value) && !value.startsWith(' ') && !value.endsWith(' ')
+        return value.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it in "._:/@+,-" }
+    }
+
+    private fun utf8Bytes(text: String): Int = text.encodeToByteArray().size
+
     /** `0` and three octal digits. */
     private fun isMode(text: String): Boolean = text.length == 4 && text[0] == '0' && text.drop(1).all { it in '0'..'7' }
 
@@ -444,6 +678,9 @@ object ManifestParser {
         if (!form(text)) bad("$where has a form or a length that is not allowed")
         return text
     }
+
+    private fun boolean(value: JsonElement, where: String): Boolean =
+        (value as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: bad("$where must be true or false")
 
     private fun integer(value: JsonElement, where: String, low: Long, high: Long): Long {
         val number = value.integerOrNull() ?: bad("$where must be an integer")

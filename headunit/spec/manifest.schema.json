@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NBTApp package manifest, manifestVersion 1",
-  "description": "manifest.json of a .nbtpkg. The file must also follow the strict JSON profile (UTF-8, no duplicate keys, integers only, at most 16 levels) and the cross-field rules that tools/nbtpkg.py checks: unique paths, every src and hook script listed in contents, a folder src with a folder dest, no destination placed twice, no serial service declared twice, no log path named twice. Unknown keys are refused inside requires and install, and ignored elsewhere.",
+  "description": "manifest.json of a .nbtpkg. The file must also follow the strict JSON profile (UTF-8, no duplicate keys, integers only, at most 16 levels) and the cross-field rules that tools/nbtpkg.py checks: unique paths, every src and hook script listed in contents, a folder src with a folder dest, no destination placed twice, no serial service declared twice, no log path named twice, and for settings the rules of each option's type and the cross-field rules that $defs/setting gives. Unknown keys are refused inside requires and install, and ignored elsewhere.",
   "type": "object",
   "required": [
     "manifestVersion",
@@ -104,6 +104,26 @@
       "maxItems": 16,
       "items": {
         "$ref": "#/$defs/log"
+      }
+    },
+    "settings": {
+      "description": "The package's settings, which a phone shows and changes through the agent: the file they are kept in, one KEY=value a line, and the options. The object is open: keys other than file and options are ignored.",
+      "type": "object",
+      "required": [
+        "options"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/settingsFile"
+        },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/setting"
+          }
+        }
       }
     }
   },
@@ -286,6 +306,198 @@
           "type": "string",
           "maxLength": 255,
           "pattern": "^(\\$\\{(app|data|tmp)\\}|/tmp(?!/nbtapp(/|$))|/var(?!/opt/nbtapp(/|$)))(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f*?]+)*/(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f]+$"
+        }
+      }
+    },
+    "settingsFile": {
+      "description": "The file the settings are kept in: ${data}/ and a relative path, no slash at the end. ${data}/settings when absent.",
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^\\$\\{data\\}/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)*$"
+    },
+    "setting": {
+      "description": "One option, as every reader takes it whatever its type. An option whose type is bool, int, text or select is then held to $defs/settingBool, settingInt, settingText or settingSelect, and to the cross-field rules: no key twice among the options (those of an unknown type included), not both default and unset, min no more than max, a default inside the option's limits, no select value twice, and at most 1024 bytes of UTF-8 in the option's strings (key, label, description, unset, an int's unit, a text's or select's default, and a select's values and their labels). An option of any other type is skipped: the package has no such setting, and of its members only key and label are looked at (and count toward the 1024 bytes). The object is open, and so is each type's: a key another type has, such as min on a bool, is ignored.",
+      "type": "object",
+      "required": [
+        "key",
+        "label",
+        "type"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/settingKey"
+        },
+        "label": {
+          "$ref": "#/$defs/name"
+        },
+        "type": {
+          "type": "string"
+        }
+      }
+    },
+    "settingKey": {
+      "description": "The name the option has in the settings file.",
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+    },
+    "settingDescription": {
+      "type": "string",
+      "maxLength": 500,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+    },
+    "settingApplies": {
+      "description": "When a change takes effect: at once, when the package's program next starts, when the HMI restarts, or when the head unit restarts. now when absent.",
+      "enum": [
+        "now",
+        "app-start",
+        "hmi-restart",
+        "reboot"
+      ]
+    },
+    "settingNumber": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "settingBool": {
+      "description": "An option that is on or off. default is true or false.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/settingDescription"
+        },
+        "default": {
+          "type": "boolean"
+        },
+        "unset": {
+          "$ref": "#/$defs/name"
+        },
+        "applies": {
+          "$ref": "#/$defs/settingApplies"
+        },
+        "advanced": {
+          "type": "boolean"
+        }
+      }
+    },
+    "settingInt": {
+      "description": "A whole number from min to max, both included; unit is shown beside it. default, when given, is inside those limits.",
+      "type": "object",
+      "required": [
+        "min",
+        "max"
+      ],
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/settingDescription"
+        },
+        "min": {
+          "$ref": "#/$defs/settingNumber"
+        },
+        "max": {
+          "$ref": "#/$defs/settingNumber"
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+        },
+        "default": {
+          "$ref": "#/$defs/settingNumber"
+        },
+        "unset": {
+          "$ref": "#/$defs/name"
+        },
+        "applies": {
+          "$ref": "#/$defs/settingApplies"
+        },
+        "advanced": {
+          "type": "boolean"
+        }
+      }
+    },
+    "settingText": {
+      "description": "A text of 1 to maxLength bytes of UTF-8. With characters safe (the default) it holds only A-Z a-z 0-9 and . _ : / @ + , -; with any, no control character (U+0000 to U+001F, U+007F) and no space at its start or end. default, when given, is such a text.",
+      "type": "object",
+      "required": [
+        "maxLength"
+      ],
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/settingDescription"
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "characters": {
+          "enum": [
+            "safe",
+            "any"
+          ]
+        },
+        "default": {
+          "type": "string"
+        },
+        "unset": {
+          "$ref": "#/$defs/name"
+        },
+        "applies": {
+          "$ref": "#/$defs/settingApplies"
+        },
+        "advanced": {
+          "type": "boolean"
+        }
+      }
+    },
+    "settingSelect": {
+      "description": "One of 2 to 16 values, each shown by its label. default, when given, is one of the values.",
+      "type": "object",
+      "required": [
+        "values"
+      ],
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/settingDescription"
+        },
+        "values": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/settingChoice"
+          }
+        },
+        "default": {
+          "type": "string"
+        },
+        "unset": {
+          "$ref": "#/$defs/name"
+        },
+        "applies": {
+          "$ref": "#/$defs/settingApplies"
+        },
+        "advanced": {
+          "type": "boolean"
+        }
+      }
+    },
+    "settingChoice": {
+      "description": "One value of a select option, as it stands in the settings file, and what a phone shows for it. The object is open.",
+      "type": "object",
+      "required": [
+        "value",
+        "label"
+      ],
+      "properties": {
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "label": {
+          "$ref": "#/$defs/name"
         }
       }
     }

@@ -102,6 +102,30 @@ def main():
             pass
     print("[ok] manifest schema")
 
+    # 2b. Settings: what a text option takes, and the edges the test packages do not reach.
+    for value in ("a", "Z9", "lamp-1.example:80/x@y+z,w_v"):
+        assert nbtpkg.setting_text_ok(value, 255) and nbtpkg.setting_text_ok(value, 255, "any"), value
+    for value in ("", "a b", "a=b", "a#b", "é", "a\tb", "a;b"):
+        assert not nbtpkg.setting_text_ok(value, 255), value
+    for value in ("a b", "a=b;c#d", "é x", "!"):
+        assert nbtpkg.setting_text_ok(value, 255, "any"), value
+    for value in ("", " a", "a ", " ", "a\tb", "a\nb", "a\x7fb"):
+        assert not nbtpkg.setting_text_ok(value, 255, "any"), value
+    assert nbtpkg.setting_text_ok("éé", 4, "any") and not nbtpkg.setting_text_ok("éé", 3, "any")
+
+    def settings(*options):
+        manifest = {"manifestVersion": 1, "id": "org.nbtapp.t", "name": "T", "version": "1.0.0", "contents": [],
+                    "settings": {"options": list(options)}}
+        nbtpkg.check_manifest(manifest)
+    lamp = {"key": "LAMP", "type": "bool"}
+    settings(dict(lamp, label="L" * 20, description="é" * 500))            # 1,024 bytes
+    refused("bad-manifest", settings, dict(lamp, label="L" * 21, description="é" * 500))
+    settings(dict(lamp, label="L" * 22, unit="U", description="é" * 499))  # a unit on a bool does not count
+    refused("bad-manifest", settings, dict(lamp, label="L" * 22, unset="U", description="é" * 499))
+    settings(dict(lamp, label="L", type="colour", description="é" * 600))  # nor anything on an unknown type
+    refused("bad-manifest", settings, dict(lamp, label="L"), dict(lamp, label="L", type="colour"))
+    print("[ok] settings")
+
     with tempfile.TemporaryDirectory() as tmp:
         # 3. The test packages.
         vectors = make_packages.build_all(os.path.join(tmp, "data"))

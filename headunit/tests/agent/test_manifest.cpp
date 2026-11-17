@@ -314,6 +314,206 @@ int main() {
         assert(Logs::code("[{\"path\":\"/tmp/x\"},{\"path\":\"/tmp/y\"}]") == "");
     }
 
+    // 11c. Settings: options of four types, each held to its own definition and to the rules that span its fields;
+    //      an option of another type is skipped, with only its key and label looked at. The object and each option
+    //      are open, and old agents skip the key.
+    {
+        struct Settings {
+            static std::string code(const std::string& settings, Manifest* out = 0, const std::string& install = "") {
+                return ::code(make(std::string(kHead) + "\"settings\":" + settings + ",", "", install), out);
+            }
+            // One option with these members.
+            static std::string one(const std::string& members, Manifest* out = 0) {
+                return code("{\"options\":[{" + members + "}]}", out);
+            }
+            static std::string lamp(const std::string& more, Manifest* out = 0) {
+                return one("\"key\":\"LAMP\",\"label\":\"Lamp\"," + more, out);
+            }
+        };
+        std::string every =
+            "{\"file\":\"${data}/dial.conf\",\"note\":1,\"options\":["
+            "{\"key\":\"CHIME\",\"label\":\"Chime\",\"description\":\"On or off.\",\"type\":\"bool\",\"default\":true,"
+            "\"applies\":\"app-start\",\"advanced\":true,\"min\":\"not looked at\"},"
+            "{\"key\":\"SPEED\",\"label\":\"Speed\",\"type\":\"int\",\"min\":-2147483648,\"max\":2147483647,"
+            "\"unit\":\"\\u00b0/s\",\"default\":-5,\"x\":[1]},"
+            "{\"key\":\"COLOUR\",\"label\":\"Colour\",\"type\":\"colour\",\"default\":{},\"description\":7},"
+            "{\"key\":\"GREETING\",\"label\":\"Greeting\",\"type\":\"text\",\"maxLength\":6,\"characters\":\"any\","
+            "\"default\":\"\\u00e9 \\u00e9!\",\"applies\":\"reboot\"},"
+            "{\"key\":\"HOST\",\"label\":\"Host\",\"type\":\"text\",\"maxLength\":255,\"unset\":\"No lamp\"},"
+            "{\"key\":\"FACE\",\"label\":\"Face\",\"type\":\"select\",\"values\":[{\"value\":\"round\",\"label\":\"Round\"},"
+            "{\"value\":\"sq-2.x_y\",\"label\":\"Square\",\"z\":0}],\"default\":\"sq-2.x_y\",\"applies\":\"hmi-restart\"}]}";
+        assert(Settings::code(every, &m) == "");
+        assert(m.hasSettings && m.settingsFile == "${data}/dial.conf" && m.settings.size() == 5 && riskFlags(m).empty());
+        const ManifestSetting& chime = m.settings[0];
+        assert(chime.key == "CHIME" && chime.label == "Chime" && chime.description == "On or off." && chime.type == kSettingBool);
+        assert(chime.hasDefault && chime.defaultBool && chime.applies == "app-start" && chime.advanced && chime.unset.empty());
+        const ManifestSetting& speed = m.settings[1];
+        assert(speed.type == kSettingInt && speed.min == -2147483648LL && speed.max == 2147483647LL);
+        assert(speed.unit == "\xc2\xb0/s" && speed.hasDefault && speed.defaultInt == -5 && speed.applies == "now" && !speed.advanced);
+        const ManifestSetting& greeting = m.settings[2];   // COLOUR, of an unknown type, is left out
+        assert(greeting.key == "GREETING" && greeting.type == kSettingText && greeting.maxLength == 6 && greeting.anyCharacters);
+        assert(greeting.hasDefault && greeting.defaultText == "\xc3\xa9 \xc3\xa9!" && greeting.applies == "reboot");
+        const ManifestSetting& host = m.settings[3];
+        assert(host.type == kSettingText && host.maxLength == 255 && !host.anyCharacters && !host.hasDefault && host.unset == "No lamp");
+        const ManifestSetting& face = m.settings[4];
+        assert(face.type == kSettingSelect && face.values.size() == 2 && face.values[1].value == "sq-2.x_y");
+        assert(face.values[1].label == "Square" && face.hasDefault && face.defaultText == "sq-2.x_y");
+        assert(std::string(settingTypeName(face.type)) == "select" && std::string(settingTypeName(kSettingInt)) == "int");
+        // No file named: the default one. No settings at all: none.
+        assert(Settings::lamp("\"type\":\"bool\"", &m) == "" && m.hasSettings && m.settingsFile == "${data}/settings");
+        assert(m.settings.size() == 1 && !m.settings[0].hasDefault);
+        assert(code(make(kHead, "", ""), &m) == "" && !m.hasSettings && m.settings.empty());
+        // Only options of unknown types: the manifest is good and the package has no setting.
+        assert(Settings::lamp("\"type\":\"colour\"", &m) == "" && m.hasSettings && m.settings.empty());
+
+        // The object and the list.
+        assert(Settings::code("[]") == bad && Settings::code("{}") == bad && Settings::code("{\"options\":[]}") == bad);
+        assert(Settings::code("{\"options\":{}}") == bad && Settings::code("{\"options\":[\"LAMP\"]}") == bad);
+        std::string many = "{\"options\":[";
+        for (int i = 0; i < 64; ++i) {
+            char key[16];
+            snprintf(key, sizeof key, "L%d", i);
+            many += std::string(i ? "," : "") + "{\"key\":\"" + key + "\",\"label\":\"L\",\"type\":\"bool\"}";
+        }
+        assert(Settings::code(many + "]}", &m) == "" && m.settings.size() == 64);
+        assert(Settings::code(many + ",{\"key\":\"L64\",\"label\":\"L\",\"type\":\"x\"}]}") == bad);
+        // The file: under ${data} only, a file and not a folder, the segment rules of every path, 255 characters.
+        const char* const files[] = {"${data}/a", "${data}/a/b.conf", "${data}/.x", "${data}/a b", 0};
+        for (int i = 0; files[i] != 0; ++i) assert(validSettingsFile(files[i]));
+        const char* const noFiles[] = {"", "${data}", "${data}/", "${data}/a/", "${data}//a", "${data}/../a", "${data}/./a",
+                                       "${app}/a", "${tmp}/a", "/tmp/a", "a", "${data}/a\\b", "${data}/a\nb", 0};
+        for (int i = 0; noFiles[i] != 0; ++i) assert(!validSettingsFile(noFiles[i]));
+        assert(validSettingsFile("${data}/" + std::string(247, 'f')) && !validSettingsFile("${data}/" + std::string(248, 'f')));
+        assert(Settings::code("{\"file\":\"${app}/s\",\"options\":[{\"key\":\"A\",\"label\":\"A\",\"type\":\"bool\"}]}") == bad);
+        assert(Settings::code("{\"file\":7,\"options\":[{\"key\":\"A\",\"label\":\"A\",\"type\":\"bool\"}]}") == bad);
+
+        // What every option has: a key, a label and a type, also on an option of an unknown type.
+        assert(Settings::one("\"label\":\"L\",\"type\":\"bool\"") == bad && Settings::one("\"key\":\"L\",\"type\":\"bool\"") == bad);
+        assert(Settings::one("\"key\":\"L\",\"label\":\"L\"") == bad && Settings::lamp("\"type\":1") == bad);
+        const char* const keys[] = {"A", "A_1", "Z9", "NBT_VID_FPS", 0};
+        for (int i = 0; keys[i] != 0; ++i) assert(Settings::one("\"key\":\"" + std::string(keys[i]) + "\",\"label\":\"L\",\"type\":\"bool\"") == "");
+        const char* const noKeys[] = {"", "a", "Lamp", "1A", "_A", "A-B", "A B", "\\u00c9", 0};
+        for (int i = 0; noKeys[i] != 0; ++i) {
+            assert(Settings::one("\"key\":\"" + std::string(noKeys[i]) + "\",\"label\":\"L\",\"type\":\"bool\"") == bad);
+            assert(Settings::one("\"key\":\"" + std::string(noKeys[i]) + "\",\"label\":\"L\",\"type\":\"colour\"") == bad);
+        }
+        assert(Settings::one("\"key\":\"" + std::string(64, 'K') + "\",\"label\":\"L\",\"type\":\"bool\"") == "");
+        assert(Settings::one("\"key\":\"" + std::string(65, 'K') + "\",\"label\":\"L\",\"type\":\"bool\"") == bad);
+        assert(Settings::one("\"key\":\"A\",\"label\":\"\",\"type\":\"colour\"") == bad);
+        assert(Settings::one("\"key\":\"A\",\"label\":\"a\\tb\",\"type\":\"bool\"") == bad);
+        assert(Settings::one("\"key\":\"A\",\"label\":\"" + std::string(65, 'l') + "\",\"type\":\"bool\"") == bad);
+        // No key twice, counting the options that are skipped.
+        assert(Settings::code("{\"options\":[{\"key\":\"A\",\"label\":\"A\",\"type\":\"bool\"},{\"key\":\"A\",\"label\":\"B\",\"type\":\"int\",\"min\":0,\"max\":1}]}") == bad);
+        assert(Settings::code("{\"options\":[{\"key\":\"A\",\"label\":\"A\",\"type\":\"bool\"},{\"key\":\"A\",\"label\":\"B\",\"type\":\"x\"}]}") == bad);
+        // An unknown type has nothing else looked at.
+        assert(Settings::lamp("\"type\":\"BOOL\",\"default\":\"x\",\"unset\":\"\",\"applies\":\"later\",\"description\":[1]") == "");
+
+        // Members of every known type.
+        assert(Settings::lamp("\"type\":\"bool\",\"description\":\"" + std::string(500, 'd') + "\"") == "");
+        assert(Settings::lamp("\"type\":\"bool\",\"description\":\"" + std::string(501, 'd') + "\"") == bad);
+        assert(Settings::lamp("\"type\":\"bool\",\"description\":\"\"") == "");
+        assert(Settings::lamp("\"type\":\"bool\",\"description\":\"a\\nb\"") == bad);
+        assert(Settings::lamp("\"type\":\"bool\",\"unset\":\"\"") == bad && Settings::lamp("\"type\":\"bool\",\"unset\":\"Off\"") == "");
+        assert(Settings::lamp("\"type\":\"bool\",\"unset\":\"Off\",\"default\":false") == bad);
+        assert(Settings::lamp("\"type\":\"bool\",\"default\":false,\"unset\":\"Off\"") == bad);
+        const char* const applies[] = {"now", "app-start", "hmi-restart", "reboot", 0};
+        for (int i = 0; applies[i] != 0; ++i) {
+            assert(Settings::lamp("\"type\":\"bool\",\"applies\":\"" + std::string(applies[i]) + "\"", &m) == "");
+            assert(m.settings[0].applies == applies[i]);
+        }
+        assert(Settings::lamp("\"type\":\"bool\",\"applies\":\"later\"") == bad && Settings::lamp("\"type\":\"bool\",\"applies\":1") == bad);
+        assert(Settings::lamp("\"type\":\"bool\",\"advanced\":\"yes\"") == bad && Settings::lamp("\"type\":\"bool\",\"advanced\":false") == "");
+        // bool.
+        assert(Settings::lamp("\"type\":\"bool\",\"default\":\"true\"") == bad && Settings::lamp("\"type\":\"bool\",\"default\":1") == bad);
+        assert(Settings::lamp("\"type\":\"bool\",\"default\":false", &m) == "" && m.settings[0].hasDefault && !m.settings[0].defaultBool);
+        // int: the limits, a unit, a default inside the limits.
+        assert(Settings::lamp("\"type\":\"int\",\"max\":1") == bad && Settings::lamp("\"type\":\"int\",\"min\":1") == bad);
+        assert(Settings::lamp("\"type\":\"int\",\"min\":2,\"max\":1") == bad && Settings::lamp("\"type\":\"int\",\"min\":1,\"max\":1") == "");
+        assert(Settings::lamp("\"type\":\"int\",\"min\":-2147483649,\"max\":1") == bad);
+        assert(Settings::lamp("\"type\":\"int\",\"min\":0,\"max\":2147483648") == bad);
+        assert(Settings::lamp("\"type\":\"int\",\"min\":\"0\",\"max\":1") == bad);
+        assert(Settings::lamp("\"type\":\"int\",\"min\":0,\"max\":9,\"default\":9") == "");
+        assert(Settings::lamp("\"type\":\"int\",\"min\":0,\"max\":9,\"default\":10") == bad);
+        assert(Settings::lamp("\"type\":\"int\",\"min\":0,\"max\":9,\"default\":-1") == bad);
+        assert(Settings::lamp("\"type\":\"int\",\"min\":0,\"max\":9,\"default\":\"1\"") == bad);
+        assert(Settings::lamp("\"type\":\"int\",\"min\":0,\"max\":9,\"unit\":\"\"") == bad);
+        assert(Settings::lamp("\"type\":\"int\",\"min\":0,\"max\":9,\"unit\":\"" + std::string(16, 'u') + "\"") == "");
+        assert(Settings::lamp("\"type\":\"int\",\"min\":0,\"max\":9,\"unit\":\"" + std::string(17, 'u') + "\"") == bad);
+        assert(Settings::lamp("\"type\":\"bool\",\"unit\":\"\",\"min\":\"x\"") == "");     // an int's keys on a bool
+        // text: maxLength, the two sets of characters, a default it takes.
+        assert(Settings::lamp("\"type\":\"text\"") == bad && Settings::lamp("\"type\":\"text\",\"maxLength\":0") == bad);
+        assert(Settings::lamp("\"type\":\"text\",\"maxLength\":255") == "" && Settings::lamp("\"type\":\"text\",\"maxLength\":256") == bad);
+        assert(Settings::lamp("\"type\":\"text\",\"maxLength\":9,\"characters\":\"ascii\"") == bad);
+        assert(Settings::lamp("\"type\":\"text\",\"maxLength\":9,\"characters\":\"safe\",\"default\":\"a.b_c:d/e@f+g,h-1\"") == bad);   // 17 bytes
+        assert(Settings::lamp("\"type\":\"text\",\"maxLength\":17,\"characters\":\"safe\",\"default\":\"a.b_c:d/e@f+g,h-1\"") == "");
+        assert(Settings::lamp("\"type\":\"text\",\"maxLength\":9,\"default\":\"\"") == bad);
+        assert(Settings::lamp("\"type\":\"text\",\"maxLength\":9,\"default\":5") == bad);
+        assert(Settings::lamp("\"type\":\"text\",\"maxLength\":5,\"characters\":\"any\",\"default\":\"\\u00e9\\u00e9\\u00e9\"") == bad);
+        assert(Settings::lamp("\"type\":\"text\",\"maxLength\":6,\"characters\":\"any\",\"default\":\"\\u00e9\\u00e9\\u00e9\"") == "");
+        const char* const safe[] = {"a", "Z9", "lamp-1.example:80/x@y+z,w_v", 0};
+        const char* const unsafe[] = {"", "a b", "a=b", "a\"b", "a#b", "\xc3\xa9", "a\tb", "a;b", 0};
+        const char* const any[] = {"a b", "a=b;c#d", "\xc3\xa9 x", "!", 0};
+        const char* const noAny[] = {"", " a", "a ", " ", "a\tb", "a\nb", "a\x7f" "b", 0};
+        for (int i = 0; safe[i] != 0; ++i) assert(validSettingText(safe[i], 255, false) && validSettingText(safe[i], 255, true));
+        for (int i = 0; unsafe[i] != 0; ++i) assert(!validSettingText(unsafe[i], 255, false));
+        for (int i = 0; any[i] != 0; ++i) assert(validSettingText(any[i], 255, true));
+        for (int i = 0; noAny[i] != 0; ++i) assert(!validSettingText(noAny[i], 255, true));
+        assert(validSettingText("abc", 3, false) && !validSettingText("abcd", 3, false) && !validSettingText("\xc3\xa9\xc3\xa9", 3, true));
+        // select: 2 to 16 values, each once and of its form, a default among them.
+        std::string two = "\"type\":\"select\",\"values\":[{\"value\":\"a\",\"label\":\"A\"},{\"value\":\"b\",\"label\":\"B\"}]";
+        assert(Settings::lamp(two) == "" && Settings::lamp(two + ",\"default\":\"b\"") == "");
+        assert(Settings::lamp(two + ",\"default\":\"c\"") == bad && Settings::lamp(two + ",\"default\":\"\"") == bad);
+        assert(Settings::lamp("\"type\":\"select\"") == bad && Settings::lamp("\"type\":\"select\",\"values\":{}") == bad);
+        assert(Settings::lamp("\"type\":\"select\",\"values\":[{\"value\":\"a\",\"label\":\"A\"}]") == bad);
+        assert(Settings::lamp("\"type\":\"select\",\"values\":[{\"value\":\"a\",\"label\":\"A\"},{\"value\":\"a\",\"label\":\"B\"}]") == bad);
+        assert(Settings::lamp("\"type\":\"select\",\"values\":[{\"value\":\"a\",\"label\":\"A\"},{\"value\":\"b\"}]") == bad);
+        assert(Settings::lamp("\"type\":\"select\",\"values\":[{\"value\":\"a\",\"label\":\"A\"},{\"value\":\"b b\",\"label\":\"B\"}]") == bad);
+        assert(Settings::lamp("\"type\":\"select\",\"values\":[{\"value\":\"a\",\"label\":\"A\"},\"b\"]") == bad);
+        std::string sixteen = "\"type\":\"select\",\"values\":[";
+        for (int i = 0; i < 16; ++i) sixteen += std::string(i ? "," : "") + "{\"value\":\"v" + std::string(1, (char)('a' + i)) + "\",\"label\":\"V\"}";
+        assert(Settings::lamp(sixteen + "]", &m) == "" && m.settings[0].values.size() == 16);
+        assert(Settings::lamp(sixteen + ",{\"value\":\"vq\",\"label\":\"V\"}]") == bad);
+        assert(Settings::lamp("\"type\":\"select\",\"values\":[{\"value\":\"" + std::string(64, 'v') + "\",\"label\":\"A\"},{\"value\":\"b\",\"label\":\"B\"}]") == "");
+        assert(Settings::lamp("\"type\":\"select\",\"values\":[{\"value\":\"" + std::string(65, 'v') + "\",\"label\":\"A\"},{\"value\":\"b\",\"label\":\"B\"}]") == bad);
+
+        // At most 1,024 bytes of UTF-8 in an option's strings: 4 + 4 bytes of key and label here, and the description
+        // in characters of two bytes, which counts bytes and not characters.
+        std::string accents;
+        for (int i = 0; i < 508; ++i) accents += "\\u00e9";
+        assert(Settings::lamp("\"type\":\"bool\",\"description\":\"" + accents.substr(0, 6 * 500) + "\"") == "");   // 1,008
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(20, 'L') + "\",\"type\":\"bool\","
+                             "\"description\":\"" + accents.substr(0, 6 * 500) + "\"") == "");   // 1,024
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(21, 'L') + "\",\"type\":\"bool\","
+                             "\"description\":\"" + accents.substr(0, 6 * 500) + "\"") == bad);  // 1,025
+        // The unset text, an int's unit and a select's values count; members a type does not have do not.
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(21, 'L') + "\",\"type\":\"bool\",\"unset\":\"U\","
+                             "\"description\":\"" + accents.substr(0, 6 * 499) + "\"") == "");   // 1,024
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(22, 'L') + "\",\"type\":\"bool\",\"unset\":\"U\","
+                             "\"description\":\"" + accents.substr(0, 6 * 499) + "\"") == bad);
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(21, 'L') + "\",\"type\":\"int\",\"min\":0,\"max\":1,"
+                             "\"unit\":\"U\",\"description\":\"" + accents.substr(0, 6 * 499) + "\"") == "");
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(22, 'L') + "\",\"type\":\"int\",\"min\":0,\"max\":1,"
+                             "\"unit\":\"U\",\"description\":\"" + accents.substr(0, 6 * 499) + "\"") == bad);
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(22, 'L') + "\",\"type\":\"bool\",\"unit\":\"U\","
+                             "\"description\":\"" + accents.substr(0, 6 * 499) + "\"") == "");
+        std::string bulky = "\"type\":\"select\",\"values\":[";   // 16 values of 61 characters and their labels: 992
+        for (int i = 0; i < 16; ++i) {
+            char value[8];
+            snprintf(value, sizeof value, "%02d", i);
+            bulky += std::string(i ? "," : "") + "{\"value\":\"" + value + std::string(59, 'v') + "\",\"label\":\"V\"}";
+        }
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(28, 'L') + "\"," + bulky + "]") == "");    // 1,024
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(29, 'L') + "\"," + bulky + "]") == bad);   // 1,025
+        assert(Settings::one("\"key\":\"LAMP\",\"label\":\"" + std::string(27, 'L') + "\"," + bulky + "],\"default\":\"00" +
+                             std::string(59, 'v') + "\"") == bad);   // the default counts too: 1,084
+
+        // Where the code comes from: the walk names the first fault of the text; the rules of an option's type come
+        // after it, as nbtpkg.py checks them, so a key unknown in install decides even when it comes later.
+        assert(Settings::code("{\"options\":[{\"key\":\"a\",\"label\":\"A\",\"type\":\"bool\"}]}", 0, "\"later\":1") == bad);
+        assert(Settings::code("{\"options\":[{\"key\":\"A\",\"label\":\"A\",\"type\":\"bool\",\"default\":1}]}", 0, "\"later\":1") ==
+               unsupported);
+    }
+
     // 12. Risk flags: a destination outside the package's own places, or a `replaces`, is modifies-system.
     assert(code(make(kHead, content("a/b"), "\"files\":[{\"src\":\"a/b\",\"dest\":\"${data}/x\",\"mode\":\"0644\"}]"), &m) == "");
     assert(riskFlags(m).empty());

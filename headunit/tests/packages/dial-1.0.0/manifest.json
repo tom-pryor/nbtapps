@@ -1,0 +1,30 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.dial",
+  "name": "Dial",
+  "version": "1.0.0",
+  "settings": {
+    "file": "${data}/dial.conf",
+    "options": [
+      { "key": "CHIME", "label": "Chime", "description": "Play a chime when the dial turns.", "type": "bool",
+        "default": true, "advanced": false },
+      { "key": "DIAL_SPEED", "label": "Dial speed", "description": "How far the dial turns each second.",
+        "type": "int", "min": 1, "max": 50, "unit": "°/s", "default": 10, "applies": "app-start" },
+      { "key": "GREETING", "label": "Greeting", "description": "Shown on the dial when the head unit starts.",
+        "type": "text", "maxLength": 40, "characters": "any", "default": "Hello, dial é", "applies": "reboot" },
+      { "key": "LAMP_HOST", "label": "Lamp address", "type": "text", "maxLength": 64, "unset": "No lamp",
+        "advanced": true },
+      { "key": "FACE", "label": "Dial face", "type": "select",
+        "values": [{ "value": "round", "label": "Round" }, { "value": "square", "label": "Square" },
+                   { "value": "hex", "label": "Hexagon" }],
+        "default": "round", "applies": "hmi-restart" },
+      { "key": "LAMP_COLOUR", "label": "Lamp colour", "type": "select",
+        "values": [{ "value": "warm", "label": "Warm" }, { "value": "cool", "label": "Cool" }],
+        "unset": "As the lamp has it", "advanced": true },
+      { "key": "DIAL_COLOUR", "label": "Dial colour", "type": "colour", "default": "#ff8800" }
+    ]
+  },
+  "install": {
+    "files": [{ "src": "payload/note.txt", "dest": "${app}/note.txt", "mode": "0644" }]
+  }
+}

@@ -27,6 +27,18 @@ const char* hookName(HookKind kind) {
     }
 }
 
+const char* const kDefaultSettingsFile = "${data}/settings";
+
+const char* settingTypeName(SettingType type) {
+    switch (type) {
+    case kSettingBool: return "bool";
+    case kSettingInt: return "int";
+    case kSettingText: return "text";
+    case kSettingSelect: return "select";
+    default: return "";
+    }
+}
+
 bool inOwnDirs(const std::string& dest) {
     return dest.compare(0, 7, "${app}/") == 0 || dest.compare(0, 8, "${data}/") == 0 ||
            dest.compare(0, 11, "${plugins}/") == 0;
@@ -218,6 +230,53 @@ bool isLogPath(const std::string& text) {
     return true;
 }
 
+// $defs/settingsFile: ${data}/ and a relative path, no slash at the end.
+bool isSettingsFile(const std::string& text) {
+    size_t rest = 0;
+    return utf8Length(text) <= 255 && startsWith(text, "${data}/", &rest) && segments(text, rest, false);
+}
+
+// $defs/settingKey: [A-Z][A-Z0-9_]{0,63}.
+bool isSettingKey(const std::string& text) {
+    if (text.empty() || text.size() > 64 || text[0] < 'A' || text[0] > 'Z') return false;
+    for (size_t i = 1; i < text.size(); ++i) {
+        char c = text[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return false;
+    }
+    return true;
+}
+
+// $defs/settingDescription: at most 500 characters, no control character.
+bool isSettingDescription(const std::string& text) { return utf8Length(text) <= 500 && noControls(text); }
+
+// $defs/settingInt/unit: 1 to 16 characters, no control character.
+bool isSettingUnit(const std::string& text) {
+    size_t n = utf8Length(text);
+    return n >= 1 && n <= 16 && noControls(text);
+}
+
+// $defs/settingChoice/value: 1 to 64 of [A-Za-z0-9._-].
+bool isChoiceValue(const std::string& text) {
+    if (text.empty() || text.size() > 64) return false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+              c == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A string that names one of `names`, a list ending in 0.
+bool oneOf(const Value& v, const char* const* names) {
+    if (!v.isString()) return false;
+    for (; *names != 0; ++names) {
+        if (v.string() == *names) return true;
+    }
+    return false;
+}
+
 // ---- the schema, walked in the order of the text --------------------------------------------------------------
 
 class Checker {
@@ -248,6 +307,8 @@ public:
                 if (!install(v)) return false;
             } else if (key == "logs") {
                 if (!logs(v)) return false;
+            } else if (key == "settings") {
+                if (!settings(v)) return false;
             }
             // manifestVersion was checked by the caller; any other key at this level is ignored.
         }
@@ -255,7 +316,16 @@ public:
     }
 
 private:
+    // An option of settings.options as the walk found it: what every option has, and the object for the rest.
+    struct PendingSetting {
+        std::string at, key, label, type;
+        Value value;
+    };
+
     bool bad(const std::string& where, const char* what) { return error_->fail("bad-manifest", where + " " + what); }
+    bool badSetting(const std::string& key, const char* what) {
+        return error_->fail("bad-manifest", "manifest gives the setting " + key + " " + what);
+    }
     bool unknown(const std::string& where, const std::string& key) {
         return error_->fail("unsupported-manifest", where + " has the unknown key \"" + key + "\"");
     }
@@ -411,6 +481,187 @@ private:
                 if (l.key(k) == "path" && !text(l.at(k), isLogPath, at + ".path", &path)) return false;
             }
             m_->logs.push_back(path);
+        }
+        return true;
+    }
+
+    // properties/settings: open, with file and 1 to 64 options of $defs/setting, which is open. Here only what every
+    // option has, whatever its type; the rest waits for settingsRules(), as nbtpkg.py's check_settings does it after
+    // the schema, so that a key refused in install further down the text still decides the code.
+    bool settings(const Value& v) {
+        static const char* const required[] = {"options", 0};
+        static const char* const option[] = {"key", "label", "type", 0};
+        if (!v.isObject()) return bad("manifest.settings", "must be an object");
+        if (!has(v, required, "manifest.settings")) return false;
+        m_->hasSettings = true;
+        m_->settingsFile = kDefaultSettingsFile;
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (v.key(i) == "file") {
+                if (!text(v.at(i), isSettingsFile, "manifest.settings.file", &m_->settingsFile)) return false;
+            } else if (v.key(i) == "options") {
+                Value list = v.at(i);
+                if (!list.isArray()) return bad("manifest.settings.options", "must be an array");
+                if (list.size() < 1) return bad("manifest.settings.options", "needs at least one option");
+                if (list.size() > kMaxSettings) return bad("manifest.settings.options", "has more than 64 options");
+                for (size_t k = 0; k < list.size(); ++k) {
+                    PendingSetting p;
+                    p.at = item("manifest.settings.options", k);
+                    p.value = list.at(k);
+                    if (!p.value.isObject()) return bad(p.at, "must be an object");
+                    if (!has(p.value, option, p.at)) return false;
+                    for (size_t m = 0; m < p.value.size(); ++m) {
+                        const std::string& key = p.value.key(m);
+                        if (key == "key") {
+                            if (!text(p.value.at(m), isSettingKey, p.at + ".key", &p.key)) return false;
+                        } else if (key == "label") {
+                            if (!text(p.value.at(m), isName, p.at + ".label", &p.label)) return false;
+                        } else if (key == "type") {
+                            if (!p.value.at(m).isString()) return bad(p.at + ".type", "must be a string");
+                            p.type = p.value.at(m).string();
+                        }
+                    }
+                    pending_.push_back(p);
+                }
+            }
+        }
+        return true;
+    }
+
+    // $defs/settingBool, settingInt, settingText and settingSelect, each open, and the rules of $defs/setting that
+    // span fields. An option of an unknown type has only its key and label looked at.
+    bool settingsRules() {
+        std::set<std::string> keys;
+        for (size_t i = 0; i < pending_.size(); ++i) {
+            const PendingSetting& p = pending_[i];
+            if (!keys.insert(p.key).second) return bad("manifest", ("names the setting " + p.key + " twice").c_str());
+            size_t bytes = p.key.size() + p.label.size();
+            ManifestSetting s;
+            bool known = true;
+            if (p.type == "bool") s.type = kSettingBool;
+            else if (p.type == "int") s.type = kSettingInt;
+            else if (p.type == "text") s.type = kSettingText;
+            else if (p.type == "select") s.type = kSettingSelect;
+            else known = false;
+            if (known) {
+                s.key = p.key;
+                s.label = p.label;
+                if (!setting(p, &s)) return false;
+                bytes += s.description.size() + s.unset.size() + s.unit.size();
+                if (s.type == kSettingText || s.type == kSettingSelect) bytes += s.defaultText.size();
+                for (size_t k = 0; k < s.values.size(); ++k) bytes += s.values[k].value.size() + s.values[k].label.size();
+            }
+            if (bytes > kMaxSettingBytes) {
+                return bad("manifest", ("gives the setting " + p.key + " more than 1024 bytes of text").c_str());
+            }
+            if (known) m_->settings.push_back(s);
+        }
+        return true;
+    }
+
+    // One option of a known type: its type's definition, walked in the order of the text, then the rules that span
+    // its fields.
+    bool setting(const PendingSetting& p, ManifestSetting* s) {
+        static const char* const intRequired[] = {"min", "max", 0};
+        static const char* const textRequired[] = {"maxLength", 0};
+        static const char* const selectRequired[] = {"values", 0};
+        static const char* const applies[] = {"now", "app-start", "hmi-restart", "reboot", 0};
+        static const char* const characters[] = {"safe", "any", 0};
+        const Value& o = p.value;
+        const std::string& at = p.at;
+        if (s->type == kSettingInt && !has(o, intRequired, at)) return false;
+        if (s->type == kSettingText && !has(o, textRequired, at)) return false;
+        if (s->type == kSettingSelect && !has(o, selectRequired, at)) return false;
+        bool hasUnset = false;
+        for (size_t i = 0; i < o.size(); ++i) {
+            const std::string& key = o.key(i);
+            Value v = o.at(i);
+            std::string where = at + "." + key;
+            if (key == "description") {
+                if (!text(v, isSettingDescription, where, &s->description)) return false;
+            } else if (key == "unset") {
+                if (!text(v, isName, where, &s->unset)) return false;
+                hasUnset = true;
+            } else if (key == "applies") {
+                if (!oneOf(v, applies)) return bad(where, "must be one of: now, app-start, hmi-restart, reboot");
+                s->applies = v.string();
+            } else if (key == "advanced") {
+                if (!v.isBool()) return bad(where, "must be true or false");
+                s->advanced = v.boolean();
+            } else if (key == "default") {
+                s->hasDefault = true;
+                if (s->type == kSettingBool) {
+                    if (!v.isBool()) return bad(where, "must be true or false");
+                    s->defaultBool = v.boolean();
+                } else if (s->type == kSettingInt) {
+                    if (!integer(v, -2147483648LL, 2147483647LL, where, &s->defaultInt)) return false;
+                } else {
+                    if (!v.isString()) return bad(where, "must be a string");
+                    s->defaultText = v.string();
+                }
+            } else if (s->type == kSettingInt && (key == "min" || key == "max")) {
+                if (!integer(v, -2147483648LL, 2147483647LL, where, key == "min" ? &s->min : &s->max)) return false;
+            } else if (s->type == kSettingInt && key == "unit") {
+                if (!text(v, isSettingUnit, where, &s->unit)) return false;
+            } else if (s->type == kSettingText && key == "maxLength") {
+                int64_t n = 0;
+                if (!integer(v, 1, (int64_t)kSettingsMaxValueBytes, where, &n)) return false;
+                s->maxLength = (size_t)n;
+            } else if (s->type == kSettingText && key == "characters") {
+                if (!oneOf(v, characters)) return bad(where, "must be one of: safe, any");
+                s->anyCharacters = v.string() == "any";
+            } else if (s->type == kSettingSelect && key == "values") {
+                if (!choices(v, where, &s->values)) return false;
+            }
+        }
+
+        if (s->hasDefault && hasUnset) {
+            return badSetting(s->key, "both a default and an unset text");
+        }
+        if (s->type == kSettingInt) {
+            if (s->min > s->max) return badSetting(s->key, "a min above its max");
+            if (s->hasDefault && (s->defaultInt < s->min || s->defaultInt > s->max)) {
+                return badSetting(s->key, "a default outside its limits");
+            }
+        } else if (s->type == kSettingText) {
+            if (s->hasDefault && !validSettingText(s->defaultText, s->maxLength, s->anyCharacters)) {
+                return badSetting(s->key, "a default it does not take");
+            }
+        } else if (s->type == kSettingSelect) {
+            std::set<std::string> seen;
+            bool found = false;
+            for (size_t k = 0; k < s->values.size(); ++k) {
+                if (!seen.insert(s->values[k].value).second) {
+                    return badSetting(s->key, "a value twice");
+                }
+                if (s->values[k].value == s->defaultText) found = true;
+            }
+            if (s->hasDefault && !found) {
+                return badSetting(s->key, "a default that is not one of its values");
+            }
+        }
+        return true;
+    }
+
+    // $defs/settingSelect/values: 2 to 16 of $defs/settingChoice, which is open.
+    bool choices(const Value& v, const std::string& where, std::vector<ManifestSettingChoice>* out) {
+        static const char* const required[] = {"value", "label", 0};
+        if (!v.isArray()) return bad(where, "must be an array");
+        if (v.size() < 2) return bad(where, "needs at least two values");
+        if (v.size() > kMaxSettingValues) return bad(where, "has more than 16 values");
+        for (size_t i = 0; i < v.size(); ++i) {
+            Value c = v.at(i);
+            std::string at = item(where, i);
+            if (!c.isObject()) return bad(at, "must be an object");
+            if (!has(c, required, at)) return false;
+            ManifestSettingChoice choice;
+            for (size_t k = 0; k < c.size(); ++k) {
+                if (c.key(k) == "value") {
+                    if (!text(c.at(k), isChoiceValue, at + ".value", &choice.value)) return false;
+                } else if (c.key(k) == "label") {
+                    if (!text(c.at(k), isName, at + ".label", &choice.label)) return false;
+                }
+            }
+            out->push_back(choice);
         }
         return true;
     }
@@ -594,12 +845,13 @@ private:
         for (size_t i = 0; i < m_->logs.size(); ++i) {
             if (!logs.insert(m_->logs[i]).second) return bad("manifest", ("names the log " + m_->logs[i] + " twice").c_str());
         }
-        return true;
+        return settingsRules();
     }
 
     Manifest* m_;
     Error* error_;
     std::set<std::string> placed_;
+    std::vector<PendingSetting> pending_;
 };
 
 }  // namespace
@@ -612,6 +864,20 @@ bool validVersion(const std::string& version) { return isVersion(version); }
 bool validSerialServiceName(const std::string& name) { return isSerialServiceName(name); }
 bool validProgramName(const std::string& program) { return isProgramName(program); }
 bool validLogPath(const std::string& path) { return isLogPath(path); }
+bool validSettingsFile(const std::string& path) { return isSettingsFile(path); }
+
+bool validSettingText(const std::string& value, size_t maxLength, bool anyCharacters) {
+    if (value.empty() || value.size() > maxLength) return false;
+    if (anyCharacters) return noControls(value) && value[0] != ' ' && value[value.size() - 1] != ' ';
+    for (size_t i = 0; i < value.size(); ++i) {
+        char c = value[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+              c == ':' || c == '/' || c == '@' || c == '+' || c == ',' || c == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
 
 bool parseManifest(const void* data, size_t len, Manifest* out, Error* error) {
     if (len > kMaxManifestBytes) return error->fail("bad-manifest", "manifest is larger than 1 MiB");

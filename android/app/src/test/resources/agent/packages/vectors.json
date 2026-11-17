@@ -171,6 +171,19 @@
       "what": "built from tests/packages/plugin-1.0.0"
     },
     {
+      "id": "org.nbtapp.dial",
+      "version": "1.0.0",
+      "name": "Dial",
+      "sha256": "dbe23d1b4cc484dd512161957185bd83f890481b27de55917225c64f20149cbd",
+      "size": 1203,
+      "manifestSha256": "479ee3ded6e123ef69a9eb41934347961238c3cb0a960811d9b251e879ffceb0",
+      "flags": [],
+      "signature": "2c09112caec1f79e1ed5a7db6bb1ad36b5859b5fc0372220fd7eb33d756d3a3764c12ce457aa470850959ee3c78cfa8177a6876361ca9ee5b3762aa9caab0501",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.dial-1.0.0.nbtpkg",
+      "what": "built from tests/packages/dial-1.0.0"
+    },
+    {
       "id": "org.nbtapp.hello",
       "version": "1.1.0",
       "name": "Hello NBT",
@@ -478,6 +491,36 @@
       "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
       "file": "good/org.nbtapp.syshook-1.0.0.nbtpkg",
       "what": "built from tests/packages/syshook-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.2.0",
+      "name": "Hello NBT",
+      "sha256": "4f0615d0a297cdc3558f33cad9bf0dfc4a44544f029e1c03c40d668d70f913e2",
+      "size": 3088,
+      "manifestSha256": "483140e372b01f377c90796fb688e9d9f16a595b04609c4aec00521b614c5870",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "d2a16117da62e81f1d09d74f87989099ae4ff1b4246621603b11277beaa38d99b29d08bfbaafbcc0a6f2fe291e6a2ec4a87e8bf8e39fcdcdc7cdce8c4ca0bc08",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/settings.nbtpkg",
+      "what": "settings of each type, with and without a default or an unset text, in the default file, with keys this version does not know and two options of a type it does not know"
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.2.0",
+      "name": "Hello NBT",
+      "sha256": "c419b60759fa4977aa12cc4ca2df8aca437fb1c6b78b60b91f49b5c267b4b56e",
+      "size": 2706,
+      "manifestSha256": "8cb583aa0ac80f4727ed8af026459990d0f079478ebea175096a6a2875e7db02",
+      "flags": [
+        "runs-scripts"
+      ],
+      "signature": "e3a5214fd648af91edd1dec636826b432ecfc5863fc1325c060fa563f4bf0728b2e0a6a55367e27c58f6f5095695b45e198ff63fdd2a94965e0d13e183af3f0b",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/settings-most.nbtpkg",
+      "what": "64 options, one with 1,024 bytes of text, kept in a file of the package's own choice"
     },
     {
       "id": "org.nbtapp.hello",
@@ -885,6 +928,326 @@
       "file": "bad/serial-service-unknown-key.nbtpkg",
       "code": "unsupported-manifest",
       "what": "a key in a serial service that this version does not know"
+    },
+    {
+      "file": "bad/settings-advanced-not-bool.nbtpkg",
+      "code": "bad-manifest",
+      "what": "advanced as a string"
+    },
+    {
+      "file": "bad/settings-applies-unknown.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an unknown applies"
+    },
+    {
+      "file": "bad/settings-bool-default-string.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a bool whose default is a string"
+    },
+    {
+      "file": "bad/settings-bytes-description.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an option of 1,025 bytes of text: a description of 500 characters in 1,000 bytes, its key and label"
+    },
+    {
+      "file": "bad/settings-bytes-select.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select of 1,025 bytes of text: 16 values of 61 characters, their labels, its key and label"
+    },
+    {
+      "file": "bad/settings-description-control.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a description with a line end"
+    },
+    {
+      "file": "bad/settings-description-too-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a description of 501 characters"
+    },
+    {
+      "file": "bad/settings-file-absolute.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a settings file outside ${data}"
+    },
+    {
+      "file": "bad/settings-file-app.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a settings file in ${app}"
+    },
+    {
+      "file": "bad/settings-file-data.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the data folder itself as the settings file"
+    },
+    {
+      "file": "bad/settings-file-dotdot.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a settings file with `..`"
+    },
+    {
+      "file": "bad/settings-file-folder.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a settings file that ends in a slash"
+    },
+    {
+      "file": "bad/settings-file-not-string.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a settings file that is a number"
+    },
+    {
+      "file": "bad/settings-file-too-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a settings file of 256 characters"
+    },
+    {
+      "file": "bad/settings-int-default-above.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a default above max"
+    },
+    {
+      "file": "bad/settings-int-default-below.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a default below min"
+    },
+    {
+      "file": "bad/settings-int-default-string.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an int's default as a string"
+    },
+    {
+      "file": "bad/settings-int-min-above-max.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an int whose min is above its max"
+    },
+    {
+      "file": "bad/settings-int-min-string.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an int whose min is a string"
+    },
+    {
+      "file": "bad/settings-int-no-max.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an int with no max"
+    },
+    {
+      "file": "bad/settings-int-no-min.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an int with no min"
+    },
+    {
+      "file": "bad/settings-int-out-of-range.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an int whose max is 2^31"
+    },
+    {
+      "file": "bad/settings-int-unit-empty.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an empty unit"
+    },
+    {
+      "file": "bad/settings-int-unit-too-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a unit of 17 characters"
+    },
+    {
+      "file": "bad/settings-key-digit-first.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a key that starts with a digit"
+    },
+    {
+      "file": "bad/settings-key-lowercase.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a key with a small letter"
+    },
+    {
+      "file": "bad/settings-key-too-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a key of 65 characters"
+    },
+    {
+      "file": "bad/settings-key-twice.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the same key twice"
+    },
+    {
+      "file": "bad/settings-key-twice-skipped.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the same key twice, once on an option of a type no reader knows"
+    },
+    {
+      "file": "bad/settings-label-control.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a label with a tab"
+    },
+    {
+      "file": "bad/settings-label-empty.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an empty label"
+    },
+    {
+      "file": "bad/settings-label-too-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a label of 65 characters"
+    },
+    {
+      "file": "bad/settings-no-key.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an option with no key"
+    },
+    {
+      "file": "bad/settings-no-label.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an option with no label"
+    },
+    {
+      "file": "bad/settings-no-options.nbtpkg",
+      "code": "bad-manifest",
+      "what": "settings with no options"
+    },
+    {
+      "file": "bad/settings-no-type.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an option with no type"
+    },
+    {
+      "file": "bad/settings-not-object.nbtpkg",
+      "code": "bad-manifest",
+      "what": "settings is a list, not an object"
+    },
+    {
+      "file": "bad/settings-option-not-object.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an option that is a string"
+    },
+    {
+      "file": "bad/settings-options-empty.nbtpkg",
+      "code": "bad-manifest",
+      "what": "settings with no option in its list"
+    },
+    {
+      "file": "bad/settings-options-not-list.nbtpkg",
+      "code": "bad-manifest",
+      "what": "options is one option, not a list"
+    },
+    {
+      "file": "bad/settings-options-too-many.nbtpkg",
+      "code": "bad-manifest",
+      "what": "65 options"
+    },
+    {
+      "file": "bad/settings-select-default-other.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select's default that is not one of its values"
+    },
+    {
+      "file": "bad/settings-select-no-values.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select with no values"
+    },
+    {
+      "file": "bad/settings-select-one-value.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select of one value"
+    },
+    {
+      "file": "bad/settings-select-too-many-values.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select of 17 values"
+    },
+    {
+      "file": "bad/settings-select-value-form.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select value with a space"
+    },
+    {
+      "file": "bad/settings-select-value-no-label.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select value with no label"
+    },
+    {
+      "file": "bad/settings-select-value-too-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select value of 65 characters"
+    },
+    {
+      "file": "bad/settings-select-value-twice.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select with one value twice"
+    },
+    {
+      "file": "bad/settings-select-values-not-list.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a select's values as one object"
+    },
+    {
+      "file": "bad/settings-text-characters-unknown.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an unknown set of characters"
+    },
+    {
+      "file": "bad/settings-text-default-bytes.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a text's default of 3 characters in 6 bytes, over a maxLength of 5"
+    },
+    {
+      "file": "bad/settings-text-default-control.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a control character in a text's default"
+    },
+    {
+      "file": "bad/settings-text-default-empty.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a text's default that is empty"
+    },
+    {
+      "file": "bad/settings-text-default-number.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a text's default as a number"
+    },
+    {
+      "file": "bad/settings-text-default-space-end.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a space at the end of a text's default"
+    },
+    {
+      "file": "bad/settings-text-default-unsafe.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a space in a safe text's default"
+    },
+    {
+      "file": "bad/settings-text-max-length-256.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a maxLength of 256"
+    },
+    {
+      "file": "bad/settings-text-max-length-zero.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a maxLength of 0"
+    },
+    {
+      "file": "bad/settings-text-no-max-length.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a text with no maxLength"
+    },
+    {
+      "file": "bad/settings-type-not-string.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a type that is a number"
+    },
+    {
+      "file": "bad/settings-unknown-type-bad-label.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an option of a type no reader knows with an empty label"
+    },
+    {
+      "file": "bad/settings-unset-empty.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an empty unset text"
+    },
+    {
+      "file": "bad/settings-unset-with-default.nbtpkg",
+      "code": "bad-manifest",
+      "what": "both a default and an unset text"
     },
     {
       "file": "bad/signature-flipped.nbtpkg",

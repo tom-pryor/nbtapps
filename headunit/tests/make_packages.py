@@ -345,6 +345,142 @@ def build_all(out_dir):
     bad["dest-tmp"] = (with_changed_manifest(field(["install", "files", 0, "dest"], "${tmp}/bin/hello")), "bad-manifest",
                        "a destination in ${tmp}, which is for logs only")
 
+    # ---- settings: what a phone shows and changes ----
+    choices = [{"value": "round", "label": "Round"}, {"value": "square", "label": "Square"}]
+    lamp = {"key": "LAMP", "label": "Lamp", "type": "bool"}
+    every_setting = {
+        "comment": "an unknown key in settings is ignored",
+        "options": [
+            dict(lamp, description="", default=False, applies="now", advanced=False, min="not looked at",
+                 note="an unknown key in an option is ignored"),
+            {"key": "CHIME", "label": "Chime", "type": "bool", "unset": "As the chime has it", "advanced": True},
+            {"key": "SPEED", "label": "Speed", "description": "How fast.", "type": "int", "min": -2147483648,
+             "max": 2147483647, "unit": "°/s", "default": -5, "applies": "app-start", "maxLength": "not looked at"},
+            {"key": "STEPS", "label": "Steps", "type": "int", "min": 3, "max": 3, "default": 3},
+            {"key": "LEVEL", "label": "Level", "type": "int", "min": 0, "max": 9, "unset": "Off"},
+            {"key": "HOST", "label": "Host", "type": "text", "maxLength": 255, "default": "lamp-1.example:80/a@b+c,d_e"},
+            {"key": "GREETING", "label": "Greeting", "type": "text", "maxLength": 6, "characters": "any",
+             "default": "é é!", "applies": "reboot"},
+            {"key": "NAME", "label": "Name", "type": "text", "maxLength": 1, "characters": "safe"},
+            {"key": "FACE", "label": "Face", "type": "select", "values": choices, "default": "square",
+             "applies": "hmi-restart"},
+            {"key": "FACE_2", "label": "Second face", "type": "select",
+             "values": [{"value": "v%d" % i, "label": "Value %d" % i, "note": "ignored"} for i in range(16)],
+             "unset": "Automatic"},
+            {"key": "COLOUR", "label": "Colour", "type": "colour", "default": "#ffffff", "min": "not looked at"},
+            {"key": "Z", "label": "x" * 64, "type": "TEXT", "description": 7},
+        ]}
+    good["settings"] = (with_changed_manifest(field(["settings"], every_setting)),
+                        "settings of each type, with and without a default or an unset text, in the default file, "
+                        "with keys this version does not know and two options of a type it does not know")
+    # 64 options, the last at exactly 1,024 bytes of text, two bytes to each character of its description.
+    most = [dict(lamp, key="LAMP_%d" % i) for i in range(63)]
+    most.append({"key": "K" * 64, "label": "L" * 64, "type": "bool", "description": "é" * 448})
+    good["settings-most"] = (with_changed_manifest(field(["settings"], {"file": "${data}/conf/dial settings.txt",
+                                                                        "options": most})),
+                             "64 options, one with 1,024 bytes of text, kept in a file of the package's own choice")
+
+    def one(**changes):
+        """A settings block with the single option `lamp`, with these members changed (None removes one)."""
+        option = dict(lamp)
+        for key, value in changes.items():
+            if value is None:
+                option.pop(key)
+            else:
+                option[key] = value
+        return {"options": [option]}
+    number = dict(lamp, type="int", min=0, max=10)
+    text = dict(lamp, type="text", maxLength=8)
+    select = dict(lamp, type="select", values=choices)
+    for label, settings, why in (
+            ("settings-not-object", [lamp], "settings is a list, not an object"),
+            ("settings-no-options", {"file": "${data}/settings"}, "settings with no options"),
+            ("settings-options-empty", {"options": []}, "settings with no option in its list"),
+            ("settings-options-not-list", {"options": lamp}, "options is one option, not a list"),
+            ("settings-options-too-many", {"options": [dict(lamp, key="L%d" % i) for i in range(65)]}, "65 options"),
+            ("settings-option-not-object", {"options": ["LAMP"]}, "an option that is a string"),
+            ("settings-file-not-string", dict(one(), file=7), "a settings file that is a number"),
+            ("settings-file-app", dict(one(), file="${app}/settings"), "a settings file in ${app}"),
+            ("settings-file-absolute", dict(one(), file="/tmp/settings"), "a settings file outside ${data}"),
+            ("settings-file-dotdot", dict(one(), file="${data}/../org.other.radio/settings"),
+             "a settings file with `..`"),
+            ("settings-file-folder", dict(one(), file="${data}/conf/"), "a settings file that ends in a slash"),
+            ("settings-file-data", dict(one(), file="${data}/"), "the data folder itself as the settings file"),
+            ("settings-file-too-long", dict(one(), file="${data}/" + "f" * 248), "a settings file of 256 characters"),
+            ("settings-no-key", one(key=None), "an option with no key"),
+            ("settings-no-label", one(label=None), "an option with no label"),
+            ("settings-no-type", one(type=None), "an option with no type"),
+            ("settings-key-lowercase", one(key="Lamp"), "a key with a small letter"),
+            ("settings-key-digit-first", one(key="1LAMP"), "a key that starts with a digit"),
+            ("settings-key-too-long", one(key="K" * 65), "a key of 65 characters"),
+            ("settings-key-twice", {"options": [lamp, dict(lamp, label="Lamp again")]}, "the same key twice"),
+            ("settings-key-twice-skipped", {"options": [lamp, dict(lamp, type="colour")]},
+             "the same key twice, once on an option of a type no reader knows"),
+            ("settings-unknown-type-bad-label", {"options": [dict(lamp, type="colour", label="")]},
+             "an option of a type no reader knows with an empty label"),
+            ("settings-label-empty", one(label=""), "an empty label"),
+            ("settings-label-too-long", one(label="x" * 65), "a label of 65 characters"),
+            ("settings-label-control", one(label="La\tmp"), "a label with a tab"),
+            ("settings-type-not-string", one(type=1), "a type that is a number"),
+            ("settings-description-too-long", one(description="x" * 501), "a description of 501 characters"),
+            ("settings-description-control", one(description="On\nor off"), "a description with a line end"),
+            ("settings-bool-default-string", one(default="true"), "a bool whose default is a string"),
+            ("settings-unset-with-default", one(default=True, unset="Off"), "both a default and an unset text"),
+            ("settings-unset-empty", one(unset=""), "an empty unset text"),
+            ("settings-applies-unknown", one(applies="later"), "an unknown applies"),
+            ("settings-advanced-not-bool", one(advanced="yes"), "advanced as a string"),
+            ("settings-int-no-min", {"options": [{k: v for k, v in number.items() if k != "min"}]},
+             "an int with no min"),
+            ("settings-int-no-max", {"options": [{k: v for k, v in number.items() if k != "max"}]},
+             "an int with no max"),
+            ("settings-int-min-above-max", {"options": [dict(number, min=11)]}, "an int whose min is above its max"),
+            ("settings-int-min-string", {"options": [dict(number, min="0")]}, "an int whose min is a string"),
+            ("settings-int-out-of-range", {"options": [dict(number, max=2147483648)]}, "an int whose max is 2^31"),
+            ("settings-int-default-below", {"options": [dict(number, default=-1)]}, "a default below min"),
+            ("settings-int-default-above", {"options": [dict(number, default=11)]}, "a default above max"),
+            ("settings-int-default-string", {"options": [dict(number, default="5")]}, "an int's default as a string"),
+            ("settings-int-unit-empty", {"options": [dict(number, unit="")]}, "an empty unit"),
+            ("settings-int-unit-too-long", {"options": [dict(number, unit="u" * 17)]}, "a unit of 17 characters"),
+            ("settings-text-no-max-length", {"options": [dict(lamp, type="text")]}, "a text with no maxLength"),
+            ("settings-text-max-length-zero", {"options": [dict(text, maxLength=0)]}, "a maxLength of 0"),
+            ("settings-text-max-length-256", {"options": [dict(text, maxLength=256)]}, "a maxLength of 256"),
+            ("settings-text-characters-unknown", {"options": [dict(text, characters="ascii")]},
+             "an unknown set of characters"),
+            ("settings-text-default-empty", {"options": [dict(text, default="")]}, "a text's default that is empty"),
+            ("settings-text-default-bytes", {"options": [dict(text, characters="any", maxLength=5, default="ééé")]},
+             "a text's default of 3 characters in 6 bytes, over a maxLength of 5"),
+            ("settings-text-default-unsafe", {"options": [dict(text, default="a b")]},
+             "a space in a safe text's default"),
+            ("settings-text-default-space-end", {"options": [dict(text, characters="any", default="a ")]},
+             "a space at the end of a text's default"),
+            ("settings-text-default-control", {"options": [dict(text, characters="any", default="a\x7fb")]},
+             "a control character in a text's default"),
+            ("settings-text-default-number", {"options": [dict(text, default=5)]}, "a text's default as a number"),
+            ("settings-select-no-values", {"options": [dict(lamp, type="select")]}, "a select with no values"),
+            ("settings-select-values-not-list", {"options": [dict(select, values=choices[0])]},
+             "a select's values as one object"),
+            ("settings-select-one-value", {"options": [dict(select, values=choices[:1])]}, "a select of one value"),
+            ("settings-select-too-many-values",
+             {"options": [dict(select, values=[{"value": "v%d" % i, "label": "V"} for i in range(17)])]},
+             "a select of 17 values"),
+            ("settings-select-value-twice", {"options": [dict(select, values=[choices[0], dict(choices[1], value="round")])]},
+             "a select with one value twice"),
+            ("settings-select-value-form", {"options": [dict(select, values=[choices[0], dict(choices[1], value="a b")])]},
+             "a select value with a space"),
+            ("settings-select-value-too-long", {"options": [dict(select, values=[choices[0], dict(choices[1], value="v" * 65)])]},
+             "a select value of 65 characters"),
+            ("settings-select-value-no-label", {"options": [dict(select, values=[choices[0], {"value": "x"}])]},
+             "a select value with no label"),
+            ("settings-select-default-other", {"options": [dict(select, default="hex")]},
+             "a select's default that is not one of its values"),
+            ("settings-bytes-description", one(label="L" * 21, description="é" * 500),
+             "an option of 1,025 bytes of text: a description of 500 characters in 1,000 bytes, its key and label"),
+            ("settings-bytes-select",
+             {"options": [dict(select, values=[{"value": "%02d" % i + "v" * 59, "label": "V" * (26 if i == 0 else 1)}
+                                               for i in range(16)])]},
+             "a select of 1,025 bytes of text: 16 values of 61 characters, their labels, its key and label")):
+        bad[label] = (with_changed_manifest(field(["settings"], settings)), "bad-manifest", why)
+
     # ---- detached signatures: a package its author signed, with the catalogue's signature over its manifest ----
     countersigned = nbtpkg.sign(seed, manifest_bytes)
     flipped = bytearray(countersigned)

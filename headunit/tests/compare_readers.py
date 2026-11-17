@@ -38,10 +38,20 @@ STRINGS = ["", "a", "a.b", "org.nbtapp.hello", "Org.x", "1.0.0", "1.0", "01.0.0"
            "0" * 64, "f" * 64, "F" * 64, "0" * 63, "hello", "x\u007fy", ".", "..", "...", "a/.", "a/.b"]
 VALUES = STRINGS + [0, 1, 2, -1, 30, 600, 601, 4294967294, 4294967295, 2 ** 53 - 1, True, False, None, [], {}, [1], ["a"],
                     [{}], {"a": 1}, [{"id": "a.b"}], {"sha256": ["0" * 64]}, {"sha256": []}, {"script": "scripts/pre-install.sh", "timeout": 5},
-                    [{"path": "${app}/l", "target": "t"}], {"agent": ">=1.0.0"}]
+                    [{"path": "${app}/l", "target": "t"}], {"agent": ">=1.0.0"},
+                    # settings
+                    "bool", "int", "text", "select", "colour", "LAMP", "LAMP_2", "lamp", "safe", "any", "now",
+                    "app-start", "reboot", "${data}/settings", "${data}/a/", "${data}/../x", "é é", " a", "a b",
+                    "a\u007f", "é" * 300, -1, -2147483648, 2147483647, 2147483648, 255, 256, 1024,
+                    {"value": "a", "label": "A"}, [{"value": "a", "label": "A"}, {"value": "b", "label": "B"}],
+                    [{"value": "a", "label": "A"}, {"value": "a", "label": "B"}],
+                    [{"key": "LAMP", "label": "Lamp", "type": "bool"}],
+                    {"options": [{"key": "LAMP", "label": "Lamp", "type": "int", "min": 0, "max": 9, "default": 3}]}]
 KEYS = ["manifestVersion", "id", "name", "version", "requires", "depends", "conflicts", "contents", "install", "files",
         "links", "hooks", "reboot", "src", "dest", "mode", "config", "replaces", "sha256", "path", "target", "script",
-        "timeout", "preInstall", "postInstall", "preRemove", "postRemove", "agent", "size", "patch", "extra", "firmware"]
+        "timeout", "preInstall", "postInstall", "preRemove", "postRemove", "agent", "size", "patch", "extra", "firmware",
+        "settings", "file", "options", "key", "label", "type", "description", "default", "unset", "applies",
+        "advanced", "min", "max", "unit", "maxLength", "characters", "values", "value"]
 
 
 def pool_value(rng):
