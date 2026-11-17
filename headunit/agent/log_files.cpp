@@ -119,7 +119,7 @@ void listPackageLogs(const Manifest& m, const Store& store, const Platform& plat
         const std::string& entry = m.logs[e];
         if (!validLogPath(entry)) continue;   // a record from before the field was checked
         // The entry's text on this machine, and the folder it starts from: the one that holds every package's
-        // folder of that kind, or /tmp or /var.
+        // folder of that kind, or the log root it starts in.
         std::string full, anchor;
         bool absolute = false;
         if (startsWith(entry, "${app}/")) {
@@ -135,8 +135,10 @@ void listPackageLogs(const Manifest& m, const Store& store, const Platform& plat
             full = base + entry.substr(6);
             anchor = fs::parentOf(base);
         } else {
+            const LogRoot* root = logRootOf(entry);
+            if (root == 0) continue;
             full = platform.systemPath(entry);
-            anchor = platform.systemPath(entry.substr(0, 4));   // "/tmp" or "/var"
+            anchor = platform.systemPath(root->path);
             absolute = true;
         }
         size_t slash = full.rfind('/');

@@ -7,14 +7,15 @@
 // Files section of its Message reference): the logs a package's manifest names in `logs`, and the agent's own.
 //
 // A `logs` entry names one file, or the files of one folder that a wildcard in its last part matches: * any
-// characters, ? one. It is under ${app}, ${data} or ${tmp}, the package's own folders, or an absolute path under
-// /tmp or /var outside the agent's folders (manifest.hpp checks the text). Here the text meets the disk:
+// characters, ? one. It is under ${app}, ${data} or ${tmp}, the package's own folders, or an absolute path in a log
+// root (logRootOf: /tmp or /var) outside the agent's folders (manifest.hpp checks the text). Here the text meets the
+// disk:
 //
 //   - Only regular files are listed. A symbolic link is left out, whatever it leads to, and so is a file whose
 //     name is not UTF-8: the protocol's text could not name it.
 //   - The folder an entry names has to be where its text says, with nothing on the way that is a link: its real
 //     path is the real path of the folder the entry starts from (the folder that holds every ${app}, ${data} or
-//     ${tmp}, or /tmp or /var) and then the entry's own text. So a link in a package's folder, or a package's
+//     ${tmp}, or the log root) and then the entry's own text. So a link in a package's folder, or a package's
 //     folder that is a link itself, leads nowhere.
 //   - An absolute entry whose real folder is in the agent's state, staging, run folder or own folder is left out,
 //     whatever the manifest's text said: the pairing keys are in the state.

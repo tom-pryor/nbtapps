@@ -174,10 +174,19 @@ bool validSerialServiceName(const std::string& name);
 bool validProgramName(const std::string& program);
 
 // The form of a logs entry's path ($defs/log/path): ${app}/, ${data}/ or ${tmp}/ and a relative path, or an
-// absolute path under /tmp or /var that is not in /tmp/nbtapp or /var/opt/nbtapp, the agent's own folders. Its
-// segments are not empty, "." or "..", and only the last may hold the wildcards * and ?. No slash at the end, at
-// most 255 characters.
+// absolute path in one of the log roots (kLogRoots in manifest.cpp: /tmp and /var) that is not in /tmp/nbtapp or
+// /var/opt/nbtapp, the agent's own folders. Its segments are not empty, "." or "..", and only the last may hold the
+// wildcards * and ?. No slash at the end, at most 255 characters.
 bool validLogPath(const std::string& path);
+
+// A folder an absolute logs entry may start in. The one list of them: the form above and the listing of the files
+// (log_files.cpp) both take it from here, so a new root is one line of kLogRoots.
+struct LogRoot {
+    const char* path;   // the folder, with no slash at the end
+};
+
+// The root an absolute path starts in: the root's folder, then a slash. 0 when it starts in none.
+const LogRoot* logRootOf(const std::string& path);
 
 // The form of settings.file ($defs/settingsFile): ${data}/ and a relative path, no slash at the end, at most 255
 // characters.

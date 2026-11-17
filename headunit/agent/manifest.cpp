@@ -6,6 +6,7 @@
 #include "manifest.hpp"
 
 #include <stdio.h>
+#include <string.h>
 
 #include <map>
 #include <set>
@@ -209,16 +210,26 @@ bool isProgramName(const std::string& text) {
     return true;
 }
 
+// The agent's own folders, which no logs entry may name: its state, with the pairing keys, and its RAM folder.
+const char* const kAgentFolders[] = {"/tmp/nbtapp", "/var/opt/nbtapp", 0};
+
+// `text` is `folder` or is inside it.
+bool inFolder(const std::string& text, const char* folder) {
+    size_t n = strlen(folder);
+    return text.compare(0, n, folder) == 0 && (text.size() == n || text[n] == '/');
+}
+
 // $defs/log/path: see validLogPath in manifest.hpp.
 bool isLogPath(const std::string& text) {
     if (utf8Length(text) > 255) return false;
     size_t rest = 0;
     if (startsWith(text, "${app}", &rest) || startsWith(text, "${data}", &rest) || startsWith(text, "${tmp}", &rest)) {
         // the package's own folders
-    } else if (startsWith(text, "/tmp", &rest)) {
-        if (text.compare(0, 11, "/tmp/nbtapp") == 0 && (text.size() == 11 || text[11] == '/')) return false;
-    } else if (startsWith(text, "/var", &rest)) {
-        if (text.compare(0, 15, "/var/opt/nbtapp") == 0 && (text.size() == 15 || text[15] == '/')) return false;
+    } else if (const LogRoot* root = logRootOf(text)) {
+        rest = strlen(root->path);
+        for (size_t i = 0; kAgentFolders[i] != 0; ++i) {
+            if (inFolder(text, kAgentFolders[i])) return false;
+        }
     } else {
         return false;
     }
@@ -864,6 +875,18 @@ bool validVersion(const std::string& version) { return isVersion(version); }
 bool validSerialServiceName(const std::string& name) { return isSerialServiceName(name); }
 bool validProgramName(const std::string& program) { return isProgramName(program); }
 bool validLogPath(const std::string& path) { return isLogPath(path); }
+
+namespace {
+const LogRoot kLogRoots[] = {{"/tmp"}, {"/var"}};
+}  // namespace
+
+const LogRoot* logRootOf(const std::string& path) {
+    for (size_t i = 0; i < sizeof kLogRoots / sizeof kLogRoots[0]; ++i) {
+        size_t n = strlen(kLogRoots[i].path);
+        if (path.compare(0, n, kLogRoots[i].path) == 0 && path.size() > n && path[n] == '/') return &kLogRoots[i];
+    }
+    return 0;
+}
 bool validSettingsFile(const std::string& path) { return isSettingsFile(path); }
 
 bool validSettingText(const std::string& value, size_t maxLength, bool anyCharacters) {
