@@ -82,9 +82,10 @@ class PackageCorpusTest {
         for (case in cases) {
             val path = case.input.decodeToString()
             when (case.verdict) {
-                "ok" -> assertTrue("line ${case.line}: $path", ManifestParser.isLogPath(path))
+                // A skipped path is the agent's to leave out: the app takes it, as the agent takes the manifest.
+                "ok", "skip" -> assertTrue("line ${case.line}: $path", ManifestParser.isLogPath(path))
                 "bad" -> assertFalse("line ${case.line}: $path", ManifestParser.isLogPath(path))
-                else -> fail("line ${case.line} is neither ok nor bad")
+                else -> fail("line ${case.line} is not ok, skip or bad")
             }
         }
         // 255 characters, not bytes, as the agent counts them.
@@ -104,6 +105,19 @@ class PackageCorpusTest {
             } catch (e: PackageFormatException) {
                 assertEquals(what, entry.text("code"), e.code)
             }
+        }
+    }
+
+    @Test
+    fun `a log in a folder the agent does not know is taken, as the agent takes it`() {
+        val skipped = vectors.getValue("skipped").jsonArray.map { it.jsonObject }
+        assertTrue("the corpus looks cut short", skipped.size >= 3)
+        for (entry in skipped) {
+            val what = "${entry.text("file")} (${entry.text("what")})"
+            val file = AgentVectors.file("packages/${entry.text("file")}")
+            val logs = PackageArchive.verify(file, listOf(AgentVectors.packageKey)).manifest.logs
+            assertEquals(what, 2, logs.size)
+            assertEquals(what, "\${data}/hello.log", logs[0])
         }
     }
 

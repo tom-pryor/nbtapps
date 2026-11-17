@@ -8,8 +8,8 @@
 //
 // A `logs` entry names one file, or the files of one folder that a wildcard in its last part matches: * any
 // characters, ? one. It is under ${app}, ${data} or ${tmp}, the package's own folders, or an absolute path in a log
-// root (logRootOf: /tmp or /var) outside the agent's folders (manifest.hpp checks the text). Here the text meets the
-// disk:
+// root (logRootOf: /tmp or /var) outside the agent's folders (manifest.hpp checks the text; an entry in a folder
+// this agent does not know is in the record and is not listed). Here the text meets the disk:
 //
 //   - Only regular files are listed. A symbolic link is left out, whatever it leads to, and so is a file whose
 //     name is not UTF-8: the protocol's text could not name it.
@@ -56,6 +56,10 @@ bool matchName(const std::string& pattern, const std::string& name);
 
 // Whether a manifest's logs name ${tmp}: the agent then makes that folder.
 bool namesTmp(const Manifest& m);
+
+// Whether a manifest's logs name a file this agent may list: an entry in a folder it knows (validLogPath). One in a
+// folder it does not know is skipped, so a package with only such entries has no logs here.
+bool namesLogs(const Manifest& m);
 
 // The files a package's logs name, as they are now: newest first, at most kMaxLogFiles.
 void listPackageLogs(const Manifest& m, const Store& store, const Platform& platform, std::vector<LogFile>* out);

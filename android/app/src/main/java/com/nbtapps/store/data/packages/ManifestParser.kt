@@ -611,15 +611,27 @@ object ManifestParser {
         return rest.startsWith("/") && segments(rest.substring(1), false)
     }
 
+    /** A variable a `logs` entry may start with: `${`, a name of `[a-z0-9_]`, `}`. */
+    private val LOG_VARIABLE = Regex("""\$\{[a-z0-9_]+}""")
+
     /**
-     * A `logs` entry's path: `${app}/`, `${data}/` or `${tmp}/` and a relative path, or an absolute path under `/tmp`
-     * or `/var` outside the agent's own folders. Only the last segment may hold the wildcards `*` and `?`.
+     * A `logs` entry's path of the right shape (`$defs/logShape`): a variable `${name}` or nothing, then segments that
+     * each start with a slash, the wildcards `*` and `?` only in the last, and an absolute path outside the agent's
+     * own folders. Which folders exist is the agent's to know: one it does not know is skipped there, so the app takes
+     * every folder and a new one needs no change here (`spec/log-paths.vectors` in the agent repo has the cases).
      */
     internal fun isLogPath(text: String): Boolean {
         if (Utf8.length(text) > 255) return false
-        val prefix = listOf("\${app}", "\${data}", "\${tmp}", "/tmp", "/var").firstOrNull { text.startsWith(it) } ?: return false
-        if (AGENT_FOLDERS.any { text == it || text.startsWith("$it/") }) return false
-        val rest = text.substring(prefix.length)
+        val rest = when {
+            text.startsWith("/") -> {
+                if (AGENT_FOLDERS.any { text == it || text.startsWith("$it/") }) return false
+                text
+            }
+            else -> {
+                val variable = LOG_VARIABLE.matchAt(text, 0) ?: return false
+                text.substring(variable.range.last + 1)
+            }
+        }
         if (!rest.startsWith("/") || !segments(rest.substring(1), trailingSlash = false)) return false
         return rest.substringBeforeLast('/').none { it == '*' || it == '?' }
     }

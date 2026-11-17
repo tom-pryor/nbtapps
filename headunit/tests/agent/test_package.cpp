@@ -142,6 +142,21 @@ int main(int argc, char** argv) {
                  code == v.find("code").string());
     }
 
+    // 2a. A log in a folder this agent does not know: the package is taken, and the entry kept, never listed.
+    json::Value skipped = root.find("skipped");
+    CHECK(skipped.size() >= 3);
+    for (size_t i = 0; i < skipped.size(); ++i) {
+        json::Value v = skipped.at(i);
+        std::string file = v.find("file").string(), data = readFile(dir + "/" + file);
+        MemorySource source(data.data(), data.size());
+        Package package;
+        Error error;
+        bool ok = package.open(&source, packageOnly, &error);
+        CHECK_IN(file + " (" + v.find("what").string() + "): " + error.code, ok);
+        const Manifest& m = package.manifest();
+        CHECK_IN(file, m.logs.size() == 2 && validLogPath(m.logs[0]) && logPathForm(m.logs[1]) == kLogPathSkip);
+    }
+
     // 2b. Detached signatures: the one given is checked, and manifest.sig is not read.
     json::Value detached = root.find("detached");
     CHECK(detached.size() >= 7);

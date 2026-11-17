@@ -173,13 +173,26 @@ bool validSha256Hex(const std::string& text);
 bool validSerialServiceName(const std::string& name);
 bool validProgramName(const std::string& program);
 
-// The form of a logs entry's path ($defs/log/path): ${app}/, ${data}/ or ${tmp}/ and a relative path, or an
-// absolute path in one of the log roots (kLogRoots in manifest.cpp: /tmp and /var) that is not in /tmp/nbtapp or
-// /var/opt/nbtapp, the agent's own folders. Its segments are not empty, "." or "..", and only the last may hold the
-// wildcards * and ?. No slash at the end, at most 255 characters.
+// What a logs entry's path is to this agent (spec/log-paths.vectors has the cases).
+//
+// Its shape ($defs/logShape), which every reader holds alike and which never changes: at most 255 characters; a
+// variable ${name} (name of [a-z0-9_]) or nothing, then segments that each start with a slash, are not empty, "."
+// or "..", and hold no backslash or control character; only the last may hold the wildcards * and ?. An absolute
+// path is not in /tmp/nbtapp or /var/opt/nbtapp, the agent's own folders. A path of another shape is bad, and the
+// manifest is refused.
+//
+// Its folder, which grows with the agent: one of the package's own (${app}, ${data}, ${tmp}) or a log root
+// (kLogRoots in manifest.cpp: /tmp and /var). A path of the right shape in another folder is skipped: the manifest is
+// taken, the entry is kept in the record and is never listed. So a package can name a log in a folder a newer agent
+// knows, and still install on this one, while nbtpkg.py, which knows every folder of its schema, refuses it to the
+// package's author.
+enum LogPathForm { kLogPathBad, kLogPathSkip, kLogPathOk };
+LogPathForm logPathForm(const std::string& path);
+
+// A path this agent lists the files of ($defs/log/path): logPathForm is kLogPathOk.
 bool validLogPath(const std::string& path);
 
-// A folder an absolute logs entry may start in. The one list of them: the form above and the listing of the files
+// A folder an absolute logs entry may start in. The one list of them: logPathForm and the listing of the files
 // (log_files.cpp) both take it from here, so a new root is one line of kLogRoots.
 struct LogRoot {
     const char* path;   // the folder, with no slash at the end

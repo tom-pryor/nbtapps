@@ -221,6 +221,20 @@ def manifest_schema():
     return _schema
 
 
+def log_path_form(path):
+    """What a logs entry's path is to a reader (spec/log-paths.vectors): "ok" in a folder the schema knows, "skip" of
+    the right shape ($defs/logShape) in another folder, which this tool refuses and the agent and the phone app skip,
+    or "bad"."""
+    schema = manifest_schema()
+    for form, definition in (("ok", schema["$defs"]["log"]), ("skip", schema["$defs"]["logShape"])):
+        try:
+            validate({"path": path} if form == "ok" else path, definition, schema, "path")
+            return form
+        except SchemaError:
+            pass
+    return "bad"
+
+
 # ---- manifest --------------------------------------------------------------------------------------------------
 
 def check_manifest(manifest):

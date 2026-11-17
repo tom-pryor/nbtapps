@@ -1515,8 +1515,9 @@ void Agent::packagesList(Session* s, int64_t id, const json::Value& params) {
         std::vector<std::string> flags = riskFlags(p.manifest);
         for (size_t f = 0; f < flags.size(); ++f) one.string(flags[f]);
         one.endArray();
-        // Whether files.list has anything to say about it: the logs its manifest names, or the agent's own.
-        if (!p.manifest.logs.empty() || p.manifest.id == kAgentPackageId) one.key("logs").boolean(true);
+        // Whether files.list has anything to say about it: logs its manifest names in folders this agent knows, or
+        // the agent's own.
+        if (namesLogs(p.manifest) || p.manifest.id == kAgentPackageId) one.key("logs").boolean(true);
         one.endObject();
         if (listed == kMaxListed || (listed > 0 && w.text().size() + one.text().size() + 1 > room)) {
             more = true;

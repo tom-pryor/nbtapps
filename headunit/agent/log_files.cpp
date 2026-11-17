@@ -105,6 +105,13 @@ bool namesTmp(const Manifest& m) {
     return false;
 }
 
+bool namesLogs(const Manifest& m) {
+    for (size_t i = 0; i < m.logs.size(); ++i) {
+        if (validLogPath(m.logs[i])) return true;
+    }
+    return false;
+}
+
 void listPackageLogs(const Manifest& m, const Store& store, const Platform& platform, std::vector<LogFile>* out) {
     out->clear();
     // Where an absolute entry may not lead, whatever its text: the agent's own folders.
@@ -117,7 +124,7 @@ void listPackageLogs(const Manifest& m, const Store& store, const Platform& plat
     std::set<std::string> seen;
     for (size_t e = 0; e < m.logs.size(); ++e) {
         const std::string& entry = m.logs[e];
-        if (!validLogPath(entry)) continue;   // a record from before the field was checked
+        if (!validLogPath(entry)) continue;   // a folder this agent does not know, or a record from before the check
         // The entry's text on this machine, and the folder it starts from: the one that holds every package's
         // folder of that kind, or the log root it starts in.
         std::string full, anchor;

@@ -295,8 +295,14 @@
         }
       }
     },
+    "logShape": {
+      "description": "The shape of a logs entry's path that every reader of a manifest holds alike, whatever folders it knows: a variable ${name} or nothing, then segments that each start with a slash and are not empty, . or .., with no backslash or control character, the wildcards * and ? only in the last; never in the agent's own folders /tmp/nbtapp and /var/opt/nbtapp. A path of this shape that $defs/log/path refuses names a folder this schema does not know: nbtpkg.py refuses it, and the agent and the phone app take the manifest and skip the entry, so that a package that names a log in a folder a newer agent knows still installs on an older one. spec/log-paths.vectors has the cases. nbtpkg.py reads this from its code (log_path_form), as no member refers to it.",
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^(?!/tmp/nbtapp(/|$))(?!/var/opt/nbtapp(/|$))(\\$\\{[a-z0-9_]+\\})?(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f*?]+)*/(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f]+$"
+    },
     "log": {
-      "description": "A log file of the package that a controller may pull from the head unit (files.list, files.fetch): one file, or the files of one folder that a wildcard in the last segment matches (* any characters, ? one). It is under ${app}, ${data} or ${tmp}, the package's own folder on the RAM disk; or an absolute path under /tmp or /var, but never the agent's own folders /tmp/nbtapp and /var/opt/nbtapp. The object is open: keys other than path are ignored.",
+      "description": "A log file of the package that a controller may pull from the head unit (files.list, files.fetch): one file, or the files of one folder that a wildcard in the last segment matches (* any characters, ? one). It is under ${app}, ${data} or ${tmp}, the package's own folder on the RAM disk; or an absolute path under /tmp or /var, but never the agent's own folders /tmp/nbtapp and /var/opt/nbtapp. A path of the right shape ($defs/logShape) in another folder is refused here and skipped by the agent and the phone app. The object is open: keys other than path are ignored.",
       "type": "object",
       "required": [
         "path"

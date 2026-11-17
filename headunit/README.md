@@ -137,8 +137,11 @@ format and the protocol.
 - A controller can pull a package's log files, so that a user can send them to whoever asked. A package names
   them in its manifest's `logs`: files or a folder with a wildcard, in `${app}`, `${data}`, `${tmp}` (the
   package's own folder on the RAM disk, `/tmp/nbtapp/apps/<id>` on a car, which the agent makes for it and a
-  power down empties; hooks get it as `NBT_TMP_DIR`) or under `/tmp` and `/var` outside the agent's folders. The
-  agent's own logs are those of `org.nbtapp.agent`. `files.list` lists them, regular files only and none reached
+  power down empties; hooks get it as `NBT_TMP_DIR`) or under `/tmp` and `/var` outside the agent's folders. A
+  path of the right shape in a folder the agent does not know is skipped, not refused: the package installs and that
+  log is not listed, so a package can name a log in a folder only a newer agent knows. `nbtpkg.py` refuses such a
+  path to the package's author (`spec/log-paths.vectors` has the cases). The agent's own logs are those of
+  `org.nbtapp.agent`. `files.list` lists them, regular files only and none reached
   through a link, and `files.fetch` sends one as a raw deflate stream (or as it is), a frame at a time while the
   link keeps up; an agent from 1.3.0 has these and lists the capability `files` in `hello`. `nbtctl logs ID`
   lists them, and `nbtctl pull ID PATH --out FILE` fetches one (`agent/log_files.hpp`, and the plan document's

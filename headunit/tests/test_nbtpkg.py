@@ -6,8 +6,8 @@
 
   1. the strict JSON profile agrees with every line of spec/json-profile.vectors
   2. the manifest schema uses only keywords the tool implements, and agrees with every line of spec/log-paths.vectors
-  3. every good test package verifies and every bad one is refused with the code vectors.json gives it, and each
-     detached-signature case gets the verdict it gives
+  3. every good test package verifies and every bad or skipped one is refused with the code vectors.json gives it,
+     and each detached-signature case gets the verdict it gives
   4. the same source builds the same bytes, and `build` + `sign` equals a signed `build`
   5. Python's own zip reader accepts a good package, so ordinary tools can inspect one
   6. the command line: keygen never overwrites, sign-file signs, verify reports and fails as documented
@@ -88,18 +88,23 @@ def main():
 
     # 2. Schema.
     schema = nbtpkg.manifest_schema()
-    # The path of a logs entry, as the agent and the phone app read it.
+    # The path of a logs entry, as the agent and the phone app read it: the schema takes only "ok".
     count = 0
-    for number, verdict, data in vector_cases("log-paths.vectors"):
+    for number, verdict, data in vector_cases("log-paths.vectors", ("ok", "skip", "bad")):
+        path = data.decode("utf-8")
+        form = nbtpkg.log_path_form(path)
+        assert form == verdict, "log-paths.vectors line %d: %s, not %s" % (number, form, verdict)
         try:
-            nbtpkg.validate({"path": data.decode("utf-8")}, schema["$defs"]["log"], schema, "log")
+            nbtpkg.validate({"path": path}, schema["$defs"]["log"], schema, "log")
             accepted = True
         except nbtpkg.SchemaError:
             accepted = False
-        assert accepted == (verdict == "ok"), \
-            "log-paths.vectors line %d: %s" % (number, "accepted" if accepted else "refused")
+        assert accepted == (verdict == "ok"), "log-paths.vectors line %d" % number
         count += 1
     assert count > 40
+    # 255 characters at most, a skipped path too.
+    for path, form in (("${data}/" + "x" * 247, "ok"), ("${home}/" + "x" * 247, "skip"), ("/" + "x" * 255, "bad")):
+        assert nbtpkg.log_path_form(path) == form, path[:20]
     print("[ok] log paths: %d cases" % count)
     assert schema["properties"]["manifestVersion"]["const"] == nbtpkg.SUPPORTED_MANIFEST_VERSION
     # `$` must not accept a trailing newline, which Python's own `$` would.
@@ -168,9 +173,15 @@ def main():
                 refused(entry["code"], nbtpkg.verify_package, data_of(entry), [public])
             except AssertionError as e:
                 raise AssertionError("%s (%s): %s" % (entry["file"], entry["what"], e))
+        # A log in a folder the schema does not know: this tool refuses it, which the agent and the app skip.
+        assert len(vectors["skipped"]) >= 3
+        for entry in vectors["skipped"]:
+            message = refused(entry["code"], nbtpkg.verify_package, data_of(entry), [public])
+            assert "logs[1].path" in message, "%s: %s" % (entry["file"], message)
         hello = next(e for e in vectors["good"] if e["file"] == "good/org.nbtapp.hello-1.2.0.nbtpkg")
         assert hello["flags"] == ["runs-scripts"]
-        print("[ok] test packages: %d good, %d bad" % (len(vectors["good"]), len(vectors["bad"])))
+        print("[ok] test packages: %d good, %d bad, %d skipped"
+              % (len(vectors["good"]), len(vectors["bad"]), len(vectors["skipped"])))
 
         # Detached signatures: the one given is checked, manifest.sig is not read.
         assert len(vectors["detached"]) >= 7

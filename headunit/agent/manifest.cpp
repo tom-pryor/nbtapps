@@ -219,27 +219,41 @@ bool inFolder(const std::string& text, const char* folder) {
     return text.compare(0, n, folder) == 0 && (text.size() == n || text[n] == '/');
 }
 
-// $defs/log/path: see validLogPath in manifest.hpp.
-bool isLogPath(const std::string& text) {
-    if (utf8Length(text) > 255) return false;
+// A variable a logs entry may start with: the package's own folders.
+const char* const kLogVariables[] = {"${app}", "${data}", "${tmp}", 0};
+
+// $defs/logShape and $defs/log/path: see LogPathForm in manifest.hpp.
+LogPathForm logPathFormOf(const std::string& text) {
+    if (utf8Length(text) > 255) return kLogPathBad;
     size_t rest = 0;
-    if (startsWith(text, "${app}", &rest) || startsWith(text, "${data}", &rest) || startsWith(text, "${tmp}", &rest)) {
-        // the package's own folders
-    } else if (const LogRoot* root = logRootOf(text)) {
-        rest = strlen(root->path);
-        for (size_t i = 0; kAgentFolders[i] != 0; ++i) {
-            if (inFolder(text, kAgentFolders[i])) return false;
+    bool known = false;
+    if (startsWith(text, "${", &rest)) {
+        // A variable: ${, then 1 or more of [a-z0-9_], then }.
+        size_t close = text.find('}', rest);
+        if (close == std::string::npos || close == rest) return kLogPathBad;
+        for (size_t i = rest; i < close; ++i) {
+            char c = text[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return kLogPathBad;
         }
+        rest = close + 1;
+        for (size_t i = 0; kLogVariables[i] != 0 && !known; ++i) known = text.compare(0, rest, kLogVariables[i]) == 0;
     } else {
-        return false;
+        // An absolute path. The agent's own folders are closed whatever roots there are.
+        for (size_t i = 0; kAgentFolders[i] != 0; ++i) {
+            if (inFolder(text, kAgentFolders[i])) return kLogPathBad;
+        }
+        known = logRootOf(text) != 0;
     }
-    if (rest >= text.size() || text[rest] != '/' || !segments(text, rest + 1, false)) return false;
+    if (rest >= text.size() || text[rest] != '/' || !segments(text, rest + 1, false)) return kLogPathBad;
     size_t last = text.rfind('/');
     for (size_t i = rest; i < last; ++i) {
-        if (text[i] == '*' || text[i] == '?') return false;   // a wildcard outside the last segment
+        if (text[i] == '*' || text[i] == '?') return kLogPathBad;   // a wildcard outside the last segment
     }
-    return true;
+    return known ? kLogPathOk : kLogPathSkip;
 }
+
+// What the parser takes: every path of the right shape, whether this agent knows its folder or not.
+bool isLogShape(const std::string& text) { return logPathFormOf(text) != kLogPathBad; }
 
 // $defs/settingsFile: ${data}/ and a relative path, no slash at the end.
 bool isSettingsFile(const std::string& text) {
@@ -477,7 +491,8 @@ private:
         return true;
     }
 
-    // properties/logs: at most 16 of $defs/log, which is open.
+    // properties/logs: at most 16 of $defs/log, which is open. A path of the right shape in a folder this agent does
+    // not know is kept and never listed (LogPathForm in manifest.hpp).
     bool logs(const Value& v) {
         static const char* const required[] = {"path", 0};
         if (!v.isArray()) return bad("manifest.logs", "must be an array");
@@ -489,7 +504,7 @@ private:
             if (!has(l, required, at)) return false;
             std::string path;
             for (size_t k = 0; k < l.size(); ++k) {
-                if (l.key(k) == "path" && !text(l.at(k), isLogPath, at + ".path", &path)) return false;
+                if (l.key(k) == "path" && !text(l.at(k), isLogShape, at + ".path", &path)) return false;
             }
             m_->logs.push_back(path);
         }
@@ -874,7 +889,8 @@ bool validSha256Hex(const std::string& text) { return isSha256(text); }
 bool validVersion(const std::string& version) { return isVersion(version); }
 bool validSerialServiceName(const std::string& name) { return isSerialServiceName(name); }
 bool validProgramName(const std::string& program) { return isProgramName(program); }
-bool validLogPath(const std::string& path) { return isLogPath(path); }
+LogPathForm logPathForm(const std::string& path) { return logPathFormOf(path); }
+bool validLogPath(const std::string& path) { return logPathFormOf(path) == kLogPathOk; }
 
 namespace {
 const LogRoot kLogRoots[] = {{"/tmp"}, {"/var"}};

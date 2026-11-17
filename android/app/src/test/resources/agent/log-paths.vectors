@@ -2,9 +2,14 @@
 # must agree with every line: tools/nbtpkg.py and the schema (tests/test_nbtpkg.py), the agent's agent/manifest.cpp
 # (tests/agent/test_manifest.cpp) and the phone app's ManifestParser (PackageCorpusTest).
 #
-# A case is `ok` or `bad`, a space, and the path. %HH stands for the byte HH; a literal percent sign is %25. A note
-# may follow two spaces and a #, since no path here holds that sequence. The 255-character limit is tested in each
+# A case is a verdict, a space, and the path. %HH stands for the byte HH; a literal percent sign is %25. A note may
+# follow two spaces and a #, since no path here holds that sequence. The 255-character limit is tested in each
 # reader's own code, where a long path can be built.
+#
+#   ok    the right shape, in a folder the agent knows: every reader takes it, and the agent lists its files
+#   skip  the right shape ($defs/logShape), in a folder the agent does not know: nbtpkg.py and the schema refuse it,
+#         the agent and the phone app take the manifest, and the agent never lists the entry
+#   bad   not the right shape: every reader refuses the manifest
 
 # ---- The package's own folders
 ok ${app}/x
@@ -28,8 +33,13 @@ bad ${data}/l?g/x
 bad ${data}x/y
 bad ${data}/a%5Cb  # a backslash
 bad ${data}/a%0Ab  # a control character
-bad ${plugins}/x  # a variable that is not a folder of the package's
-bad ${home}/x  # a variable that does not exist
+skip ${plugins}/x  # a variable that is not a folder of the package's
+skip ${home}/x  # a variable that does not exist
+skip ${home}/a/*.log
+bad ${}/x  # a variable with no name
+bad ${home/x
+bad ${Data}/x  # a variable's name is lower case
+bad ${da-ta}/x
 
 # ---- Absolute paths: the log roots, outside the agent's own folders
 ok /var/log/x.log
@@ -38,13 +48,18 @@ ok /tmp/a/b
 ok /tmp/...
 ok /var/opt/nbtappx/y  # only the agent's folder itself is closed, not names that start like it
 ok /tmp/nbtapps/a
-bad /tmp
 bad /tmp/
-bad /tmpx/y
-bad /var
-bad /varx/y
-bad /etc/passwd  # not a log root
-bad /tmp/nbtapp
+bad /
+bad /etc/
+bad /etc/*/x  # a wildcard outside the last segment, in a folder the agent does not know
+skip /tmp  # a file in /, which is no log root
+skip /tmpx/y
+skip /var
+skip /varx/y
+skip /etc/passwd  # not a log root
+skip /etc/*
+skip /fs/usb0/nbt.log
+bad /tmp/nbtapp  # the agent's own folders are bad, not skipped, whatever roots there are
 bad /tmp/nbtapp/x
 bad /tmp/nbtapp/apps/other/x  # another package's ${tmp}, named by its path
 bad /var/opt/nbtapp

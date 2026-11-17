@@ -90,8 +90,10 @@ int main(int argc, char** argv) {
     CHECK(matchName(".*", ".hidden") && !matchName("*", ".hidden") && matchName(".hidden", ".hidden") && matchName("x", "x"));
     CHECK(!matchName("x", "xy") && !matchName("xy", "x") && matchName("**y", "y") && matchName("*y*", "aya"));
 
-    // 2. ${tmp} named or not.
+    // 2. ${tmp} named or not; logs to list, or only in folders this agent does not know (spec/log-paths.vectors).
     CHECK(namesTmp(manifest("a.b", "${tmp}/x")) && !namesTmp(manifest("a.b", "${data}/x", "/tmp/x")));
+    CHECK(namesLogs(manifest("a.b", "/etc/x", "${data}/x")) && namesLogs(manifest("a.b", "/tmp/x")));
+    CHECK(!namesLogs(manifest("a.b", "/etc/x", "${home}/x")) && !namesLogs(Manifest()));
 
     // 3. Each place an entry may name, newest first, in the manifest's form, regular files only.
     {
@@ -121,8 +123,11 @@ int main(int argc, char** argv) {
         // A name with no wildcard is that file, a hidden one included; one that is not there is not listed.
         files = listed(manifest(id, "${data}/log/.hidden.log", "${data}/log/gone.log", "/var/log/none.log"), platform);
         CHECK_IN(paths(files), paths(files) == "${data}/log/.hidden.log");
-        // A text that is not a log path, as an old record might hold, lists nothing.
+        // A text that is not a log path, as an old record might hold, lists nothing, and neither does a path in a
+        // folder this agent does not know, though a file is there.
         CHECK(listed(manifest(id, "${data}/../state/phones.json", "/etc/passwd"), platform).empty());
+        put(root + "/system/etc/logger.log", "not a log root", 1500);
+        CHECK(listed(manifest(id, "/etc/logger.log", "/etc/*"), platform).empty());
 
         // A folder on the way that is a link leads nowhere, inside the package's folder or as the folder itself.
         symlinkAt(platform.stateDir(), data + "/linked");

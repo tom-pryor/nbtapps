@@ -46,7 +46,7 @@ static std::string code(const std::string& text, Manifest* out = 0) {
 // One case of spec/log-paths.vectors.
 struct LogPathCase {
     int line;
-    std::string verdict;   // ok or bad
+    std::string verdict;   // ok, skip or bad
     std::string path;      // with each %HH made the byte HH
 };
 
@@ -79,7 +79,7 @@ static std::vector<LogPathCase> logPathCases(const char* file) {
         LogPathCase one;
         one.line = number;
         one.verdict = line.substr(0, space);
-        assert(one.verdict == "ok" || one.verdict == "bad");
+        assert(one.verdict == "ok" || one.verdict == "skip" || one.verdict == "bad");
         std::string text = space == std::string::npos ? "" : line.substr(space + 1);
         for (size_t i = 0; i < text.size(); ++i) {
             if (text[i] == '%') {
@@ -340,14 +340,16 @@ int main() {
         assert(Logs::code("[{\"path\":\"${data}/log/*.log\"},{\"path\":\"/tmp/radio.log\",\"label\":\"x\"}]", &m) == "");
         assert(m.logs.size() == 2 && m.logs[0] == "${data}/log/*.log" && m.logs[1] == "/tmp/radio.log" && riskFlags(m).empty());
         // Each path of spec/log-paths.vectors, which nbtpkg.py and the phone app are held to as well, in a manifest
-        // and alone.
+        // and alone: a skipped one is taken in a manifest and is not a path the agent lists.
         std::vector<LogPathCase> cases = logPathCases("spec/log-paths.vectors");
         assert(cases.size() > 40);
         for (size_t i = 0; i < cases.size(); ++i) {
             json::Writer w;
             w.beginArray().beginObject().key("path").string(cases[i].path).endObject().endArray();
-            bool ok = cases[i].verdict == "ok";
-            if (Logs::code(w.text()) != (ok ? "" : bad) || validLogPath(cases[i].path) != ok) {
+            const std::string& verdict = cases[i].verdict;
+            LogPathForm form = verdict == "ok" ? kLogPathOk : verdict == "skip" ? kLogPathSkip : kLogPathBad;
+            if (Logs::code(w.text()) != (form == kLogPathBad ? bad : "") || logPathForm(cases[i].path) != form ||
+                validLogPath(cases[i].path) != (form == kLogPathOk)) {
                 fprintf(stderr, "test_manifest: spec/log-paths.vectors line %d: %s is not %s\n", cases[i].line,
                         cases[i].path.c_str(), cases[i].verdict.c_str());
                 return 1;

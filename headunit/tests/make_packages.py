@@ -6,11 +6,14 @@
   OUTDIR/good/*.nbtpkg   the sources in tests/packages, signed with tests/keys/test-package.key, plus variants a
                          reader must also accept
   OUTDIR/bad/*.nbtpkg    hello 1.2.0 with one defect each; every reader must refuse each of them
+  OUTDIR/skipped/*.nbtpkg  hello 1.2.0 naming a log in a folder the schema does not know: nbtpkg.py refuses each
+                         with its code, and the agent and the app take it and skip that log (spec/log-paths.vectors)
   OUTDIR/detached/*.nbtpkg  hello 1.2.0 as an author might sign it, each read with a detached signature over its
                          manifest instead of its manifest.sig
   OUTDIR/vectors.json    what each file is: for a good one the values an index entry or a job.plan offer carries,
                          for a bad one the code the refusal has (bad-archive, bad-signature, bad-manifest or
-                         unsupported-manifest) and what is wrong with it, for a detached one the signature to read it
+                         unsupported-manifest) and what is wrong with it, for a skipped one nbtpkg.py's code and what
+                         it names, for a detached one the signature to read it
                          with and the code ("" when it is accepted, trusting the package key only)
 
 The same sources give the same files, byte for byte. Every implementation that reads packages runs against this
@@ -332,16 +335,23 @@ def build_all(out_dir):
             ("logs-twice", [{"path": "/tmp/hello.log"}, {"path": "/tmp/hello.log"}], "the same log named twice"),
             ("logs-dotdot", [{"path": "${data}/../../var/opt/nbtapp/phones.json"}], "a log path with `..`"),
             ("logs-relative", [{"path": "log/hello.log"}], "a log path that is not absolute"),
-            ("logs-unknown-variable", [{"path": "${home}/hello.log"}], "a log path with an unknown variable"),
-            ("logs-plugins", [{"path": "${plugins}/Hello/hello.log"}], "a log path in the HMI's plugin folder"),
             ("logs-folder", [{"path": "${data}/log/"}], "a log path that ends in a slash"),
             ("logs-wildcard-in-folder", [{"path": "${data}/*/hello.log"}], "a wildcard outside the last segment"),
-            ("logs-absolute-elsewhere", [{"path": "/etc/passwd"}], "a log path outside /tmp and /var"),
             ("logs-agent-state", [{"path": "/var/opt/nbtapp/phones.json"}], "a log path in the agent's state folder"),
             ("logs-agent-run", [{"path": "/tmp/nbtapp/log/agent.log"}], "a log path in the agent's folder on the RAM disk"),
             ("logs-other-tmp", [{"path": "/tmp/nbtapp/apps/org.other.radio/radio.log"}],
              "another package's ${tmp}, named by its path")):
         bad[label] = (with_changed_manifest(field(["logs"], logs)), "bad-manifest", why)
+    # A log path of the right shape in a folder the schema does not know: nbtpkg.py refuses it to the package's author,
+    # and the agent and the phone app take the manifest and skip the entry, which the agent then never lists (see
+    # spec/log-paths.vectors). The good entry beside it is kept.
+    skipped = {}
+    for label, path, why in (
+            ("logs-unknown-variable", "${home}/hello.log", "a log path with an unknown variable"),
+            ("logs-plugins", "${plugins}/Hello/hello.log", "a log path in the HMI's plugin folder"),
+            ("logs-absolute-elsewhere", "/etc/passwd", "a log path outside the log roots")):
+        logs = [{"path": "${data}/hello.log"}, {"path": path}]
+        skipped[label] = (with_changed_manifest(field(["logs"], logs)), "bad-manifest", why)
     bad["dest-tmp"] = (with_changed_manifest(field(["install", "files", 0, "dest"], "${tmp}/bin/hello")), "bad-manifest",
                        "a destination in ${tmp}, which is for logs only")
 
@@ -505,8 +515,8 @@ def build_all(out_dir):
 
     # ---- write ----
     vectors = {"keys": {"package": public.hex(), "other": nbtpkg.public_key(other_seed).hex()}, "good": [], "bad": [],
-               "detached": []}
-    for kind in ("good", "bad", "detached"):
+               "skipped": [], "detached": []}
+    for kind in ("good", "bad", "skipped", "detached"):
         os.makedirs(os.path.join(out_dir, kind), exist_ok=True)
         for stale in os.listdir(os.path.join(out_dir, kind)):
             os.remove(os.path.join(out_dir, kind, stale))
@@ -520,6 +530,11 @@ def build_all(out_dir):
         with open(os.path.join(out_dir, path), "wb") as f:
             f.write(data)
         vectors["bad"].append({"file": path, "code": code, "what": why})
+    for label, (data, code, why) in sorted(skipped.items()):
+        path = "skipped/%s.nbtpkg" % label
+        with open(os.path.join(out_dir, path), "wb") as f:
+            f.write(data)
+        vectors["skipped"].append({"file": path, "code": code, "what": why})
     for label, (data, signature, code, why) in sorted(detached.items()):
         path = "detached/%s.nbtpkg" % label
         with open(os.path.join(out_dir, path), "wb") as f:
@@ -534,4 +549,5 @@ def build_all(out_dir):
 if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "testdata")
     result = build_all(out)
-    print("[DONE] %s: %d good, %d bad packages" % (out, len(result["good"]), len(result["bad"])))
+    print("[DONE] %s: %d good, %d bad, %d skipped packages"
+          % (out, len(result["good"]), len(result["bad"]), len(result["skipped"])))

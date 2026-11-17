@@ -3,7 +3,9 @@
 # Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 """Holds the two package readers together: tools/nbtpkg.py and the agent's (agent/package.cpp, through
 build/agent-host/test_package --codes). Makes changed copies of the test packages and checks that both readers give
-every one of them the same verdict: accepted, or refused with the same code.
+every one of them the same verdict: accepted, or refused with the same code. A logs path in a folder the schema does
+not know is the one planned difference: nbtpkg.py refuses it and the agent skips it, so the Python verdict is taken
+with such paths put in ${data}.
 
   python3 tests/compare_readers.py [COUNT] [SEED]      (default 4000 cases, seed 1; needs `make build/agent-host/test_package testdata` first)
 
@@ -14,6 +16,7 @@ Two kinds of change:
 
 Not part of `make agent-test`: it is slow and random. Run it after changing either reader or the schema.
 """
+import hashlib
 import json
 import os
 import random
@@ -130,12 +133,42 @@ def change_bytes(data, rng):
     return bytes(data)
 
 
-def python_verdict(data, public):
+def python_verdict(data, public, seed_key):
+    """nbtpkg.py's verdict, as the agent would give it: a log in a folder the schema does not know, which nbtpkg.py
+    refuses and the agent skips (spec/log-paths.vectors), is judged as if it named a folder both know."""
     try:
         nbtpkg.verify_package(data, [public])
         return "ok"
     except nbtpkg.PkgError as e:
+        if e.code == "bad-manifest":
+            known = with_known_log_folders(data, seed_key)
+            if known is not None:
+                return python_verdict(known, public, seed_key)
         return e.code
+
+
+def with_known_log_folders(data, seed_key):
+    """The package again with each logs path that the agent skips put in ${data}, signed again: the same path the
+    same each time, so that a log named twice is still named twice. None when it names no such path."""
+    try:
+        entries = nbtpkg.read_zip(data)
+        manifest = nbtpkg.parse_json(entries[0]["data"])
+    except (nbtpkg.PkgError, ValueError, IndexError, KeyError):
+        return None
+    logs = manifest.get("logs") if isinstance(manifest, dict) else None
+    changed = False
+    for entry in logs if isinstance(logs, list) else []:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if isinstance(path, str) and nbtpkg.log_path_form(path) == "skip":
+            entry["path"] = "${data}/skipped-" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
+            changed = True
+    if not changed:
+        return None
+    text = (json.dumps(manifest) + "\n").encode()
+    members = [{"name": e["name_bytes"], "method": e["method"], "crc": e["crc"], "usize": e["usize"], "raw": e["raw"],
+                "flags": e["flags"]} for e in entries[2:]]
+    return nbtpkg.write_zip([nbtpkg.make_member(nbtpkg.MANIFEST, text),
+                             nbtpkg.make_member(nbtpkg.SIGNATURE, nbtpkg.sign(seed_key, text), store=True)] + members)
 
 
 def main():
@@ -150,7 +183,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         vectors = make_packages.build_all(os.path.join(tmp, "data"))
         originals = []
-        for entry in vectors["good"] + vectors["bad"]:
+        for entry in vectors["good"] + vectors["bad"] + vectors["skipped"]:
             with open(os.path.join(tmp, "data", entry["file"]), "rb") as f:
                 originals.append(f.read())
         good = originals[:len(vectors["good"])]
@@ -178,7 +211,7 @@ def main():
             with open(path, "wb") as f:
                 f.write(data)
             cases.append(path)
-            verdicts[path] = python_verdict(data, public)
+            verdicts[path] = python_verdict(data, public, seed_key)
 
         tally, differences = {}, 0
         for start in range(0, len(cases), 500):

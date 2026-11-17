@@ -63,7 +63,7 @@ class AgentVectorsInSyncTest {
             AgentBench.need("the agent repo's bench could not build the test packages: $said", said == null)
 
             assertArrayEquals("packages/vectors.json differs from the bench's", File(built, "vectors.json").readBytes(), AgentVectors.file("packages/vectors.json").readBytes())
-            for (kind in listOf("good", "bad", "detached")) {
+            for (kind in listOf("good", "bad", "skipped", "detached")) {
                 val copies = AgentVectors.file("packages/$kind").listFiles().orEmpty().map { it.name }.sorted()
                 assertEquals("the $kind packages", File(built, kind).listFiles().orEmpty().map { it.name }.sorted(), copies)
                 for (name in copies) {
