@@ -59,6 +59,8 @@ public:
 
     int fd() const { return link_->fd(); }
     const char* linkKind() const { return link_->kind(); }
+    // Link::phoneAddress().
+    std::string linkPhoneAddress() const { return link_->phoneAddress(); }
     bool open() const { return open_; }
     // Why the link ended; empty while it is open.
     const std::string& closeReason() const { return reason_; }

@@ -401,6 +401,7 @@ bool Agent::init(std::string* error) {
         note("the record of paired phones cannot be used, so no phone is paired: " + problem);
     }
     note(countOf(phones_.all().size(), "phone") + " paired");
+    shareAddresses();
     return true;
 }
 
@@ -1283,6 +1284,7 @@ void Agent::auth(Session* s, int64_t id, const json::Value& params) {
     note(linkName(s->number) + ": \"" + s->name + "\" is the phone it was paired as");
     replaceOlderLinks(s);
     answer(s, id, "{}");
+    rememberAddress(s);
 }
 
 // ---- pairing ------------------------------------------------------------------------------------------------------
@@ -1391,6 +1393,10 @@ void Agent::pairingIssue(Session* s, int64_t id, const json::Value& params) {
     phone.id = s->phoneId;
     phone.name = s->name;
     phone.pairedAt = clock_->unixSeconds();
+    // The link's address, where it has one: written with the pairing. A phone paired again over a link with no
+    // address keeps the one it had.
+    const PairedPhone* before = phones_.find(s->phoneId);
+    if (!colonAddress(s->peer->linkPhoneAddress(), &phone.address)) phone.address = before != 0 ? before->address : "";
     std::string why;
     if (!random_->secret(phone.key, sizeof phone.key)) {
         refuse(s, id, "internal", "this head unit has no random bytes to make a key of");
@@ -1405,7 +1411,24 @@ void Agent::pairingIssue(Session* s, int64_t id, const json::Value& params) {
     w.beginObject().key("key").string(toHex(phone.key, sizeof phone.key)).endObject();
     answer(s, id, w.text());
     closePairing("issued");
+    rememberAddress(s);
+    shareAddresses();
 }
+
+void Agent::rememberAddress(Session* s) {
+    std::string address = s->peer->linkPhoneAddress(), why;
+    if (address.empty() || s->phoneId.empty()) return;
+    bool changed = false;
+    if (!phones_.setAddress(s->phoneId, address, &changed, &why)) {
+        note(linkName(s->number) + ": the phone's Bluetooth address could not be kept: " + why);
+        return;
+    }
+    if (!changed) return;
+    note(linkName(s->number) + ": the phone's Bluetooth address is kept, for the car to dial the phone's app");
+    shareAddresses();
+}
+
+void Agent::shareAddresses() { addresses_.set(phones_.addresses()); }
 
 // ---- the paired phones --------------------------------------------------------------------------------------------
 
@@ -1463,6 +1486,7 @@ void Agent::phonesForget(Session* s, int64_t id, const json::Value& params) {
         return;
     }
     for (size_t i = 0; i < gone.size(); ++i) dropLinksOf(gone[i]);
+    shareAddresses();
     note(linkName(s->number) + ": " + countOf(count, "phone") + " forgotten");
     json::Writer w;
     w.beginObject().key("forgotten").integer((int64_t)count).endObject();

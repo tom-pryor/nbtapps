@@ -103,15 +103,17 @@ public:
         SppService::Phone what;
         std::string service;
         bool parsed;
+        std::string address;
     };
 
     virtual void sppSay(const std::string& line) { lines.push_back(line); }
     virtual void sppState(SppService::State now) { states.push_back(now); }
-    virtual void sppPhone(SppService::Phone what, const std::string& service, bool parsed) {
+    virtual void sppPhone(SppService::Phone what, const std::string& service, bool parsed, const std::string& address) {
         PhoneEvent e;
         e.what = what;
         e.service = service;
         e.parsed = parsed;
+        e.address = address;
         phone.push_back(e);
     }
     virtual void sppRefusedPhone(const PhoneInList& phone) { refused.push_back(phone); }
@@ -469,6 +471,9 @@ int main() {
         CHECK(r.seen.phone.size() == 5);
         CHECK(r.seen.phone[0].what == SppService::kPhoneAsked && r.seen.phone[0].service == kName &&
               r.seen.phone[0].parsed);
+        // The address goes with a request, for the node it brings, and with nothing else.
+        CHECK(r.seen.phone[0].address == kPhoneAddress && r.seen.phone[2].address == kPhoneAddress);
+        CHECK(r.seen.phone[1].address.empty() && r.seen.phone[3].address.empty() && r.seen.phone[4].address.empty());
         CHECK(r.seen.phone[1].what == SppService::kPhoneLinked && r.seen.phone[1].service == kName);
         CHECK(r.seen.phone[2].what == SppService::kPhoneAsked && r.seen.phone[2].service == "Another");
         CHECK(r.seen.phone[3].what == SppService::kPhoneRefused && r.seen.phone[3].service == "Another" &&

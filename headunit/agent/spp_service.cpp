@@ -445,6 +445,7 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
         std::string refused = refusedAddress_;
         pthread_mutex_unlock(&mu_);
         if (refusal) events_->sppRefusedPhone(phoneInList(l, refused));
+        if (l.ok && l.error == 0) events_->sppDevices(l.devices);
         if (!l.ok) {
             unread = kUnreadDeviceList;
             what = "a device list";
@@ -614,7 +615,7 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
         }
         events_->sppPhone(id == kInfServiceRequest ? kPhoneAsked
                                                    : (id == kInfServiceRequestComplete ? kPhoneLinked : kPhoneRefused),
-                          q.service, q.ok);
+                          q.service, q.ok, id == kInfServiceRequest && q.ok ? q.address : std::string());
         return;
     }
     bool rejected = type == kTypeRejectedA || type == kTypeRejectedB;

@@ -24,7 +24,8 @@ static PairedPhone phoneOf(char digit, const char* name, int64_t pairedAt) {
 }
 
 static bool same(const PairedPhone& a, const PairedPhone& b) {
-    return a.id == b.id && a.name == b.name && a.pairedAt == b.pairedAt && memcmp(a.key, b.key, sizeof a.key) == 0;
+    return a.id == b.id && a.name == b.name && a.pairedAt == b.pairedAt && memcmp(a.key, b.key, sizeof a.key) == 0 &&
+           a.address == b.address;
 }
 
 int main(int argc, char** argv) {
@@ -120,6 +121,71 @@ int main(int argc, char** argv) {
         CHECK_IN(why, fs::writeFile(path, std::string(1u << 20, ' '), 0600, &why));
         PhoneStore store;
         CHECK(!store.load(path, &why) && store.all().empty());
+    }
+    {   // A phone's Bluetooth address: optional, kept in one form, round trip, and gone with the phone.
+        std::string shown;
+        CHECK(colonAddress("00:11:22:33:44:55", &shown) && shown == "00:11:22:33:44:55");
+        CHECK(colonAddress("aa:bb:cc:dd:ee:0f", &shown) && shown == "AA:BB:CC:DD:EE:0F");
+        CHECK(colonAddress("aabbccddee0f", &shown) && shown == "AA:BB:CC:DD:EE:0F");
+        const char* notOne[] = {"", "00:11:22:33:44", "00-11-22-33-44-55", "00:11:22:33:44:5G", "0011223344556",
+                                "001:12:23:34:45:5", " 00:11:22:33:44:55"};
+        for (size_t i = 0; i < sizeof notOne / sizeof notOne[0]; ++i) CHECK_IN(notOne[i], !colonAddress(notOne[i], &shown));
+
+        // A file from before the address is read as it is, and written back without one.
+        const char* key = "3131313131313131313131313131313131313131313131313131313131313131";
+        std::string old = std::string("{\"version\":1,\"phones\":[{\"phoneId\":\"11111111111111111111111111111111\",\"name\":\"n\","
+                                      "\"key\":\"") + key + "\",\"pairedAt\":3}]}";
+        std::vector<PairedPhone> read;
+        CHECK_IN(why, PhoneStore::decode(old, &read, &why) && read.size() == 1 && read[0].address.empty());
+        CHECK(PhoneStore::encode(read).find("address") == std::string::npos);
+        std::string with = std::string("{\"version\":1,\"phones\":[{\"phoneId\":\"11111111111111111111111111111111\",\"name\":\"n\","
+                                       "\"key\":\"") + key + "\",\"pairedAt\":3,\"address\":\"00:11:22:33:44:55\"}]}";
+        CHECK_IN(why, PhoneStore::decode(with, &read, &why) && read.size() == 1 && read[0].address == "00:11:22:33:44:55");
+        std::vector<PairedPhone> again;
+        CHECK(PhoneStore::decode(PhoneStore::encode(read), &again, &why) && again.size() == 1 && same(again[0], read[0]));
+        // An address in another form, or of another type, makes the file one that cannot be read, as any other
+        // member that the store does not write.
+        const char* badAddress[] = {"\"00:11:22:33:44\"", "\"001122334455\"", "\"00:11:22:aa:bb:cc\"", "\"\"", "5", "null"};
+        for (size_t i = 0; i < sizeof badAddress / sizeof badAddress[0]; ++i) {
+            std::string text = std::string("{\"version\":1,\"phones\":[{\"phoneId\":\"11111111111111111111111111111111\","
+                                           "\"name\":\"n\",\"key\":\"") + key + "\",\"pairedAt\":3,\"address\":" +
+                               badAddress[i] + "}]}";
+            why.clear();
+            CHECK_IN(text, !PhoneStore::decode(text, &read, &why) && read.empty() && !why.empty());
+        }
+
+        // setAddress: written once, not again for the same, moved from a phone that had it, gone with the phone.
+        std::string file = work + "/addresses.json";
+        PhoneStore store;
+        CHECK(store.load(file, &why));
+        CHECK(store.put(phoneOf('1', "one", 1), &why) && store.put(phoneOf('2', "two", 2), &why));
+        CHECK(store.addresses().empty());
+        bool changed = false;
+        CHECK(store.setAddress(std::string(32, '1'), "00:11:22:33:44:55", &changed, &why) && changed);
+        CHECK(store.find(std::string(32, '1'))->address == "00:11:22:33:44:55");
+        CHECK(store.setAddress(std::string(32, '1'), "001122334455", &changed, &why) && !changed);
+        CHECK(store.setAddress(std::string(32, '9'), "00:11:22:33:44:66", &changed, &why) && !changed);   // not paired
+        CHECK(!store.setAddress(std::string(32, '1'), "not one", &changed, &why) && !changed);
+        PhoneStore next;
+        CHECK(next.load(file, &why) && next.find(std::string(32, '1'))->address == "00:11:22:33:44:55");
+        CHECK(store.setAddress(std::string(32, '2'), "00:11:22:33:44:55", &changed, &why) && changed);
+        CHECK(store.find(std::string(32, '1'))->address.empty() && store.find(std::string(32, '2'))->address == "00:11:22:33:44:55");
+        CHECK(store.setAddress(std::string(32, '1'), "66:77:88:99:AA:BB", &changed, &why) && changed);
+        CHECK(store.addresses().size() == 2 && store.addresses()[0] == "66:77:88:99:AA:BB");
+        size_t count = 0;
+        CHECK(store.forget(std::string(32, '2'), &count, &why) && count == 1);
+        CHECK(store.addresses().size() == 1 && store.addresses()[0] == "66:77:88:99:AA:BB");
+        CHECK(next.load(file, &why) && next.addresses().size() == 1 && testutil::readFile(file).find("00:11") == std::string::npos);
+        CHECK(store.forgetAll(&count, &why) && store.addresses().empty());
+
+        // The list another thread reads.
+        PhoneAddressList list;
+        CHECK(!list.has("00:11:22:33:44:55") && list.get().empty());
+        list.set(std::vector<std::string>(1, "00:11:22:33:44:55"));
+        CHECK(list.has("00:11:22:33:44:55") && list.has("001122334455") && list.has("00:11:22:33:44:55"));
+        CHECK(!list.has("00:11:22:33:44:56") && !list.has("") && list.get().size() == 1);
+        list.set(std::vector<std::string>());
+        CHECK(!list.has("00:11:22:33:44:55"));
     }
     {   // A folder that cannot be written: the pairing fails, and the store is as it was.
         PhoneStore store;

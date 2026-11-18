@@ -180,6 +180,25 @@ int main() {
         p8[0] = true;
         CHECK(t.scan(p8, 1200, true) == 0 && t.state(0) == NodeTracker::kOurs);
     }
+    {   // a node is handed on with the address of the request it was matched to, not that of a later request
+        NodeTracker t(15, 2);
+        none(p8);
+        t.baseline(p8);
+        t.onPhoneRequest(1300, true, "00:11:22:33:44:55");
+        t.onPhoneRequest(1300, false, "66:77:88:99:AA:BB");   // another service's, which takes the second node
+        t.onPhoneRequest(1301, true, "CC:DD:EE:FF:00:11");
+        CHECK(t.takenAddress().empty());
+        p8[3] = true;
+        CHECK(t.scan(p8, 1301, false) == 3 && t.takenAddress() == "00:11:22:33:44:55");
+        p8[4] = true;
+        CHECK(t.scan(p8, 1301, false) == -1 && t.otherService(4) && t.takenAddress() == "00:11:22:33:44:55");
+        p8[5] = true;
+        CHECK(t.scan(p8, 1302, false) == 5 && t.takenAddress() == "CC:DD:EE:FF:00:11");
+        // A node taken with no request has no address.
+        t.onPhoneRequest(1310, false);
+        p8[6] = true;
+        CHECK(t.scan(p8, 1310, true) == 6 && t.takenAddress().empty());
+    }
 
     printf("test_spp_nodes: ok\n");
     return 0;

@@ -262,8 +262,22 @@ void* pumpUp(void* arg) {
 
 }  // namespace
 
+namespace {
+
+// The agent's end of a serial link: a socket, which also knows the phone's address.
+class SerialSocketLink : public SocketLink {
+public:
+    SerialSocketLink(int fd, const std::string& address) : SocketLink(fd, "serial"), address_(address) {}
+    virtual std::string phoneAddress() const { return address_; }
+
+private:
+    std::string address_;
+};
+
+}  // namespace
+
 Link* newSerialLink(NodeReader* reader, const std::string& path, SerialLog* log, const std::vector<uint8_t>& first,
-                    unsigned lingerMs) {
+                    unsigned lingerMs, const std::string& address) {
     int pair[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
         log->line(path + ": no socket pair for the link: " + strerror(errno));
@@ -310,7 +324,7 @@ Link* newSerialLink(NodeReader* reader, const std::string& path, SerialLog* log,
         countPump(-1);
         return 0;
     }
-    return new SocketLink(pair[0], "serial");
+    return new SerialSocketLink(pair[0], address);
 }
 
 Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log, const std::vector<uint8_t>& first,
@@ -754,7 +768,8 @@ void SerialListener::sppState(SppService::State) {
     pthread_mutex_unlock(&mu_);
 }
 
-void SerialListener::sppPhone(SppService::Phone what, const std::string& service, bool parsed) {
+void SerialListener::sppPhone(SppService::Phone what, const std::string& service, bool parsed,
+                              const std::string& address) {
     // The stack does not say more than this about whose link it will be: what the phone says first decides.
     bool maybeOurs = service == config_.name || service == config_.carService;
     say("a phone %s (service '%s')%s%s",
@@ -768,7 +783,7 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
     unsigned refused = 0;
     if (what == SppService::kPhoneAsked) {
         askedAt_ = now;   // for any service: the registration check keeps out of the way of a phone that asks
-        tracker_.onPhoneRequest(monoSec(), maybeOurs);
+        tracker_.onPhoneRequest(monoSec(), maybeOurs, address);
         if (maybeOurs) {
             reqAt_ = now;
             holdWhy_ = "a phone has asked for a link";
@@ -809,6 +824,38 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
 
 // The car's device list has come for the refusal that waits for it: on the Bluetooth service's thread.
 void SerialListener::sppRefusedPhone(const PhoneInList& phone) { sayRefusal(RefusalFacts::kListRead, phone); }
+
+namespace {
+// How the log says what a device list changed for a phone: whether it is there, and its security, which is what
+// the car dialling it goes by. The phone by its number only.
+std::string presenceLine(const Presence::Change& c) {
+    char text[200];
+    if (c.removed) {
+        snprintf(text, sizeof text, "the car's device list: phone %u is no longer in it", c.number);
+    } else {
+        snprintf(text, sizeof text, "the car's device list: phone %u is %s (connection %u), security %u%s", c.number,
+                 connectionName(c.connection), c.connection, c.security,
+                 c.security == kSecurityKeyMissing ? ": the car has its key and the phone has not" : "");
+    }
+    return text;
+}
+}  // namespace
+
+// A device list has come: on the Bluetooth service's thread. What it says of the phones is kept; the log says
+// what has changed of whether each is there, and of its security.
+void SerialListener::sppDevices(const std::vector<BtDevice>& devices) {
+    if (!config_.dial.on) return;
+    std::vector<Presence::Change> changes;
+    pthread_mutex_lock(&mu_);
+    presence_.update(devices, (int64_t)(monoNow() * 1000.0), &changes);
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+    for (size_t i = 0; i < changes.size(); ++i) {
+        const Presence::Change& c = changes[i];
+        bool there = (c.connectionBefore >= kConnConnected) != (c.connection >= kConnConnected);
+        if (c.added || c.removed || there || c.securityChanged) say("%s", presenceLine(c).c_str());
+    }
+}
 
 // The line for the refusal that waits, if one does, with what is known of the device list.
 void SerialListener::sayRefusal(RefusalFacts::List list, const PhoneInList& phone) {
@@ -1308,7 +1355,7 @@ void SerialListener::closeKept(Closing which) {
 
 // Opens node `node`, which has just become a link that may be ours, and hands it to the agent if what the phone
 // says first shows that it is.
-void SerialListener::take(int node) {
+void SerialListener::take(int node, const std::string& address) {
     std::string path = nodePath(node);
     int fd = open(path.c_str(), O_RDWR);
     double openedAt = monoNow();
@@ -1375,7 +1422,7 @@ void SerialListener::take(int node) {
     if (found == kOurs) {
         say("%s: it opened with the magic bytes, so the link is the agent's", path.c_str());
         // Counted as up from here, which keeps the hold on.
-        link = newSerialLink(reader, path, log_, first, config_.lingerMs);
+        link = newSerialLink(reader, path, log_, first, config_.lingerMs, address);
         if (link == 0) holdWhy = "the link could not be set up";
     } else if (found == kLetGo) {
         letGo(reader, node, path, openedAt, why);
@@ -1411,6 +1458,7 @@ void SerialListener::lookForLinks() {
     pthread_mutex_lock(&mu_);
     for (int i = 0; i < NodeTracker::kNodes; ++i) before[i] = tracker_.state(i);
     int ours = tracker_.scan(present, monoSec(), false);
+    std::string address = tracker_.takenAddress();
     for (int i = 0; i < NodeTracker::kNodes; ++i) {
         after[i] = tracker_.state(i);
         other[i] = tracker_.otherService(i);
@@ -1419,7 +1467,7 @@ void SerialListener::lookForLinks() {
     // A node that is new has appeared since the look before this one.
     for (int i = 0; i < NodeTracker::kNodes; ++i)
         if (present[i] && before[i] == NodeTracker::kAbsent) appeared_[i] = lastLook > 0 ? lastLook : scannedAt_;
-    if (ours >= 0) take(ours);
+    if (ours >= 0) take(ours, address);
     for (int i = 0; i < NodeTracker::kNodes; ++i) {
         if (before[i] == after[i] || after[i] != NodeTracker::kForeign) continue;
         say("%s: %s, so it is not ours: left alone", nodePath(i).c_str(),
@@ -1553,12 +1601,21 @@ void SerialListener::run() {
                 // those keep the phone's app from this service.
                 if (services_ != 0) services_->sweep("the agent's serial service has just been registered");
                 checkedAt_ = monoNow();
+                // Which of the car's phones are there, for the car to dial them: asked anew each time, since the
+                // car's Bluetooth service may have restarted.
+                if (config_.dial.on && !spp_.askDeviceList()) say("the car's device list could not be asked for");
             }
             registered = true;
             checkRegistrationIfDue();
         } else {
             if (registered) deadline = monoNow() + config_.registerMs / 1000.0;
             registered = false;
+            // What the car's Bluetooth service said of the phones went with it.
+            if (!spp_.attached()) {
+                pthread_mutex_lock(&mu_);
+                presence_.forget();
+                pthread_mutex_unlock(&mu_);
+            }
             if (s == SppService::kFailed || monoNow() >= deadline) {
                 std::string never = "the car's Bluetooth service never attached (the agent asked the service broker "
                                     "for " + spp_.server() + ")";

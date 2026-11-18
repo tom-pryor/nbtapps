@@ -8,6 +8,8 @@
 
 #include <stdint.h>
 
+#include <string>
+
 namespace nbt {
 namespace btspp {
 
@@ -41,10 +43,12 @@ public:
     }
 
     // A ServiceRequest inform arrived: the phone asked for a link to our service (`ours`) or to another one.
-    void onPhoneRequest(uint32_t now, bool ours = true) {
+    // `address` is the phone's, as the inform gave it: takenAddress() hands it on with the node.
+    void onPhoneRequest(uint32_t now, bool ours = true, const std::string& address = std::string()) {
         if (nReq_ == kRequests) drop(0);
         req_[nReq_].at = now;
         req_[nReq_].ours = ours;
+        req_[nReq_].address = address;
         ++nReq_;
     }
 
@@ -65,6 +69,7 @@ public:
             if (state_[i] != kPending) continue;
             if (any || (nReq_ && req_[0].ours)) {
                 if (take < 0) {
+                    taken_ = nReq_ ? req_[0].address : std::string();
                     if (nReq_) drop(0);
                     state_[i] = kOurs;
                     take = i;
@@ -83,6 +88,9 @@ public:
     }
 
     State state(int i) const { return (i >= 0 && i < kNodes) ? state_[i] : kAbsent; }
+    // The address of the request that the node scan() last took belongs to: that phone's link is on the node.
+    // Empty for a node taken with no request, or a request that gave none.
+    const std::string& takenAddress() const { return taken_; }
     // Whether node i is someone else's because the phone asked for another service with it.
     bool otherService(int i) const { return i >= 0 && i < kNodes && state_[i] == kForeign && other_[i]; }
 
@@ -90,6 +98,7 @@ private:
     struct Request {
         uint32_t at;
         bool ours;
+        std::string address;
     };
 
     bool fresh(const Request& r, uint32_t now) const {
@@ -106,6 +115,7 @@ private:
     State state_[kNodes];
     uint32_t since_[kNodes];
     bool other_[kNodes];
+    std::string taken_;
 };
 
 }  // namespace btspp

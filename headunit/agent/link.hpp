@@ -36,6 +36,9 @@ public:
     // "local", "serial" or "tcp". The local socket needs no `auth` and is the one kind the pairing window and the
     // list of paired phones are worked from; the other two need `auth` before anything else is answered.
     virtual const char* kind() const = 0;
+    // The Bluetooth address of the phone at the other end, where the link knows it: a serial link only
+    // (serial_link.hpp). Empty otherwise. It goes into the record of paired phones and nowhere else.
+    virtual std::string phoneAddress() const { return std::string(); }
 };
 
 // Where controllers connect to the agent.

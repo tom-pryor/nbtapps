@@ -623,13 +623,17 @@ public:
         virtual void sppSay(const std::string& line) = 0;
         virtual void sppState(State now) = 0;
         // `service` is the service the phone asked for, which may be any of the car's, not only this one.
-        // `parsed`: the server's message was read whole.
-        virtual void sppPhone(Phone what, const std::string& service, bool parsed) = 0;
+        // `parsed`: the server's message was read whole. `address` is the phone's, for kPhoneAsked, as the
+        // request gave it: for the caller to keep with the request, and never to log.
+        virtual void sppPhone(Phone what, const std::string& service, bool parsed, const std::string& address) = 0;
         // What removeOther(name) came to: the server's error code, 0 for done, or kNoError if the server rejected
         // the request, gave no answer in time, or could not be sent it.
         virtual void sppOtherRemoved(const std::string& /*name*/, uint32_t /*error*/) {}
         // What the car's device list says of the phone of the last refusal, after askAboutRefused().
         virtual void sppRefusedPhone(const PhoneInList& /*phone*/) {}
+        // A whole device list has come, the answer to DeviceListGet or the inform DeviceListChanged: every phone the
+        // car knows, with its address, connection and security. For the caller to keep, and never to log.
+        virtual void sppDevices(const std::vector<BtDevice>& /*devices*/) {}
     };
 
     // Both outlive this object.

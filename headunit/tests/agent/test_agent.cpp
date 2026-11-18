@@ -421,6 +421,16 @@ private:
     size_t sent_;
 };
 
+// A serial link that knows the phone's Bluetooth address, as one of the listener's does.
+class AddressedLink : public SocketLink {
+public:
+    AddressedLink(int fd, const char* kind, const std::string& address) : SocketLink(fd, kind), address_(address) {}
+    virtual std::string phoneAddress() const { return address_; }
+
+private:
+    std::string address_;
+};
+
 // ---- a head unit in a folder, with its agent ----------------------------------------------------------------------
 
 class FakeClock : public Clock {
@@ -478,11 +488,11 @@ struct Bench {
         for (size_t i = 0; i < phones.size(); ++i) delete phones[i];
     }
 
-    // A link with nothing said on it yet.
-    Phone* connect(const char* kind = "local") {
+    // A link with nothing said on it yet; with `address`, one that knows the phone's Bluetooth address.
+    Phone* connect(const char* kind = "local", const std::string& address = std::string()) {
         int fds[2];
         CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
-        agent.adopt(new SocketLink(fds[0], kind));
+        agent.adopt(address.empty() ? new SocketLink(fds[0], kind) : new AddressedLink(fds[0], kind, address));
         Phone* phone = new Phone(fds[1]);
         phones.push_back(phone);
         return phone;
@@ -1328,6 +1338,88 @@ static void testPhones() {
 }
 
 // ---- link.closing: how the agent ends a link on purpose -----------------------------------------------------------
+
+// A phone's Bluetooth address, from the serial link it pairs or does `auth` on: kept in the record of paired phones
+// and in the list the listener reads, and nowhere else: not in an answer, not in the log.
+static void testPhoneAddress() {
+    Bench b("address");
+    std::string logPath = b.root + "/log.txt";
+    FILE* log = fopen(logPath.c_str(), "w");
+    CHECK(log != 0);
+    b.agent.setLog(log);
+    std::string phonesFile = b.platform.stateDir() + "/phones.json";
+    CHECK(b.agent.phoneAddresses()->get().empty());
+
+    // Paired over a serial link that knows its address: the pairing is written with it.
+    Phone* ctl = b.connect();
+    CHECK(Parsed(b.hello(ctl, kGoodHello)).result.isObject());
+    Phone* p = b.connect("serial", "00:11:22:33:44:55");
+    CHECK(Parsed(b.hello(p, Bench::phoneHello("1", 4096))).result.isObject());
+    std::string code = str(Parsed(b.call(ctl, "pairing.open", "{}")).result, "code");
+    Parsed issued(b.call(p, "pairing.issue", codeParams(code)));
+    CHECK(issued.result.isObject());
+    const PairedPhone* record = b.agent.phones().find(std::string(32, '1'));
+    CHECK(record != 0 && record->address == "00:11:22:33:44:55");
+    CHECK(testutil::readFile(phonesFile).find("\"address\":\"00:11:22:33:44:55\"") != std::string::npos);
+    CHECK(b.agent.phoneAddresses()->has("00:11:22:33:44:55") && b.agent.phoneAddresses()->get().size() == 1);
+
+    // `auth` from a link with the address in its other form: the same, so nothing is written.
+    std::string keyHex = str(issued.result, "key");
+    uint8_t keyBytes[kPairingKeyBytes];
+    CHECK(fromHex(keyHex, keyBytes, sizeof keyBytes));
+    std::string key((const char*)keyBytes, sizeof keyBytes);
+    struct stat before, after;
+    CHECK(stat(phonesFile.c_str(), &before) == 0);
+    Phone* again = b.connect("serial", "001122334455");
+    CHECK(Parsed(b.hello(again, Bench::phoneHello("1", 4096))).result.isObject());
+    CHECK(Parsed(b.authenticate(again, key)).result.isObject());
+    CHECK(stat(phonesFile.c_str(), &after) == 0 && before.st_ino == after.st_ino);
+    // From another address: the record takes it.
+    Phone* moved = b.connect("serial", "66:77:88:99:aa:bb");
+    CHECK(Parsed(b.hello(moved, Bench::phoneHello("1", 4096))).result.isObject());
+    CHECK(Parsed(b.authenticate(moved, key)).result.isObject());
+    CHECK(b.agent.phones().find(std::string(32, '1'))->address == "66:77:88:99:AA:BB");
+    CHECK(b.agent.phoneAddresses()->has("66:77:88:99:AA:BB") && !b.agent.phoneAddresses()->has("00:11:22:33:44:55"));
+    // A link with no address changes nothing; nor does a failed `auth`.
+    Phone* plain = b.connect("serial");
+    CHECK(Parsed(b.hello(plain, Bench::phoneHello("1", 4096))).result.isObject());
+    CHECK(Parsed(b.authenticate(plain, key)).result.isObject());
+    CHECK(b.agent.phones().find(std::string(32, '1'))->address == "66:77:88:99:AA:BB");
+    Phone* wrong = b.connect("serial", "CC:DD:EE:FF:00:11");
+    CHECK(Parsed(b.hello(wrong, Bench::phoneHello("1", 4096))).result.isObject());
+    CHECK(Parsed(b.call(wrong, "auth", "{\"nonce\":\"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf\"}")).result.isObject());
+    CHECK(Parsed(b.call(wrong, "auth", "{\"proof\":\"" + std::string(64, '0') + "\"}")).code() == "auth-failed");
+    CHECK(b.agent.phones().find(std::string(32, '1'))->address == "66:77:88:99:AA:BB");
+
+    // Not in phones.list, info.get or anything else that was answered.
+    std::string listed = b.call(ctl, "phones.list", "{}");
+    CHECK(Parsed(listed).result.isObject() && listed.find("66:77") == std::string::npos && listed.find("address") == std::string::npos);
+    std::string info = b.call(ctl, "info.get", "{}");
+    CHECK(info.find("66:77") == std::string::npos && info.find("00:11:22") == std::string::npos);
+
+    // Forgotten with the phone.
+    CHECK(Parsed(b.call(ctl, "phones.forget", "{\"all\":true}")).result.isObject());
+    CHECK(b.agent.phoneAddresses()->get().empty());
+    CHECK(testutil::readFile(phonesFile).find("address") == std::string::npos);
+
+    // An agent that starts finds the addresses that were kept.
+    {
+        Bench c("address-start");
+        c.pair("2");
+        std::string why;
+        bool changed = false;
+        CHECK_IN(why, c.agent.phones().setAddress(std::string(32, '2'), "00:11:22:33:44:55", &changed, &why) && changed);
+        Bench d("address-start", true);
+        CHECK(d.agent.phoneAddresses()->has("00:11:22:33:44:55"));
+    }
+
+    b.agent.setLog(0);
+    fclose(log);
+    std::string text = testutil::readFile(logPath);
+    CHECK_IN(text, text.find("the phone's Bluetooth address is kept") != std::string::npos);
+    const char* forms[] = {"00:11:22", "001122", "66:77:88", "667788", "66:77:88:99:aa", "CC:DD:EE", "CCDDEE"};
+    for (size_t i = 0; i < sizeof forms / sizeof forms[0]; ++i) CHECK_IN(forms[i], text.find(forms[i]) == std::string::npos);
+}
 
 static void testLinkClosing() {
     {   // The agent stops, or ends for a newer version of itself: every link but the local socket's is told and
@@ -4089,6 +4181,7 @@ int main(int argc, char** argv) {
     testAuth();
     testPairing();
     testPhones();
+    testPhoneAddress();
     testLinkClosing();
     testInfo();
     testPlan();

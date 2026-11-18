@@ -81,8 +81,10 @@
 #include <string>
 #include <vector>
 
+#include "dial_config.hpp"
 #include "link.hpp"
 #include "node_reader.hpp"
+#include "presence.hpp"
 #include "protocol_constants.hpp"
 #include "serial_log.hpp"
 #include "serial_report.hpp"
@@ -112,10 +114,11 @@ const char* const kCarSerialService = "SPP";
 // takes; once `lingerMs` have passed the log says that the link is still up. See the top of this file. `log` has
 // to be there until they have ended, which serialLinksOpen() tells.
 //
-// `first` is what has been read from the node already: the link gives it before anything else.
+// `first` is what has been read from the node already: the link gives it before anything else. `address` is the
+// Bluetooth address of the phone whose link it is, where that is known: the link's phoneAddress().
 Link* newSerialLink(NodeReader* reader, const std::string& path, SerialLog* log,
                     const std::vector<uint8_t>& first = std::vector<uint8_t>(),
-                    unsigned lingerMs = (unsigned)kSerialLingerMs);
+                    unsigned lingerMs = (unsigned)kSerialLingerMs, const std::string& address = std::string());
 // The same on a node that is open already (blocking, for reading and writing), with a reader of its own started
 // on it with the platform's timed read.
 Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log,
@@ -214,6 +217,7 @@ struct SerialConfig {
     unsigned checkQuietMs;       // quiet: no link of the agent's up or being decided on, and no phone's request
                                  // for a link for this long
     unsigned attachWaitMs;       // the car's Bluetooth service not attached for this long: the log says so, once
+    DialConfig dial;             // the car dials the agent's phones (dial_config.hpp)
 
     SerialConfig()
         : name(kSerialServiceName), uuid(kSerialServiceUuid), carService(kCarSerialService),
@@ -524,8 +528,10 @@ private:
 
     virtual void sppSay(const std::string& line);
     virtual void sppState(btspp::SppService::State now);
-    virtual void sppPhone(btspp::SppService::Phone what, const std::string& service, bool parsed);
+    virtual void sppPhone(btspp::SppService::Phone what, const std::string& service, bool parsed,
+                          const std::string& address);
     virtual void sppRefusedPhone(const btspp::PhoneInList& phone);
+    virtual void sppDevices(const std::vector<btspp::BtDevice>& devices);
     void sayRefusal(RefusalFacts::List list, const btspp::PhoneInList& phone);
     void tendRefusal();
 
@@ -535,7 +541,8 @@ private:
     std::string nodePath(int i) const;
     void scanNodes(bool present[btspp::NodeTracker::kNodes]) const;
     void lookForLinks();
-    void take(int node);
+    // `address`: the phone's, from the request the node was matched to (NodeTracker::takenAddress()).
+    void take(int node, const std::string& address);
     // What the decide step found.
     enum Decided { kOurs, kLetGo, kEnded };
     Decided decide(NodeReader* reader, const std::string& path, double openedAt, std::vector<uint8_t>* first,
@@ -626,6 +633,9 @@ private:
     double refusalAt_;           // 0: none waits
     // The listener's thread: when tendLetGo() last looked for running programs of software put on by hand.
     double handLookAt_;
+    // The car dials the phone (SerialConfig::dial). Which of the car's phones are there (mu_): asked for each time
+    // the service has been registered, and forgotten while the car's Bluetooth service is gone.
+    btspp::Presence presence_;
 };
 
 }  // namespace nbt

@@ -131,6 +131,8 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 #   serial_services  the serial services that packages' programs register, and the removal of one whose program
 #                    is not running
 #   serial_report  the start-up report: what the head unit says of its Bluetooth when the agent starts
+#   presence     which of the car's phones are there, from its device list: what the car dialling a phone goes by
+#   dial_rules   when the car dials a phone of the agent's, and what comes of each answer
 #   phones       the paired phones and their pairing keys, on disk
 #   agent_home   the agent's own folder: its versions, and the files that say which one the launcher starts
 #   log_files    the files a controller may pull: the logs a package's manifest names, and the agent's own
@@ -150,7 +152,8 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/planner.cpp agent/job.cpp agent/agent.cpp agent/hu_platform.cpp agent/dsi_client.cpp \
                agent/spp_service.cpp agent/spp_gate.cpp agent/node_reader.cpp agent/serial_link.cpp agent/programs.cpp \
                agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp agent/checks.cpp \
-               agent/settings_file.cpp agent/settings.cpp agent/serial_report.cpp
+               agent/settings_file.cpp agent/settings.cpp agent/serial_report.cpp agent/presence.cpp \
+               agent/dial_rules.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 # src/*.hpp: test_plugin runs the plugin's screens about phones, which are headers, against an agent, and

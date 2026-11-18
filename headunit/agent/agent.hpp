@@ -298,6 +298,9 @@ public:
     Engine& engine() { return engine_; }
     Job& job() { return job_; }
     PhoneStore& phones() { return phones_; }
+    // The Bluetooth addresses of the paired phones, kept up to date for the Bluetooth serial listener's thread,
+    // which dials them (serial_link.hpp).
+    PhoneAddressList* phoneAddresses() { return &addresses_; }
     const std::string& headUnitId() const { return headUnitId_; }
     size_t sessions() const { return sessions_.size(); }
     // A blob.fetch whose reply or stream stays silent this long ends its link, of whatever kind. A serial link
@@ -445,6 +448,11 @@ private:
     void phonesList(Session* s, int64_t id);
     void phonesForget(Session* s, int64_t id, const json::Value& params);
     void dropLinksOf(const std::string& phoneId);
+    // The Bluetooth address of the link `s` is on, for the phone it has shown to be: kept in the record of paired
+    // phones where it is new. Never logged, never in an answer.
+    void rememberAddress(Session* s);
+    // phoneAddresses() as phones_ has them now.
+    void shareAddresses();
     void infoGet(Session* s, int64_t id);
     void packagesList(Session* s, int64_t id, const json::Value& params);
     void sourcesList(Session* s, int64_t id);
@@ -512,6 +520,7 @@ private:
 
     std::string headUnitId_;
     PhoneStore phones_;
+    PhoneAddressList addresses_;
     Pairing pairing_;
     std::vector<Listener*> listeners_;
     SerialReset* serialReset_;

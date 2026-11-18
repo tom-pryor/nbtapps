@@ -158,22 +158,42 @@ public:
         } else if (id == kReqDeviceListGet) {
             trace_->add("device list");
             if (answersList) {
-                // The phone of the test's requests, in the colon form, with the test's connection and security.
                 putU32(reply, 0);
-                putU32(reply, listed ? 1 : 0);
-                if (listed) putString(reply, "Test Phone");
-                putU32(reply, listed ? 1 : 0);
-                if (listed) putString(reply, "AA:BB:CC:DD:EE:FF");
-                putU32(reply, listed ? 1 : 0);
-                if (listed) putU32(reply, 0);
-                putU32(reply, listed ? 1 : 0);
-                if (listed) putU32(reply, security);
-                putU32(reply, listed ? 1 : 0);
-                if (listed) putU32(reply, connection);
+                putDevices(reply);
                 events_->gapMessage(kTypeResponse, kRspDeviceListGet, &reply[0], (uint32_t)reply.size());
             }
         }
         return true;
+    }
+    // The device lists: the phone of the test's requests, in the colon form, with the test's connection and
+    // security, if `listed`; then the phones in `phones`.
+    void putDevices(std::vector<uint8_t>& p) {
+        std::vector<BtDevice> all;
+        if (listed) {
+            BtDevice d;
+            d.address = "AA:BB:CC:DD:EE:FF";
+            d.connection = connection;
+            d.security = security;
+            all.push_back(d);
+        }
+        all.insert(all.end(), phones.begin(), phones.end());
+        putU32(p, (uint32_t)all.size());
+        for (size_t i = 0; i < all.size(); ++i) putString(p, "Test Phone");
+        putU32(p, (uint32_t)all.size());
+        for (size_t i = 0; i < all.size(); ++i) putString(p, all[i].address);
+        putU32(p, (uint32_t)all.size());
+        for (size_t i = 0; i < all.size(); ++i) putU32(p, 0x5a020c);
+        putU32(p, (uint32_t)all.size());
+        for (size_t i = 0; i < all.size(); ++i) putU32(p, all[i].security);
+        putU32(p, (uint32_t)all.size());
+        for (size_t i = 0; i < all.size(); ++i) putU32(p, all[i].connection);
+    }
+    // DeviceListChanged, with the lists as they are now.
+    void devicesChanged() {
+        std::vector<uint8_t> p;
+        putDevices(p);
+        putU32(p, 0);
+        events_->gapMessage(0x400, kInfDeviceListChanged, &p[0], (uint32_t)p.size());
     }
     virtual bool subscribe(uint32_t) { return up_; }
     virtual std::string describe() const { return "Test.Server 1.0"; }
@@ -187,10 +207,10 @@ public:
         events_->gapDetached();
     }
     // A phone asks for a link to `service`, is given it, or is refused.
-    void phone(uint32_t informId, const char* service) {
+    void phone(uint32_t informId, const char* service, const char* address = "AABBCCDDEEFF") {
         std::vector<uint8_t> p;
         if (informId == kInfServiceRequest) putString(p, "Test Phone");
-        putString(p, "AABBCCDDEEFF");
+        putString(p, address);
         putString(p, service);
         events_->gapMessage(0x400, informId, &p[0], (uint32_t)p.size());
     }
@@ -203,6 +223,7 @@ public:
     bool answersList;                // DeviceListGet is answered, with the phone in it if `listed`
     bool listed;
     uint32_t connection, security;
+    std::vector<BtDevice> phones;      // more phones in the car's device list
     std::vector<uint8_t> disconnect;   // the last ServiceDisconnect's payload
 
 private:
@@ -550,6 +571,7 @@ static SerialConfig configFor(const std::string& dir) {
     c.decideMs = 300;
     c.lingerMs = 300;
     c.checkMs = 0;   // testRegistrationCheck() turns it on
+    c.dial.on = false;   // the car dialling the phone has tests of its own, which turn it on
     return c;
 }
 
@@ -613,12 +635,15 @@ static void testListener() {
         exchange(first, link, pattern(20000, 4), pattern(20000, 5));
         CHECK(trace.saw("btspp0 opened") && trace.saw("a phone asked for a serial link (service 'SPP')"));
         CHECK(!trace.saw("Test Phone") && !trace.saw("AABBCCDDEEFF"));
+        // The link knows the address of the phone whose request its node came with.
+        CHECK(link->phoneAddress() == "AABBCCDDEEFF");
 
         // A second phone, while the first link is up, and by the service's own name.
         Node second(dir + "/btspp", 1);
-        gap.phone(kInfServiceRequest, kSerialServiceName);
+        gap.phone(kInfServiceRequest, kSerialServiceName, "001122334455");
         second.appear();
         Link* other = dialled(listener, second, trace);
+        CHECK(other->phoneAddress() == "001122334455" && !trace.saw("001122334455"));
         exchange(second, other, "two", "zwei");
         exchange(first, link, "one", "eins");
 
@@ -1013,6 +1038,79 @@ static void testRefusal() {
                                             "come in 3 s.", 4000));
     CHECK(!trace.saw("Test Phone") && !trace.saw("AA:BB") && !trace.saw("AABB"));
     listener.stop();
+}
+
+// ---- which of the car's phones are there --------------------------------------------------------------------------
+
+static BtDevice carPhone(const char* address, uint32_t connection, uint32_t security) {
+    BtDevice d;
+    d.address = address;
+    d.connection = connection;
+    d.security = security;
+    return d;
+}
+
+static void testPresence() {
+    std::string dir = freshFolder("presence");
+    {   // the device list is asked for once the service is registered, and again after the service comes back; what
+        // changes of whether a phone is there, and of its security, is said by the phone's number
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        gap.phones.push_back(carPhone("00:11:22:33:44:55", kConnConnected, 7));
+        gap.phones.push_back(carPhone("66:77:88:99:AA:BB", kConnInRange, 8));
+        SerialConfig config = configFor(dir);
+        config.dial.on = true;
+        SerialListener listener(&gap, &gate, &trace, config);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        CHECK(!trace.saw("device list"));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the car's device list: phone 2 is in range (connection 1), security 8", 2000));
+        CHECK(trace.exactly("device list") == 1 && trace.at("is registered") < trace.at("device list"));
+        CHECK(trace.saw("the car's device list: phone 1 is connected (connection 2), security 7"));
+        // An inform: phone 2 comes, phone 1 loses its key; a change from connected to service connected is not said.
+        gap.phones[0] = carPhone("00:11:22:33:44:55", kConnServiceConnected, 9);
+        gap.phones[1] = carPhone("66:77:88:99:AA:BB", kConnConnected, 8);
+        gap.devicesChanged();
+        CHECK_IN(trace.text(), trace.saw("phone 1 is service connected (connection 3), security 9: the car has its key and "
+                                         "the phone has not"));
+        CHECK(trace.saw("phone 2 is connected (connection 2), security 8"));
+        unsigned lines = trace.count("the car's device list:");
+        gap.phones[0] = carPhone("00:11:22:33:44:55", kConnConnected, 9);
+        gap.devicesChanged();
+        CHECK(trace.count("the car's device list:") == lines);
+        gap.phones.pop_back();
+        gap.devicesChanged();
+        CHECK(trace.saw("phone 2 is no longer in it"));
+        // The service goes and comes back: asked again, and the phones keep their numbers.
+        gap.detach();
+        pause(450);
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "registered", 2000));
+        double end = monoNow() + 2.0;
+        while (trace.exactly("device list") < 2 && monoNow() < end) pause(5);
+        CHECK(trace.exactly("device list") == 2);
+        CHECK(!trace.saw("00:11:22") && !trace.saw("66:77:88") && !trace.saw("Test Phone"));
+        listener.stop();
+    }
+    {   // the dial off: nothing of it
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        gap.phones.push_back(carPhone("00:11:22:33:44:55", kConnConnected, 7));
+        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        gap.devicesChanged();
+        pause(300);
+        CHECK(!trace.saw("device list") && !trace.saw("phone 1"));
+        listener.stop();
+    }
 }
 
 // ---- the registration check -------------------------------------------------------------------------------------
@@ -2426,6 +2524,7 @@ int main(int argc, char** argv) {
     testLink();
     testListener();
     testRegistrationCheck();
+    testPresence();
     testRefusal();
     testAgent();
     testLeftBehind();
