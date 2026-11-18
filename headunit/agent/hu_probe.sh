@@ -126,7 +126,11 @@ probe() {
     ls -l /mnt 2>&1
 
     sec "plugin folders"
-    for base in /opt/hmi/ID5/data/ro /opt/hmi/ID5/data/rw; do
+    # The last is the folder above ${var_plugins}, the HMI's plugin folder on the writable partition behind /var.
+    # A head unit that never had a plugin there may lack it, and the folders above it: each is placed.
+    place /var/opt/hmi
+    place /var/opt/hmi/data
+    for base in /opt/hmi/ID5/data/ro /opt/hmi/ID5/data/rw /var/opt/hmi/data/ID5; do
         place "$base"
         place "$base/Plugins"
         [ -d "$base/Plugins" ] || continue
