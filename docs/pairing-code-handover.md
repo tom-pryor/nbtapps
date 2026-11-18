@@ -39,7 +39,9 @@ startActivity(intent)
   or a car picked there and then from the Bluetooth devices paired with the phone. With no head unit saved, as
   for a user who has never opened NBTApps, the picker is shown at once, with the car the phone is connected to
   picked already where it can be told; the user may first be asked for the Nearby devices permission. Nothing is
-  connected before the user taps **Pair**, since connecting replaces whatever link NBTApps already has.
+  connected for the request before the user taps **Pair**, since connecting replaces whatever link NBTApps already
+  has. Where NBTApps has a link to the chosen head unit already, **Pair** uses it: a link NBTApps made, or, with
+  agent 1.6.0 or later, one the car opened to it while NBTApps was open.
 - On **Pair** a car that was picked is saved as a head unit, unless it is saved already, and NBTApps connects to
   it and sends the code. If the phone was already paired with that head unit, it says so and sends nothing. A
   code that has run out by then saves nothing.

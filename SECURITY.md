@@ -12,9 +12,9 @@ There is no fixed response time. A fix goes out as a new release of the part aff
 
 - The install agent (`nbtagent`, `nbtctl`, the launcher and starter scripts): the package checks (signature,
   manifest, hashes, archive paths), the install engine, pairing, and the protocol a phone speaks to it over
-  Bluetooth serial or the local socket.
-- The Android app (`com.nbtapps.store`): the catalogue checks, pairing and the keys it keeps, and what it sends to
-  a head unit.
+  Bluetooth serial (a link the phone opens, or one the car opens to the phone) or the local socket.
+- The Android app (`com.nbtapps.store`): the catalogue checks, pairing and the keys it keeps, the Bluetooth serial
+  links it accepts from a head unit, and what it sends to a head unit.
 - The iDrive plugin (NBTApp).
 
 ## What is not
