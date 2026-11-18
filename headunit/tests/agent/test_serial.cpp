@@ -117,7 +117,8 @@ static bool sawWithin(Trace& trace, const std::string& part, int ms) {
 
 class FakeGap : public GapClient {
 public:
-    explicit FakeGap(Trace* trace) : canOpen(true), registerError(0), events_(0), up_(false), trace_(trace) {}
+    explicit FakeGap(Trace* trace)
+        : canOpen(true), registerError(0), deregisterError(0), events_(0), up_(false), trace_(trace) {}
 
     virtual bool open(Events* events) {
         trace_->add("gap open");
@@ -135,7 +136,7 @@ public:
         } else if (id == kReqSppUuidDeregister) {
             Reader name(&payload[0], (uint32_t)payload.size());
             trace_->add("deregister " + name.str());
-            putU32(reply, 0);
+            putU32(reply, deregisterError);
             events_->gapMessage(kTypeResponse, kRspSppUuidDeregister, &reply[0], (uint32_t)reply.size());
         } else if (id == kReqServiceDisconnect) {
             disconnect = payload;   // before the trace says so, which is what the test waits for
@@ -161,6 +162,7 @@ public:
 
     bool canOpen;
     uint32_t registerError;          // what a registration is answered with
+    uint32_t deregisterError;        // and a removal
     std::vector<uint8_t> disconnect;   // the last ServiceDisconnect's payload
 
 private:
@@ -583,6 +585,33 @@ static void testListener() {
         listener.stop();                                  // twice does nothing more
         delete link;
         delete other;
+    }
+    {   // what the removal at stop() came to: the stack had dropped the registration (10), or a link on the service
+        // is up (5)
+        uint32_t errors[] = {10, 5};
+        for (int i = 0; i < 2; ++i) {
+            Trace trace;
+            LinksGone gone;
+            FakeGap gap(&trace);
+            FakeGate gate(&trace);
+            gap.deregisterError = errors[i];
+            SerialListener listener(&gap, &gate, &trace, configFor(dir));
+            std::string why;
+            CHECK_IN(why, listener.start(&why));
+            gap.attach();
+            CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+            listener.stop();
+            if (errors[i] == 10) {
+                CHECK_IN(trace.text(), trace.saw("'NBTApp' was not registered any more: the car's Bluetooth had dropped "
+                                                 "the registration, as switching Bluetooth off and on in iDrive does, so "
+                                                 "there was nothing to remove"));
+                CHECK(!trace.saw("did not remove"));
+            } else {
+                CHECK_IN(trace.text(), trace.saw("the car's Bluetooth service did not remove the registration of 'NBTApp' "
+                                                 "(5 DEFAULT (a link on that service is up)): it stays until the car's "
+                                                 "Bluetooth is switched off and on or restarts, or an agent removes it"));
+            }
+        }
     }
     {   // the gate is not in front: the stack is never asked, and nothing is left behind
         Trace trace;

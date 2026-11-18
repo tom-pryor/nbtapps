@@ -609,9 +609,14 @@ void SerialListener::shutDown() {
             usleep(20000);
             s = spp_.state();
         }
+        uint32_t err = spp_.removeError();
         if (s == SppService::kRemoveFailed)
-            say("the car's Bluetooth service did not remove the registration of '%s': it stays until that service "
-                "restarts", config_.name.c_str());
+            say("the car's Bluetooth service did not remove the registration of '%s' (%s): it stays until the car's "
+                "Bluetooth is switched off and on or restarts, or an agent removes it", config_.name.c_str(),
+                deregisterErrorText(err).c_str());
+        else if (s == SppService::kRemoved && err == 10)
+            say("'%s' was not registered any more: the car's Bluetooth had dropped the registration, as switching "
+                "Bluetooth off and on in iDrive does, so there was nothing to remove", config_.name.c_str());
         else if (s != SppService::kRemoved)
             say("no reply to the removal of '%s' in 3 s: it may stay registered until the car's Bluetooth service "
                 "restarts", config_.name.c_str());

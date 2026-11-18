@@ -21,6 +21,7 @@ static const char* const kName = "Test_Service";
 static const char* const kUuid = "0123ABCD-89EF-4A5B-8C7D-0123456789AB";
 static const char* const kPhoneName = "Test Phone";
 static const char* const kPhoneAddress = "AABBCCDDEEFF";
+static const size_t kInforms = 6;   // the informs a registration asks for
 
 static std::vector<uint8_t> bytes(const char* s, size_t n) {
     return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(s), reinterpret_cast<const uint8_t*>(s) + n);
@@ -35,7 +36,7 @@ public:
         std::vector<uint8_t> payload;
     };
 
-    FakeGap() : events(0), up(false), canOpen(true), takes(true), opens(0) {}
+    FakeGap() : events(0), up(false), canOpen(true), takes(true), refuseSubscribe(false), opens(0) {}
 
     virtual bool open(Events* e) {
         ++opens;
@@ -52,7 +53,7 @@ public:
         return true;
     }
     virtual bool subscribe(uint32_t informId) {
-        if (!up) return false;
+        if (!up || refuseSubscribe) return false;
         informs.push_back(informId);
         return true;
     }
@@ -90,7 +91,7 @@ public:
     }
 
     Events* events;
-    bool up, canOpen, takes;
+    bool up, canOpen, takes, refuseSubscribe;
     int opens;
     std::vector<Sent> sent;
     std::vector<uint32_t> informs;
@@ -246,8 +247,24 @@ int main() {
     CHECK(readError(reinterpret_cast<const uint8_t*>("\x00\x00\x00\x00"), 4) == 0);
     CHECK(readError(reinterpret_cast<const uint8_t*>("\x05\x00"), 2) == kNoError);
     CHECK(readError(NULL, 0) == kNoError);
-    CHECK(std::string(gapErrorName(0)) == "OK" && std::string(gapErrorName(4)) == "REFUSED");
-    CHECK(std::string(gapErrorName(99)) == "FAILED");
+    // The stack's own table, in its order.
+    {
+        const char* const names[] = {"OK", "TIMEOUT", "BUSY", "STATE", "LINKKEY", "DEFAULT", "REFUSED", "RFCOMM",
+                                     "SECURITY", "MISSING_KEY", "INVALID_PARAM", "ALREADY_CONNECTED", "HW_NOT_READY",
+                                     "NO_SLC", "PAGE_TIMEOUT", "DEVICE_NOT_IN_LIST"};
+        for (uint32_t e = 0; e < 16; ++e) CHECK_IN(gapErrorName(e), std::string(gapErrorName(e)) == names[e]);
+        CHECK(std::string(gapErrorName(16)) == "UNKNOWN" && std::string(gapErrorName(kNoError)) == "UNKNOWN");
+        // What a code means depends on the request it answers.
+        CHECK(registerErrorText(0) == "0 OK");
+        CHECK(registerErrorText(5) == "5 DEFAULT (the name or the UUID is registered already, or the car's Bluetooth "
+                                      "is switched off)");
+        CHECK(deregisterErrorText(10) == "10 INVALID_PARAM (no such name is registered)");
+        CHECK(deregisterErrorText(5) == "5 DEFAULT (a link on that service is up)");
+        CHECK(registerErrorText(10) == "10 INVALID_PARAM" && deregisterErrorText(14) == "14 PAGE_TIMEOUT");
+        CHECK(registerErrorText(1) == "1 TIMEOUT (the stack was busy for too long and dropped the request)");
+        CHECK(deregisterErrorText(2) == "2 BUSY (the stack was busy with another request)");
+        CHECK(registerErrorText(kNoError) == "no error code" && deregisterErrorText(99) == "99 UNKNOWN");
+    }
 
     // 5. Reader: truncated and oversized strings fail without reading past the end.
     {
@@ -259,6 +276,42 @@ int main() {
         CHECK(r2.str().empty() && !r2.ok());
         Reader r3(NULL, 12);
         CHECK(r3.u32() == 0 && !r3.ok());
+    }
+
+    // 5b. What the car sends: no padding after a message's last string, and padding that is not zeros. Made-up
+    //     payloads; only the layout is the car's.
+    {
+        // "Echo" (length 5) as the last string, its three bytes of padding left out.
+        std::vector<uint8_t> t = bytes("\x05\x00\x00\x00" "Echo\x00", 9);
+        Reader r(&t[0], (uint32_t)t.size());
+        CHECK(r.str() == "Echo" && r.ok() && r.left() == 0);
+        // Only part of the padding there.
+        t = bytes("\x05\x00\x00\x00" "Echo\x00\x7e", 10);
+        Reader r1(&t[0], (uint32_t)t.size());
+        CHECK(r1.str() == "Echo" && r1.ok() && r1.left() == 0);
+        // Padding with leftovers in it, then a value: the value is read where it is, the padding never looked at.
+        t = bytes("\x05\x00\x00\x00" "Echo\x00\xa5\x5a\xff" "\x0e\x00\x00\x00", 16);
+        Reader r2(&t[0], (uint32_t)t.size());
+        CHECK(r2.str() == "Echo" && r2.u32() == 14 && r2.ok() && r2.left() == 0);
+        // A string followed by leftover bytes rather than zeros, past its NUL.
+        t = bytes("\x03\x00\x00\x00" "ab\x00\x41" "\x02\x00\x00\x00" "z\x00", 14);
+        Reader r3(&t[0], (uint32_t)t.size());
+        CHECK(r3.str() == "ab" && r3.str() == "z" && r3.ok() && r3.left() == 0);
+        // A string that is not the last one, cut short of its padding: what follows it is missing, and that fails.
+        t = bytes("\x05\x00\x00\x00" "Echo\x00", 9);
+        Reader r4(&t[0], (uint32_t)t.size());
+        CHECK(r4.str() == "Echo" && r4.ok() && r4.u32() == 0 && !r4.ok());
+        // The string's own bytes must all be there.
+        t = bytes("\x05\x00\x00\x00" "Ech", 7);
+        Reader r5(&t[0], (uint32_t)t.size());
+        CHECK(r5.str().empty() && !r5.ok());
+        // A phone's request whose service, the last string, comes without its padding and the one before with junk
+        // in it.
+        std::vector<uint8_t> q = bytes("\x0b\x00\x00\x00" "Test Phone\x00\xee"
+                                       "\x0d\x00\x00\x00" "AABBCCDDEEFF\x00\x01\x02\x03"
+                                       "\x05\x00\x00\x00" "Echo\x00", 45);
+        ServiceRequest s = parseServiceRequest(kInfServiceRequest, &q[0], (uint32_t)q.size());
+        CHECK(s.ok && s.name == kPhoneName && s.address == kPhoneAddress && s.service == "Echo");
     }
 
     // 6. ServiceRequest informs: name + address + service, or address + service.
@@ -295,8 +348,12 @@ int main() {
         CHECK(spp.start() && gap.opens == 1);
         CHECK(spp.state() == SppService::kWaiting && gap.sent.empty() && gap.informs.empty());
         gap.attach();
-        CHECK(gap.informs.size() == 3 && gap.informs[0] == kInfServiceRequest &&
+        CHECK(gap.informs.size() == kInforms && gap.informs[0] == kInfServiceRequest &&
               gap.informs[1] == kInfServiceRequestComplete && gap.informs[2] == kInfServiceRequestError);
+        CHECK(gap.informs[3] == kInfDeviceListChanged && gap.informs[4] == kInfServiceDisconnected &&
+              gap.informs[5] == kInfServiceListChanged);
+        for (size_t i = 0; i < gap.informs.size(); ++i) CHECK(!isResponseId(gap.informs[i]));
+        CHECK(!seen.said("could not be asked for inform"));
         isRegister(gap.took(kReqSppUuidRegister), 1);
         CHECK(spp.state() == SppService::kRegSent);
         gap.reply(kRspSppUuidRegister, 0);
@@ -332,6 +389,26 @@ int main() {
         CHECK(spp.state() == SppService::kRetrySent);
         gap.reply(kRspSppUuidRegister, 0);
         CHECK(spp.state() == SppService::kRegistered && gap.sent.empty());
+    }
+    {   // nothing was filed under the name, and the stack still says DEFAULT: the UUID is taken by another name, or
+        // the car's Bluetooth is off
+        FakeGap gap;
+        Seen seen;
+        SppService spp(&gap, &seen);
+        spp.configure(kName, kUuid, 0);
+        CHECK(spp.start());
+        gap.attach();
+        gap.took(kReqSppUuidRegister);
+        gap.reply(kRspSppUuidRegister, 5);
+        gap.took(kReqSppUuidDeregister);
+        gap.reply(kRspSppUuidDeregister, 10);
+        CHECK(seen.said("SppUuidDeregister reply (id 0x80000044): 10 INVALID_PARAM (no such name is registered)"));
+        gap.took(kReqSppUuidRegister);
+        gap.reply(kRspSppUuidRegister, 5);
+        CHECK(spp.state() == SppService::kFailed);
+        CHECK(seen.said("nothing was registered under the name 'Test_Service', so its UUID "
+                        "0123ABCD-89EF-4A5B-8C7D-0123456789AB is registered under another name, or the car's Bluetooth "
+                        "is switched off"));
     }
     {   // refused the second time too: failed, and nothing more is sent
         FakeGap gap;
@@ -405,7 +482,7 @@ int main() {
         r.gap.detach();
         CHECK(r.spp.state() == SppService::kWaiting && r.seen.said("the registration is gone with it"));
         r.gap.attach();
-        CHECK(r.gap.informs.size() == 6);                 // the informs are asked for again
+        CHECK(r.gap.informs.size() == 2 * kInforms);                 // the informs are asked for again
         isRegister(r.gap.took(kReqSppUuidRegister), 0);
         r.gap.reply(kRspSppUuidRegister, 0);
         CHECK(r.seen.passed() == path(SppService::kWaiting, SppService::kRegSent, SppService::kRegistered));
@@ -438,14 +515,24 @@ int main() {
         CHECK(r.seen.passed() == path(SppService::kRemoveSent, SppService::kRemoved));
         r.gap.detach();                                   // a server that comes back is not given the service again
         r.gap.attach();
-        CHECK(r.gap.sent.empty() && r.gap.informs.size() == 3 && r.spp.state() == SppService::kRemoved);
+        CHECK(r.gap.sent.empty() && r.gap.informs.size() == kInforms && r.spp.state() == SppService::kRemoved);
     }
     {   // the server says no
         Registered r;
         CHECK(r.spp.remove("leaving"));
         r.gap.took(kReqSppUuidDeregister);
-        r.gap.reply(kRspSppUuidDeregister, 4);
-        CHECK(r.spp.state() == SppService::kRemoveFailed);
+        r.gap.reply(kRspSppUuidDeregister, 5);
+        CHECK(r.spp.state() == SppService::kRemoveFailed && r.spp.removeError() == 5);
+        CHECK(r.seen.said("5 DEFAULT (a link on that service is up)"));
+    }
+    {   // the stack had dropped the registration already (Bluetooth off and on): nothing is filed under the name,
+        // which is as good as removed
+        Registered r;
+        CHECK(r.spp.removeError() == kNoError);
+        CHECK(r.spp.remove("leaving"));
+        r.gap.took(kReqSppUuidDeregister);
+        r.gap.reply(kRspSppUuidDeregister, 10);
+        CHECK(r.spp.state() == SppService::kRemoved && r.spp.removeError() == 10);
     }
     {   // or rejects the request
         Registered r;
@@ -492,7 +579,7 @@ int main() {
         r.seen.passed();
         r.spp.again();
         isRegister(r.gap.took(kReqSppUuidRegister), 0);
-        CHECK(r.seen.passed() == path(SppService::kWaiting, SppService::kRegSent) && r.gap.informs.size() == 3);
+        CHECK(r.seen.passed() == path(SppService::kWaiting, SppService::kRegSent) && r.gap.informs.size() == kInforms);
         r.gap.reply(kRspSppUuidRegister, 0);
         CHECK(r.spp.state() == SppService::kRegistered && r.gap.opens == 1);
     }
@@ -504,7 +591,7 @@ int main() {
         CHECK(r.gap.sent.empty() && r.spp.state() == SppService::kWaiting);
         r.gap.attach();
         isRegister(r.gap.took(kReqSppUuidRegister), 0);
-        CHECK(r.spp.state() == SppService::kRegSent && r.gap.informs.size() == 6);
+        CHECK(r.spp.state() == SppService::kRegSent && r.gap.informs.size() == 2 * kInforms);
     }
     {   // a server that came back while the service was away was not asked for the phones' requests: now it is
         Registered r;
@@ -513,10 +600,10 @@ int main() {
         r.gap.reply(kRspSppUuidDeregister, 0);
         r.gap.detach();
         r.gap.attach();
-        CHECK(r.gap.sent.empty() && r.gap.informs.size() == 3);
+        CHECK(r.gap.sent.empty() && r.gap.informs.size() == kInforms);
         r.spp.again();
         isRegister(r.gap.took(kReqSppUuidRegister), 0);
-        CHECK(r.gap.informs.size() == 6);
+        CHECK(r.gap.informs.size() == 2 * kInforms);
     }
     {   // and after a registration that the server did not take
         FakeGap gap;
@@ -535,7 +622,7 @@ int main() {
         spp.again();
         isRegister(gap.took(kReqSppUuidRegister), 0);
         gap.reply(kRspSppUuidRegister, 0);
-        CHECK(spp.state() == SppService::kRegistered && gap.opens == 1 && gap.informs.size() == 3);
+        CHECK(spp.state() == SppService::kRegistered && gap.opens == 1 && gap.informs.size() == kInforms);
     }
     {   // a removal the client does not take
         Registered r;
@@ -580,8 +667,9 @@ int main() {
         r.gap.reply(kRspSppUuidDeregister, 0);
         CHECK(r.seen.removed() == "OtherRadio=0" && r.seen.said("SppUuidDeregister reply for 'OtherRadio': 0 OK"));
         CHECK(deregisters(r.gap.took(kReqSppUuidDeregister)) == "Second");
-        r.gap.reply(kRspSppUuidDeregister, 5);                                    // whatever the server makes of a name
-        CHECK(r.seen.removed() == "Second=5");
+        r.gap.reply(kRspSppUuidDeregister, 10);                                   // whatever the server makes of a name
+        CHECK(r.seen.removed() == "Second=10");
+        CHECK(r.seen.said("SppUuidDeregister reply for 'Second': 10 INVALID_PARAM (no such name is registered)"));
         CHECK(deregisters(r.gap.took(kReqSppUuidDeregister)) == "Third");
         r.gap.reject(kTypeRejectedA, kReqSppUuidDeregister);
         CHECK(r.seen.removed() == "Third=-1" && r.seen.said("rejected the removal of 'Third'") && r.gap.sent.empty());
@@ -744,6 +832,227 @@ int main() {
         CHECK(!r.spp.disconnectPhone("", "", "") && r.seen.said("not sent"));
     }
 
+    // 17. The ids of replies, which are never asked for as informs.
+    CHECK(isResponseId(kRspSppUuidRegister) && isResponseId(kRspSppUuidDeregister) && isResponseId(kRspVersionGet));
+    CHECK(isResponseId(kRspDeviceListGet) && isResponseId(kRspServiceConnect) && isResponseId(kRspServiceDisconnect));
+    CHECK(isResponseId(0x80000016u) && isResponseId(0x8000005eu));
+    CHECK(!isResponseId(0x80000015u) && !isResponseId(0x8000005fu) && !isResponseId(kInfServiceRequest));
+    CHECK(!isResponseId(kInfDeviceListChanged) && !isResponseId(kInfServiceDisconnected) &&
+          !isResponseId(kInfServiceListChanged) && !isResponseId(0x8000000fu) && !isResponseId(0x2e));
+
+    // 18. The other messages, built and read. Made-up payloads: only the layouts are the server's. Where the server
+    //     pads, it pads with leftovers here, and it leaves the padding out after a message's last string.
+    {
+        std::vector<uint8_t> c = buildServiceConnect("BtCtrl", "testinst", "00:11:22:33:44:55", "Test_Service");
+        CHECK(c == bytes("\x07\x00\x00\x00" "BtCtrl\x00\x00"
+                         "\x09\x00\x00\x00" "testinst\x00\x00\x00\x00"
+                         "\x12\x00\x00\x00" "00:11:22:33:44:55\x00\x00\x00"
+                         "\x0d\x00\x00\x00" "Test_Service\x00\x00\x00\x00", 72));
+
+        // ServiceConnect's reply: address, service, error.
+        std::vector<uint8_t> r = bytes("\x12\x00\x00\x00" "00:11:22:33:44:55\x00\xa1\xb2"
+                                       "\x0d\x00\x00\x00" "Test_Service\x00\xc3\xd4\xe5"
+                                       "\x0e\x00\x00\x00", 48);
+        ServiceConnectReply cr = parseServiceConnectReply(&r[0], (uint32_t)r.size());
+        CHECK(cr.ok && cr.address == "00:11:22:33:44:55" && cr.service == "Test_Service" && cr.error == 14);
+        CHECK(!parseServiceConnectReply(&r[0], 44).ok);
+
+        // ServiceDisconnect's reply: address, service, error, reason.
+        r = bytes("\x0d\x00\x00\x00" "AABBCCDDEEFF\x00\x99\x99\x99"
+                  "\x04\x00\x00\x00" "SPP\x00"
+                  "\x00\x00\x00\x00" "\x01\x00\x00\x00", 36);
+        ServiceDisconnectReply dr = parseServiceDisconnectReply(&r[0], (uint32_t)r.size());
+        CHECK(dr.ok && dr.address == kPhoneAddress && dr.service == "SPP" && dr.error == 0 && dr.reason == 1);
+        CHECK(!parseServiceDisconnectReply(&r[0], 32).ok);
+
+        // The device lists of two phones: names (dropped), addresses, class, security, connection.
+        std::vector<uint8_t> lists;
+        putU32(lists, 2);
+        putString(lists, "Test Phone A");
+        putString(lists, "Test Phone B");
+        putU32(lists, 2);
+        putString(lists, "00:11:22:33:44:55");
+        putString(lists, "66:77:88:99:AA:BB");
+        putU32(lists, 2); putU32(lists, 0x5a020c); putU32(lists, 0x5a020c);
+        putU32(lists, 2); putU32(lists, 7); putU32(lists, 9);
+        putU32(lists, 2); putU32(lists, kConnConnected); putU32(lists, kConnNotInRange);
+        std::vector<uint8_t> reply;
+        putU32(reply, 0);
+        reply.insert(reply.end(), lists.begin(), lists.end());
+        DeviceList l = parseDeviceList(kRspDeviceListGet, &reply[0], (uint32_t)reply.size());
+        CHECK(l.ok && l.error == 0 && l.devices.size() == 2);
+        CHECK(l.devices[0].address == "00:11:22:33:44:55" && l.devices[0].security == 7 &&
+              l.devices[0].connection == kConnConnected && l.devices[0].deviceClass == 0x5a020c);
+        CHECK(l.devices[1].address == "66:77:88:99:AA:BB" && l.devices[1].security == 9 &&
+              l.devices[1].connection == kConnNotInRange);
+        CHECK(!parseDeviceList(kRspDeviceListGet, &reply[0], (uint32_t)reply.size() - 1).ok);
+        std::vector<uint8_t> changed = lists;
+        putU32(changed, 3);
+        l = parseDeviceList(kInfDeviceListChanged, &changed[0], (uint32_t)changed.size());
+        CHECK(l.ok && l.devices.size() == 2 && l.after == 3);
+        CHECK(!parseDeviceList(kInfDeviceListChanged, &lists[0], (uint32_t)lists.size()).ok);   // its last value missing
+        // An error with nothing after it; lists whose counts differ.
+        std::vector<uint8_t> e;
+        putU32(e, 3);
+        l = parseDeviceList(kRspDeviceListGet, &e[0], (uint32_t)e.size());
+        CHECK(l.ok && l.error == 3 && l.devices.empty());
+        std::vector<uint8_t> odd;
+        putU32(odd, 0);
+        putU32(odd, 1); putString(odd, "Test Phone A");
+        putU32(odd, 1); putString(odd, "00:11:22:33:44:55");
+        putU32(odd, 1); putU32(odd, 0);
+        putU32(odd, 0);
+        putU32(odd, 1); putU32(odd, 2);
+        CHECK(!parseDeviceList(kRspDeviceListGet, &odd[0], (uint32_t)odd.size()).ok);
+        std::vector<uint8_t> many;
+        putU32(many, 0);
+        putU32(many, 100000);
+        CHECK(!parseDeviceList(kRspDeviceListGet, &many[0], (uint32_t)many.size()).ok);
+        CHECK(std::string(connectionName(3)) == "service connected" && std::string(connectionName(7)) == "unknown");
+        CHECK(addressKey("00:11:22:aa:BB:cc") == "001122AABBCC" && addressKey("001122AABBCC") == "001122AABBCC");
+
+        // ServiceDisconnected: device, instance, address, service, reason.
+        std::vector<uint8_t> d;
+        putString(d, "BtCtrl");
+        putString(d, "testinst");
+        putString(d, "00:11:22:33:44:55");
+        putString(d, "Test_Service");
+        putU32(d, 1);
+        ServiceDisconnected sd = parseServiceDisconnected(&d[0], (uint32_t)d.size());
+        CHECK(sd.ok && sd.device == "BtCtrl" && sd.instance == "testinst" && sd.service == "Test_Service" &&
+              sd.reason == 1);
+        CHECK(!parseServiceDisconnected(&d[0], (uint32_t)d.size() - 4).ok);
+
+        // ServiceListChanged: address, services[], states[], profiles[], versions[], reason.
+        std::vector<uint8_t> s;
+        putString(s, "00:11:22:33:44:55");
+        putU32(s, 2); putString(s, "SPP"); putString(s, "HFP");
+        putU32(s, 2); putU32(s, 1); putU32(s, 0);
+        putU32(s, 1); putString(s, "Profile");
+        putU32(s, 1); putU32(s, 0x0102);
+        putU32(s, 4);
+        ServiceListChanged sl = parseServiceListChanged(&s[0], (uint32_t)s.size());
+        CHECK(sl.ok && sl.services.size() == 2 && sl.services[1] == "HFP" && sl.states[0] == 1 &&
+              sl.profiles[0] == "Profile" && sl.versions[0] == 0x0102 && sl.reason == 4);
+        CHECK(!parseServiceListChanged(&s[0], (uint32_t)s.size() - 4).ok);
+
+        // VersionGet's reply: error, five strings, the last with no padding.
+        std::vector<uint8_t> v;
+        putU32(v, 0);
+        putString(v, "TEST_STACK_1");
+        putString(v, "Vendor");
+        putString(v, "1.2.3");
+        putString(v, "four");
+        putString(v, "five5");
+        v.resize(v.size() - 2);
+        StackVersion sv = parseStackVersion(&v[0], (uint32_t)v.size());
+        CHECK(sv.ok && sv.error == 0 && sv.parts.size() == 5 && sv.parts[0] == "TEST_STACK_1" && sv.parts[4] == "five5");
+        CHECK(!parseStackVersion(&v[0], 20).ok);
+        CHECK(shownText(std::string("ab\x01" "cd", 5), 4) == "ab?c");
+    }
+
+    // 19. The new informs and replies on a registration: state kept, sparing lines, never an address or a name.
+    {
+        Registered r;
+        std::vector<uint8_t> lists;
+        putU32(lists, 1); putString(lists, kPhoneName);
+        putU32(lists, 1); putString(lists, "00:11:22:33:44:55");
+        putU32(lists, 1); putU32(lists, 0);
+        putU32(lists, 1); putU32(lists, 8);
+        putU32(lists, 1); putU32(lists, kConnServiceConnected);
+        putU32(lists, 0);
+        CHECK(!r.spp.heard().devicesKnown);
+        r.gap.events->gapMessage(0x400, kInfDeviceListChanged, &lists[0], (uint32_t)lists.size());
+        SppService::Heard h = r.spp.heard();
+        CHECK(h.devicesKnown && h.devices.size() == 1 && h.devices[0].security == 8 && h.deviceListChanges == 1);
+        CHECK(h.devices[0].connection == kConnServiceConnected);
+        // A device list asked for: DeviceListGet, no payload.
+        CHECK(r.spp.askDeviceList() && r.gap.took(kReqDeviceListGet).empty());
+        std::vector<uint8_t> reply;
+        putU32(reply, 0);
+        putU32(reply, 0); putU32(reply, 0); putU32(reply, 0); putU32(reply, 0); putU32(reply, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspDeviceListGet, &reply[0], (uint32_t)reply.size());
+        h = r.spp.heard();
+        CHECK(h.devicesKnown && h.devices.empty() && h.deviceListChanges == 1);
+        // A link ended, logged without the address.
+        std::vector<uint8_t> d;
+        putString(d, "BtCtrl");
+        putString(d, "ExtBox1");
+        putString(d, kPhoneAddress);
+        putString(d, "SPP");
+        putU32(d, 1);
+        for (int i = 0; i < 10; ++i) r.gap.events->gapMessage(0x400, kInfServiceDisconnected, &d[0], (uint32_t)d.size());
+        CHECK(r.seen.said("the Bluetooth stack says a link ended: device 'BtCtrl', instance 'ExtBox1', service 'SPP', "
+                          "ended by the phone"));
+        CHECK(r.seen.said("Further ends of links are counted and not logged") && r.spp.heard().linksEnded == 10);
+        size_t ends = 0;
+        for (size_t i = 0; i < r.seen.lines.size(); ++i) ends += r.seen.lines[i].find("a link ended") != std::string::npos;
+        CHECK(ends == 8);
+        // A service list changed: counted only.
+        std::vector<uint8_t> s;
+        putString(s, kPhoneAddress);
+        putU32(s, 0); putU32(s, 0); putU32(s, 0); putU32(s, 0);
+        putU32(s, 0);
+        size_t before = r.seen.lines.size();
+        r.gap.events->gapMessage(0x400, kInfServiceListChanged, &s[0], (uint32_t)s.size());
+        CHECK(r.spp.heard().serviceListChanges == 1 && r.seen.lines.size() == before);
+        // One that cannot be read is said once.
+        r.gap.events->gapMessage(0x400, kInfServiceListChanged, &s[0], 6);
+        r.gap.events->gapMessage(0x400, kInfServiceListChanged, &s[0], 6);
+        CHECK(r.seen.lines.size() == before + 1 && r.seen.said("ServiceListChanged from the Bluetooth server could not "
+                                                               "be read (id 0x80000008, 6 bytes)"));
+        // VersionGet: no payload; its reply is logged when it was asked for, and not when another client's.
+        CHECK(r.spp.askVersion() && r.gap.took(kReqVersionGet).empty());
+        std::vector<uint8_t> v;
+        putU32(v, 0);
+        putString(v, "TEST_STACK_1");
+        putString(v, "Vendor");
+        putString(v, "1.2.3");
+        putString(v, "four");
+        putString(v, "five");
+        r.gap.events->gapMessage(kTypeResponse, kRspVersionGet, &v[0], (uint32_t)v.size());
+        CHECK(r.seen.said("the Bluetooth stack's version: 'TEST_STACK_1', 'Vendor', '1.2.3', 'four', 'five'"));
+        before = r.seen.lines.size();
+        r.gap.events->gapMessage(kTypeResponse, kRspVersionGet, &v[0], (uint32_t)v.size());
+        CHECK(r.seen.lines.size() == before);
+        // ServiceDisconnect's reply: known now, so logged with its code and reason, and not as unknown.
+        r.gap.inform(kInfServiceRequest, "SPP");
+        CHECK(r.spp.disconnectPhone("", "", ""));
+        r.gap.took(kReqServiceDisconnect);
+        std::vector<uint8_t> dr;
+        putString(dr, kPhoneAddress);
+        putString(dr, "SPP");
+        putU32(dr, 0);
+        putU32(dr, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &dr[0], (uint32_t)dr.size());
+        CHECK(r.seen.said("ServiceDisconnect reply: 0 OK, reason 0") && !r.seen.said("does not know"));
+        // A ServiceConnect reply is another client's: nothing in this agent asks for one.
+        before = r.seen.lines.size();
+        std::vector<uint8_t> cr;
+        putString(cr, kPhoneAddress);
+        putString(cr, "Test_Service");
+        putU32(cr, 14);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &cr[0], (uint32_t)cr.size());
+        CHECK(r.seen.lines.size() == before);
+        CHECK(!r.seen.said(kPhoneName) && !r.seen.said(kPhoneAddress) && !r.seen.said("00:11:22"));
+        CHECK(r.spp.state() == SppService::kRegistered && r.gap.sent.empty());
+        // The server goes: what it said of the phones goes with it.
+        r.gap.detach();
+        CHECK(!r.spp.heard().devicesKnown && !r.spp.askVersion() && !r.spp.askDeviceList());
+    }
+    {   // a client that cannot send: the subscription's failure is said
+        FakeGap gap;
+        Seen seen;
+        SppService spp(&gap, &seen);
+        spp.configure(kName, kUuid, 0);
+        CHECK(spp.start());
+        gap.refuseSubscribe = true;
+        gap.attach();
+        CHECK(seen.said("the Bluetooth server could not be asked for inform 0x80000009: the request could not be sent"));
+        gap.takes = false;
+        CHECK(!spp.askVersion() && seen.said("DSI request 0x3 not sent: the send to the Bluetooth server failed"));
+    }
+
     // 16. The real client is the head unit's: anywhere else it does not open, and nothing can be sent through it.
 #ifndef __QNXNTO__
     {
@@ -752,6 +1061,7 @@ int main() {
         real.configure(36, 2, false);
         CHECK(real.describe() == "BSS_GAP.SGBluetoothGap 36.2" && !real.attached());
         CHECK(!real.request(kReqSppUuidDeregister, buildDeregister(kName)) && !real.subscribe(kInfServiceRequest));
+        CHECK(!real.subscribe(kRspSppUuidRegister));
         Seen seen;
         SppService spp(&real, &seen);
         spp.configure(kName, kUuid, 0);

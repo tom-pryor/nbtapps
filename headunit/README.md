@@ -545,7 +545,10 @@ maker's phone apps do not work over Bluetooth. If it cannot be set up, the agent
 with the local socket. If the car's Bluetooth service does not take the registration, or the service is not
 registered for 20 seconds (an agent that starts with the head unit may be there before the car's Bluetooth
 service is), the agent takes the gate away again, and sets both up anew 30 seconds later, and so on until the
-service is registered. Its lines in the log start with `bluetooth:`. The phone's Bluetooth pairing with
+service is registered. Its lines in the log start with `bluetooth:`. Besides the phones' requests for a link, the
+agent asks the car's Bluetooth service for what it says of the car's device list, of links that end and of a
+phone's services; it keeps that, and logs the first eight links that end, never with a phone's name or address.
+The phone's Bluetooth pairing with
 the car is not enough on this link: until the phone has been paired with the agent and has proved it with `auth`,
 the agent answers `hello`, `ping`, `auth` and `pairing.issue`, and refuses everything else. A link that does not open with the protocol's magic bytes is let go (see "Other programs' links"
 below), and one that opens with what an earlier link left behind is looked at past it (see "What the node does"). One that does, and then does not say `hello` within 30 seconds or goes silent for as long, is ended. With
@@ -611,7 +614,8 @@ asked to. The agent therefore:
   300 ms after the answer, so that a phone that asked on that very link has its answer first. With none open, the
   next serial link whose node opens within 60 seconds is ended at the open, with no decide step, and its node read
   until the link ends; that is for a phone whose links come up and carry nothing, which taps Connect once more.
-  The log says how long after the request the link's node went, or that the link was still up 3 seconds after it.
+  The log says what the car answered (its error code and a reason), how long after the request the link's node
+  went, or that the link was still up 3 seconds after it.
   The phone's address goes into the request and never into the log. Which values the car wants in the request is
   not settled; `nbtctl call serial.reset '{"device":"...","instance":"...","service":"..."}'` tries others without
   a new build:

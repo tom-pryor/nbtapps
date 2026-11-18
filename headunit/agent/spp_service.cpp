@@ -47,6 +47,8 @@ bool DsiGapClient::request(uint32_t id, const std::vector<uint8_t>& payload) {
 }
 
 bool DsiGapClient::subscribe(uint32_t informId) {
+    // A reply's id would bring every other client's replies of that id as well.
+    if (isResponseId(informId)) return false;
     pthread_mutex_lock(&tx_);
     bool ok = dsi_.setNotification(informId);
     pthread_mutex_unlock(&tx_);
@@ -72,7 +74,8 @@ void DsiGapClient::onData(DsiClient*, uint32_t type, uint32_t id, uint32_t, cons
 
 SppService::SppService(GapClient* gap, Events* events)
     : gap_(gap), events_(events), type_(0), state_(kIdle), mode_(kModeOff), subscribed_(false), otherSentAt_(0),
-      otherReplyS_(kOtherRemovalReplyS), unknownLeft_(0) {
+      otherReplyS_(kOtherRemovalReplyS), unknownLeft_(0), removeError_(kNoError), clearError_(kNoError),
+      disconnectOut_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0) {
     pthread_mutex_init(&mu_, NULL);
 }
 
@@ -98,6 +101,13 @@ SppService::State SppService::state() {
     State s = state_;
     pthread_mutex_unlock(&mu_);
     return s;
+}
+
+uint32_t SppService::removeError() {
+    pthread_mutex_lock(&mu_);
+    uint32_t e = removeError_;
+    pthread_mutex_unlock(&mu_);
+    return e;
 }
 
 void SppService::set(State s) {
@@ -135,6 +145,9 @@ bool SppService::startRemoval() {
 
 bool SppService::remove(const char* why) {
     setMode(kModeOff);
+    pthread_mutex_lock(&mu_);
+    removeError_ = kNoError;
+    pthread_mutex_unlock(&mu_);
     if (!gap_->attached()) return false;
     set(kRemoveSent);   // before the request goes out: its reply comes on another thread
     if (sendDeregister(why)) return true;
@@ -149,7 +162,10 @@ void SppService::again() {
     // The server is there. If it has attached since the two lines above, gapAttached() has registered already.
     pthread_mutex_lock(&mu_);
     bool waiting = state_ == kWaiting;
-    if (waiting) state_ = kRegSent;
+    if (waiting) {
+        state_ = kRegSent;
+        clearError_ = kNoError;
+    }
     pthread_mutex_unlock(&mu_);
     if (!waiting) return;
     events_->sppState(kRegSent);
@@ -157,16 +173,55 @@ void SppService::again() {
     sendRegister();
 }
 
-// The phones' requests for a link: asked for once for each time the server attaches.
+// The informs: asked for once for each time the server attaches. The phones' requests for a link, and what is
+// kept of the car's phones and their links.
 void SppService::subscribe() {
     pthread_mutex_lock(&mu_);
     bool had = subscribed_;
     subscribed_ = true;
     pthread_mutex_unlock(&mu_);
     if (had) return;
-    gap_->subscribe(kInfServiceRequest);
-    gap_->subscribe(kInfServiceRequestComplete);
-    gap_->subscribe(kInfServiceRequestError);
+    subscribeTo(kInfServiceRequest);
+    subscribeTo(kInfServiceRequestComplete);
+    subscribeTo(kInfServiceRequestError);
+    subscribeTo(kInfDeviceListChanged);
+    subscribeTo(kInfServiceDisconnected);
+    subscribeTo(kInfServiceListChanged);
+}
+
+void SppService::subscribeTo(uint32_t informId) {
+    // Never a reply's id: see isResponseId().
+    if (isResponseId(informId)) {
+        say("inform 0x%x is not asked for: it is the id of a reply", informId);
+        return;
+    }
+    if (gap_->subscribe(informId)) return;
+    say("the Bluetooth server could not be asked for inform 0x%x: %s", informId,
+        gap_->attached() ? "the request could not be sent" : "it is not attached");
+}
+
+bool SppService::askVersion() {
+    if (!gap_->attached()) return false;
+    pthread_mutex_lock(&mu_);
+    versionAsked_ = true;
+    pthread_mutex_unlock(&mu_);
+    if (send(kReqVersionGet, std::vector<uint8_t>())) return true;
+    pthread_mutex_lock(&mu_);
+    versionAsked_ = false;
+    pthread_mutex_unlock(&mu_);
+    return false;
+}
+
+bool SppService::askDeviceList() {
+    if (!gap_->attached()) return false;
+    return send(kReqDeviceListGet, std::vector<uint8_t>());
+}
+
+SppService::Heard SppService::heard() {
+    pthread_mutex_lock(&mu_);
+    Heard h = heard_;
+    pthread_mutex_unlock(&mu_);
+    return h;
 }
 
 bool SppService::removeOther(const std::string& name) {
@@ -233,14 +288,131 @@ bool SppService::disconnectPhone(const std::string& device, const std::string& i
     std::string i = instance.empty() ? std::string(kDisconnectInstance) : instance;
     pthread_mutex_lock(&mu_);
     unknownLeft_ = kUnknownLogged;
+    disconnectOut_ = true;
     pthread_mutex_unlock(&mu_);
     say("ServiceDisconnect device '%s', instance '%s', service '%s', for the phone of the last request for a link",
         d.c_str(), i.c_str(), named.c_str());
     if (send(kReqServiceDisconnect, buildServiceDisconnect(d, i, address, named))) return true;
     pthread_mutex_lock(&mu_);
     unknownLeft_ = 0;
+    disconnectOut_ = false;
     pthread_mutex_unlock(&mu_);
     return false;
+}
+
+namespace {
+// ServiceDisconnected informs are logged one by one up to this many; after that they are only counted.
+const unsigned kEndsLogged = 8;
+// unreadSaid_: which kind of message has been logged once as one that could not be read.
+enum { kUnreadDeviceList = 1, kUnreadEnded = 2, kUnreadServiceList = 4, kUnreadVersion = 8, kUnreadDisconnect = 16 };
+}  // namespace
+
+// The replies and informs that are kept as state, or only logged: true if `id` is one of them. On the client's
+// thread; nothing here sends or waits.
+bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len) {
+    bool rejected = type == kTypeRejectedA || type == kTypeRejectedB;
+    if (rejected) {
+        if (id == kReqVersionGet) {
+            pthread_mutex_lock(&mu_);
+            versionAsked_ = false;
+            pthread_mutex_unlock(&mu_);
+            say("the Bluetooth server rejected VersionGet (type 0x%x)", type);
+            return true;
+        }
+        if (id == kReqDeviceListGet) {
+            say("the Bluetooth server rejected DeviceListGet (type 0x%x)", type);
+            return true;
+        }
+        return false;
+    }
+    unsigned unread = 0;
+    const char* what = 0;
+    if (id == kInfDeviceListChanged || id == kRspDeviceListGet) {
+        DeviceList l = parseDeviceList(id, payload, len);
+        pthread_mutex_lock(&mu_);
+        if (id == kInfDeviceListChanged) ++heard_.deviceListChanges;
+        if (l.ok && l.error == 0) {
+            heard_.devices = l.devices;
+            heard_.devicesKnown = true;
+        }
+        pthread_mutex_unlock(&mu_);
+        if (!l.ok) {
+            unread = kUnreadDeviceList;
+            what = "a device list";
+        } else if (l.error != 0) {
+            say("DeviceListGet reply: %s", gapErrorText(l.error, "").c_str());
+        }
+    } else if (id == kInfServiceDisconnected) {
+        ServiceDisconnected d = parseServiceDisconnected(payload, len);
+        pthread_mutex_lock(&mu_);
+        ++heard_.linksEnded;
+        unsigned n = d.ok ? ++endsLogged_ : 0;
+        pthread_mutex_unlock(&mu_);
+        if (!d.ok) {
+            unread = kUnreadEnded;
+            what = "ServiceDisconnected";
+        } else if (n <= kEndsLogged) {
+            char by[32];
+            snprintf(by, sizeof(by), "reason %u", d.reason);
+            say("the Bluetooth stack says a link ended: device '%s', instance '%s', service '%s', %s%s",
+                shownText(d.device, 32).c_str(), shownText(d.instance, 32).c_str(), shownText(d.service, 40).c_str(),
+                d.reason == 1 ? "ended by the phone" : (d.reason == 0 ? "ended by the car" : by),
+                n == kEndsLogged ? ". Further ends of links are counted and not logged" : "");
+        }
+    } else if (id == kInfServiceListChanged) {
+        ServiceListChanged c = parseServiceListChanged(payload, len);
+        pthread_mutex_lock(&mu_);
+        ++heard_.serviceListChanges;
+        pthread_mutex_unlock(&mu_);
+        if (!c.ok) {
+            unread = kUnreadServiceList;
+            what = "ServiceListChanged";
+        }
+    } else if (id == kRspVersionGet) {
+        pthread_mutex_lock(&mu_);
+        bool asked = versionAsked_;
+        versionAsked_ = false;
+        pthread_mutex_unlock(&mu_);
+        if (!asked) return true;   // another client's
+        StackVersion v = parseStackVersion(payload, len);
+        if (!v.ok) {
+            unread = kUnreadVersion;
+            what = "VersionGet's reply";
+        } else if (v.error != 0) {
+            say("VersionGet reply: %s", gapErrorText(v.error, "").c_str());
+        } else {
+            std::string parts;
+            for (size_t i = 0; i < v.parts.size(); ++i) parts += (i ? ", '" : "'") + shownText(v.parts[i], 64) + "'";
+            say("the Bluetooth stack's version: %s", parts.c_str());
+        }
+    } else if (id == kRspServiceDisconnect) {
+        pthread_mutex_lock(&mu_);
+        bool out = disconnectOut_;
+        disconnectOut_ = false;
+        pthread_mutex_unlock(&mu_);
+        if (!out) return true;     // another client's
+        ServiceDisconnectReply d = parseServiceDisconnectReply(payload, len);
+        if (!d.ok) {
+            unread = kUnreadDisconnect;
+            what = "ServiceDisconnect's reply";
+        } else {
+            say("ServiceDisconnect reply: %s, reason %u", gapErrorText(d.error, "").c_str(), d.reason);
+        }
+    } else if (id == kRspServiceConnect) {
+        return true;               // this agent asks for none: another client's
+    } else {
+        return false;
+    }
+    if (unread != 0) {
+        pthread_mutex_lock(&mu_);
+        bool first = (unreadSaid_ & unread) == 0;
+        unreadSaid_ |= unread;
+        pthread_mutex_unlock(&mu_);
+        if (first)
+            say("%s from the Bluetooth server could not be read (id 0x%x, %u bytes); later ones that cannot be read "
+                "are not logged", what, id, len);
+    }
+    return true;
 }
 
 // An answer this class does not know, after a ServiceDisconnect: its id, its type and its first 32-bit value, and
@@ -263,7 +435,8 @@ void SppService::noteUnknown(uint32_t type, uint32_t id, const uint8_t* payload,
 
 bool SppService::send(uint32_t id, const std::vector<uint8_t>& payload) {
     if (gap_->request(id, payload)) return true;
-    say("DSI request 0x%x not sent: the Bluetooth server is not attached", id);
+    say("DSI request 0x%x not sent: %s", id,
+        gap_->attached() ? "the send to the Bluetooth server failed" : "the Bluetooth server is not attached");
     return false;
 }
 
@@ -287,6 +460,9 @@ void SppService::gapAttached() {
     }
     if (m != kModeKeep) return;
     subscribe();
+    pthread_mutex_lock(&mu_);
+    clearError_ = kNoError;
+    pthread_mutex_unlock(&mu_);
     set(kRegSent);
     sendRegister();
 }
@@ -300,6 +476,11 @@ void SppService::gapDetached() {
     // Every registration went with the server, the ones that removeOther() was asked to remove among them.
     otherWaiting_.clear();
     otherSent_.clear();
+    // No reply comes from a server that has gone, and what it said of the phones is old.
+    disconnectOut_ = false;
+    versionAsked_ = false;
+    heard_.devicesKnown = false;
+    heard_.devices.clear();
     pthread_mutex_unlock(&mu_);
     if (had) events_->sppState(kWaiting);
 }
@@ -322,9 +503,13 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
     }
     bool rejected = type == kTypeRejectedA || type == kTypeRejectedB;
     if (rejected && id == kReqServiceDisconnect) {
+        pthread_mutex_lock(&mu_);
+        disconnectOut_ = false;
+        pthread_mutex_unlock(&mu_);
         say("the Bluetooth server rejected ServiceDisconnect (type 0x%x)", type);
         return;
     }
+    if (handleKnown(type, id, payload, len)) return;
 
     // The answer to a removal of another program's registration, if one is out: it went out before any removal of
     // our own that is waiting too, so its answer is the first of the two.
@@ -336,7 +521,7 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
         if (!other.empty()) {
             uint32_t err = rejected ? kNoError : readError(payload, len);
             if (rejected) say("the Bluetooth server rejected the removal of '%s' (type 0x%x)", other.c_str(), type);
-            else say("SppUuidDeregister reply for '%s': %u %s", other.c_str(), err, err == 0 ? "OK" : gapErrorName(err));
+            else say("SppUuidDeregister reply for '%s': %s", other.c_str(), deregisterErrorText(err).c_str());
             events_->sppOtherRemoved(other, err);
             sendNextOther();
             return;
@@ -346,7 +531,7 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
     State s = state();
     if (id == kRspSppUuidRegister && !rejected) {
         uint32_t err = readError(payload, len);
-        say("SppUuidRegister reply: %u %s", err, gapErrorName(err));
+        say("SppUuidRegister reply: %s", registerErrorText(err).c_str());
         // A reply that comes when no registration is waiting for one (after remove(), say) changes nothing.
         if (s != kRegSent && s != kRetrySent) return;
         if (err == 0) {
@@ -355,6 +540,13 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
             set(kClearSent);
             sendDeregister("clearing a registration an earlier run left behind, then trying again");
         } else {
+            pthread_mutex_lock(&mu_);
+            uint32_t cleared = clearError_;
+            pthread_mutex_unlock(&mu_);
+            // Nothing was filed under our name, and the stack still says DEFAULT.
+            if (cleared == 10 && err == 5)
+                say("nothing was registered under the name '%s', so its UUID %s is registered under another name, or "
+                    "the car's Bluetooth is switched off", name_.c_str(), uuid_.c_str());
             set(kFailed);
         }
         return;
@@ -370,9 +562,13 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
     // The deregister reply: 0x80000044, or the first plain response after the request.
     if ((s == kClearSent || s == kRemoveSent) && (id == kRspSppUuidDeregister || type == kTypeResponse)) {
         uint32_t err = readError(payload, len);
-        say("SppUuidDeregister reply (id 0x%x): %u %s", id, err, gapErrorName(err));
+        say("SppUuidDeregister reply (id 0x%x): %s", id, deregisterErrorText(err).c_str());
+        pthread_mutex_lock(&mu_);
+        if (s == kClearSent) clearError_ = err;
+        else removeError_ = err;
+        pthread_mutex_unlock(&mu_);
         if (s == kClearSent) { set(kRetrySent); sendRegister(); }
-        else set(err == 0 ? kRemoved : kRemoveFailed);
+        else set(err == 0 || err == 10 ? kRemoved : kRemoveFailed);
         sendNextOther();   // a removal of another program's registration may have waited for this answer
         return;
     }

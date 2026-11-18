@@ -17,7 +17,6 @@ typedef void (*FnConnCtor)(void*);
 typedef int  (*FnConnAdd)(void*, void*);
 typedef void (*FnConnStart)(void*);
 typedef void (*FnCliCtor)(void*, const char*, const char*, int, int);
-typedef void (*FnSetNotif)(void*, unsigned);
 typedef void (*FnStreamCtor)(void*, void*, void*, int, unsigned, unsigned, unsigned, const void*, const void*, int);
 typedef void (*FnStreamWrite)(void*, const void*, unsigned);
 typedef int  (*FnStreamSend)(void*, int);
@@ -28,7 +27,6 @@ struct Syms {
     FnConnAdd connAdd;
     FnConnStart connStart;
     FnCliCtor cliCtor;
-    FnSetNotif setNotif;
     FnStreamCtor streamCtor;
     FnStreamWrite streamWrite;
     FnStreamSend streamSend;
@@ -114,13 +112,12 @@ bool DsiClient::open(const char* iface, const char* role, int major, int minor) 
         g_s.connAdd     = (FnConnAdd)    need("_ZN14CDSIConnection3addER10CDSIClient");
         g_s.connStart   = (FnConnStart)  need("_ZN14CDSIConnection5startEv");
         g_s.cliCtor     = (FnCliCtor)    need("_ZN10CDSIClientC1EPKcS1_ii");
-        g_s.setNotif    = (FnSetNotif)   need("_ZN10CDSIClient15setNotificationEj");
         g_s.streamCtor  = (FnStreamCtor) need("_ZN11CDSIOStreamC1ER11CDSIChannelP13CDSITCPSocketiN3DSI11RequestTypeENS4_7CommandEjRK8SPartyIDS9_i");
         g_s.streamWrite = (FnStreamWrite)need("_ZN11CDSIOStream5writeEPKvj");
         g_s.streamSend  = (FnStreamSend) need("_ZN11CDSIOStream4sendEi");
         g_s.streamDtor  = (FnStreamDtor) need("_ZN11CDSIOStreamD1Ev");
         g_s.vtable      = need("_ZTV10CDSIClient");
-        if (!g_s.connCtor || !g_s.connAdd || !g_s.connStart || !g_s.cliCtor || !g_s.setNotif || !g_s.streamCtor ||
+        if (!g_s.connCtor || !g_s.connAdd || !g_s.connStart || !g_s.cliCtor || !g_s.streamCtor ||
             !g_s.streamWrite || !g_s.streamSend || !g_s.streamDtor || !g_s.vtable) {
             say("this head unit's DSI library lacks symbols this client needs: not connecting");
             memset(&g_s, 0, sizeof(g_s));
@@ -205,30 +202,41 @@ void DsiClient::onDataTramp(void* self, void* istream) {
     if (c->dataCb_) c->dataCb_(c, type, id, seq, pl, len, c->user_);
 }
 
+// The library's own CDSIClient::setNotification sends the same message as this, request type 0x101, and does not
+// say whether the send worked; this does.
 bool DsiClient::setNotification(uint32_t informId) {
     if (!cli_ || !attached_) return false;
-    g_s.setNotif(cli_, informId);
-    if (verbose_) say("setNotification(0x%x)", informId);
-    return true;
+    int rc = send(0x101u, informId, std::vector<uint8_t>());
+    if (verbose_) say("setNotification(0x%x) -> %d", informId, rc);
+    if (rc != 0) say("asking for inform 0x%x: the send failed (%d)", informId, rc);
+    return rc == 0;
 }
 
 bool DsiClient::sendRequest(uint32_t requestId, const std::vector<uint8_t>& payload) {
     if (!cli_ || !attached_) return false;
+    int rc = send(0x100u, requestId, payload);
+    if (verbose_) say("TX request id=0x%x, %u bytes, send -> %d", requestId, (unsigned)payload.size(), rc);
+    if (rc != 0) say("request 0x%x: the send failed (%d)", requestId, rc);
+    return rc == 0;
+}
+
+// One message to the server. CDSIOStream::send answers 0 when the message went out, and something else, with the
+// library's own error trace, when it did not.
+int DsiClient::send(uint32_t requestType, uint32_t id, const std::vector<uint8_t>& payload) {
     // CDSIOStream holds 64-bit members: its storage must be 8-byte aligned (LDRD/STRD fault otherwise on ARM).
     uint64_t storage[kStreamSize / 8 + 1];
     memset(storage, 0, sizeof(storage));
     char* stream = reinterpret_cast<char*>(storage);
     // CDSIClient fields: +0x110 client party, +0x118 server party, +0x130 CDSIChannel, +0x138 CDSITCPSocket,
-    // +0x140 ipc fd. Request type 0x100, command 7.
+    // +0x140 ipc fd. Command 7.
     void* chan = cli_ + 0x130;
     void* tcp  = cli_ + 0x138;
     int ipcFd  = *reinterpret_cast<int*>(cli_ + 0x140);
-    g_s.streamCtor(stream, chan, tcp, ipcFd, 0x100u, 7u, requestId, cli_ + 0x110, cli_ + 0x118, 0);
+    g_s.streamCtor(stream, chan, tcp, ipcFd, requestType, 7u, id, cli_ + 0x110, cli_ + 0x118, 0);
     if (!payload.empty()) g_s.streamWrite(stream, &payload[0], (unsigned)payload.size());
     int rc = g_s.streamSend(stream, -1);
     g_s.streamDtor(stream);
-    if (verbose_) say("TX request id=0x%x, %u bytes, send -> %d", requestId, (unsigned)payload.size(), rc);
-    return true;
+    return rc;
 }
 
 } // namespace nbt

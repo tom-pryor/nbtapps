@@ -42,8 +42,11 @@ public:
     bool open(const char* iface, const char* role, int major, int minor);
 
     bool attached() const { return attached_; }
+    // Both false when the server is not attached or the message could not be sent; a failed send is logged.
     bool sendRequest(uint32_t requestId, const std::vector<uint8_t>& payload);
-    bool setNotification(uint32_t informId);   // ask for one inform (event) of the server
+    // Asks for one inform (event) of the server. Never a reply's id: that brings every other client's replies of
+    // that id too (btspp::isResponseId).
+    bool setNotification(uint32_t informId);
 
     // Trampolines the library calls in place of CDSIClient's virtuals (public for the C-style casts only).
     static void onAttachedTramp(void* self);
@@ -52,6 +55,7 @@ public:
 
 private:
     static void* threadMain(void* arg);
+    int send(uint32_t requestType, uint32_t id, const std::vector<uint8_t>& payload);
     void say(const char* fmt, ...) const __attribute__((format(printf, 2, 3)));
     void* need(const char* name) const;
 

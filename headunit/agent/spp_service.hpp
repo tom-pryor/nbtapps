@@ -20,11 +20,13 @@
 //
 // DSI payload encoding (little-endian, every item 4-byte aligned from the payload start):
 //   u32      4 bytes
-//   string   u32 length INCLUDING the NUL, the bytes, zero padding to 4
+//   string   u32 length INCLUDING the NUL, the bytes, padding to 4: zeros in what we send. What the car sends may
+//            have other bytes there, and leaves the padding out after a message's last string (Reader)
 
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <string>
@@ -43,11 +45,19 @@ const int kGapMinor = 0;
 const uint32_t kReqSppUuidRegister = 0x2e;           // name, service UUID, connect UUID, u32 type
 const uint32_t kReqSppUuidDeregister = 0x2f;         // name
 // Ends a link of a phone's to one of the car's services: closing the link's node does not. Which values a link that
-// the phone opened needs is not settled; kDisconnectDevice and kDisconnectInstance are the first ones tried. The
-// id of its reply is not known.
+// the phone opened needs is not settled; kDisconnectDevice and kDisconnectInstance are the first ones tried.
 const uint32_t kReqServiceDisconnect = 0x1b;         // device, instance, address, service
 const char* const kDisconnectDevice = "BtCtrl";
 const char* const kDisconnectInstance = "ExtBox1";
+// The car opens a link to a service on a phone: the service's name, which the stack turns into its UUID, on an
+// instance of the device's (whose node is /dev/<instance>). The address is in the colon form, 00:11:22:33:44:55.
+const uint32_t kReqServiceConnect = 0x1a;            // device, instance, address, service
+const uint32_t kReqVersionGet = 0x03;                // nothing
+const uint32_t kReqDeviceListGet = 0x13;             // nothing
+const uint32_t kRspVersionGet = 0x80000019;          // u32 GapErrorCode, five strings
+const uint32_t kRspDeviceListGet = 0x80000028;       // u32 GapErrorCode, then the device lists (DeviceList)
+const uint32_t kRspServiceConnect = 0x8000002f;      // address, service, u32 GapErrorCode
+const uint32_t kRspServiceDisconnect = 0x80000030;   // address, service, u32 GapErrorCode, u32 reason
 const uint32_t kRspSppUuidRegister = 0x80000043;     // u32 GapErrorCode
 const uint32_t kRspSppUuidDeregister = 0x80000044;   // u32 GapErrorCode
 // Informs about a link the PHONE opens to one of the car's services, each naming the service. The request comes
@@ -55,6 +65,17 @@ const uint32_t kRspSppUuidDeregister = 0x80000044;   // u32 GapErrorCode
 const uint32_t kInfServiceRequest = 0x80000009;          // name, address, service
 const uint32_t kInfServiceRequestComplete = 0x8000000a;  // address, service
 const uint32_t kInfServiceRequestError = 0x8000000b;     // address, service
+// Informs about the car's phones and their links, kept as state.
+const uint32_t kInfDeviceListChanged = 0x80000001;   // the device lists (DeviceList), then a u32
+const uint32_t kInfServiceDisconnected = 0x80000007; // device, instance, address, service, u32 reason (1 remote, 0 local)
+const uint32_t kInfServiceListChanged = 0x80000008;  // address, services[], states u32[], profiles[], versions u32[],
+                                                     // u32 reason
+// A list in a payload is a u32 count, then the elements.
+
+// The ids of the server's replies: request N's is 0x80000000 + N + 0x16 for N up to 0x11, + 0x15 for 0x13 to 0x3c
+// and + 0x14 for 0x3e to 0x4a. A reply is never asked for as an inform: a client that does gets every other
+// client's replies of that id as well.
+inline bool isResponseId(uint32_t id) { return id >= 0x80000016u && id <= 0x8000005eu; }
 const uint32_t kTypeResponse = 0x200;
 const uint32_t kTypeRejectedA = 0x202, kTypeRejectedB = 0x204;   // the stub or server refused the request
 
@@ -144,6 +165,12 @@ inline std::vector<uint8_t> buildServiceDisconnect(const std::string& device, co
     return p;
 }
 
+// The same four strings as ServiceDisconnect.
+inline std::vector<uint8_t> buildServiceConnect(const std::string& device, const std::string& instance,
+                                                const std::string& address, const std::string& service) {
+    return buildServiceDisconnect(device, instance, address, service);
+}
+
 // ---- replies and informs -------------------------------------------------------------------------------------
 
 class Reader {
@@ -159,14 +186,17 @@ public:
         off_ += 4;
         return v;
     }
+    // The car leaves out the padding after the last string of a message, and padding it does send holds whatever
+    // was there before, not zeros. So a string needs only its own bytes, the padding may be cut off at the end,
+    // and the padding's bytes are never looked at.
     std::string str() {
         uint32_t len = u32();
         if (!ok_) return std::string();
-        uint32_t padded = (len + 3u) & ~3u;
-        if (len > 4096 || padded > left()) { ok_ = false; return std::string(); }
+        if (len > 4096 || len > left()) { ok_ = false; return std::string(); }
         std::string s;
         for (uint32_t i = 0; i < len && p_[off_ + i]; ++i) s += (char)p_[off_ + i];
-        off_ += padded;
+        uint32_t padded = (len + 3u) & ~3u;
+        off_ += padded < left() ? padded : left();
         return s;
     }
 
@@ -184,19 +214,61 @@ inline uint32_t readError(const uint8_t* p, uint32_t n) {
     return r.ok() ? e : kNoError;
 }
 
-// GapErrorCode. DEFAULT is what the stack returns when the name or UUID is already registered.
+// GapErrorCode, in the stack's own order. 0 is NONE there, which is "OK" here.
 inline const char* gapErrorName(uint32_t e) {
     switch (e) {
     case 0: return "OK";
     case 1: return "TIMEOUT";
     case 2: return "BUSY";
     case 3: return "STATE";
-    case 4: return "REFUSED";
-    case 5: return "DEFAULT (name or UUID already registered?)";
-    case 6: return "INVALID_PARAM";
-    default: return "FAILED";
+    case 4: return "LINKKEY";
+    case 5: return "DEFAULT";
+    case 6: return "REFUSED";
+    case 7: return "RFCOMM";
+    case 8: return "SECURITY";
+    case 9: return "MISSING_KEY";
+    case 10: return "INVALID_PARAM";
+    case 11: return "ALREADY_CONNECTED";
+    case 12: return "HW_NOT_READY";
+    case 13: return "NO_SLC";
+    case 14: return "PAGE_TIMEOUT";
+    case 15: return "DEVICE_NOT_IN_LIST";
+    default: return "UNKNOWN";
     }
 }
+
+// What a code means in the answer to SppUuidRegister and to SppUuidDeregister, where that is known; empty where
+// it is not. While the stack is making a connection, a registration or a removal waits; one that has waited 10 s
+// is dropped with TIMEOUT, and one that comes while another waits gets BUSY.
+inline const char* registerErrorMeaning(uint32_t e) {
+    switch (e) {
+    case 1: return "the stack was busy for too long and dropped the request";
+    case 2: return "the stack was busy with another request";
+    case 5: return "the name or the UUID is registered already, or the car's Bluetooth is switched off";
+    default: return "";
+    }
+}
+
+inline const char* deregisterErrorMeaning(uint32_t e) {
+    switch (e) {
+    case 1: return "the stack was busy for too long and dropped the request";
+    case 2: return "the stack was busy with another request";
+    case 5: return "a link on that service is up";
+    case 10: return "no such name is registered";
+    default: return "";
+    }
+}
+
+// "5 DEFAULT (what it means)", or "no error code" for kNoError.
+inline std::string gapErrorText(uint32_t e, const char* meaning) {
+    if (e == kNoError) return "no error code";
+    char b[200];
+    if (meaning != 0 && *meaning != 0) snprintf(b, sizeof(b), "%u %s (%s)", e, gapErrorName(e), meaning);
+    else snprintf(b, sizeof(b), "%u %s", e, gapErrorName(e));
+    return b;
+}
+inline std::string registerErrorText(uint32_t e) { return gapErrorText(e, registerErrorMeaning(e)); }
+inline std::string deregisterErrorText(uint32_t e) { return gapErrorText(e, deregisterErrorMeaning(e)); }
 
 struct ServiceRequest {
     std::string name;      // the phone's name (ServiceRequest only)
@@ -217,6 +289,205 @@ inline ServiceRequest parseServiceRequest(uint32_t id, const uint8_t* p, uint32_
     q.service = r.str();
     q.ok = r.ok();
     return q;
+}
+
+// The most elements a list is read with: more is taken for a message that is not what it seems.
+const uint32_t kMostListed = 64;
+
+// A list of strings into *out; with no `out`, only read past, and *count, if given, says how many there were.
+inline bool readStrings(Reader& r, std::vector<std::string>* out, uint32_t* count = 0) {
+    uint32_t n = r.u32();
+    if (!r.ok() || n > kMostListed) return false;
+    for (uint32_t i = 0; i < n && r.ok(); ++i) {
+        std::string s = r.str();
+        if (out) out->push_back(s);
+    }
+    if (count) *count = n;
+    return r.ok();
+}
+
+inline bool readValues(Reader& r, std::vector<uint32_t>* out) {
+    uint32_t n = r.u32();
+    if (!r.ok() || n > kMostListed) return false;
+    for (uint32_t i = 0; i < n && r.ok(); ++i) out->push_back(r.u32());
+    return r.ok();
+}
+
+// 0x8000002f: what came of a ServiceConnect.
+struct ServiceConnectReply {
+    std::string address, service;
+    uint32_t error;
+    bool ok;
+};
+
+inline ServiceConnectReply parseServiceConnectReply(const uint8_t* p, uint32_t n) {
+    ServiceConnectReply c;
+    Reader r(p, n);
+    c.address = r.str();
+    c.service = r.str();
+    c.error = r.u32();
+    c.ok = r.ok();
+    return c;
+}
+
+// 0x80000030: what came of a ServiceDisconnect.
+struct ServiceDisconnectReply {
+    std::string address, service;
+    uint32_t error, reason;
+    bool ok;
+};
+
+inline ServiceDisconnectReply parseServiceDisconnectReply(const uint8_t* p, uint32_t n) {
+    ServiceDisconnectReply d;
+    Reader r(p, n);
+    d.address = r.str();
+    d.service = r.str();
+    d.error = r.u32();
+    d.reason = r.u32();
+    d.ok = r.ok();
+    return d;
+}
+
+// A phone in the car's device list. Its name is not kept: it is read past and dropped.
+struct BtDevice {
+    std::string address;
+    uint32_t deviceClass, security, connection;
+    BtDevice() : deviceClass(0), security(0), connection(0) {}
+};
+
+// BtDevice::connection.
+enum { kConnNotInRange = 0, kConnInRange = 1, kConnConnected = 2, kConnServiceConnected = 3 };
+
+inline const char* connectionName(uint32_t c) {
+    switch (c) {
+    case kConnNotInRange: return "not in range";
+    case kConnInRange: return "in range";
+    case kConnConnected: return "connected";
+    case kConnServiceConnected: return "service connected";
+    default: return "unknown";
+    }
+}
+
+// The device lists: names[], addresses[], class u32[], security u32[], connection u32[], one element in each for a
+// device. DeviceListGet's reply has the error code before them; DeviceListChanged has a u32 after them.
+struct DeviceList {
+    uint32_t error;                 // the reply's; 0 for an inform
+    std::vector<BtDevice> devices;
+    uint32_t after;                 // the inform's last value
+    bool ok;
+    DeviceList() : error(0), after(0), ok(false) {}
+};
+
+inline bool readDeviceLists(Reader& r, std::vector<BtDevice>* out) {
+    std::vector<std::string> addresses;
+    std::vector<uint32_t> classes, security, connection;
+    uint32_t n = 0;
+    if (!readStrings(r, 0, &n) || !readStrings(r, &addresses) || !readValues(r, &classes) ||
+        !readValues(r, &security) || !readValues(r, &connection))
+        return false;
+    if (addresses.size() != n || classes.size() != n || security.size() != n || connection.size() != n) return false;
+    for (uint32_t i = 0; i < n; ++i) {
+        BtDevice d;
+        d.address = addresses[i];
+        d.deviceClass = classes[i];
+        d.security = security[i];
+        d.connection = connection[i];
+        out->push_back(d);
+    }
+    return true;
+}
+
+// kRspDeviceListGet, or kInfDeviceListChanged.
+inline DeviceList parseDeviceList(uint32_t id, const uint8_t* p, uint32_t n) {
+    DeviceList l;
+    Reader r(p, n);
+    if (id == kRspDeviceListGet) l.error = r.u32();
+    // A reply with an error may hold nothing after it.
+    if (id == kRspDeviceListGet && r.ok() && l.error != 0 && r.left() == 0) {
+        l.ok = true;
+        return l;
+    }
+    bool lists = r.ok() && readDeviceLists(r, &l.devices);
+    if (id == kInfDeviceListChanged) l.after = r.u32();
+    l.ok = lists && r.ok();
+    return l;
+}
+
+// Two addresses are the same phone's whatever their form: the hex digits are compared, upper-cased.
+inline std::string addressKey(const std::string& address) {
+    std::string k;
+    for (size_t i = 0; i < address.size(); ++i) {
+        char c = address[i];
+        if (!isHex(c)) continue;
+        if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
+        k += c;
+    }
+    return k;
+}
+
+// kInfServiceDisconnected: a link to a service has ended. reason 1: the far end ended it; 0: this end did.
+struct ServiceDisconnected {
+    std::string device, instance, address, service;
+    uint32_t reason;
+    bool ok;
+};
+
+inline ServiceDisconnected parseServiceDisconnected(const uint8_t* p, uint32_t n) {
+    ServiceDisconnected d;
+    Reader r(p, n);
+    d.device = r.str();
+    d.instance = r.str();
+    d.address = r.str();
+    d.service = r.str();
+    d.reason = r.u32();
+    d.ok = r.ok();
+    return d;
+}
+
+// kInfServiceListChanged: the services of a phone and the state of each.
+struct ServiceListChanged {
+    std::string address;
+    std::vector<std::string> services, profiles;
+    std::vector<uint32_t> states, versions;
+    uint32_t reason;
+    bool ok;
+};
+
+inline ServiceListChanged parseServiceListChanged(const uint8_t* p, uint32_t n) {
+    ServiceListChanged c;
+    Reader r(p, n);
+    c.address = r.str();
+    bool lists = readStrings(r, &c.services) && readValues(r, &c.states) && readStrings(r, &c.profiles) &&
+                 readValues(r, &c.versions);
+    c.reason = r.u32();
+    c.ok = lists && r.ok();
+    return c;
+}
+
+// kRspVersionGet: the stack's version strings.
+struct StackVersion {
+    uint32_t error;
+    std::vector<std::string> parts;
+    bool ok;
+};
+
+inline StackVersion parseStackVersion(const uint8_t* p, uint32_t n) {
+    StackVersion v;
+    Reader r(p, n);
+    v.error = r.u32();
+    for (int i = 0; i < 5 && r.ok() && r.left() > 0; ++i) {
+        std::string s = r.str();
+        if (r.ok()) v.parts.push_back(s);
+    }
+    v.ok = r.ok() && (v.parts.size() == 5 || v.error != 0);
+    return v;
+}
+
+// A string of the server's as a log may show it: printable ASCII, `most` characters at most.
+inline std::string shownText(const std::string& s, size_t most) {
+    std::string t;
+    for (size_t i = 0; i < s.size() && t.size() < most; ++i) t += (s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : '?';
+    return t;
 }
 
 // ---- the Bluetooth server, as its client sees it ---------------------------------------------------------------
@@ -302,7 +573,7 @@ public:
         kRegistered,
         kFailed,         // the server did not take the registration
         kRemoveSent,     // SppUuidDeregister by remove() or startRemoval()
-        kRemoved,
+        kRemoved,        // the server removed it, or had nothing under the name (removeError() says which)
         kRemoveFailed
     };
 
@@ -365,15 +636,38 @@ public:
     // that the server told (kInfServiceRequest), whatever service it was for. `device`, `instance` and `service`
     // may be given; empty is kDisconnectDevice, kDisconnectInstance and the service named in that request. The
     // phone's address goes into the request and nowhere else. False, with nothing sent, if the server is not
-    // attached or no phone has asked for a link since this object was made. A reply or a rejection that comes
-    // after it and that this object does not know is logged with its id, its type and its first 32-bit value. From
-    // any thread.
+    // attached or no phone has asked for a link since this object was made. Its reply (kRspServiceDisconnect) is
+    // logged with its error code and reason, and a reply or a rejection that comes after it and that this object
+    // does not know with its id, its type and its first 32-bit value. From any thread.
     bool disconnectPhone(const std::string& device, const std::string& instance, const std::string& service);
     // Whether a phone has asked for a link since this object was made: disconnectPhone() has someone to name.
     bool knowsPhone();
     bool attached() const { return gap_->attached(); }
+    // The server's name and the version of its interface that is asked for, for the log.
+    std::string server() const { return gap_->describe(); }
+
+    // VersionGet: the stack's version strings, which the log gets when the reply comes. False, with nothing sent, if
+    // the server is not attached or the request could not be sent. From any thread.
+    bool askVersion();
+    // DeviceListGet: the car's device list is read anew, into heard(). The same rules as askVersion().
+    bool askDeviceList();
+
+    // What the server's informs and replies have told about the car's phones and their links: kept, and not acted
+    // on. A phone's address is in memory only, and never in the log.
+    struct Heard {
+        bool devicesKnown;                 // a device list has come
+        std::vector<BtDevice> devices;
+        unsigned deviceListChanges;        // DeviceListChanged informs
+        unsigned linksEnded;               // ServiceDisconnected informs
+        unsigned serviceListChanges;       // ServiceListChanged informs
+        Heard() : devicesKnown(false), deviceListChanges(0), linksEnded(0), serviceListChanges(0) {}
+    };
+    Heard heard();
 
     State state();
+    // The server's answer to the last removal of this object's own registration: 0, a GapErrorCode, or kNoError
+    // for none yet. 10 (no such name is registered) counts as removed: the stack had dropped the registration.
+    uint32_t removeError();
     const std::string& name() const { return name_; }
     const std::string& uuid() const { return uuid_; }
 
@@ -393,6 +687,8 @@ private:
     void setMode(Mode m);
     bool send(uint32_t id, const std::vector<uint8_t>& payload);
     void subscribe();
+    void subscribeTo(uint32_t informId);
+    bool handleKnown(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len);
     void sendRegister();
     bool sendDeregister(const char* why);
     void sendNextOther();
@@ -414,6 +710,13 @@ private:
     // reaches the log or leaves this class.
     std::string phoneAddress_, phoneService_;
     unsigned unknownLeft_;                    // after a ServiceDisconnect: how many more unknown answers are logged
+    uint32_t removeError_;                    // see removeError()
+    uint32_t clearError_;                     // the answer to kClearSent's removal
+    bool disconnectOut_;                      // a ServiceDisconnect of ours waits for its reply
+    bool versionAsked_;                       // a VersionGet of ours waits for its reply
+    Heard heard_;
+    unsigned endsLogged_;                     // ServiceDisconnected informs said in the log so far
+    unsigned unreadSaid_;                     // the kinds of message logged once as not read
 };
 
 }  // namespace btspp
