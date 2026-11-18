@@ -292,6 +292,18 @@ class PackageArchiveTest {
         fun flags(install: String) = verify(members(manifest(install = install))).manifest.flags
 
         assertEquals(emptyList<String>(), flags("""{ "files": [{ "src": "payload/bin/hello", "dest": "${'$'}{app}/hello", "mode": "0755" }] }"""))
+        // Both of the HMI's plugin folders are the package's own places, a link in one included.
+        assertEquals(
+            emptyList<String>(),
+            flags(
+                """{ "files": [{ "src": "payload/", "dest": "${'$'}{plugins}/Hello/", "mode": "0644" }],
+                     "links": [{ "path": "${'$'}{var_plugins}/Hello/hello", "target": "x" }] }""",
+            ),
+        )
+        assertEquals(
+            emptyList<String>(),
+            flags("""{ "files": [{ "src": "payload/", "dest": "${'$'}{var_plugins}/Hello/", "mode": "0644" }] }"""),
+        )
         assertEquals(
             listOf("runs-scripts"),
             flags("""{ "hooks": { "postInstall": { "script": "scripts/post-install.sh", "timeout": 30 } } }"""),
@@ -316,6 +328,22 @@ class PackageArchiveTest {
                      "hooks": { "preRemove": { "script": "scripts/post-install.sh", "timeout": 1 } }, "reboot": "required" }""",
             ),
         )
+    }
+
+    @Test
+    fun `a destination is in one of the four folders a package places files in, or absolute`() {
+        fun install(dest: String) = """{ "files": [{ "src": "payload/bin/hello", "dest": "$dest", "mode": "0755" }] }"""
+        fun link(path: String) = """{ "links": [{ "path": "$path", "target": "x" }] }"""
+        val v = "${'$'}{var_plugins}"
+
+        assertEquals("$v/Hello/hello", verify(members(manifest(install = install("$v/Hello/hello")))).manifest.files.single().dest)
+        assertEquals("$v/Hello/h", verify(members(manifest(install = link("$v/Hello/h")))).manifest.links.single().path)
+        for (dest in listOf(v, "$v/", "$v/Hello/", "${v}x/a", "${'$'}{var_pluginsx}/a", "${'$'}{VAR_PLUGINS}/a", "$v//a", "$v/../a")) {
+            assertRefused(badManifest, members(manifest(install = install(dest))))
+        }
+        for (path in listOf(v, "$v/", "$v/Hello/", "${'$'}{var_pluginsx}/a")) {
+            assertRefused(badManifest, members(manifest(install = link(path))))
+        }
     }
 
     @Test

@@ -671,9 +671,13 @@ object ManifestParser {
 
     private fun isSrc(text: String): Boolean = Utf8.length(text) <= 255 && segments(text, trailingSlash = true)
 
+    /** The folders a destination or a link's path may start in, besides an absolute path (`$defs/file/dest`). */
+    private val DEST_VARIABLES = listOf("\${app}", "\${data}", "\${plugins}", "\${var_plugins}")
+
     private fun isDest(text: String): Boolean {
         if (Utf8.length(text) > 255) return false
-        for (prefix in listOf("\${app}/", "\${data}/", "\${plugins}/")) {
+        for (variable in DEST_VARIABLES) {
+            val prefix = "$variable/"
             if (text.startsWith(prefix)) return text.length == prefix.length || segments(text.substring(prefix.length), true)
         }
         return text.startsWith("/") && segments(text.substring(1), true)
@@ -681,7 +685,7 @@ object ManifestParser {
 
     private fun isLinkPath(text: String): Boolean {
         if (Utf8.length(text) > 255) return false
-        val rest = listOf("\${app}", "\${data}", "\${plugins}").firstOrNull { text.startsWith(it) }?.let { text.substring(it.length) } ?: text
+        val rest = DEST_VARIABLES.firstOrNull { text.startsWith(it) }?.let { text.substring(it.length) } ?: text
         return rest.startsWith("/") && segments(rest.substring(1), false)
     }
 

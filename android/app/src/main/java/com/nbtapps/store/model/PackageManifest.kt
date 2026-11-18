@@ -46,7 +46,8 @@ data class PackageManifest(
     private fun inOwnDirectories(dest: String): Boolean = OWN_DIRECTORIES.any { dest.startsWith(it) }
 
     private companion object {
-        val OWN_DIRECTORIES = listOf("\${app}/", "\${data}/", "\${plugins}/")
+        /** The package's own places: a destination in one is not `modifies-system`. Both plugin folders count. */
+        val OWN_DIRECTORIES = listOf("\${app}/", "\${data}/", "\${plugins}/", "\${var_plugins}/")
     }
 }
 
