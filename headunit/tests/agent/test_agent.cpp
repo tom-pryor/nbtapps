@@ -1422,8 +1422,9 @@ static void testInfo() {
     CHECK(str(info.result, "agentVersion") == "1.0.0" && str(info.result, "headUnitId") == kHeadUnitId);
     CHECK(integer(info.result, "manifestVersion") == 1 && str(info.result, "restartNeeded") == "none");
     json::Value free = info.result.find("free");
-    CHECK(free.size() == 4 && integer(free, "app") == 123456789 && integer(free, "data") == 123456789 &&
-          integer(free, "plugins") == 123456789 && integer(free, "staging") == 123456789);
+    CHECK(free.size() == 5 && integer(free, "app") == 123456789 && integer(free, "data") == 123456789 &&
+          integer(free, "plugins") == 123456789 && integer(free, "varPlugins") == 123456789 &&
+          integer(free, "staging") == 123456789);
 
     Parsed sources(b.call(p, "sources.list", "{}"));
     json::Value list = sources.result.find("sources");

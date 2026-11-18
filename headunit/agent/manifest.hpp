@@ -119,7 +119,8 @@ struct ManifestSetting {
 // One file the package places: an install.files entry, or one file of a folder entry.
 struct Placement {
     std::string src;    // path in the archive
-    std::string dest;   // destination as the manifest writes it: ${app}/..., ${data}/..., ${plugins}/... or /...
+    std::string dest;   // destination as the manifest writes it: ${app}/..., ${data}/..., ${plugins}/...,
+                        // ${var_plugins}/... or /...
     size_t file;        // index into Manifest::files of the entry it comes from
     size_t content;     // index into Manifest::contents
 };
@@ -222,7 +223,8 @@ bool validSettingsFile(const std::string& path);
 // U+007F) and no space at its start or end.
 bool validSettingText(const std::string& value, size_t maxLength, bool anyCharacters);
 
-// True for a destination inside one of the package's own places: ${app}/, ${data}/ or ${plugins}/.
+// True for a destination inside one of the package's own places: ${app}/, ${data}/, ${plugins}/ or
+// ${var_plugins}/.
 bool inOwnDirs(const std::string& dest);
 
 }  // namespace nbt

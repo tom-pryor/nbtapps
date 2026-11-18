@@ -556,6 +556,98 @@ static void testOwnPlugin() {
     tidy(b);
 }
 
+// ---- the HMI's plugin folder on the writable partition ------------------------------------------------------------
+// ${var_plugins} is one of a package's own places, as ${plugins} is, on a partition that is never remounted.
+
+static void testVarPlugin() {
+    const char* const id = "org.nbtapp.varplugin";
+    Bench b("var-plugin", keys());
+    const std::string folder = b.platform.varPluginsDir(), plugin = folder + "/NbtVar";
+    std::string why;
+    CHECK(fs::kindOf(folder) == fs::kNone);   // a head unit that never had a plugin there
+
+    // The install makes the folder and the plugin's folder in it, and remounts nothing. The hook finds the folder
+    // in its environment.
+    Snapshot before = snap(b);
+    Recorder rec;
+    StepReport r = b.engine.install(good("org.nbtapp.varplugin-1.0.0"), "", &rec);
+    done(r);
+    CHECK(r.restart == "hmi-restart" && b.platform.remounts.empty());
+    CHECK(readFile(plugin + "/NbtVar.manifest") == readFile("tests/packages/varplugin-1.0.0/payload/plugin/NbtVar.manifest"));
+    CHECK(modeOf(plugin + "/NbtVar.xml") == 0644 && linkOf(plugin + "/libNbtVar.so") == "libNbtVar.txt");
+    CHECK_IN(rec.logs, has(rec.logs, "postInstall: post-install: var plugins dir " + folder + "\n"));
+    InstalledPackage p = b.record(id);
+    CHECK(std::find(p.dirs.begin(), p.dirs.end(), "${var_plugins}") != p.dirs.end());   // the package made it
+    CHECK(std::find(p.dirs.begin(), p.dirs.end(), "${var_plugins}/NbtVar") != p.dirs.end());
+    CHECK(p.files.size() == 3 && p.links.size() == 1 && p.links[0].path == "${var_plugins}/NbtVar/libNbtVar.so");
+    tidy(b);
+
+    // Removal takes both folders with it, and remounts nothing either: the head unit is as it was.
+    done(b.engine.remove(id, true, 0));
+    CHECK(same(snap(b), before) && fs::kindOf(folder) == fs::kNone && b.platform.remounts.empty());
+    tidy(b);
+
+    // Where the folder was there before the package, with an app copied into it by hand, it is not the package's:
+    // nothing in the record, and it stays when the package goes, with that app in it.
+    write(folder + "/Other/Other.manifest", pluginManifest(251, "Other"));
+    write(folder + "/Other/Other.xml", pluginDescription(40000));
+    before = snap(b);
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    p = b.record(id);
+    CHECK(std::find(p.dirs.begin(), p.dirs.end(), "${var_plugins}") == p.dirs.end());
+    done(b.engine.remove(id, true, 0));
+    CHECK(same(snap(b), before) && b.platform.remounts.empty());
+    tidy(b);
+
+    // A file where the package places one, which no record knows, is not written over: stock-mismatch, as in
+    // ${plugins}, and nothing is changed.
+    write(plugin + "/NbtVar.xml", "<pluginApps/>\n");
+    before = snap(b);
+    r = b.engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
+    refused(r, "stock-mismatch");
+    CHECK(has(r.error.message, "${var_plugins}/NbtVar/NbtVar.xml") && same(snap(b), before));
+    CHECK_IN(why, fs::removeTree(plugin, &why));
+    tidy(b);
+
+    // The ids of an app in this folder count against a plugin for ${plugins}, and those of an app in ${plugins}
+    // against a plugin for this folder.
+    write(folder + "/Other/Other.manifest", pluginManifest(250, "Other"));
+    r = b.engine.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0);
+    refused(r, "hmi-id-taken");
+    CHECK(has(r.error.message, "250"));
+    write(folder + "/Other/Other.manifest", pluginManifest(251, "Other"));
+    write(folder + "/Other/Other.xml", pluginDescription(32760));
+    r = b.engine.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0);
+    refused(r, "hmi-id-taken");
+    CHECK(has(r.error.message, "32760"));
+    write(folder + "/Other/Other.xml", pluginDescription(40000));
+    const std::string stock = b.platform.pluginsDir() + "/Stock";
+    write(stock + "/Stock.manifest", pluginManifest(253, "Stock"));
+    write(stock + "/Stock.xml", pluginDescription(40001));
+    r = b.engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
+    refused(r, "hmi-id-taken");
+    CHECK(has(r.error.message, "253"));
+    write(stock + "/Stock.manifest", pluginManifest(254, "Stock"));
+    write(stock + "/Stock.xml", pluginDescription(32763));
+    r = b.engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
+    refused(r, "hmi-id-taken");
+    CHECK(has(r.error.message, "32763"));
+    CHECK(fs::kindOf(plugin) == fs::kNone && b.platform.remounts.empty());
+    tidy(b);
+
+    // With neither in use, a plugin goes into each folder, and only the one for ${plugins} remounts.
+    write(stock + "/Stock.xml", pluginDescription(40001));
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    CHECK(b.platform.remounts.empty());
+    installDone(b, "org.nbtapp.demoplugin-1.0.0");
+    CHECK(b.platform.remounts.size() == 2 && b.platform.remounts[0] == "rw" && b.platform.remounts[1] == "ro");
+    CHECK(fs::kindOf(plugin + "/NbtVar.manifest") == fs::kFile && fs::kindOf(b.platform.pluginsDir() + "/NbtDemo/NbtDemo.manifest") == fs::kFile);
+    tidy(b);
+    done(b.engine.remove(id, true, 0));
+    CHECK(fs::kindOf(plugin) == fs::kNone && fs::kindOf(folder + "/Other/Other.manifest") == fs::kFile && b.platform.remounts.size() == 2);
+    tidy(b);
+}
+
 // ---- a stock file -------------------------------------------------------------------------------------------------
 
 static void testStockFile() {
@@ -896,6 +988,7 @@ static StepReport stepPatch10(Engine& e) { return e.install(good("org.nbtapp.men
 static StepReport stepPatch11(Engine& e) { return e.install(good("org.nbtapp.menupatch-1.1.0"), "", 0); }
 static StepReport stepPatch20(Engine& e) { return e.install(good("org.nbtapp.menupatch-2.0.0"), "", 0); }
 static StepReport stepPlugin(Engine& e) { return e.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0); }
+static StepReport stepVarPlugin(Engine& e) { return e.install(good("org.nbtapp.varplugin-1.0.0"), "", 0); }
 static StepReport stepRemoveHello(Engine& e) { return e.remove("org.nbtapp.hello", false, 0); }
 static StepReport stepRemovePatch(Engine& e) { return e.remove("org.nbtapp.menupatch", true, 0); }
 
@@ -983,6 +1076,7 @@ static int testCrashRecovery(bool copyMoves, int pairs) {
         {"stock-let-go", setupPatch11, stepPatch20, true},
         {"plugin", setupNothing, stepPlugin, true},
         {"plugin-folder-there", setupPluginsFolder, stepPlugin, true},
+        {"var-plugin", setupNothing, stepVarPlugin, true},
         {"remove", setupHello12, stepRemoveHello, true},
         {"remove-stock", setupPatch10, stepRemovePatch, true},
     };
@@ -1560,6 +1654,7 @@ int main(int argc, char** argv) {
     testHooksFindReadOnly();
     testPlugin();
     testOwnPlugin();
+    testVarPlugin();
     testStockFile();
     testOwnershipAndConflicts();
     testKeysAndChecks();
@@ -1567,7 +1662,7 @@ int main(int argc, char** argv) {
     testAgentPackage();
     int agentDeaths = testAgentCrash();
     // A death at every point of every scenario, with moves as renames and as copies. A second death during the
-    // recovery as well: with copies for four scenarios, or with NBT_TEST_ALL_PAIRS set for all nine both ways,
+    // recovery as well: with copies for four scenarios, or with NBT_TEST_ALL_PAIRS set for all of them both ways,
     // which takes two minutes.
     bool allPairs = getenv("NBT_TEST_ALL_PAIRS") != 0;
     int deaths = testCrashRecovery(false, allPairs ? 2 : 0);

@@ -34,6 +34,7 @@ bad ${data}x/y
 bad ${data}/a%5Cb  # a backslash
 bad ${data}/a%0Ab  # a control character
 skip ${plugins}/x  # a variable that is not a folder of the package's
+skip ${var_plugins}/x  # nor is the other plugin folder, though a package places files there
 skip ${home}/x  # a variable that does not exist
 skip ${home}/a/*.log
 bad ${}/x  # a variable with no name
@@ -47,6 +48,7 @@ ok /tmp/a/b/c
 ok /tmp/a/b
 ok /tmp/...
 ok /var/opt/nbtappx/y  # only the agent's folder itself is closed, not names that start like it
+ok /var/opt/hmi/data/ID5/Plugins/A/a.log  # the folder of ${var_plugins} on a car, by its path under /var
 ok /tmp/nbtapps/a
 bad /tmp/
 bad /

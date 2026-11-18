@@ -50,9 +50,11 @@ struct HeadUnitConfig {
     std::string appsDir;       // ${app} of a package is <appsDir>/<id>
     std::string dataDir;       // ${data} of a package is <dataDir>/<id>
     std::string tmpDir;        // ${tmp} of a package is <tmpDir>/<id>: on the RAM disk, lost at power down
-    std::string pluginsDir;    // ${plugins}
+    std::string pluginsDir;    // ${plugins}: on the system partition
+    std::string varPluginsDir; // ${var_plugins}: on a writable partition. It need not be there, nor its parent
     std::string agentDir;      // the agent's own folder: its versions, and the files the launcher reads
-    std::vector<std::string> otherPluginDirs;   // further folders the HMI loads plugins from
+    // Further folders the HMI loads plugins from, which no package places files in: only the ids in them are read.
+    std::vector<std::string> otherPluginDirs;
     std::string systemMount;   // where the system partition is mounted; its read-only flag is the one that counts
 
     // Command lines, the program by its absolute path. They run as the agent, with PATH set to hookPath and
@@ -96,7 +98,8 @@ public:
     // dead one's.
     // False with *error set, and nothing made, if the configuration is incomplete or this machine is not the one
     // it describes: systemMount and the folder that holds pluginsDir have to be folders already; pluginsDir itself
-    // need not be there. False also if a folder cannot be made.
+    // need not be there. Nothing is asked of varPluginsDir or the folders above it, and neither is made here.
+    // False also if a folder cannot be made.
     bool prepare(std::string* error);
     const HeadUnitConfig& config() const { return config_; }
     // One line for the log after prepare(), or empty: nothing was out of the ordinary.
@@ -109,6 +112,7 @@ public:
     virtual std::string dataDir(const std::string& id) const { return config_.dataDir + "/" + id; }
     virtual std::string tmpDir(const std::string& id) const { return config_.tmpDir + "/" + id; }
     virtual std::string pluginsDir() const { return config_.pluginsDir; }
+    virtual std::string varPluginsDir() const { return config_.varPluginsDir; }
     virtual std::string agentHome() const { return config_.agentDir; }
     virtual std::vector<std::string> pluginScanDirs() const;
     virtual std::string systemPath(const std::string& absolute) const { return absolute; }

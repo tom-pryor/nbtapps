@@ -10,6 +10,10 @@ are shell scripts that stand in for binaries.
   slow-1.0.0             a postInstall that outlives its timeout
   prefail-1.0.0          a preInstall that exits with 7
   plugin-1.0.0           an HMI plugin folder with a connector id (250) and a focus id (32760)
+  varplugin-1.0.0        an HMI plugin folder in ${var_plugins}, the plugin folder on the writable partition, with a
+                         connector id (253), a focus id (32763) and a link beside its files. Its postInstall prints
+                         the folder it finds in NBT_VAR_PLUGINS_DIR. It names no requires.agent, so that the test
+                         agents, which are 1.0.0, take it
   patch-1.0.0, -1.1.0    replaces the stock file /opt/demo/menu.xml (the tests create it: "stock menu, firmware A"
                          or "... B" and a newline), with a config file in ${data}; patch-2.0.0 lets go of it again
   syshook-1.0.0          a file and a link on the system partition and all four hooks, each of which prints its

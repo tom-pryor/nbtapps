@@ -314,6 +314,11 @@ static void testHandApp() {
     write(p.root + "/stock-plugins/Demo2/Demo2.manifest", pluginManifest(210, "Demo2"));
     f = p.run("aa-fix");
     CHECK_IN(movesOf(p, f), f.moves.size() == 2 && movesOf(p, f).find("/stock-plugins/Demo2 -> /system/opt/aa/Demo2.old\n") != std::string::npos);
+    // And so does ${var_plugins}, the HMI's plugin folder on the writable partition, where apps are copied by hand.
+    // Here it is on the file system that holds /opt/aa; on a car it is not, and the check then offers no fix.
+    write(p.platform.varPluginsDir() + "/Demo3/Demo3.manifest", pluginManifest(210, "Demo3"));
+    f = p.run("aa-fix");
+    CHECK_IN(movesOf(p, f), f.moves.size() == 3 && movesOf(p, f).find("/var-plugins/Demo3 -> /system/opt/aa/Demo3.old\n") != std::string::npos);
     // Two folders of one name go to the two names.
     write(p.root + "/stock-plugins/Demo/Demo.manifest", pluginManifest(210, "Demo"));
     f = p.run("aa-fix");

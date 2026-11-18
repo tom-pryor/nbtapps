@@ -351,6 +351,8 @@ def build_all(out_dir):
     for label, path, why in (
             ("logs-unknown-variable", "${home}/hello.log", "a log path with an unknown variable"),
             ("logs-plugins", "${plugins}/Hello/hello.log", "a log path in the HMI's plugin folder"),
+            ("logs-var-plugins", "${var_plugins}/Hello/hello.log",
+             "a log path in the HMI's plugin folder on the writable partition"),
             ("logs-absolute-elsewhere", "/etc/passwd", "a log path outside the log roots")):
         logs = [{"path": "${data}/hello.log"}, {"path": path}]
         skipped[label] = (with_changed_manifest(field(["logs"], logs)), "bad-manifest", why)

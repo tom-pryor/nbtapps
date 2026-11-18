@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A stand-in UI description. -->
+<pluginApps>
+  <pluginApp applicationType="Custom" applicationWeight="198" entryButtonFocusID="32763" insertAfterFocusID="2270" insertStateID="20" text="Var">
+    <entryButton action="5" id="1" model="3"/>
+  </pluginApp>
+</pluginApps>

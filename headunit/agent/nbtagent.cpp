@@ -10,14 +10,14 @@
 //    `nbtagent --look PATH` for its own use)
 //
 // With --root, everything it touches is inside DIR, laid out as host_platform.hpp says: installed records,
-// staging, ${app}, ${data}, ${plugins}, and absolute destinations under DIR/system. It remounts nothing and
-// restarts nothing; it counts those requests and carries on. That works on a car as well as on a build host, and
-// is the way to try the agent on one without changing it.
+// staging, ${app}, ${data}, ${plugins}, ${var_plugins}, and absolute destinations under DIR/system. It remounts
+// nothing and restarts nothing; it counts those requests and carries on. That works on a car as well as on a build
+// host, and is the way to try the agent on one without changing it.
 //
 // Without --root, the build for the head unit (qcc, __QNXNTO__) works on the head unit: the real folders, the
 // system partition remounted for a write and put back, the HMI restarted (hu_platform.hpp). What it needs to know
-// for that is HeadUnitConfig::car(). On a machine that lacks the system partition's folder or the plugin folder
-// it ends, having made nothing. In this mode:
+// for that is HeadUnitConfig::car(). On a machine that lacks the system partition's folder or the HMI's folder
+// that holds ${plugins} it ends, having made nothing. In this mode:
 //   - the socket is /tmp/nbtagent.sock and cannot be put elsewhere. The socket is what keeps a second agent off
 //     the same head unit: one that finds an agent answering there ends before it looks at anything else;
 //   - SIGHUP is ignored, so the agent outlives the SSH session it was started from;

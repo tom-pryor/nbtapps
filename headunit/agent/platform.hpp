@@ -34,19 +34,25 @@ public:
     virtual std::string stagingDir() const = 0;
     // Writable, and lost when the head unit powers down: small marks that have to go when it does.
     virtual std::string runDir() const = 0;
-    // ${app} and ${data} of one package, and ${plugins}, the HMI's plugin folder.
+    // ${app} and ${data} of one package.
     virtual std::string appDir(const std::string& id) const = 0;
     virtual std::string dataDir(const std::string& id) const = 0;
     // ${tmp} of one package: its own folder on the RAM disk, for logs that are to spare the flash and may go at a
     // power down. Only a manifest's `logs` names it (log_files.hpp). /tmp/nbtapp/apps/<id> on the head unit.
     virtual std::string tmpDir(const std::string& id) const = 0;
+    // ${plugins}, the HMI's plugin folder on the system partition, which is remounted for a write; and
+    // ${var_plugins}, the second folder the HMI loads plugins from, on the writable data partition, which is not.
+    // Neither need be there: the first package that places a file in one makes it, and takes it away again when
+    // that package goes and the folder is empty.
     virtual std::string pluginsDir() const = 0;
+    virtual std::string varPluginsDir() const = 0;
     // The agent's own folder (agent_home.hpp): a folder for each version of it, and the files that say which one
     // the launcher starts. /var/opt/nbtapp/agent on the head unit. It is there only where the agent was put
     // onto the machine that way: the platform does not make it.
     virtual std::string agentHome() const = 0;
-    // Every folder the HMI loads plugins from: pluginsDir(), and any other, such as the stock, read-only one on a
-    // head unit whose ${plugins} is the writable one. The ids already in use are read from all of them.
+    // Every folder the HMI loads plugins from: pluginsDir(), varPluginsDir(), and any other, such as the stock,
+    // read-only one on a head unit whose ${plugins} is the writable one. The ids already in use are read from all
+    // of them, so those of an app copied into one by hand are seen.
     virtual std::vector<std::string> pluginScanDirs() const = 0;
     // Where an absolute destination from a manifest really is: the path itself on the head unit, the same path
     // under a folder on a build host.

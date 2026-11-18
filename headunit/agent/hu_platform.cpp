@@ -64,7 +64,7 @@ bool absolute(const std::string& path) { return !path.empty() && path[0] == '/';
 // Each value from the place named. "The probe" is what hu_probe.sh reads off a head unit, on the node the HMI runs
 // on, which is the node the agent runs on. What no source gives stays unset, so nothing runs on a guess:
 //   reboot            not recorded anywhere. It may stay empty: the agent then refuses to reboot
-//   otherPluginDirs   no second folder is known that the HMI loads plugins from
+//   otherPluginDirs   no folder the HMI loads plugins from is known beside pluginsDir and varPluginsDir
 //
 // The two remount commands are in the form the head unit's own partition script uses, `mount -u -o rw|ro` and the
 // mount point, with mount where the probe finds it. Neither is taken at its word: after each the platform asks the
@@ -80,6 +80,10 @@ HeadUnitConfig HeadUnitConfig::car() {
     c.dataDir = "/var/opt/nbtapp/data";                // plan document, "Files": ${data} sits under /var/opt/nbtapp
     c.tmpDir = "/tmp/nbtapp/apps";                     // plan document, "Pulling files": ${tmp} on the RAM disk
     c.pluginsDir = "/opt/hmi/ID5/data/ro/Plugins";     // README, "Installing"
+    // The HMI's second plugin folder, under /var, which is on the writable partition: apps installed by hand go
+    // there, and packages that have this path built into their programs. A stock head unit has /var/opt/hmi, and
+    // may have nothing below it yet; the first package that places a file in it makes the folder.
+    c.varPluginsDir = "/var/opt/hmi/data/ID5/Plugins";
     c.agentDir = "/var/opt/nbtapp/agent";              // plan document, "Agent updates"; hu_install.sh puts it there
     c.systemMount = "/fs/sda0";                        // the probe: /opt is a link into it
     const char* writable[] = {"/bin/mount", "-u", "-o", "rw", "/fs/sda0"};
@@ -102,9 +106,10 @@ std::string HeadUnitConfig::missing() const {
     struct {
         const char* name;
         const std::string* value;
-    } paths[] = {{"stateDir", &stateDir}, {"stagingDir", &stagingDir}, {"runDir", &runDir},           {"appsDir", &appsDir},
-                 {"dataDir", &dataDir},   {"tmpDir", &tmpDir},   {"pluginsDir", &pluginsDir}, {"agentDir", &agentDir},
-                 {"systemMount", &systemMount}, {"shell", &shell}};
+    } paths[] = {{"stateDir", &stateDir},       {"stagingDir", &stagingDir}, {"runDir", &runDir},
+                 {"appsDir", &appsDir},         {"dataDir", &dataDir},       {"tmpDir", &tmpDir},
+                 {"pluginsDir", &pluginsDir},   {"varPluginsDir", &varPluginsDir},
+                 {"agentDir", &agentDir},       {"systemMount", &systemMount}, {"shell", &shell}};
     for (size_t i = 0; i < sizeof paths / sizeof paths[0]; ++i) {
         if (!absolute(*paths[i].value)) names += std::string(names.empty() ? "" : ", ") + paths[i].name;
     }
@@ -142,7 +147,8 @@ bool HeadUnitPlatform::prepare(std::string* error) {
     if (!missing.empty()) return fail(error, "the head unit's configuration is not complete: " + missing);
     // Before anything is made: a head unit has these two already, and a machine that lacks one is another machine,
     // or the configuration is wrong about this one. Not the plugins folder itself: a head unit that never had a
-    // plugin has none, and the first plugin installed makes it in the HMI's folder that is checked here.
+    // plugin has none, and the first plugin installed makes it in the HMI's folder that is checked here. Nothing
+    // of varPluginsDir either: a head unit may lack it and the folders above it, and is a head unit all the same.
     std::string hmiData = fs::parentOf(config_.pluginsDir);
     const std::string* stock[] = {&config_.systemMount, &hmiData};
     for (size_t i = 0; i < sizeof stock / sizeof stock[0]; ++i) {
@@ -172,6 +178,7 @@ bool HeadUnitPlatform::prepare(std::string* error) {
 
 std::vector<std::string> HeadUnitPlatform::pluginScanDirs() const {
     std::vector<std::string> dirs(1, config_.pluginsDir);
+    dirs.push_back(config_.varPluginsDir);
     dirs.insert(dirs.end(), config_.otherPluginDirs.begin(), config_.otherPluginDirs.end());
     return dirs;
 }

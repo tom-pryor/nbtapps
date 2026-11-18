@@ -58,7 +58,7 @@ ALREADY_COMPRESSED = (".zip", ".gz", ".xz", ".bz2", ".png", ".jpg", ".jpeg")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_PATH = os.path.join(ROOT, "spec", "manifest.schema.json")
-OWN_DIRS = ("${app}/", "${data}/", "${plugins}/")
+OWN_DIRS = ("${app}/", "${data}/", "${plugins}/", "${var_plugins}/")   # not modifies-system (risk_flags)
 
 
 class PkgError(Exception):

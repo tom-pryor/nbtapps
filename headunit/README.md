@@ -9,8 +9,9 @@ link, for a phone app that connects and gets nothing (see "How a link ends").
 
 It is an iDrive **PluginApp**, built on the **HU Framework**: the head unit's own framework for add-on apps such as
 `SecurityMenu` and `ActiveSeating` (`libAppFramework.A.so`, `libCoreFramework.A.so`). At boot, HmiMain3D loads every
-`Plugins/<Name>/<Name>.manifest` under `/opt/hmi/ID5/data/ro`. The entry button and its placement come from the XML,
-so iDrive creates the menu row itself. Nothing in HmiMain3D is patched.
+`Plugins/<Name>/<Name>.manifest` under `/opt/hmi/ID5/data/ro`, and those under `/var/opt/hmi/data/ID5`, on the
+writable partition. The entry button and its placement come from the XML, so iDrive creates the menu row itself.
+Nothing in HmiMain3D is patched.
 
 ## Layout
 
@@ -81,14 +82,34 @@ format and the protocol.
 - The build for the head unit (`./build.sh agent`) uses that code when `nbtagent` is started with no `--root`: it
   then works on the head unit itself, with its state in `/var/opt/nbtapp` and its socket at `/tmp/nbtagent.sock`,
   where that build's `nbtctl` looks when it is told nothing else. The configuration for a car is
-  `HeadUnitConfig::car()`: `${app}` is `/var/opt/nbtapp/apps/<id>`, the system partition is `/fs/sda0`, remounted
-  with `/bin/mount -u -o rw /fs/sda0` and put back with `-o ro`, and the HMI is restarted with
-  `/opt/core/bin/OnOffDSICommander appreset`. The file says where each value comes from. After each remount the
-  agent asks the file system whether it is read-only, so a remount that does nothing fails the install step
+  `HeadUnitConfig::car()`: `${app}` is `/var/opt/nbtapp/apps/<id>`, `${plugins}` is
+  `/opt/hmi/ID5/data/ro/Plugins` and `${var_plugins}` is `/var/opt/hmi/data/ID5/Plugins`, the system partition is
+  `/fs/sda0`, remounted with `/bin/mount -u -o rw /fs/sda0` and put back with `-o ro`, and the HMI is restarted
+  with `/opt/core/bin/OnOffDSICommander appreset`. The file says where each value comes from. After each remount
+  the agent asks the file system whether it is read-only, so a remount that does nothing fails the install step
   before a file is written, or leaves the partition writable until the head unit is turned off and says so in
   the install log. No command for a reboot is known: the agent answers a request for one with `unsupported`, and
-  the head unit has to be turned off and on by hand. On a machine that has no `/fs/sda0` or no plugin folder this
-  mode ends without making anything. The host's build has no such mode.
+  the head unit has to be turned off and on by hand. On a machine that has no `/fs/sda0`, or no
+  `/opt/hmi/ID5/data/ro` to hold the plugin folder, this mode ends without making anything; nothing is asked of
+  `/var/opt/hmi`. The host's build has no such mode.
+- A package places its files in four folders and at absolute paths (`install.files`, `install.links`): `${app}`
+  and `${data}`, its own; `${plugins}`, the HMI's plugin folder on the system partition, which the agent remounts
+  for the step; and `${var_plugins}`, the second folder the HMI loads plugins from, on the writable partition
+  behind `/var`, where apps installed by hand are put and which needs no remount. The two plugin folders are
+  alike in everything else. Each is one of the package's own places, so a package that places files there is not
+  flagged `modifies-system`. A head unit that never had a plugin in one has no such folder: the first package
+  that places a file there makes it, and takes it away again when that package goes and the folder is empty. The
+  folder that holds it has to be there: where it is not, the install fails with `io-error` and is undone. The
+  agent writes over no file there that is in no package's record (`stock-mismatch`). A plugin's connector id and
+  focus ids are checked against the apps in both folders, whichever it goes into. Hooks get the folder as
+  `NBT_VAR_PLUGINS_DIR`. `${var_plugins}` is not a folder a `logs` entry may name. An agent that does not know
+  `${var_plugins}` refuses a manifest that uses it, so a package that places anything there sets
+  `requires.agent` to the first agent that knows it: an older agent then refuses it with `agent-too-old` instead
+  of as a bad manifest, and the phone app says that the package needs a newer agent. A phone app that does not
+  know `${var_plugins}` refuses such a package as a bad manifest when it downloads it, whatever agent the head
+  unit has. Such a package's record is one that an older agent cannot read (see "Once a version is confirmed"
+  under [The agent updates itself](#the-agent-updates-itself)). On the bench, with `--root DIR`, the folder is
+  `DIR/var-plugins`.
 - The official package key is built in (`agent/embedded_keys.hpp`): the public half of the key that signs the
   official catalogue's packages. An agent built for the head unit trusts that key and no other. The host build
   also takes `--test-key` for the test keys.
@@ -850,8 +871,9 @@ as failed with `not-confirmed`. The starter in place is as it was. The update ca
 Once a version is confirmed nothing goes back by itself. Going back by hand, by writing an older version's name to
 `current`, has one limit: the agent reads each installed package's manifest again from its record, and an older
 agent refuses a manifest whose form it does not know. A package installed by a newer agent with, for example, a
-`logs` path in `/dev/shmem` or in a folder only that agent knows (skipped there) is then a record the older agent
-cannot read, so it cannot list, update or remove that package until the newer version is back.
+`logs` path in `/dev/shmem` or in a folder only that agent knows (skipped there), or a file in `${var_plugins}`,
+is then a record the older agent cannot read, so it cannot list, update or remove that package until the newer
+version is back.
 
 What an agent accepts of its own package:
 
@@ -947,10 +969,12 @@ the capability `checks` in `hello`.
 | `aa-fix` | An app that was installed by hand: `/opt/aa` is there, or a plugin folder whose `<Name>.manifest` claims the connector id 210 and in which no installed package owns anything. It lists such a plugin folder to be moved, and everything in `/opt/aa` and `/var/opt/aa` to be removed | Stops the programs that run from `/opt/aa`. Moves the plugin's folder, whole, out of the plugin folder into `/opt/aa` as `<Name>.old`, or `<Name>.nbtappsold` where that is taken, and leaves it there, where the HMI no longer loads it. Then removes the rest as listed. The packet filter's configuration is not read or written: what that app changed there stays as it is. The HMI needs a restart |
 
 The plugin's folder is moved and not removed because the HMI may have the plugin loaded, and its files are not
-taken away under it. A folder directly in `/opt/aa` that is a real folder, not a link, and whose name ends in `.old`
-or `.nbtappsold` is parked: neither it nor anything in it is listed, moved or removed, and a check that finds
-nothing else says `ok`. `/opt/aa` itself is not listed for removal while it receives a plugin or holds a parked
-one.
+taken away under it. The check looks for it in every folder the HMI loads plugins from, `${plugins}` and
+`${var_plugins}` both. On a car the second is on another partition than `/opt/aa`, and a move is one rename
+(below), so a plugin found there is a problem with no fix. A folder directly in `/opt/aa` that is a real folder,
+not a link, and whose name ends in `.old` or `.nbtappsold` is parked: neither it nor anything in it is listed,
+moved or removed, and a check that finds nothing else says `ok`. `/opt/aa` itself is not listed for removal while
+it receives a plugin or holds a parked one.
 
 Every fix keeps to these rules:
 

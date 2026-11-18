@@ -493,6 +493,22 @@
       "what": "built from tests/packages/syshook-1.0.0"
     },
     {
+      "id": "org.nbtapp.varplugin",
+      "version": "1.0.0",
+      "name": "Demo plugin on the data partition",
+      "sha256": "ccb2ffbd59218dcd6bebf4fe9b71a90d6a99822e470394cb6d2ee3a32386efc6",
+      "size": 1871,
+      "manifestSha256": "d35873541e396c24cbc593089ef800b4160f58df403b14479fae4578a23469b6",
+      "flags": [
+        "runs-scripts",
+        "needs-reboot"
+      ],
+      "signature": "d91dc1875911e139909ba445b81e444d7b36881f6304309c0ef2a070dd4a315425dee9767aa7f7f10e91575ddb93c10d8661d1445a649b9e24d196c1ac51150e",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.varplugin-1.0.0.nbtpkg",
+      "what": "built from tests/packages/varplugin-1.0.0"
+    },
+    {
       "id": "org.nbtapp.hello",
       "version": "1.2.0",
       "name": "Hello NBT",
@@ -1300,6 +1316,11 @@
       "file": "skipped/logs-unknown-variable.nbtpkg",
       "code": "bad-manifest",
       "what": "a log path with an unknown variable"
+    },
+    {
+      "file": "skipped/logs-var-plugins.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a log path in the HMI's plugin folder on the writable partition"
     }
   ],
   "detached": [

@@ -124,6 +124,26 @@ def main():
             raise AssertionError("range %r accepted" % wrong)
         except nbtpkg.SchemaError:
             pass
+    # A destination and a link's path: in one of the four folders a package places files in, or absolute.
+    dest = schema["$defs"]["file"]["properties"]["dest"]
+    link = schema["$defs"]["link"]["properties"]["path"]
+    for good in ("${app}/b", "${plugins}/A/", "${var_plugins}/A/", "${var_plugins}/A/a.so", "${var_plugins}/", "/x"):
+        nbtpkg.validate(good, dest, schema, "dest")
+    for wrong in ("${var_plugins}", "${var_plugins}x/a", "${var_pluginsx}/a", "${VAR_PLUGINS}/a", "${var_plugins}//a",
+                  "${var_plugins}/../a", "${tmp}/a"):
+        try:
+            nbtpkg.validate(wrong, dest, schema, "dest")
+            raise AssertionError("dest %r accepted" % wrong)
+        except nbtpkg.SchemaError:
+            pass
+    for good in ("${plugins}/A/b", "${var_plugins}/A/b", "/x"):
+        nbtpkg.validate(good, link, schema, "link")
+    for wrong in ("${var_plugins}", "${var_plugins}/", "${var_plugins}/A/", "${var_pluginsx}/a"):
+        try:
+            nbtpkg.validate(wrong, link, schema, "link")
+            raise AssertionError("link path %r accepted" % wrong)
+        except nbtpkg.SchemaError:
+            pass
     print("[ok] manifest schema")
 
     # 2b. Settings: what a text option takes, and the edges the test packages do not reach.
@@ -205,6 +225,10 @@ def main():
         assert nbtpkg.risk_flags({"install": {"files": [{"dest": "${plugins}/A/a", "replaces": {}}]}}) == ["modifies-system"]
         assert nbtpkg.risk_flags({"install": {"links": [{"path": "/bin/x"}]}}) == ["modifies-system"]
         assert nbtpkg.risk_flags({"install": {"files": [{"dest": "${data}/x"}], "hooks": {}}}) == []
+        # Both plugin folders are the package's own places; a variable that only starts like one is not.
+        assert nbtpkg.risk_flags({"install": {"files": [{"dest": "${plugins}/A/a"}, {"dest": "${var_plugins}/B/"}],
+                                              "links": [{"path": "${var_plugins}/B/l"}]}}) == []
+        assert nbtpkg.risk_flags({"install": {"files": [{"dest": "${var_pluginsx}/a"}]}}) == ["modifies-system"]
         assert nbtpkg.risk_flags({}) == []
 
         # 4. Reproducible, and signing afterwards gives the same archive as building signed.

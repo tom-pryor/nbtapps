@@ -52,8 +52,9 @@ std::string number(uint64_t value) {
 }
 
 // The folders above a destination, as destinations, parents first. ${app} and ${data} themselves are among them,
-// because the package owns them, and so is ${plugins}: a head unit that never had a plugin has no such folder, and
-// the first plugin installed makes it, and takes it away again if it is empty when that plugin goes. / is not.
+// because the package owns them, and so are ${plugins} and ${var_plugins}: a head unit that never had a plugin in
+// one has no such folder, and the first plugin installed there makes it, and takes it away again if it is empty
+// when that plugin goes. Only the folder itself is made: the one that holds it has to be there. / is not among them.
 std::vector<std::string> ancestorsOf(const std::string& dest) {
     size_t root = 0;
     bool includeRoot = false;
@@ -65,6 +66,9 @@ std::vector<std::string> ancestorsOf(const std::string& dest) {
         includeRoot = true;
     } else if (startsWith(dest, "${plugins}")) {
         root = 10;
+        includeRoot = true;
+    } else if (startsWith(dest, "${var_plugins}")) {
+        root = 14;
         includeRoot = true;
     }
     std::vector<std::string> out;
@@ -330,6 +334,9 @@ bool Engine::runHook(const Manifest& m, HookKind kind, const std::string& cwd, c
     env.push_back("NBT_APP_DIR=" + store_.appDir(m));
     env.push_back("NBT_DATA_DIR=" + platform_->dataDir(m.id));
     env.push_back("NBT_TMP_DIR=" + platform_->tmpDir(m.id));
+    // The HMI's plugin folder on the writable partition, for a hook that has to find a plugin there. It may not
+    // be there: only a package that places a file in it makes it.
+    env.push_back("NBT_VAR_PLUGINS_DIR=" + platform_->varPluginsDir());
 
     putBackReadOnly(log);
     log->line(std::string("running ") + name + ": " + hook.script);
@@ -1265,7 +1272,8 @@ bool InstallStep::planLink(const ManifestLink& link, const std::map<std::string,
 
 // The connector id and the focus ids of a plugin this package places must not be in use by another app on the car.
 bool InstallStep::checkHmiIds() {
-    std::string plugins = platform()->pluginsDir();
+    // A plugin of this package is one it places in either folder that a package places plugins in.
+    std::string plugins = platform()->pluginsDir(), varPlugins = platform()->varPluginsDir();
     std::set<std::string> ours;   // what this package places now or placed before: not "another app"
     std::map<std::string, std::string> unpacked;
     for (size_t i = 0; i < files_.size(); ++i) {
@@ -1279,7 +1287,7 @@ bool InstallStep::checkHmiIds() {
     std::vector<long> connectors, focus;
     for (size_t i = 0; i < files_.size(); ++i) {
         const FileAction& a = files_[i];
-        if (!under(a.real, plugins) || !endsWith(a.real, ".manifest")) continue;
+        if (!(under(a.real, plugins) || under(a.real, varPlugins)) || !endsWith(a.real, ".manifest")) continue;
         std::string text, desc;
         if (!fs::readFile(a.unpacked, kMaxPluginFile, &text, 0)) continue;
         readPluginManifest(text, &connectors, &desc);

@@ -9,6 +9,7 @@
 //   <root>/state      installed records, journal        <root>/apps/<id>   ${app}
 //   <root>/staging    blob cache, unpacked packages     <root>/data/<id>   ${data}
 //   <root>/plugins    ${plugins}                        <root>/system/...  absolute destinations
+//   <root>/var-plugins  ${var_plugins}, which is not on the stand-in for the system partition
 //   <root>/run        the marks a power down takes away: removing this folder is the power cut of a test
 //   <root>/tmp/<id>   ${tmp}, which a power down would take away too
 //   <root>/agent      the agent's own folder, if a test or a launcher has made one: prepare() does not
@@ -29,8 +30,8 @@ public:
     explicit HostPlatform(const std::string& root)
         : hmiRestarts(0), reboots(0), fakeFree(-1), reserve(64u << 10), systemWritable(-1), root_(root), writable_(false) {}
 
-    // Makes the folders a head unit would already have. Not <root>/plugins: a head unit that never had a plugin has
-    // no plugins folder, and the first plugin installed makes it.
+    // Makes the folders a head unit would already have. Not <root>/plugins or <root>/var-plugins: a head unit that
+    // never had a plugin has no such folder, and the first plugin installed in one makes it.
     bool prepare(std::string* error) const {
         return fs::makeDirs(stateDir(), error) && fs::makeDirs(stagingDir(), error) && fs::makeDirs(runDir(), error) &&
                fs::makeDirs(root_ + "/system", error);
@@ -43,15 +44,18 @@ public:
     virtual std::string dataDir(const std::string& id) const { return root_ + "/data/" + id; }
     virtual std::string tmpDir(const std::string& id) const { return root_ + "/tmp/" + id; }
     virtual std::string pluginsDir() const { return root_ + "/plugins"; }
+    virtual std::string varPluginsDir() const { return root_ + "/var-plugins"; }
     virtual std::string agentHome() const { return root_ + "/agent"; }
     virtual std::vector<std::string> pluginScanDirs() const {
         std::vector<std::string> dirs(1, pluginsDir());
+        dirs.push_back(varPluginsDir());
         dirs.insert(dirs.end(), morePluginDirs.begin(), morePluginDirs.end());
         return dirs;
     }
     virtual std::string systemPath(const std::string& absolute) const { return root_ + "/system" + absolute; }
 
-    // Stands in for the read-only system partition: <root>/plugins and <root>/system count as being on it.
+    // Stands in for the read-only system partition: <root>/plugins and <root>/system count as being on it, and
+    // <root>/var-plugins does not.
     virtual bool makeWritable(const std::string& path, std::string*) {
         if (onSystem(path)) {
             if (!writable_) remounts.push_back("rw");

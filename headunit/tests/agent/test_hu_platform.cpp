@@ -56,6 +56,8 @@ static std::string line(const std::vector<std::string>& argv) {
 //   <root>/system               the system partition: read-only unless <root>/bin/writable exists
 //   <root>/elsewhere            a second read-only file system, which no command makes writable
 //   <root>/var/opt/nbtapp       state, with ${app}, ${data} and staging in it      <root>/tmp/nbtapp   the run folder
+//   <root>/var/opt/hmi/data/ID5/Plugins   ${var_plugins}, on the writable file system: neither it nor the folders
+//                               above it are made, as on a head unit that never had a plugin there
 //   <root>/bin/mount rw|ro      appends "mount rw" or "mount ro" to <root>/bin/calls and flips <root>/bin/writable.
 //                               With <root>/bin/fail-rw or fail-ro holding a number above 0 it counts that down,
 //                               prints "mount: busy" and exits with 1 instead; with noop-rw it does nothing
@@ -89,6 +91,7 @@ struct Car {
         config.dataDir = config.stateDir + "/data";
         config.tmpDir = config.runDir + "/apps";
         config.pluginsDir = root + "/system/opt/hmi/Plugins";
+        config.varPluginsDir = root + "/var/opt/hmi/data/ID5/Plugins";
         config.agentDir = config.stateDir + "/agent";
         config.systemMount = root + "/system";
         config.remountWritable = command("/bin/sh", bin + "/mount", "rw");
@@ -159,6 +162,11 @@ static void testConfig() {
     CHECK(real.dataDir("org.nbtapp.hello") == "/var/opt/nbtapp/data/org.nbtapp.hello" && real.shell() == "/bin/ksh");
     CHECK(real.stagingDir() == "/var/opt/nbtapp/staging" && real.runDir() == "/tmp/nbtapp");
     CHECK(real.tmpDir("org.nbtapp.hello") == "/tmp/nbtapp/apps/org.nbtapp.hello");
+    // The two plugin folders: the stock one on the system partition, and the one under /var, where apps installed by
+    // hand are and where packages that have the path built in go. Both are read for the ids in use.
+    CHECK(real.pluginsDir() == "/opt/hmi/ID5/data/ro/Plugins" && real.varPluginsDir() == "/var/opt/hmi/data/ID5/Plugins");
+    std::vector<std::string> carScan = real.pluginScanDirs();
+    CHECK(carScan.size() == 2 && carScan[0] == real.pluginsDir() && carScan[1] == real.varPluginsDir());
 
     // A machine that lacks a folder every head unit has is not one, or the configuration is wrong about it.
     // Either way nothing is made there.
@@ -181,6 +189,9 @@ static void testConfig() {
         CarPlatform p(stock);
         CHECK_IN(why, p.prepare(&why) && !there(stock.config.pluginsDir) && fs::isDir(stock.config.stateDir));
         CHECK(stock.calls().empty());
+        // Nor does it have the plugin folder under /var, or any folder of the HMI's there: nothing is asked of them,
+        // and nothing is made.
+        CHECK(!there(stock.root + "/var/opt/hmi") && !there(stock.config.varPluginsDir));
     }
 
     Car c("config");
@@ -193,6 +204,9 @@ static void testConfig() {
     bad.otherPluginDirs.push_back("Plugins");
     bad.restoreAttempts = 0;
     CHECK_IN(bad.missing(), bad.missing() == "stagingDir, runDir, otherPluginDirs, restartHmi, reboot, restoreAttempts");
+    bad = c.config;
+    bad.varPluginsDir = "";
+    CHECK_IN(bad.missing(), bad.missing() == "varPluginsDir");
 
     c.config.otherPluginDirs.push_back(c.root + "/system/opt/hmi/StockPlugins");
     CarPlatform p(c);
@@ -209,7 +223,8 @@ static void testConfig() {
     if (!fs::sameDevice("/proc", c.config.stateDir)) CHECK(p.reserveBytes("/proc") == (64u << 10));
     CHECK(p.appDir("org.nbtapp.hello") == c.config.appsDir + "/org.nbtapp.hello" && p.hookPath() == "/usr/bin:/bin");
     std::vector<std::string> scan = p.pluginScanDirs();
-    CHECK(scan.size() == 2 && scan[0] == p.pluginsDir() && scan[1] == c.root + "/system/opt/hmi/StockPlugins");
+    CHECK(scan.size() == 3 && scan[0] == p.pluginsDir() && scan[1] == c.config.varPluginsDir &&
+          scan[2] == c.root + "/system/opt/hmi/StockPlugins");
     uint64_t free = 0;
     CHECK(p.freeBytes(c.config.stagingDir + "/no/such/folder", &free) && free > 0);
     CHECK(c.calls().empty());   // nothing ran
@@ -233,6 +248,10 @@ static void testRemount() {
     // A path that can be written to needs nothing.
     CHECK(p.makeWritable(c.config.stateDir + "/installed/x", &why) && p.makeWritable(c.config.appsDir + "/x/bin/y", &why));
     CHECK(c.calls().empty() && !p.remounted() && !there(p.markerPath()));
+    // Nor does a path in ${var_plugins}, which is on a writable file system, though neither the folder nor the
+    // folders above it are there.
+    CHECK_IN(why, p.makeWritable(c.config.varPluginsDir + "/NbtVar/NbtVar.manifest", &why) && p.makeWritable(c.config.varPluginsDir, &why));
+    CHECK(c.calls().empty() && !p.remounted() && !there(p.markerPath()) && !there(c.config.varPluginsDir));
     CHECK(p.restoreReadOnly(&why) && c.calls().empty());
 
     // One on the system partition: one remount, however many paths follow, and one more to put it back.
@@ -488,6 +507,22 @@ static void testEngine() {
     done(engine.remove("org.nbtapp.demoplugin", true, 0));
     CHECK(!there(demo) && there(plugins) && c.calls() == "mount rw\nmount ro\nmount rw\nmount ro\n");
     CHECK(fs::removeTree(plugins, &why));
+
+    // A plugin in ${var_plugins}, which is on the writable partition: nothing is remounted, for the install or for
+    // the removal. Where the folder that holds it is not there either, the install fails and leaves nothing: the
+    // agent makes the plugin folder, and no folder of the HMI's above it.
+    std::string varPlugins = c.config.varPluginsDir, hmiVar = fs::parentOf(varPlugins), nbtVar = varPlugins + "/NbtVar";
+    CHECK(!there(c.root + "/var/opt/hmi"));
+    r = engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
+    CHECK_IN(r.error.code + ": " + r.error.message, r.outcome == kStepFailed && r.error.code == "io-error");
+    CHECK(!there(c.root + "/var/opt/hmi") && !there(p.appDir("org.nbtapp.varplugin")) && c.calls().empty());
+    CHECK(fs::makeDirs(hmiVar, &why));
+    r = engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
+    done(r);
+    CHECK(r.restart == "hmi-restart" && there(nbtVar + "/NbtVar.manifest") && c.calls().empty() && !c.writable());
+    CHECK(has(readFile(p.stateDir() + "/installed/org.nbtapp.varplugin/record.json"), "\"${var_plugins}\""));
+    done(engine.remove("org.nbtapp.varplugin", true, 0));
+    CHECK(!there(varPlugins) && fs::isDir(hmiVar) && c.calls().empty());
 
     // Its connector id is taken by an app in the stock folder, which is not where ${plugins} points.
     write(c.root + "/system/opt/hmi/StockPlugins/Stock/Stock.manifest",

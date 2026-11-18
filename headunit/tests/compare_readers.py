@@ -36,6 +36,7 @@ STRINGS = ["", "a", "a.b", "org.nbtapp.hello", "Org.x", "1.0.0", "1.0", "01.0.0"
            ">= 1.0.0", "none", "required", "hmi-restart", "maybe", "0644", "0755", "644", "0999", "payload/bin/hello",
            "payload/", "payload/bin/", "payload/etc/hello.conf", "scripts/pre-install.sh", "scripts/", "../x", "a/../b",
            "a//b", "/abs", "/abs/", "/", "${app}/x", "${app}/", "${app}", "${data}/x/", "${plugins}/A/b", "${home}/x",
+           "${var_plugins}/A/b", "${var_plugins}/", "${var_plugins}", "${var_pluginsx}/A",
            "${app}/bin/hello", "${app}/../x", "a\\b", "a\nb", "a\u0000b", "café", "\U0001f600", "x" * 64, "x" * 65,
            "x" * 255, "x" * 256, "é" * 128, "é" * 255, "é" * 256, "manifest.json", "manifest.sig",
            "0" * 64, "f" * 64, "F" * 64, "0" * 63, "hello", "x\u007fy", ".", "..", "...", "a/.", "a/.b"]

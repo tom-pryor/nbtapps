@@ -245,17 +245,21 @@ int main() {
     assert(code(make(kHead, content(wide), "")) == bad);
 
     // 8. Destinations.
-    const char* const dests[] = {"${app}/b", "${data}/x/y", "${plugins}/Demo/b", "/x", "/opt/a.b/c", "/${app}/x",
-                                 "${app}/${data}", 0};
+    const char* const dests[] = {"${app}/b", "${data}/x/y", "${plugins}/Demo/b", "${var_plugins}/Demo/b", "/x",
+                                 "/opt/a.b/c", "/${app}/x", "${app}/${data}", 0};
     for (int i = 0; dests[i] != 0; ++i) assert(dest(dests[i]) == "");
     const char* const noDests[] = {"", "x", "bin/x", "${app}", "${home}/x", "${APP}/x", "${app}//x", "${app}/../x",
                                    "${app}/x/./y", "/", "//x", "/x//y", "/x/../y", "/..", "${app}x", "$app/x",
-                                   "/x\\\\y", "/x\\ty", "${app}/", "/x/", "${plugins}/Demo/", 0};
-    for (int i = 0; noDests[i] != 0; ++i) assert(dest(noDests[i]) == bad);   // the last three: a file to a folder
+                                   "/x\\\\y", "/x\\ty", "${var_plugins}", "${var_plugins}x/a", "${var_pluginsx}/a",
+                                   "${VAR_PLUGINS}/a", "${var_plugins}//a", "${var_plugins}/../a", "${var_plugins}/Demo/",
+                                   "${app}/", "/x/", "${plugins}/Demo/", 0};
+    for (int i = 0; noDests[i] != 0; ++i) assert(dest(noDests[i]) == bad);   // the last four: a file to a folder
     // A folder goes to a folder, which may be the top of ${app}.
     std::string folder = "\"files\":[{\"src\":\"a/\",\"dest\":\"${app}/\",\"mode\":\"0644\"}]";
     assert(code(make(kHead, content("a/b") + "," + content("a/c/d"), folder), &m) == "");
     assert(m.placements.size() == 2 && m.placements[0].dest == "${app}/b" && m.placements[1].dest == "${app}/c/d");
+    assert(code(make(kHead, content("a/b"), "\"files\":[{\"src\":\"a/\",\"dest\":\"${var_plugins}/Demo/\",\"mode\":\"0644\"}]"), &m) == "");
+    assert(m.placements.size() == 1 && m.placements[0].dest == "${var_plugins}/Demo/b");
     assert(code(make(kHead, content("a/b"), "\"files\":[{\"src\":\"a/\",\"dest\":\"/opt/x\",\"mode\":\"0644\"}]")) == bad);
     assert(code(make(kHead, content("b/b"), folder)) == bad);                                    // nothing under a/
     assert(code(make(kHead, content("a/b"), "\"files\":[{\"src\":\"a/\",\"dest\":\"/x/\",\"mode\":\"0644\",\"config\":false}]")) == bad);
@@ -278,7 +282,9 @@ int main() {
 
     // 10. Links.
     assert(link("${app}/bin/x", "y") == "" && link("/usr/bin/x", "../lib/y") == "" && link("${plugins}/A/b", "/abs") == "");
-    const char* const noLinks[] = {"", "x", "${app}", "${app}/", "/x/", "/", "${app}x/y", "${home}/x", "/x/../y", 0};
+    assert(link("${var_plugins}/A/b", "a.so") == "");
+    const char* const noLinks[] = {"", "x", "${app}", "${app}/", "/x/", "/", "${app}x/y", "${home}/x", "/x/../y",
+                                   "${var_plugins}", "${var_plugins}/", "${var_plugins}/A/", "${var_pluginsx}/y", 0};
     for (int i = 0; noLinks[i] != 0; ++i) assert(link(noLinks[i], "y") == bad);
     assert(link("/x", "") == bad && link("/x", "a\\nb") == bad && link("/x", std::string(255, 't')) == "");
     assert(link("/x", std::string(256, 't')) == bad);
@@ -580,6 +586,14 @@ int main() {
     assert(code(make(kHead, "", "\"links\":[{\"path\":\"/bin/x\",\"target\":\"y\"}]"), &m) == "");
     assert(riskFlags(m).size() == 1 && riskFlags(m)[0] == "modifies-system");
     assert(inOwnDirs("${app}/x") && inOwnDirs("${data}/") && !inOwnDirs("${app}") && !inOwnDirs("/x") && !inOwnDirs("${home}/x"));
+    // Both plugin folders are the package's own places: a plugin placed in either, with a link beside it, is not
+    // modifies-system.
+    assert(code(make(kHead, content("a/b"), "\"files\":[{\"src\":\"a/b\",\"dest\":\"${plugins}/A/x\",\"mode\":\"0644\"},"
+                     "{\"src\":\"a/b\",\"dest\":\"${var_plugins}/B/x\",\"mode\":\"0644\"}],"
+                     "\"links\":[{\"path\":\"${var_plugins}/B/y\",\"target\":\"x\"}]"), &m) == "");
+    assert(riskFlags(m).empty());
+    assert(inOwnDirs("${plugins}/A") && inOwnDirs("${var_plugins}/A") && inOwnDirs("${var_plugins}/") &&
+           !inOwnDirs("${var_plugins}") && !inOwnDirs("${var_pluginsx}/A"));
 
     // 13. The size limit.
     std::string large = "{\"manifestVersion\":1,\"pad\":\"" + std::string(kMaxManifestBytes, 'x') + "\"}";
