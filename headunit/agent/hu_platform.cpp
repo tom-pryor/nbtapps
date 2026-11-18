@@ -141,8 +141,10 @@ bool HeadUnitPlatform::prepare(std::string* error) {
     std::string missing = config_.missing();
     if (!missing.empty()) return fail(error, "the head unit's configuration is not complete: " + missing);
     // Before anything is made: a head unit has these two already, and a machine that lacks one is another machine,
-    // or the configuration is wrong about this one.
-    const std::string* stock[] = {&config_.systemMount, &config_.pluginsDir};
+    // or the configuration is wrong about this one. Not the plugins folder itself: a head unit that never had a
+    // plugin has none, and the first plugin installed makes it in the HMI's folder that is checked here.
+    std::string hmiData = fs::parentOf(config_.pluginsDir);
+    const std::string* stock[] = {&config_.systemMount, &hmiData};
     for (size_t i = 0; i < sizeof stock / sizeof stock[0]; ++i) {
         if (!fs::isDir(*stock[i])) {
             return fail(error, "this is not the head unit the configuration describes: there is no folder " + *stock[i]);

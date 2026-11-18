@@ -18,6 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <map>
 
 #include "../../agent/fsutil.hpp"
@@ -514,10 +515,13 @@ static void testOwnPlugin() {
     StepReport r = b.engine.install(first, "", 0);
     refused(r, "stock-mismatch");
     CHECK(same(snap(b), before) && b.platform.remounts.empty());
-    CHECK_IN(why, fs::removeTree(folder, &why));
+    // Moved out of the way, and with it the Plugins folder, which the hand copy made: the head unit is as one that
+    // never had a plugin.
+    CHECK_IN(why, fs::removeTree(b.platform.pluginsDir(), &why));
     tidy(b);
 
-    // The install: the folder with its five files, and the HMI has to start again to load it.
+    // The install: the Plugins folder and the plugin's folder with its five files, and the HMI has to start again
+    // to load it.
     before = snap(b);
     r = b.engine.install(first, "", 0);
     done(r);
@@ -529,6 +533,7 @@ static void testOwnPlugin() {
     CHECK(b.platform.remounts.size() == 2 && b.platform.remounts[0] == "rw" && b.platform.remounts[1] == "ro");
     InstalledPackage p = b.record(id);
     CHECK(p.manifest.version == "1.0.0" && p.files.size() == 5);
+    CHECK(std::find(p.dirs.begin(), p.dirs.end(), "${plugins}") != p.dirs.end());   // the package made it
     const std::string library = readFile(folder + "/libNbtApp.so");
     CHECK(has(library, "version 1.0.0"));
     tidy(b);
@@ -540,12 +545,14 @@ static void testOwnPlugin() {
     CHECK(has(readFile(folder + "/libNbtApp.so"), "version 1.1.0") && b.record(id).manifest.version == "1.1.0");
     CHECK(readFile(folder + "/NbtApp.manifest") == readFile("plugin/NbtApp.manifest"));
     CHECK(fs::listDir(folder, &names, &why) && names.size() == 5);
+    p = b.record(id);
+    CHECK(std::find(p.dirs.begin(), p.dirs.end(), "${plugins}") != p.dirs.end());   // still the package's
     tidy(b);
     refused(b.engine.install(first, "", 0), "downgrade");
 
-    // Removal takes the folder with it.
+    // Removal takes both folders with it: the head unit is as it was.
     done(b.engine.remove(id, true, 0));
-    CHECK(same(snap(b), before) && fs::kindOf(folder) == fs::kNone);
+    CHECK(same(snap(b), before) && fs::kindOf(b.platform.pluginsDir()) == fs::kNone);
     tidy(b);
 }
 
@@ -877,6 +884,11 @@ static void setupPatch11(Bench& b) {
     write(b.data("org.nbtapp.menupatch") + "/settings.conf", "volume = 11\n", 0600);
 }
 static void setupNothing(Bench&) {}
+// A head unit that had a plugin before: the Plugins folder is there, and is nobody's.
+static void setupPluginsFolder(Bench& b) {
+    std::string why;
+    CHECK_IN(why, fs::makeDirs(b.platform.pluginsDir(), &why));
+}
 
 static StepReport stepHello12(Engine& e) { return e.install(good("org.nbtapp.hello-1.2.0"), "", 0); }
 static StepReport stepHello13(Engine& e) { return e.install(good("org.nbtapp.hello-1.3.0"), "", 0); }
@@ -970,6 +982,7 @@ static int testCrashRecovery(bool copyMoves, int pairs) {
         {"stock-upgrade", setupPatch10, stepPatch11, true},
         {"stock-let-go", setupPatch11, stepPatch20, true},
         {"plugin", setupNothing, stepPlugin, true},
+        {"plugin-folder-there", setupPluginsFolder, stepPlugin, true},
         {"remove", setupHello12, stepRemoveHello, true},
         {"remove-stock", setupPatch10, stepRemovePatch, true},
     };

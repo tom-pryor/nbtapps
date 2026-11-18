@@ -95,7 +95,8 @@ public:
     // the caller has to know that no other agent is at work on this head unit: its marker would be taken for a
     // dead one's.
     // False with *error set, and nothing made, if the configuration is incomplete or this machine is not the one
-    // it describes: systemMount and pluginsDir have to be folders already. False also if a folder cannot be made.
+    // it describes: systemMount and the folder that holds pluginsDir have to be folders already; pluginsDir itself
+    // need not be there. False also if a folder cannot be made.
     bool prepare(std::string* error);
     const HeadUnitConfig& config() const { return config_; }
     // One line for the log after prepare(), or empty: nothing was out of the ordinary.

@@ -29,10 +29,11 @@ public:
     explicit HostPlatform(const std::string& root)
         : hmiRestarts(0), reboots(0), fakeFree(-1), reserve(64u << 10), systemWritable(-1), root_(root), writable_(false) {}
 
-    // Makes the folders a head unit would already have.
+    // Makes the folders a head unit would already have. Not <root>/plugins: a head unit that never had a plugin has
+    // no plugins folder, and the first plugin installed makes it.
     bool prepare(std::string* error) const {
         return fs::makeDirs(stateDir(), error) && fs::makeDirs(stagingDir(), error) && fs::makeDirs(runDir(), error) &&
-               fs::makeDirs(pluginsDir(), error) && fs::makeDirs(root_ + "/system", error);
+               fs::makeDirs(root_ + "/system", error);
     }
 
     virtual std::string stateDir() const { return root_ + "/state"; }

@@ -79,7 +79,8 @@ struct Car {
               "echo \"restart $*\" >> " + bin + "/calls\n"
               "if [ -e " + bin + "/fail-restart ]; then echo 'no HMI to restart'; exit 4; fi\n");
         write(bin + "/slow", "echo \"slow\" >> " + bin + "/calls\nsleep 30\n");
-        CHECK_IN(why, fs::makeDirs(root + "/system/opt/hmi/Plugins", &why) && fs::makeDirs(root + "/elsewhere", &why));
+        // The HMI's folder, but no Plugins folder in it: a head unit that never had a plugin.
+        CHECK_IN(why, fs::makeDirs(root + "/system/opt/hmi", &why) && fs::makeDirs(root + "/elsewhere", &why));
 
         config.stateDir = root + "/var/opt/nbtapp";
         config.stagingDir = config.stateDir + "/staging";
@@ -168,9 +169,18 @@ static void testConfig() {
         CHECK_IN(why, !noMount.prepare(&why) && has(why, "not the head unit") && has(why, other.root + "/fs/sda0"));
         other.config.systemMount = other.root + "/system";
         other.config.pluginsDir = other.root + "/system/opt/hmi/ID5/Plugins";
-        CarPlatform noPlugins(other);
-        CHECK_IN(why, !noPlugins.prepare(&why) && has(why, "not the head unit") && has(why, "/opt/hmi/ID5/Plugins"));
+        CarPlatform noHmi(other);
+        CHECK_IN(why, !noHmi.prepare(&why) && has(why, "not the head unit") && has(why, "/opt/hmi/ID5") && !has(why, "Plugins"));
         CHECK(!there(other.root + "/var") && !there(other.root + "/tmp") && other.calls().empty());
+    }
+
+    // A head unit that never had a plugin has the HMI's folder and no Plugins folder in it. It is one, and the
+    // agent starts there; the first plugin installed makes the folder (testEngine), so prepare leaves it be.
+    {
+        Car stock("no-plugins");
+        CarPlatform p(stock);
+        CHECK_IN(why, p.prepare(&why) && !there(stock.config.pluginsDir) && fs::isDir(stock.config.stateDir));
+        CHECK(stock.calls().empty());
     }
 
     Car c("config");
@@ -452,21 +462,39 @@ static void testEngine() {
     done(engine.install(good("org.nbtapp.runtime-2.1.0"), "", 0));
     CHECK(there(p.appDir("org.nbtapp.runtime") + "/lib/libnbtrt.txt") && c.calls().empty());
 
-    // A plugin: one remount for its three files, and back.
-    std::string demo = c.config.pluginsDir + "/NbtDemo";
+    // A plugin, on a head unit that never had one: the same remount makes the Plugins folder for its three files,
+    // and the package owns the folder, so it goes with the package.
+    std::string plugins = c.config.pluginsDir;
+    std::string demo = plugins + "/NbtDemo";
+    CHECK(!there(plugins));
     StepReport r = engine.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0);
     done(r);
     CHECK(r.restart == "hmi-restart" && there(demo + "/NbtDemo.manifest") && there(demo + "/NbtDemo.xml"));
     CHECK(!c.writable() && !p.remounted() && !there(p.markerPath()) && c.calls() == "mount rw\nmount ro\n");
+    CHECK(has(readFile(p.stateDir() + "/installed/org.nbtapp.demoplugin/record.json"), "\"${plugins}\""));
     done(engine.remove("org.nbtapp.demoplugin", true, 0));
-    CHECK(!there(demo) && !c.writable() && c.calls() == "mount rw\nmount ro\n");
+    CHECK(!there(demo) && !there(plugins) && !c.writable() && c.calls() == "mount rw\nmount ro\n");
+
+    // Another plugin's folder in it, put there by hand: the folder stays when the package goes, with that one in it.
+    done(engine.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0));
+    write(plugins + "/Other/Other.manifest", "<plugin/>\n");
+    done(engine.remove("org.nbtapp.demoplugin", true, 0));
+    CHECK(!there(demo) && there(plugins + "/Other/Other.manifest"));
+    c.calls();
+    // Where the folder was there before the package, it is not the package's: nothing in the record, and it stays.
+    done(engine.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0));
+    CHECK(!has(readFile(p.stateDir() + "/installed/org.nbtapp.demoplugin/record.json"), "\"${plugins}\""));
+    CHECK(fs::removeTree(plugins + "/Other", &why));
+    done(engine.remove("org.nbtapp.demoplugin", true, 0));
+    CHECK(!there(demo) && there(plugins) && c.calls() == "mount rw\nmount ro\nmount rw\nmount ro\n");
+    CHECK(fs::removeTree(plugins, &why));
 
     // Its connector id is taken by an app in the stock folder, which is not where ${plugins} points.
     write(c.root + "/system/opt/hmi/StockPlugins/Stock/Stock.manifest",
           "<plugin><config><dependencies><pluginAppConnector><id>250</id></pluginAppConnector></dependencies></config></plugin>\n");
     r = engine.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0);
     CHECK_IN(r.error.code + ": " + r.error.message, r.outcome == kStepFailed && r.error.code == "hmi-id-taken");
-    CHECK(!there(demo) && c.calls().empty());
+    CHECK(!there(demo) && !there(plugins) && c.calls().empty());
 
     // Files on the system partition and hooks: read-only whenever a hook runs.
     CHECK(fs::makeDirs(p.systemPath("/opt/demo"), &why));
@@ -492,7 +520,7 @@ static void testEngine() {
     c.set("fail-rw", "99");
     r = engine.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0);
     CHECK_IN(r.error.code + ": " + r.error.message, r.outcome == kStepFailed && r.error.code == "io-error" && has(r.error.message, "mount: busy"));
-    CHECK(!there(demo) && !c.writable() && !p.remounted() && !there(p.markerPath()));
+    CHECK(!there(demo) && !there(plugins) && !c.writable() && !p.remounted() && !there(p.markerPath()));
     c.unset("fail-rw");
 
     // It cannot be put back: the step is done all the same, its log says so, and the next step's end tries again.

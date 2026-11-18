@@ -52,7 +52,8 @@ std::string number(uint64_t value) {
 }
 
 // The folders above a destination, as destinations, parents first. ${app} and ${data} themselves are among them,
-// because the package owns them; ${plugins} and / are not.
+// because the package owns them, and so is ${plugins}: a head unit that never had a plugin has no such folder, and
+// the first plugin installed makes it, and takes it away again if it is empty when that plugin goes. / is not.
 std::vector<std::string> ancestorsOf(const std::string& dest) {
     size_t root = 0;
     bool includeRoot = false;
@@ -64,6 +65,7 @@ std::vector<std::string> ancestorsOf(const std::string& dest) {
         includeRoot = true;
     } else if (startsWith(dest, "${plugins}")) {
         root = 10;
+        includeRoot = true;
     }
     std::vector<std::string> out;
     if (includeRoot) out.push_back(dest.substr(0, root));
