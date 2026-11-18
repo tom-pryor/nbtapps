@@ -219,6 +219,8 @@ class GoldenSessionTest {
                 assertEquals(1, info.manifestVersion)
                 assertEquals(500_000_000L, info.free.staging)
                 assertEquals("none", info.restartNeeded)
+                // Carried as it came, for the diagnostics the user copies.
+                assertEquals("""{"listener":false}""", info.serial.toString())
 
                 assertEquals(emptyList<Any>(), client.packages())
                 val source = client.sources().single()

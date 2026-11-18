@@ -20,6 +20,7 @@ import com.nbtapps.store.data.jobs.FakeAgent
 import com.nbtapps.store.data.jobs.FakeConnector
 import com.nbtapps.store.data.jobs.FakePhones
 import com.nbtapps.store.data.jobs.JobRepository
+import com.nbtapps.store.data.link.IncomingLink
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.packages.PackageDownloader
@@ -80,6 +81,11 @@ class SetupViewModelTest {
             gate?.await()
             return inner.connect(endpoint)
         }
+
+        // A link the car opens is never held.
+        override fun accepts(endpoint: Endpoint) = inner.accepts(endpoint)
+
+        override suspend fun accept(endpoints: Collection<Endpoint>): IncomingLink = inner.accept(endpoints)
     }
 
     private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
@@ -195,6 +201,24 @@ class SetupViewModelTest {
 
         connector.unreachable = null
         viewModel.retry()
+
+        viewModel.awaitStep("pair") { it is SetupStep.Pair }
+        assertEquals(1, saved().size)
+    }
+
+    @Test
+    fun `a failed connect, then the car opening the link itself, goes on to Pair, and the diagnostics name the car`() = test {
+        phones.code = "420042"
+        connector.unreachable = "the car didn't take the link"
+        val viewModel = viewModel()
+        viewModel.pickTheCar()
+        viewModel.awaitStep("failed") { it is SetupStep.Connect && it.failure != null }
+        val copied = viewModel.diagnostics()
+        assertTrue(copied, copied.contains("Head unit: BMW 12345"))
+        assertFalse(copied, copied.contains(car.address))
+
+        // The pairing window opened on the car has the car dial the phone, which the app takes while it is open.
+        withTimeoutOrNull(10_000) { while (connector.dialIn(car.address) == null) delay(10) } ?: throw AssertionError("the app never listened")
 
         viewModel.awaitStep("pair") { it is SetupStep.Pair }
         assertEquals(1, saved().size)

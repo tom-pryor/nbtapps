@@ -28,6 +28,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.nbtapps.store.R
 import com.nbtapps.store.ui.headunits.ChecklistMark
 import com.nbtapps.store.ui.headunits.ChecklistMarkIcon
+import com.nbtapps.store.ui.headunits.CopyDiagnosticsButton
 import com.nbtapps.store.ui.headunits.markDescription
 
 /** The first row of the Connect page, where the car is in reach over Bluetooth. */
@@ -41,13 +42,18 @@ internal val WHAT_TO_CHECK: List<Pair<String, String>> = listOf(
     "Is the agent running?" to
         "On the car's screen: NBTApp, then Start the agent. On a car without the plugin, start it over SSH, as in step 3 of the install guide.",
     "Has the car only just started?" to "Give it half a minute and try again.",
-    "Is Android Auto starting up?" to "It uses the same link to the car as it starts. Wait until it is up, then try again.",
+    "Is wireless Android Auto on?" to
+        "It can hold the car's one link for phone apps. With a recent agent it can stay on: show the pairing code on the " +
+        "car (NBTApp, then Pair a phone; on a car without the plugin, nbtctl pair over SSH, as in step 5 of the install " +
+        "guide) and keep this page open. The car connects to this app by itself within a few seconds, and the set-up " +
+        "goes on. With an older agent, wait until Android Auto is up, then try again.",
 )
 
 /**
  * Step 2, the link to the agent on the car, which was begun when the car was picked: no tap starts it. While it is
  * opened, [failure] is null, and Cancel ([onCancel], as back) gives it up. Once it failed, [failure] says why, and
- * the page says what to check, with Try again ([onRetry]) and Pick another car ([onPickAnother]).
+ * the page says what to check, with Try again ([onRetry]) and Pick another car ([onPickAnother]), and "Copy
+ * diagnostics", which copies what [diagnostics] gives.
  *
  * The first row says whether the car is connected to the phone over Bluetooth at all, read again each time the page
  * comes back ([onRefresh]); a head unit with no Bluetooth endpoint has no such row.
@@ -61,6 +67,7 @@ internal fun ConnectPage(
     onRetry: () -> Unit,
     onPickAnother: () -> Unit,
     onRefresh: () -> Unit,
+    diagnostics: () -> String,
 ) {
     val context = LocalContext.current
     LifecycleResumeEffect(Unit) {
@@ -118,6 +125,7 @@ internal fun ConnectPage(
                 }
             }
             TextButton(onClick = { openInstallGuide(context) }) { Text("Open the install guide") }
+            CopyDiagnosticsButton(diagnostics)
         }
     }
 }

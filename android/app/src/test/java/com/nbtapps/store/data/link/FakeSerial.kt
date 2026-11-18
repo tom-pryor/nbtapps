@@ -132,6 +132,12 @@ class FakeRadio(private val socketFor: (attempt: Int) -> SerialSocket = { FakeSo
         }
     }
 
+    /** What [inspect] tells of a try: nothing, unless a test says. */
+    @Volatile
+    var facts: (socket: SerialSocket?, failure: Throwable?) -> TryFacts = { _, _ -> TryFacts() }
+
+    override fun inspect(address: String, socket: SerialSocket?, failure: Throwable?): TryFacts = facts(socket, failure)
+
     /** The next server made, within ten seconds. */
     fun nextServer(): FakeServer = serverMade.poll(10, TimeUnit.SECONDS) ?: throw AssertionError("nothing listened")
 

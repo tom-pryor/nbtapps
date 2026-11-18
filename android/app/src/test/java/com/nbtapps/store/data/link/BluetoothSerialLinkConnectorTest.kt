@@ -230,6 +230,56 @@ class BluetoothSerialLinkConnectorTest {
     }
 
     @Test
+    fun `where the tries tell why none came up, the text says that in place of what it can be`() = runTest {
+        val refused = FakeRadio { FakeSocket("read failed, socket might closed or timeout, read ret: -1") }
+        refused.facts = { _, _ -> TryFacts(channel = 5, carConnected = true, bonded = true) }
+        val message = failureOf(connector(refused), car, dials = true)
+        assertEquals(
+            "No Bluetooth serial link to BMW 12345 came up (11 tries over 40 s). " + LinkCause.REFUSED.text(dials = true) +
+                " Last failure: read failed, socket might closed or timeout, read ret: -1",
+            message,
+        )
+
+        val noService = FakeRadio { FakeSocket("read failed") }
+        noService.facts = { _, _ -> TryFacts(channel = -1, carConnected = true) }
+        assertTrue(failureOf(connector(noService), car).contains(LinkCause.NO_SERVICE.text(dials = false)))
+
+        val notConnected = FakeRadio { FakeSocket("read failed") }
+        notConnected.facts = { _, _ -> TryFacts(channel = -1, carConnected = false) }
+        val away = failureOf(connector(notConnected), car, dials = true)
+        assertTrue(away, away.contains(LinkCause.NOT_CONNECTED.text(dials = true)))
+        assertFalse(away, away.contains("agent"))
+    }
+
+    @Test
+    fun `no channel where the phone cannot tell whether the car is connected gives the text of what it can be`() = runTest {
+        val radio = FakeRadio { FakeSocket("read failed") }
+        radio.facts = { _, _ -> TryFacts(channel = -1) }
+
+        assertEquals(
+            "No Bluetooth serial link to BMW 12345 came up (11 tries over 40 s). The agent may not be running on the head " +
+                "unit, or the car may be out of range. Last failure: read failed",
+            failureOf(connector(radio), car, dials = true),
+        )
+    }
+
+    @Test
+    fun `each try of the phone's is kept for the diagnostics, with what the phone tells of it`() = runTest {
+        val radio = FakeRadio { attempt -> FakeSocket(if (attempt < 2) "refused" else null) }
+        radio.facts = { _, failure -> TryFacts(errorCode = if (failure != null) 18 else null, channel = 3) }
+        val diagnostics = SerialDiagnostics()
+        BluetoothSerialLinkConnector(radio, now = { currentTime }, io = StandardTestDispatcher(testScheduler), diagnostics = diagnostics, listener = SerialListener(radio, Dispatchers.IO))
+            .connect(car)
+
+        val dials = diagnostics.tries().filter { it.path == LinkTry.Path.DIAL }
+        assertEquals(listOf(LinkTry.Outcome.FAILED, LinkTry.Outcome.UP), dials.map { it.outcome })
+        assertEquals("IOException", dials[0].error)
+        assertEquals("refused", dials[0].message)
+        assertEquals(TryFacts(errorCode = 18, channel = 3), dials[0].facts)
+        assertEquals(TryFacts(channel = 3), dials[1].facts)
+    }
+
+    @Test
     fun `a head unit whose agent dials is tried for 40 seconds, one not known to for 20`() = runTest {
         val notKnown = FakeRadio { FakeSocket("refused") }
         assertTrue(failureOf(connector(notKnown), car, dials = false).contains("(7 tries over 20 s)"))
@@ -254,6 +304,19 @@ class BluetoothSerialLinkConnectorTest {
         assertEquals(30_700, currentTime)
         assertTrue(message, message.contains("(2 tries over 31 s)"))
         assertTrue(message, message.endsWith("Last failure: The car didn't answer within 15 s"))
+        assertTrue(message, message.contains(LinkCause.NO_ANSWER.text(dials = false)))
+    }
+
+    @Test
+    fun `for an agent that dials, a give-up that cannot tell why does not put it down to another app holding the link`() = runTest {
+        val radio = FakeRadio { FakeSocket("read failed") }
+        val message = failureOf(connector(radio), car, dials = true)
+
+        assertEquals(
+            "No Bluetooth serial link to BMW 12345 came up (11 tries over 40 s). The agent may not be running on the head " +
+                "unit, or the car may be out of range. Last failure: read failed",
+            message,
+        )
     }
 
     @Test

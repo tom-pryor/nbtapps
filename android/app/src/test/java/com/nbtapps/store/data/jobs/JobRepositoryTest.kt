@@ -188,6 +188,31 @@ class JobRepositoryTest {
     }
 
     @Test
+    fun `how the agent's Bluetooth serial stands is kept from its info for the diagnostics, and an agent without says nothing`() = test {
+        assertTrue(jobs.connect("car").isSuccess)
+        assertNull(jobs.agentSerial("car"))
+
+        val serial = """{"listener":true,"registered":true,"dial":"on","counts":{"dials":3}}"""
+        connector.onConnect = { agent ->
+            agent.handlers["info.get"] = {
+                """{"agentVersion":"1.0.0","headUnitId":"$agentId","manifestVersion":1,"free":{},"restartNeeded":"none","serial":$serial}"""
+            }
+        }
+        assertTrue(jobs.connect("car").isSuccess)
+        assertEquals(serial, jobs.agentSerial("car").toString())
+        assertNull(jobs.agentSerial("bt"))
+
+        // One that is not an object is no reason to refuse the answer.
+        connector.onConnect = { agent ->
+            agent.handlers["info.get"] = {
+                """{"agentVersion":"1.0.0","headUnitId":"$agentId","manifestVersion":1,"free":{},"restartNeeded":"none","serial":7}"""
+            }
+        }
+        assertTrue(jobs.connect("car").isSuccess)
+        assertEquals("what was kept stays", serial, jobs.agentSerial("car").toString())
+    }
+
+    @Test
     fun `an agent with another id than the one saved is not this head unit`() = test {
         headUnits.update("car") { it.copy(headUnitId = "ff".repeat(16)) }
 
@@ -1885,6 +1910,21 @@ class JobRepositoryTest {
         assertEquals(6, radio.servers.size)
         assertTrue(radio.servers.all { it.closes.get() >= 1 })
         assertEquals(listOf(ProtocolConstants.SERIAL_SERVICE_NAME), radio.listens.map { it.first }.distinct())
+    }
+
+    @Test
+    fun `out of sight, something that keeps the app busy keeps it listening for as long as it lasts`() = test {
+        val jobs = listening()
+        shown.state.value = false
+        listens(false)
+
+        val release = CompletableDeferred<Unit>()
+        val busy = launch { jobs.usingLink { release.await() } }
+        listens(true)
+
+        release.complete(Unit)
+        busy.join()
+        listens(false)
     }
 
     @Test

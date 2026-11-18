@@ -59,6 +59,7 @@ import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.RiskFlag
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
 import com.nbtapps.store.ui.headunits.CheckFixDialog
+import com.nbtapps.store.ui.headunits.CopyDiagnosticsButton
 import com.nbtapps.store.ui.headunits.Moves
 import com.nbtapps.store.ui.headunits.Paths
 import com.nbtapps.store.ui.headunits.movesHeading
@@ -294,6 +295,7 @@ private fun ConnectionCard(
             is LinkState.Failed -> {
                 Text(link.reason, color = MaterialTheme.colorScheme.error)
                 Button(onClick = viewModel::connect) { Text("Connect again") }
+                CopyDiagnosticsButton(viewModel::diagnostics)
             }
         }
     }

@@ -16,6 +16,7 @@ import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.data.jobs.SerialResetOutcome
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.data.serialUnavailable
@@ -179,6 +180,7 @@ class HeadUnitDetailViewModel internal constructor(
     private val appScope: CoroutineScope,
     /** The archives on this phone, for what their manifests say: see [HeadUnitDetailUiState.laterFormat]. */
     private val stored: Flow<List<StoredPackage>> = flowOf(emptyList()),
+    private val diagnostics: SerialDiagnostics = SerialDiagnostics(),
 ) : ViewModel() {
 
     @Inject
@@ -191,7 +193,8 @@ class HeadUnitDetailViewModel internal constructor(
         setup: AutostartSetup,
         @ApplicationScope appScope: CoroutineScope,
         store: PackageStore,
-    ) : this(savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope, store.packages)
+        diagnostics: SerialDiagnostics,
+    ) : this(savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope, store.packages, diagnostics)
 
     private data class Local(
         val serial: SerialStatus? = null,
@@ -262,6 +265,9 @@ class HeadUnitDetailViewModel internal constructor(
     fun connect() {
         viewModelScope.launch { jobs.connect(headUnitId) }
     }
+
+    /** What "Copy diagnostics" copies, where the connect failed: see [SerialDiagnostics.report]. */
+    fun diagnostics(): String = diagnostics.report(uiState.value.headUnit?.name, jobs.agentSerial(headUnitId))
 
     fun disconnect() {
         viewModelScope.launch { jobs.disconnect() }

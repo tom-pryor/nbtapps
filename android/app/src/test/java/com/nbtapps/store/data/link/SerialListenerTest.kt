@@ -26,7 +26,8 @@ class SerialListenerTest {
     private val car = "00:11:22:33:44:55"
     private val other = "66:77:88:99:AA:BB"
     private val radio = FakeRadio()
-    private val listener = SerialListener(radio)
+    private val diagnostics = SerialDiagnostics()
+    private val listener = SerialListener(radio, diagnostics = diagnostics)
 
     private fun test(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) { withTestTimeout(60_000, block) }
 
@@ -81,6 +82,9 @@ class SerialListenerTest {
         server.dialIn(socket, car)
         assertEquals(car, waiting.await().address)
         assertEquals(1, radio.servers.size)
+        // Each is kept for the diagnostics, by what came of it: no address in them.
+        assertEquals(listOf(LinkTry.Outcome.TURNED_AWAY, LinkTry.Outcome.UP), diagnostics.tries().map { it.outcome })
+        assertTrue(diagnostics.tries().all { it.path == LinkTry.Path.ACCEPT })
     }
 
     @Test
@@ -129,6 +133,9 @@ class SerialListenerTest {
             assertEquals("Bluetooth is off", e.message)
         }
         assertFalse(listener.listening)
+        val kept = diagnostics.tries().single()
+        assertEquals(LinkTry.Path.LISTEN, kept.path)
+        assertEquals("Bluetooth is off", kept.message)
     }
 
     @Test

@@ -52,6 +52,7 @@ fun SetupScreen(
             onRetry = viewModel::retry,
             onPickAnother = viewModel::pickAnother,
             onRefresh = viewModel::refreshBluetooth,
+            diagnostics = viewModel::diagnostics,
         )
         is SetupStep.Pair -> PairPage(
             uiState,

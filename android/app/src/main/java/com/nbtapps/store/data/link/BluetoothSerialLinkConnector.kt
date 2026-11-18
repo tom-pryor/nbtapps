@@ -11,6 +11,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -45,6 +46,12 @@ interface SerialRadio {
      *   phone refuses. A radio that cannot listen at all always throws.
      */
     fun listen(name: String, uuid: UUID): SerialServer = throw IOException("This phone can't listen for the car")
+
+    /**
+     * What the phone can tell of a try with [socket] to or from the device at [address], beyond its [failure], for
+     * the diagnostics ([LinkTry]). A radio that can tell nothing says so, with every fact null.
+     */
+    fun inspect(address: String, socket: SerialSocket?, failure: Throwable?): TryFacts = TryFacts()
 }
 
 /** Listening for serial links to one service on the phone: see [SerialRadio.listen]. */
@@ -134,8 +141,11 @@ class BluetoothSerialLinkConnector(
     /** The clock the times are measured on: `SystemClock.elapsedRealtime` in the app, which goes on while the phone sleeps. */
     private val now: () -> Long = ::monotonicMillis,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** Where each try is kept for the user to copy, the listener's too. */
+    private val diagnostics: SerialDiagnostics = SerialDiagnostics(),
+    private val log: LinkLog = LinkLog.NONE,
     /** The app's one listener, which [accept] waits on too. */
-    private val listener: SerialListener = SerialListener(radio, io),
+    private val listener: SerialListener = SerialListener(radio, io, diagnostics, log, now),
 ) : LinkConnector {
 
     override fun supports(endpoint: Endpoint): Boolean = endpoint is SerialEndpoint
@@ -154,22 +164,30 @@ class BluetoothSerialLinkConnector(
         val window = if (dials) times.dialWindowMillis else times.windowMillis
         // The first link that is up. A second one finds it taken, and is closed with nothing more written on it.
         val won = CompletableDeferred<Link>()
-        fun offer(link: Link) {
-            if (!won.complete(link)) link.close()
+        fun offer(link: Link, path: String) {
+            if (won.complete(link)) {
+                log.line("connect: the $path link is up and taken")
+            } else {
+                link.close()
+                log.line("connect: the $path link came up second and was closed")
+            }
         }
+        // This connect's own tries, for why none came up.
+        val tries = CopyOnWriteArrayList<LinkTry>()
         return coroutineScope {
             val listening = launch {
                 try {
-                    offer(listener.accept(listOf(serial.address), first = true).link)
+                    offer(listener.accept(listOf(serial.address), first = true).link, "car's")
                 } catch (e: IOException) {
                     // The phone cannot listen now: the dial goes on alone.
                 }
             }
             val dialling = launch {
                 try {
-                    offer(SerialLink(connectWithRetry(window, times.pauseMillis, now, times.maxPauseMillis) { dial(serial.address) }))
+                    offer(SerialLink(connectWithRetry(window, times.pauseMillis, now, times.maxPauseMillis) { dial(serial.address, tries) }), "phone's")
                 } catch (e: ConnectFailedException) {
-                    won.completeExceptionally(IOException(gaveUp(serial, e), e))
+                    log.line("connect: gave up after ${e.tries}")
+                    won.completeExceptionally(IOException(gaveUp(serial, e, causeOf(tries), dials), e))
                 }
             }
             try {
@@ -196,33 +214,61 @@ class BluetoothSerialLinkConnector(
     }
 
     /**
-     * What the user is told when no try came up. The phone learns only that the connect failed, not why, so the
-     * text names what it can be; Android's own words for the failure come last, for whoever can read them.
+     * What the user is told when no try came up: the [cause] the tries tell, where they do. Otherwise the phone
+     * learns only that the connect failed, not why, so the text names what it can be: for an agent that [dials],
+     * not another app holding the car's link, which such an agent gets round. Android's own words for the last
+     * failure come last, for whoever can read them.
      */
-    private fun gaveUp(serial: SerialEndpoint, failure: ConnectFailedException): String =
-        "No Bluetooth serial link to ${serial.deviceName} came up (${failure.tries}). The agent may not be running " +
-            "on the head unit, the car may be out of range, or a wireless Android Auto session may be holding the " +
-            "car's one serial link to this phone." + failure.cause?.message?.let { " Last failure: $it" }.orEmpty()
+    private fun gaveUp(serial: SerialEndpoint, failure: ConnectFailedException, cause: LinkCause?, dials: Boolean): String {
+        val why = cause?.text(dials)
+            ?: if (dials) {
+                "The agent may not be running on the head unit, or the car may be out of range."
+            } else {
+                "The agent may not be running on the head unit, the car may be out of range, or a wireless Android Auto " +
+                    "session may be holding the car's one serial link to this phone."
+            }
+        return "No Bluetooth serial link to ${serial.deviceName} came up (${failure.tries}). $why" +
+            failure.cause?.message?.let { " Last failure: $it" }.orEmpty()
+    }
+
+    /** The phone's dial heard nothing within its time. */
+    private class NoAnswer(millis: Long) : IOException("The car didn't answer within ${millis / 1000} s")
 
     /**
-     * One try, given [SerialConnectTimes.tryMillis]. A connect blocks for seconds and hears of nothing but its socket
-     * closing, so a try that runs out of time, and one whose caller is cancelled, closes it.
+     * One try, given [SerialConnectTimes.tryMillis], and kept in [tries] and the diagnostics. A connect blocks for
+     * seconds and hears of nothing but its socket closing, so a try that runs out of time, and one whose caller is
+     * cancelled, closes it.
      */
-    private suspend fun dial(address: String): SerialSocket {
+    private suspend fun dial(address: String, tries: MutableList<LinkTry>): SerialSocket {
+        val began = now()
         var made: SerialSocket? = null
         try {
             val socket = withContext(io) { radio.socket(address, SERVICE_UUID).also { made = it } }
             withTimeoutOrNull(times.tryMillis) { withContext(io) { bringUp(socket) } } ?: run {
                 socket.closeQuietly()
-                throw IOException("The car didn't answer within ${times.tryMillis / 1000} s")
+                throw NoAnswer(times.tryMillis)
             }
+            tries += note(address, socket, LinkTry.Outcome.UP, null, began)
             return socket
+        } catch (e: IOException) {
+            tries += note(address, made, if (e is NoAnswer) LinkTry.Outcome.NO_ANSWER else LinkTry.Outcome.FAILED, e, began)
+            throw e
         } catch (e: CancellationException) {
             // Cancelled, perhaps at the very moment the link came up: nobody is handed the socket, so it must not
             // stay open and hold the car's one serial link.
             made?.closeQuietly()
             throw e
         }
+    }
+
+    /** Keeps a try of the phone's dial, with what the phone can tell of it, and logs it. */
+    private fun note(address: String, socket: SerialSocket?, outcome: LinkTry.Outcome, failure: IOException?, began: Long): LinkTry {
+        val facts = try {
+            radio.inspect(address, socket, failure)
+        } catch (e: RuntimeException) {
+            TryFacts()
+        }
+        return diagnostics.record(LinkTry.Path.DIAL, outcome, now() - began, failure, facts).also { log.line(it.describe()) }
     }
 
     private suspend fun bringUp(socket: SerialSocket) {

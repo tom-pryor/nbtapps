@@ -6,7 +6,10 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
+import android.bluetooth.BluetoothSocketException
 import android.content.Context
+import android.os.Build
+import androidx.annotation.RequiresApi
 import com.nbtapps.store.data.PhoneBluetooth
 import com.nbtapps.store.data.serialUnavailable
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -36,6 +39,20 @@ class AndroidSerialRadio @Inject constructor(
     } catch (e: IllegalArgumentException) {
         throw IOException("The Bluetooth address saved for this head unit isn't one", e)
     }
+
+    /**
+     * Android's error code where it has one, the RFCOMM channel the socket found, and whether the car is connected to
+     * the phone and paired with it. Nothing of it may fail the try it is about: what cannot be read is left out.
+     */
+    override fun inspect(address: String, socket: SerialSocket?, failure: Throwable?): TryFacts = TryFacts(
+        errorCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) errorCodeOf(failure) else null,
+        channel = (socket as? Socket)?.channel(),
+        carConnected = runCatching { address.uppercase() in bluetooth.connected.value }.getOrNull(),
+        bonded = runCatching { bluetooth.pairedDevices().any { it.address.equals(address, ignoreCase = true) } }.getOrNull(),
+    )
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun errorCodeOf(failure: Throwable?): Int? = (failure as? BluetoothSocketException)?.errorCode
 
     /**
      * The secure kind, as [socket]'s: only a device paired with the phone gets through, and the link is encrypted.
@@ -78,5 +95,16 @@ class AndroidSerialRadio @Inject constructor(
         }
 
         override fun close() = socket.close()
+
+        /**
+         * The RFCOMM channel the socket found for the service, from the socket's own field, which Android does not
+         * publish: -1 until a channel is found. Null where it cannot be read.
+         */
+        @SuppressLint("DiscouragedPrivateApi") // read for the diagnostics only, and nothing depends on it
+        fun channel(): Int? = try {
+            BluetoothSocket::class.java.getDeclaredField("mPort").apply { isAccessible = true }.getInt(socket)
+        } catch (e: Throwable) {
+            null
+        }
     }
 }

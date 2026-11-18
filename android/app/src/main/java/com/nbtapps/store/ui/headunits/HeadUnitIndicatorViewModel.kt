@@ -11,6 +11,7 @@ import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.data.jobs.headUnitId
 import com.nbtapps.store.data.jobs.selectedHeadUnit
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.HeadUnit
@@ -95,6 +96,7 @@ class HeadUnitIndicatorViewModel @Inject constructor(
     private val jobs: JobRepository,
     connector: LinkConnector,
     @ApplicationScope private val appScope: CoroutineScope,
+    private val diagnostics: SerialDiagnostics = SerialDiagnostics(),
 ) : ViewModel() {
 
     val uiState: StateFlow<HeadUnitIndicatorUiState> =
@@ -113,5 +115,11 @@ class HeadUnitIndicatorViewModel @Inject constructor(
 
     fun disconnect() {
         appScope.launch { jobs.disconnect() }
+    }
+
+    /** What "Copy diagnostics" copies, where the connect failed: see [SerialDiagnostics.report]. */
+    fun diagnostics(): String {
+        val unit = uiState.value.headUnit
+        return diagnostics.report(unit?.name, unit?.id?.let(jobs::agentSerial))
     }
 }

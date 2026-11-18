@@ -31,9 +31,11 @@ import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
 import com.nbtapps.store.data.jobs.AutostartSetup
 import com.nbtapps.store.data.jobs.JobKeeper
 import com.nbtapps.store.data.jobs.JobRepository
+import com.nbtapps.store.data.link.AndroidLinkLog
 import com.nbtapps.store.data.link.AndroidSerialRadio
 import com.nbtapps.store.data.link.BluetoothSerialLinkConnector
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.update.ApkInstaller
@@ -170,11 +172,18 @@ abstract class AppModule {
         @Singleton
         fun providePairingKeys(): PairingKeys = KeystorePairingKeys()
 
+        /** The last tries at a Bluetooth serial link, in memory only, for the user to copy where a connect failed. */
+        @Provides
+        @Singleton
+        fun provideSerialDiagnostics(installed: InstalledApp): SerialDiagnostics = SerialDiagnostics(
+            about = "App ${installed.versionName}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MODEL ?: "unknown phone"}",
+        )
+
         /** Every build has it. Who may use the link is settled over it, by `auth` with a pairing key. */
         @Provides
         @Singleton
-        fun provideSerialLinkConnector(radio: AndroidSerialRadio, clock: ElapsedClock): BluetoothSerialLinkConnector =
-            BluetoothSerialLinkConnector(radio, now = clock::millis)
+        fun provideSerialLinkConnector(radio: AndroidSerialRadio, clock: ElapsedClock, diagnostics: SerialDiagnostics): BluetoothSerialLinkConnector =
+            BluetoothSerialLinkConnector(radio, now = clock::millis, diagnostics = diagnostics, log = AndroidLinkLog)
 
         @Provides
         @Singleton
@@ -198,6 +207,7 @@ abstract class AppModule {
             foreground = foreground,
             // Read now, which also begins following Bluetooth being switched on and off.
             bluetoothOn = bluetooth.also { it.refreshConnected() }.on,
+            log = AndroidLinkLog,
         )
 
         /** Setting a head unit up to start the agent with the car, which goes on when the pairing screen is left. */

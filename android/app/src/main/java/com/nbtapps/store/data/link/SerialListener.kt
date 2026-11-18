@@ -30,11 +30,16 @@ class AcceptedLink(val address: String, val link: Link)
  * a while. So they are written the moment a link is accepted, as they are the moment a connect comes back
  * ([BluetoothSerialLinkConnector]); a link that cannot take them is closed, and listening goes on.
  *
- * [accept] blocks on [io], and is ended by closing the listener; nothing here stays open once nobody waits.
+ * [accept] blocks on [io], and is ended by closing the listener; nothing here stays open once nobody waits. What
+ * comes of each link, and listening that cannot be had, is kept in [diagnostics] and said in [log].
  */
 class SerialListener(
     private val radio: SerialRadio,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    private val diagnostics: SerialDiagnostics = SerialDiagnostics(),
+    private val log: LinkLog = LinkLog.NONE,
+    /** The clock a link's hand-over is timed on. */
+    private val now: () -> Long = ::monotonicMillis,
 ) {
     private class Waiter(val addresses: Set<String>) {
         val result = CompletableDeferred<AcceptedLink>()
@@ -119,6 +124,7 @@ class SerialListener(
             val opened = try {
                 radio.listen(ProtocolConstants.SERIAL_SERVICE_NAME, BluetoothSerialLinkConnector.SERVICE_UUID)
             } catch (e: IOException) {
+                log.line(diagnostics.record(LinkTry.Path.LISTEN, LinkTry.Outcome.FAILED, failure = e).describe())
                 failAll(e)
                 continue
             }
@@ -130,6 +136,7 @@ class SerialListener(
                 opened.closeQuietly()
                 continue
             }
+            log.line("listening for the car's links")
             acceptOn(opened)
         }
     }
@@ -143,6 +150,7 @@ class SerialListener(
                 // Closed by [leave], or failed of itself, as when Bluetooth goes off: then nobody can be given a link.
                 val failed = synchronized(lock) { (server === opened).also { if (it) server = null } }
                 opened.closeQuietly()
+                log.line(if (failed) "listening stopped: ${e.message}" else "listening stopped: nothing waits for the car's links")
                 if (failed) failAll(e)
                 return
             }
@@ -150,13 +158,25 @@ class SerialListener(
         }
     }
 
+    /** Keeps what came of a link the car opened, with what the phone can tell of it, and logs it. */
+    private fun note(incoming: AcceptedSocket, outcome: LinkTry.Outcome, failure: IOException?, began: Long) {
+        val facts = try {
+            radio.inspect(incoming.address, incoming.socket, failure)
+        } catch (e: RuntimeException) {
+            TryFacts()
+        }
+        log.line(diagnostics.record(LinkTry.Path.ACCEPT, outcome, now() - began, failure, facts).describe())
+    }
+
     /** Gives [incoming] to the first who waits for its address, with the magic bytes written; closes it where nobody does. */
     private fun handOver(incoming: AcceptedSocket) {
+        val began = now()
         val address = incoming.address.uppercase()
         val takers = synchronized(lock) { waiters.filter { address in it.addresses } }
         if (takers.isEmpty()) {
             // Not a car the app waits for: let go at once, for whatever opened it.
             incoming.socket.closeQuietly()
+            note(incoming, LinkTry.Outcome.TURNED_AWAY, null, began)
             return
         }
         try {
@@ -165,8 +185,10 @@ class SerialListener(
         } catch (e: IOException) {
             // A link that cannot take them is a try that failed.
             incoming.socket.closeQuietly()
+            note(incoming, LinkTry.Outcome.FAILED, e, began)
             return
         }
+        note(incoming, LinkTry.Outcome.UP, null, began)
         val link = SerialLink(incoming.socket)
         // One that gave up meanwhile does not take it; the next does.
         if (takers.none { it.result.complete(AcceptedLink(incoming.address, link)) }) link.close()

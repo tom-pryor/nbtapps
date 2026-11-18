@@ -16,6 +16,7 @@ import com.nbtapps.store.data.link.JobEvent
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkClosedException
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.link.LinkLog
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.data.link.ProtocolException
 import com.nbtapps.store.data.link.RemoteException
@@ -303,6 +304,8 @@ class JobRepository(
     private val resetWaitMs: Long = 5_000,
     /** Whether the phone's Bluetooth is on and the app may use it: [com.nbtapps.store.data.PhoneBluetooth.on]. */
     private val bluetoothOn: StateFlow<Boolean> = MutableStateFlow(true),
+    /** Where a link's end, and what came of a link the car opened, are said. */
+    private val log: LinkLog = LinkLog.NONE,
 ) {
     private val connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val jobState = MutableStateFlow<JobView?>(null)
@@ -401,6 +404,9 @@ class JobRepository(
 
     /** How many [attempt]s run. One listens for the car by itself, so the app does not listen beside it. */
     private val attempting = MutableStateFlow(0)
+
+    /** The `serial` object of each head unit's last `info.get` in this run, by this app's id: see [agentSerial]. */
+    private val serialStatus = ConcurrentHashMap<String, JsonObject>()
 
     init {
         scope.launch { watchForeground() }
@@ -593,6 +599,13 @@ class JobRepository(
                 val before = connectionState.value
                 val link = spare.also { spare = null }
                 val result = attempt(unit.id, quiet = true, IncomingLink(incoming.endpoint, requireNotNull(link)))
+                log.line(
+                    when {
+                        result.isSuccess -> "the car's link is connected"
+                        result.exceptionOrNull() is PairingNeeded -> "the car's link waits for the phone to be paired"
+                        else -> "the car's link failed, quietly: ${result.exceptionOrNull()?.message}"
+                    },
+                )
                 when {
                     result.isSuccess -> {
                         remembered = null
@@ -795,6 +808,13 @@ class JobRepository(
             connectionState.value = ConnectionState.Disconnected
         }
     }
+
+    /**
+     * How the agent of the head unit [headUnitId] said its Bluetooth serial stood, in its last `info.get` in this run:
+     * its `serial` object as it came, for the diagnostics the user copies. Null where the app had no link to it in
+     * this run, or its agent has no such object.
+     */
+    fun agentSerial(headUnitId: String): JsonObject? = serialStatus[headUnitId]
 
     /** Reads the head unit's profile and installed list again, and whether its agent is started with it. */
     suspend fun refresh(): Result<Unit> = withSession { current ->
@@ -1410,6 +1430,7 @@ class JobRepository(
         capabilities: List<String>,
     ) {
         connectionState.value = ConnectionState.Connected(headUnitId, endpoint, info, installed, autostart, capabilities)
+        (info.serial as? JsonObject)?.let { serialStatus[headUnitId] = it }
         val profile = HeadUnitProfile(info.agentVersion, info.manifestVersion, info.free, info.restartNeeded, installed, now())
         headUnits.update(headUnitId) { it.copy(profile = profile) }
     }
@@ -1476,6 +1497,7 @@ class JobRepository(
         }
         val reason = current.ended.await()
         val told = current.closing
+        log.line("the link ended: $reason" + told?.let { " (link.closing $it)" }.orEmpty())
         connectLock.withLock {
             // The app has moved on to another link: the end of this one, `other-link` too, is nothing to show.
             if (session !== current) return@withLock

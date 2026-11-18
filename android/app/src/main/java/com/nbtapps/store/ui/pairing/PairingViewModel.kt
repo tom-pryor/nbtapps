@@ -12,6 +12,7 @@ import com.nbtapps.store.data.jobs.AutostartStep
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.link.ProtocolConstants
+import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.ui.headunits.CheckFixFlow
@@ -111,10 +112,14 @@ class PairingViewModel @Inject constructor(
     private val jobs: JobRepository,
     private val setup: AutostartSetup,
     @ApplicationScope private val appScope: CoroutineScope,
+    private val diagnostics: SerialDiagnostics,
 ) : ViewModel() {
 
     /** This app's id of the head unit being paired with. */
     val headUnitId = savedStateHandle.toRoute<PairingRoute>().headUnitId
+
+    /** What "Copy diagnostics" copies, where the connect failed: see [SerialDiagnostics.report]. */
+    fun diagnostics(): String = diagnostics.report(uiState.value.headUnitName, jobs.agentSerial(headUnitId))
 
     private val enableAutostart = savedStateHandle.getStateFlow(ENABLE_AUTOSTART, true)
 

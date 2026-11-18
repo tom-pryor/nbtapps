@@ -14,6 +14,7 @@ import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.headUnitId
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.data.link.reachesTcp
 import com.nbtapps.store.data.saveCar
 import com.nbtapps.store.di.ApplicationScope
@@ -102,6 +103,7 @@ class SetupViewModel @Inject constructor(
     private val setupChoice: SetupRepository,
     connector: LinkConnector,
     @ApplicationScope private val appScope: CoroutineScope,
+    private val diagnostics: SerialDiagnostics = SerialDiagnostics(),
 ) : ViewModel() {
 
     /** Whether the set-up adds a further car: the route says so. */
@@ -335,6 +337,12 @@ class SetupViewModel @Inject constructor(
         attempting.value = true
         job.invokeOnCompletion { if (attempt === job) attempting.value = false }
         job.start()
+    }
+
+    /** What "Copy diagnostics" copies, where the connect failed: see [SerialDiagnostics.report]. */
+    fun diagnostics(): String {
+        val headUnitId = kept.value.answers.headUnitId
+        return diagnostics.report(uiState.value.name.ifEmpty { null }, headUnitId?.let(jobs::agentSerial))
     }
 
     /** Try again, after the connect failed. */

@@ -31,6 +31,7 @@ import com.nbtapps.store.R
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
 import com.nbtapps.store.ui.headunits.CheckFixDialog
 import com.nbtapps.store.ui.headunits.ChecksLine
+import com.nbtapps.store.ui.headunits.CopyDiagnosticsButton
 import com.nbtapps.store.ui.headunits.checksLine
 
 /**
@@ -100,8 +101,15 @@ fun PairingScreen(
                     }
                     is PairingStep.NoLink -> {
                         Text("The code from the car's screen goes to $name over the app's link to it, and there is none now.")
+                        Text(
+                            "With wireless Android Auto on, show the pairing code on the car (NBTApp, then Pair a phone) and keep this " +
+                                "screen open: a recent agent has the car connect to this app by itself within a few seconds, and with an " +
+                                "older one, tap Connect to the agent once Android Auto is up.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         step.reason?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         Button(onClick = viewModel::connect) { Text("Connect to the agent") }
+                        if (step.reason != null) CopyDiagnosticsButton(viewModel::diagnostics)
                     }
                 }
             }

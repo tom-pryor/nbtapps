@@ -3,6 +3,7 @@
 package com.nbtapps.store.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 // The parameters and results of the phone and agent protocol, as the plan document's "Message reference" tab
 // sets them. Fields the app does not know are ignored when these are read, and a field with no value is left
@@ -41,6 +42,12 @@ data class AgentInfo(
     val manifestVersion: Int,
     val free: FreeSpace = FreeSpace(),
     val restartNeeded: String = RestartKind.NONE,
+    /**
+     * How the agent's Bluetooth serial stands, as it came: whether it listens, its counts of the car's dials and their
+     * answers, and so on, never an address. Only for the diagnostics the user copies, so it is not read further, and
+     * an answer whose `serial` is not an object is read all the same. Null from an agent from before there was this.
+     */
+    val serial: JsonElement? = null,
 )
 
 /**

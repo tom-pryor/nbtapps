@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
@@ -47,7 +48,7 @@ fun HeadUnitIndicator(
     viewModel: HeadUnitIndicatorViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    HeadUnitIndicatorContent(uiState, viewModel::connect, viewModel::disconnect, onOpenHeadUnit, onSetUp, onPairHeadUnit)
+    HeadUnitIndicatorContent(uiState, viewModel::connect, viewModel::disconnect, onOpenHeadUnit, onSetUp, onPairHeadUnit, viewModel::diagnostics)
 }
 
 @Composable
@@ -58,7 +59,9 @@ private fun HeadUnitIndicatorContent(
     onOpenHeadUnit: (String) -> Unit,
     onSetUp: (() -> Unit)?,
     onPairHeadUnit: (String) -> Unit,
+    diagnostics: () -> String,
 ) {
+    val context = LocalContext.current
     val unit = uiState.headUnit
     when {
         // Nothing until the saved head units are read: "Set up your car" must not flash up for a user who has one.
@@ -110,6 +113,9 @@ private fun HeadUnitIndicatorContent(
                             text = { Text(if (uiState.status == IndicatorStatus.FAILED) "Connect again" else "Connect") },
                             onClick = { open = false; onConnect(unit.id) },
                         )
+                        if (uiState.status == IndicatorStatus.FAILED) {
+                            DropdownMenuItem(text = { Text(COPY_DIAGNOSTICS) }, onClick = { open = false; copyDiagnostics(context, diagnostics()) })
+                        }
                     }
                 }
                 DropdownMenuItem(text = { Text("Head unit details") }, onClick = { open = false; onOpenHeadUnit(unit.id) })
