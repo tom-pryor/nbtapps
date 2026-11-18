@@ -145,6 +145,11 @@ no car is saved.
    While the app is connected, the car maker's own phone features over Bluetooth serial don't work; calls and
    music are not affected. If no agent answers, the page says why and what to check; start the agent (step 3)
    and tap **Try again**.
+
+   Wireless Android Auto can hold the car's one link for phone apps. With agent 1.6.0 or later it can stay on:
+   the car connects to the open app by itself. Before this phone is paired with the agent, the car does that
+   only while a pairing code is showing, so get a code as in item 4 and keep the page open; the set-up goes on
+   within a few seconds. With an older agent, wait until Android Auto is up, then tap **Try again**.
 4. **Pair this phone**: the app asks for a code from the car. The iDrive plugin that would show it is not
    installed yet, so get the code over SSH (**No NBTApp entry on the car's screen?** on that page says the
    same):
@@ -278,6 +283,8 @@ From now on:
 - **The agent updates itself**: when a newer agent is published, the app offers it on the head unit's page.
   The new version gets one trial start; if it fails, the car goes back to the version before.
 - **The app updates itself** from the card on its catalogue screen.
+- **Android Auto can stay on**: with agent 1.6.0 or later, the car connects to the open app by itself, even
+  while wireless Android Auto holds the car's link for phone apps.
 
 ## When something goes wrong
 
@@ -285,7 +292,7 @@ From now on:
 |---|---|
 | `hu_install: version 1.5.1 is there already` | The script never writes over an installed version. Stop the agent (`slay nbtagent`), remove that version (`rm -rf /var/opt/nbtapp/agent/1.5.1`) and run the script again |
 | `hu_install: an update of the agent was begun and is not finished` | Start the agent (step 3) and let it finish the update, then try again |
-| The app cannot connect | Check the agent runs: **NBTApp**, **Start the agent** on the car's screen, or `nbtctl info` over SSH. Read `/tmp/nbtapp/log/agent.log` |
+| The app cannot connect, or the set-up stops at connecting | Check the agent runs: **NBTApp**, **Start the agent** on the car's screen, or `nbtctl info` over SSH. With agent 1.6.0 or later, show the pairing code on the car (**NBTApp**, **Pair a phone**, or `nbtctl pair` over SSH) and keep the app open: the car connects to it by itself within a few seconds, with wireless Android Auto on or off. If it still does not connect, send with your report: the text of **Copy diagnostics** on the app's page that says the connect failed; the output of `nbtctl serial status` (agent 1.6.0 or later); the agent's log, `/tmp/nbtapp/log/agent.log`; and the problem file, `/var/opt/nbtapp/serial-problems.log`, if there is one (`cat` prints each). None of these holds a phone's Bluetooth address |
 | **Start with the car**, or the **Setting up** card, stopped with a reason | Put right what it names (the phone's internet connection, the link to the head unit) and tap **Retry**. Or do step 7 by hand |
 | The app says a thing on the head unit **needs a look** | The checks found something that was put onto the car by hand. **Show** opens the head unit's page, which lists it under **Checks** with its fix; see step 6 |
 | The agent no longer starts with the car | After three starts in a row in which the agent did not keep running for five minutes, the plugin stops trying. The card in the app says so; tap **Have the car try again**. Over SSH: `rm /var/opt/nbtapp/agent/autostart.boots` |
