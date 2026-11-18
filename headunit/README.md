@@ -377,6 +377,8 @@ files of `release/NbtApp/` as `${plugins}/NbtApp/`, which on a head unit is `/op
 and asks for a restart of the HMI, which loads a plugin only when it starts. The agent installs, updates and
 removes it with the step every package gets: the system partition is writable only while files are placed, a
 library that is loaded is moved out of `Plugins` and never written over, and an update that fails is undone.
+A head unit that never had a plugin has no `Plugins` folder: the agent (1.5.1 and later) makes it with the
+plugin's own folder, and takes it away again when the plugin is removed and nothing else is in it.
 
 ```sh
 QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh        # also leaves release/pkg/org.nbtapp.plugin-<version>.nbtpkg, not signed
