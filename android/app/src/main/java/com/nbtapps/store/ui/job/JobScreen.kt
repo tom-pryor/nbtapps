@@ -46,6 +46,7 @@ import com.nbtapps.store.R
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.JobState
+import com.nbtapps.store.model.LATER_FEATURES_WARNING
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RestartKind
 
@@ -164,7 +165,7 @@ private fun PlanContent(uiState: JobUiState, plan: Plan, viewModel: JobViewModel
             Text("Also delete the package's own data and settings")
         }
     }
-    if (plan.riskFlags.isNotEmpty()) {
+    if (plan.riskFlags.isNotEmpty() || plan.unknownFlags) {
         Section("Before you start") {
             plan.riskFlags.forEach { flag ->
                 Column {
@@ -172,6 +173,8 @@ private fun PlanContent(uiState: JobUiState, plan: Plan, viewModel: JobViewModel
                     Text(flag.explanation, style = MaterialTheme.typography.bodyMedium)
                 }
             }
+            // A flag of a later agent, which this app cannot explain, is never left out unsaid.
+            if (plan.unknownFlags) Text(LATER_FEATURES_WARNING, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary)
         }
     }
     if (!plan.runnable) {

@@ -51,6 +51,12 @@ data class StoredPackage(
     val depends: List<PackageDependency> = emptyList(),
     /** The manifest's `requires.agent` range, if it has one. */
     val requiresAgent: String? = null,
+    /**
+     * The manifest uses features this version of the app does not know ([PackageManifest.laterFormat][com.nbtapps.store.model.PackageManifest.laterFormat]):
+     * [flags] say only what the app could read. False in a record written before there was such a mark: the app that
+     * wrote it took no such manifest.
+     */
+    val laterFormat: Boolean = false,
 ) {
     /** What the agent is told about this archive in `job.plan`. */
     fun offer() = Offer(id, version, sha256, size, manifestSha256, signature)
@@ -178,6 +184,7 @@ class PackageStore(
                 flags = verified.manifest.flags,
                 depends = verified.manifest.depends,
                 requiresAgent = verified.manifest.requires.agent,
+                laterFormat = verified.manifest.laterFormat,
             )
             manifest(pkg).writeBytes(verified.manifestBytes)
             if (!part.renameTo(archive(pkg))) throw IOException("Couldn't store the package")

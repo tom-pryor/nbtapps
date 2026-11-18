@@ -129,6 +129,9 @@ data class PackageVersion(
 ) {
     val riskFlags: List<RiskFlag> get() = flags.mapNotNull(RiskFlag::fromId)
 
+    /** [flags] has one this app does not know, which [riskFlags] leaves out: see [LATER_FEATURES_WARNING]. */
+    val unknownFlags: Boolean get() = RiskFlag.anyUnknown(flags)
+
     /** The archive is to be checked against [signature], not its own `manifest.sig`. */
     val detachedSignature: Boolean get() = signature != null
 
@@ -185,8 +188,18 @@ enum class RiskFlag(val id: String, val label: String, val explanation: String) 
 
     companion object {
         fun fromId(id: String): RiskFlag? = entries.find { it.id == id }
+
+        /** Whether [ids] has a flag this app does not know: one of a later version, which it cannot explain. */
+        fun anyUnknown(ids: List<String>): Boolean = ids.any { fromId(it) == null }
     }
 }
+
+/**
+ * What the app says where a package uses what this version of the app does not know, instead of guessing at it: a
+ * manifest of a later format ([PackageManifest.laterFormat]), or a risk flag of a later version, from a catalogue or
+ * from the agent's plan ([RiskFlag.anyUnknown]), so that one is never hidden.
+ */
+const val LATER_FEATURES_WARNING = "Uses features this version of the app doesn't know. Update the app to see everything it does."
 
 /** A package's `v1/details/<id>.json`: the long-form listing, fetched when the detail screen opens. */
 @Serializable

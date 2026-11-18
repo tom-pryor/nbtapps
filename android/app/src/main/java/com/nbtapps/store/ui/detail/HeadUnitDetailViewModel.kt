@@ -16,6 +16,8 @@ import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.data.jobs.SerialResetOutcome
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.packages.PackageStore
+import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.data.serialUnavailable
 import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.Autostart
@@ -31,11 +33,13 @@ import com.nbtapps.store.ui.navigation.HeadUnitDetailRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -112,6 +116,11 @@ data class HeadUnitDetailUiState(
     /** What the agent reports now, or reported last time when there is no link. */
     val profile: HeadUnitProfile? = null,
     val installed: List<InstalledPackage> = emptyList(),
+    /**
+     * The ids of the [installed] packages whose installed version is on this phone with a manifest that uses features
+     * this version of the app does not know ([StoredPackage.laterFormat]).
+     */
+    val laterFormat: Set<String> = emptySet(),
     /** The running or last job on this head unit. */
     val job: JobView? = null,
     /** Why the last restart request failed. */
@@ -155,6 +164,10 @@ data class HeadUnitDetailUiState(
     val serialReset: SerialResetUi? = null,
 )
 
+/** The ids of the [installed] packages whose installed version is among the [stored] archives with [StoredPackage.laterFormat]. */
+internal fun laterFormat(installed: List<InstalledPackage>, stored: List<StoredPackage>): Set<String> =
+    installed.filter { pkg -> stored.any { it.id == pkg.id && it.version == pkg.version && it.laterFormat } }.mapTo(HashSet()) { it.id }
+
 @HiltViewModel
 class HeadUnitDetailViewModel internal constructor(
     private val headUnitId: String,
@@ -164,6 +177,8 @@ class HeadUnitDetailViewModel internal constructor(
     private val bluetooth: PhoneBluetooth,
     private val setup: AutostartSetup,
     private val appScope: CoroutineScope,
+    /** The archives on this phone, for what their manifests say: see [HeadUnitDetailUiState.laterFormat]. */
+    private val stored: Flow<List<StoredPackage>> = flowOf(emptyList()),
 ) : ViewModel() {
 
     @Inject
@@ -175,7 +190,8 @@ class HeadUnitDetailViewModel internal constructor(
         bluetooth: PhoneBluetooth,
         setup: AutostartSetup,
         @ApplicationScope appScope: CoroutineScope,
-    ) : this(savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope)
+        store: PackageStore,
+    ) : this(savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope, store.packages)
 
     private data class Local(
         val serial: SerialStatus? = null,
@@ -228,8 +244,9 @@ class HeadUnitDetailViewModel internal constructor(
         }
 
     val uiState: StateFlow<HeadUnitDetailUiState> =
-        combine(page, fixes.state) { page, fix -> page.copy(fix = fix) }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
+        combine(page, fixes.state, stored) { page, fix, stored ->
+            page.copy(fix = fix, laterFormat = laterFormat(page.installed, stored))
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
 
     /**
      * Reads what the phone's Bluetooth says of the head unit's serial endpoint: when the screen comes up, on

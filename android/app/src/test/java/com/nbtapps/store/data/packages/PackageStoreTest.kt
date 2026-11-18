@@ -10,6 +10,7 @@ import com.nbtapps.store.model.PackageVersion
 import java.io.File
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -127,6 +128,30 @@ class PackageStoreTest {
         assertEquals(emptyList<String>(), leftovers())
 
         assertNotNull(add("org.nbtapp.runtime", entry))
+    }
+
+    @Test
+    fun `a package whose manifest is of a later format is stored with the mark, and an older record reads without it`() = runTest {
+        val first = PackageStore(dir).also { it.load() }
+        // hello 1.2.0 with a key in install.files that this app does not know.
+        val later = AgentVectors.file("packages/bad/install-unknown-key.nbtpkg")
+        val stored = later.inputStream().use { first.add(it, keys) }
+        assertTrue(stored.laterFormat)
+        assertEquals(listOf("runs-scripts"), stored.flags)
+        val plain = hello.inputStream().use { first.add(it, keys) }
+        assertFalse(plain.laterFormat)
+        assertEquals(
+            mapOf(stored.sha256 to true, plain.sha256 to false),
+            PackageStore(dir).also { it.load() }.packages.value.associate { it.sha256 to it.laterFormat },
+        )
+
+        // A record that an app from before the mark wrote has no such member: it reads as before, unmarked.
+        val record = File(dir, "${stored.sha256}.json")
+        val members = Json.parseToJsonElement(record.readText()).jsonObject
+        assertTrue(members.getValue("laterFormat").jsonPrimitive.content == "true")
+        record.writeText(JsonObject(members - "laterFormat").toString())
+        val older = PackageStore(dir).also { it.load() }.packages.value.single { it.sha256 == stored.sha256 }
+        assertEquals(stored.copy(laterFormat = false), older)
     }
 
     /** A package its author signed, and the catalogue's signature for it: from the agent repo's test packages. */

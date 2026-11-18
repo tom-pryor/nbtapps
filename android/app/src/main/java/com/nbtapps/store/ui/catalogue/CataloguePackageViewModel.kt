@@ -58,6 +58,11 @@ data class GetState(
     val version: PackageVersion,
     /** Whether that version's archive, verified, is on the phone. */
     val stored: Boolean = false,
+    /**
+     * That archive's manifest uses features this version of the app does not know
+     * ([StoredPackage.laterFormat]): the page says so while it is on the phone.
+     */
+    val laterFormat: Boolean = false,
     /** The archives still to download before it can be installed: this one and the dependencies it needs. */
     val toDownload: List<Resolver.Needed> = emptyList(),
     val downloading: DownloadState.Running? = null,
@@ -203,9 +208,11 @@ private fun getState(
     val states = toDownload.mapNotNull { downloads[it.version.sha256] }
     val running = states.filterIsInstance<DownloadState.Running>()
     val agentAsk = status.asks.any { it.id == AGENT_PACKAGE_ID }
+    val archive = stored.find { it.sha256 == version.sha256 }
     return GetState(
         version = version,
-        stored = stored.any { it.sha256 == version.sha256 },
+        stored = archive != null,
+        laterFormat = archive?.laterFormat == true,
         toDownload = toDownload,
         downloading = if (running.isEmpty()) null else DownloadState.Running(running.sumOf { it.bytes }, running.sumOf { it.total }),
         downloadError = states.filterIsInstance<DownloadState.Failed>().firstOrNull()?.reason,

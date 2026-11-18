@@ -193,6 +193,9 @@ data class Plan(
 ) {
     val runnable: Boolean get() = planId != null && missing.isEmpty() && problems.isEmpty()
     val riskFlags: List<RiskFlag> get() = flags.mapNotNull(RiskFlag::fromId)
+
+    /** [flags] has one this app does not know, which [riskFlags] leaves out: see [LATER_FEATURES_WARNING]. */
+    val unknownFlags: Boolean get() = RiskFlag.anyUnknown(flags)
 }
 
 /** The restart a package, a plan or a finished job asks for. */

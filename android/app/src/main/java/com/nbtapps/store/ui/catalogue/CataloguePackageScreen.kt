@@ -47,6 +47,7 @@ import com.nbtapps.store.R
 import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.PrereleaseAsk
 import com.nbtapps.store.model.CataloguePackage
+import com.nbtapps.store.model.LATER_FEATURES_WARNING
 import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.ui.headunits.HeadUnitIndicator
 
@@ -120,7 +121,7 @@ fun CataloguePackageScreen(
                 }
                 uiState.newest?.let { newest ->
                     LatestVersionCard(newest, prerelease = pkg.isPrerelease(newest.version))
-                    if (newest.riskFlags.isNotEmpty()) RiskCard(newest)
+                    if (newest.riskFlags.isNotEmpty() || newest.unknownFlags) RiskCard(newest)
                 }
                 if (uiState.dependencies.isNotEmpty()) DependenciesCard(uiState.dependencies, onOpenPackage)
                 DetailsSections(uiState.details, pkg, onRetry = viewModel::retryDetails)
@@ -304,6 +305,7 @@ private fun GetCard(
             }
             else -> Text("Version ${get.version.version} is on this phone, checked and ready to install.")
         }
+        if (get.laterFormat) LaterFeatures()
         get.asks.forEach { ask ->
             Text("Needs ${ask.name} ${ask.version}, which is a pre-release.", style = MaterialTheme.typography.bodyMedium)
             OutlinedButton(onClick = { onAsk(ask) }) { Text("Turn on pre-releases of ${ask.name}") }
@@ -342,7 +344,15 @@ private fun RiskCard(version: PackageVersion) {
                 Text(flag.explanation, style = MaterialTheme.typography.bodyMedium)
             }
         }
+        // A flag the catalogue publishes that this app cannot explain is never left out unsaid.
+        if (version.unknownFlags) LaterFeatures()
     }
+}
+
+/** That the package uses what this version of the app does not know: see [LATER_FEATURES_WARNING]. */
+@Composable
+private fun LaterFeatures() {
+    Text(LATER_FEATURES_WARNING, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary)
 }
 
 @Composable

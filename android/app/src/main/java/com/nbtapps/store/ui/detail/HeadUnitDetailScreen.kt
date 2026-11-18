@@ -54,6 +54,7 @@ import com.nbtapps.store.model.CheckProblem
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.HeadUnitProfile
 import com.nbtapps.store.model.InstalledPackage
+import com.nbtapps.store.model.LATER_FEATURES_WARNING
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.RiskFlag
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
@@ -407,6 +408,14 @@ private fun AutostartCard(state: Autostart, busy: Boolean, error: String?, onSet
 /** Whether a package's row offers its settings: there is a link to an agent that has them, and the package has some. */
 internal fun showsSettings(uiState: HeadUnitDetailUiState, pkg: InstalledPackage): Boolean = uiState.settings && pkg.settings
 
+/**
+ * Whether a package's row says that it uses features this version of the app does not know: the installed version is
+ * on the phone with a manifest of a later format ([HeadUnitDetailUiState.laterFormat]), or the agent gives it a risk
+ * flag this app cannot explain, which the row would otherwise leave out.
+ */
+internal fun laterFeatures(uiState: HeadUnitDetailUiState, pkg: InstalledPackage): Boolean =
+    pkg.id in uiState.laterFormat || RiskFlag.anyUnknown(pkg.flags)
+
 @Composable
 private fun InstalledCard(
     uiState: HeadUnitDetailUiState,
@@ -423,6 +432,7 @@ private fun InstalledCard(
                 InstalledRow(
                     pkg,
                     connected,
+                    laterFeatures = laterFeatures(uiState, pkg),
                     onUninstall,
                     onLogs = { onOpenLogs(pkg.id) }.takeIf { uiState.logs && pkg.logs },
                     onSettings = { onOpenSettings(pkg.id) }.takeIf { showsSettings(uiState, pkg) },
@@ -443,6 +453,7 @@ private fun InstalledCard(
 private fun InstalledRow(
     pkg: InstalledPackage,
     connected: Boolean,
+    laterFeatures: Boolean,
     onUninstall: (String) -> Unit,
     onLogs: (() -> Unit)?,
     onSettings: (() -> Unit)?,
@@ -450,7 +461,12 @@ private fun InstalledRow(
     val flags = pkg.flags.mapNotNull(RiskFlag::fromId).joinToString(" · ") { it.label }
     ListItem(
         headlineContent = { Text(pkg.name) },
-        supportingContent = { Text(listOf("${pkg.id} · ${pkg.version}", flags).filter { it.isNotEmpty() }.joinToString("\n")) },
+        supportingContent = {
+            Column {
+                Text(listOf("${pkg.id} · ${pkg.version}", flags).filter { it.isNotEmpty() }.joinToString("\n"))
+                if (laterFeatures) Text(LATER_FEATURES_WARNING, color = MaterialTheme.colorScheme.tertiary)
+            }
+        },
         trailingContent = {
             Column(horizontalAlignment = Alignment.End) {
                 TextButton(onClick = { onUninstall(pkg.id) }, enabled = connected) { Text("Uninstall") }
