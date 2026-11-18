@@ -176,19 +176,25 @@ int main(int argc, char** argv) {
         CHECK(package.open(&third, packageOnly, std::string(), "1.0.0", &none));
     }
 
-    // 2b. A log in a folder this agent does not know: the package is taken, and the entry kept, never listed.
+    // 2b. What nbtpkg.py refuses to a package's author and this agent takes. A log in a folder this agent does not
+    // know: the entry is kept, never listed. A requires.app with no requires.agent: kept, and not acted on.
     json::Value skipped = root.find("skipped");
-    CHECK(skipped.size() >= 3);
+    CHECK(skipped.size() >= 4);
     for (size_t i = 0; i < skipped.size(); ++i) {
         json::Value v = skipped.at(i);
-        std::string file = v.find("file").string(), data = readFile(dir + "/" + file);
+        std::string file = v.find("file").string(), data = readFile(dir + "/" + file), names = v.find("names").string();
         MemorySource source(data.data(), data.size());
         Package package;
         Error error;
         bool ok = package.open(&source, packageOnly, &error);
         CHECK_IN(file + " (" + v.find("what").string() + "): " + error.code, ok);
         const Manifest& m = package.manifest();
-        CHECK_IN(file, m.logs.size() == 2 && validLogPath(m.logs[0]) && logPathForm(m.logs[1]) == kLogPathSkip);
+        if (names == "requires.app") {
+            CHECK_IN(file, m.appRange == ">=0.8.0" && m.agentRange.empty());
+        } else {
+            CHECK_IN(file, names == "logs[1].path");
+            CHECK_IN(file, m.logs.size() == 2 && validLogPath(m.logs[0]) && logPathForm(m.logs[1]) == kLogPathSkip);
+        }
     }
 
     // 2c. Detached signatures: the one given is checked, and manifest.sig is not read.

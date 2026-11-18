@@ -128,6 +128,7 @@ struct Placement {
 struct Manifest {
     std::string id, name, version;
     std::string agentRange;   // requires.agent; empty when absent
+    std::string appRange;     // requires.app, the phone app's to check: kept, and not acted on; empty when absent
     std::vector<ManifestDependency> depends, conflicts;
     std::vector<ManifestContent> contents;
     std::vector<ManifestFile> files;

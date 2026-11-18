@@ -194,6 +194,23 @@ def main():
     assert not nbtpkg.agent_requirement_ok(">=1.10.0", (2, 0, 0)) and nbtpkg.agent_requirement_ok(">=1.10.0", (1, 9, 9))
     print("[ok] requires.agent for ${var_plugins}")
 
+    # 2d. requires.app, the phone app's, which an agent knows from 1.6.0: a range, and the same rule as above.
+    def requiring(requires):
+        nbtpkg.check_manifest({"manifestVersion": 1, "id": "org.nbtapp.t", "name": "T", "version": "1.0.0",
+                               "contents": [], "requires": requires})
+    for requirement in (None, ">=1.5.1", "<2.0.0", "1.5.1"):
+        requires = {"app": ">=0.8.0"} if requirement is None else {"agent": requirement, "app": ">=0.8.0"}
+        message = refused("bad-manifest", requiring, requires)
+        assert "requires.app" in message and "\"requires\": {\"agent\": \">=1.6.0\"}" in message, message
+        assert "agent-too-old" in message, message
+    for app in (">=0.8.0", "<1.0.0", ">=0.8.0-beta.1 <2.0.0", "0.8.0"):
+        requiring({"agent": ">=1.6.0", "app": app})
+        requiring({"app": app, "agent": ">=1.6.0 <2.0.0"})
+    for app in (">=0.8", "", 8, "^0.8.0", None):
+        refused("bad-manifest", requiring, {"agent": ">=1.6.0", "app": app})
+    refused("unsupported-manifest", requiring, {"agent": ">=1.6.0", "phone": ">=0.8.0"})
+    print("[ok] requires.app")
+
     with tempfile.TemporaryDirectory() as tmp:
         # 3. The test packages.
         vectors = make_packages.build_all(os.path.join(tmp, "data"))
@@ -217,11 +234,14 @@ def main():
                 refused(entry["code"], nbtpkg.verify_package, data_of(entry), [public])
             except AssertionError as e:
                 raise AssertionError("%s (%s): %s" % (entry["file"], entry["what"], e))
-        # A log in a folder the schema does not know: this tool refuses it, which the agent and the app skip.
-        assert len(vectors["skipped"]) >= 3
+        # What this tool refuses and the agent and the app take: a log in a folder the schema does not know, which
+        # they skip, and requires.app with no requires.agent that keeps out the agents that do not know it.
+        assert len(vectors["skipped"]) >= 4
         for entry in vectors["skipped"]:
             message = refused(entry["code"], nbtpkg.verify_package, data_of(entry), [public])
-            assert "logs[1].path" in message and "does not know" in message, "%s: %s" % (entry["file"], message)
+            assert entry["names"] in message and ("does not know" in message or "knows from" in message), \
+                "%s: %s" % (entry["file"], message)
+        assert {e["names"] for e in vectors["skipped"]} == {"logs[1].path", "requires.app"}
         hello = next(e for e in vectors["good"] if e["file"] == "good/org.nbtapp.hello-1.2.0.nbtpkg")
         assert hello["flags"] == ["runs-scripts"]
         print("[ok] test packages: %d good, %d bad, %d skipped"

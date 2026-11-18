@@ -387,12 +387,17 @@ private:
         return where + index;
     }
 
-    // properties/requires: closed.
+    // properties/requires: closed. app is the phone app's to check; it is kept, and nothing here acts on it.
     bool requiresObject(const Value& v) {
         if (!v.isObject()) return bad("manifest.requires", "must be an object");
         for (size_t i = 0; i < v.size(); ++i) {
-            if (v.key(i) != "agent") return unknown("manifest.requires", v.key(i));
-            if (!text(v.at(i), isRange, "manifest.requires.agent", &m_->agentRange)) return false;
+            if (v.key(i) == "agent") {
+                if (!text(v.at(i), isRange, "manifest.requires.agent", &m_->agentRange)) return false;
+            } else if (v.key(i) == "app") {
+                if (!text(v.at(i), isRange, "manifest.requires.app", &m_->appRange)) return false;
+            } else {
+                return unknown("manifest.requires", v.key(i));
+            }
         }
         return true;
     }

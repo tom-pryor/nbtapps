@@ -6,16 +6,20 @@
   OUTDIR/good/*.nbtpkg   the sources in tests/packages, signed with tests/keys/test-package.key, plus variants a
                          reader must also accept
   OUTDIR/bad/*.nbtpkg    hello 1.2.0 with one defect each; every reader must refuse each of them, except that the
-                         phone app takes those named bad/settings-* with no settings, so that a later format of
-                         settings, behind requires.agent, never stops it downloading a package
-  OUTDIR/skipped/*.nbtpkg  hello 1.2.0 naming a log in a folder the schema does not know: nbtpkg.py refuses each
-                         with its code, and the agent and the app take it and skip that log (spec/log-paths.vectors)
+                         phone app takes those that vectors.json marks with "app", so that a later format, behind
+                         requires.agent, never stops it downloading a package: "no-settings" for a fault in settings,
+                         which it takes with no settings, and "later-format" for something in install or requires that
+                         it does not know, which it takes and marks as of a later format
+  OUTDIR/skipped/*.nbtpkg  hello 1.2.0 with what nbtpkg.py refuses to the package's author and the agent and the app
+                         take: a log in a folder the schema does not know, which they skip (spec/log-paths.vectors),
+                         or a requires.app with no requires.agent to keep out the agents that do not know it
   OUTDIR/detached/*.nbtpkg  hello 1.2.0 as an author might sign it, each read with a detached signature over its
                          manifest instead of its manifest.sig
   OUTDIR/vectors.json    what each file is: for a good one the values an index entry or a job.plan offer carries,
                          for a bad one the code the refusal has (bad-archive, bad-signature, bad-manifest or
-                         unsupported-manifest) and what is wrong with it, for a skipped one nbtpkg.py's code and what
-                         it names, for a detached one the signature to read it
+                         unsupported-manifest), what is wrong with it and, where the app takes it, "app", for a
+                         skipped one nbtpkg.py's code, what is wrong with it and the member its refusal names
+                         ("names": logs[1].path or requires.app), for a detached one the signature to read it
                          with and the code ("" when it is accepted, trusting the package key only)
 
 The same sources give the same files, byte for byte. Every implementation that reads packages runs against this
@@ -132,6 +136,10 @@ def build_all(out_dir):
         m["futureField"] = {"ignored": [1, 2, 3]}
         m["contents"][0]["note"] = "ignored too"
     good["unknown-keys"] = (with_changed_manifest(unknown_key), "unknown keys outside requires and install are ignored")
+    def requires_app(m):
+        m["requires"] = {"agent": ">=1.6.0", "app": ">=0.8.0"}
+    good["requires-app"] = (with_changed_manifest(requires_app),
+                            "the versions of the phone app that may install it, with the first agent that knows that")
     folder = {"name": b"payload/", "method": 0, "crc": 0, "usize": 0, "raw": b""}
     good["folder-entries"] = (with_members(lambda ms: ms.insert(2, folder)), "folder entries are ignored")
     stored = [make_member(m["name"].decode(), nbtpkg.read_zip(base)[i + 2]["data"], store=True)
@@ -252,6 +260,10 @@ def build_all(out_dir):
         m["padding"] = "x" * (1 << 20)
     bad["manifest-too-large"] = (with_changed_manifest(huge), "bad-manifest", "the manifest is larger than 1 MiB")
 
+    # The bad ones the phone app takes, and how: see the module's comment.
+    app = {}
+    LATER = "later-format"
+
     def version2(m):
         m["manifestVersion"] = 2
     bad["manifest-version-2"] = (with_changed_manifest(version2), "unsupported-manifest", "manifestVersion 2")
@@ -259,10 +271,16 @@ def build_all(out_dir):
         m["install"]["files"][0]["patch"] = "bsdiff"
     bad["install-unknown-key"] = (with_changed_manifest(patch_key), "unsupported-manifest",
                                   "a key in install.files that this version does not know")
+    app["install-unknown-key"] = LATER
     def requires_key(m):
         m["requires"]["firmware"] = ">=1.0.0"
     bad["requires-unknown-key"] = (with_changed_manifest(requires_key), "unsupported-manifest",
                                    "a requirement this version cannot check")
+    app["requires-unknown-key"] = LATER
+    def requires_app_bad(m):
+        m["requires"] = {"agent": ">=1.6.0", "app": ">=0.8"}
+    bad["requires-app-not-range"] = (with_changed_manifest(requires_app_bad), "bad-manifest",
+                                     "a requires.app that is not a list of comparators")
 
     def field(path, value):
         def change(m):
@@ -293,6 +311,7 @@ def build_all(out_dir):
             ("contents-hash-uppercase", ["contents", 0, "sha256"], base_manifest["contents"][0]["sha256"].upper(),
              "a hash in capitals")):
         bad[label] = (with_changed_manifest(field(path, value)), "bad-manifest", why)
+    app["dest-unknown-variable"] = app["reboot-unknown"] = LATER
     def lists_manifest(m):
         m["contents"].append({"path": MANIFEST, "size": 1, "sha256": "0" * 64})
     bad["contents-lists-manifest"] = (with_changed_manifest(lists_manifest), "bad-manifest", "contents lists manifest.json")
@@ -322,6 +341,7 @@ def build_all(out_dir):
             ("serial-service-unknown-key", [dict(radio, uuid="0123ABCD-89EF-4A5B-8C7D-0123456789AB")],
              "unsupported-manifest", "a key in a serial service that this version does not know")):
         bad[label] = (with_changed_manifest(field(["install", "serialServices"], services)), code, why)
+    app["serial-service-unknown-key"] = LATER
 
     # ---- logs: the files a controller may pull ----
     every_form = [{"path": "${data}/log/*.log"}, {"path": "${app}/state.txt"}, {"path": "${tmp}/crash-?.txt"},
@@ -355,9 +375,14 @@ def build_all(out_dir):
              "a log path in the HMI's plugin folder on the writable partition"),
             ("logs-absolute-elsewhere", "/etc/passwd", "a log path outside the log roots")):
         logs = [{"path": "${data}/hello.log"}, {"path": path}]
-        skipped[label] = (with_changed_manifest(field(["logs"], logs)), "bad-manifest", why)
+        skipped[label] = (with_changed_manifest(field(["logs"], logs)), "bad-manifest", why, "logs[1].path")
+    # requires.app, which an agent knows from 1.6.0, with no requires.agent to keep out the agents before it: nbtpkg.py
+    # refuses it to the package's author, as an older agent would refuse it as unsupported-manifest.
+    skipped["requires-app-no-agent"] = (with_changed_manifest(field(["requires"], {"app": ">=0.8.0"})), "bad-manifest",
+                                        "a requires.app with no requires.agent", "requires.app")
     bad["dest-tmp"] = (with_changed_manifest(field(["install", "files", 0, "dest"], "${tmp}/bin/hello")), "bad-manifest",
                        "a destination in ${tmp}, which is for logs only")
+    app["dest-tmp"] = LATER   # to the app ${tmp} is a folder variable it does not know in a destination
 
     # ---- settings: what a phone shows and changes ----
     choices = [{"value": "round", "label": "Round"}, {"value": "square", "label": "Square"}]
@@ -494,6 +519,7 @@ def build_all(out_dir):
                                                for i in range(16)])]},
              "a select of 1,025 bytes of text: 16 values of 61 characters, their labels, its key and label")):
         bad[label] = (with_changed_manifest(field(["settings"], settings)), "bad-manifest", why)
+        app[label] = "no-settings"
 
     # ---- detached signatures: a package its author signed, with the catalogue's signature over its manifest ----
     countersigned = nbtpkg.sign(seed, manifest_bytes)
@@ -533,12 +559,16 @@ def build_all(out_dir):
         path = "bad/%s.nbtpkg" % label
         with open(os.path.join(out_dir, path), "wb") as f:
             f.write(data)
-        vectors["bad"].append({"file": path, "code": code, "what": why})
-    for label, (data, code, why) in sorted(skipped.items()):
+        entry = {"file": path, "code": code, "what": why}
+        if label in app:
+            entry["app"] = app[label]
+        vectors["bad"].append(entry)
+    assert set(app) <= set(bad), sorted(set(app) - set(bad))
+    for label, (data, code, why, names) in sorted(skipped.items()):
         path = "skipped/%s.nbtpkg" % label
         with open(os.path.join(out_dir, path), "wb") as f:
             f.write(data)
-        vectors["skipped"].append({"file": path, "code": code, "what": why})
+        vectors["skipped"].append({"file": path, "code": code, "what": why, "names": names})
     for label, (data, signature, code, why) in sorted(detached.items()):
         path = "detached/%s.nbtpkg" % label
         with open(os.path.join(out_dir, path), "wb") as f:

@@ -29,6 +29,10 @@
       "properties": {
         "agent": {
           "$ref": "#/$defs/range"
+        },
+        "app": {
+          "description": "The versions of the phone app that may install the package. The phone app checks it against its own version; the agent takes it and does not act on it. Only an agent from 1.6.0 knows it, so a manifest that has it also names 1.6.0 or later in requires.agent, so that an older agent refuses it as agent-too-old, not as a bad manifest.",
+          "$ref": "#/$defs/range"
         }
       }
     },

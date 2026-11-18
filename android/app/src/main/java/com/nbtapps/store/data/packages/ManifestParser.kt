@@ -150,11 +150,15 @@ object ManifestParser {
     private fun requires(value: JsonElement): PackageRequirements {
         val obj = value as? JsonObject ?: bad("requires must be an object")
         var agent: String? = null
+        var app: String? = null
         for ((key, member) in obj) {
-            if (key != "agent") unknown("requires", key)
-            agent = text(member, "requires.agent", ::isRange)
+            when (key) {
+                "agent" -> agent = text(member, "requires.agent", ::isRange)
+                "app" -> app = text(member, "requires.app", ::isRange)
+                else -> unknown("requires", key)
+            }
         }
-        return PackageRequirements(agent)
+        return PackageRequirements(agent, app)
     }
 
     private fun dependencies(value: JsonElement, where: String): List<PackageDependency> {

@@ -5,6 +5,7 @@ package com.nbtapps.store.data.packages
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.model.ManifestSerialService
+import com.nbtapps.store.model.PackageRequirements
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -65,6 +66,22 @@ class PackageCorpusTest {
     }
 
     @Test
+    fun `the versions of the app a package names are read as a range, beside the agent's`() {
+        fun requires(file: String) =
+            PackageArchive.verify(AgentVectors.file("packages/$file"), listOf(AgentVectors.packageKey)).manifest.requires
+
+        assertEquals(PackageRequirements(agent = ">=1.6.0", app = ">=0.8.0"), requires("good/requires-app.nbtpkg"))
+        assertEquals(PackageRequirements(agent = ">=1.0.0"), requires("good/org.nbtapp.hello-1.2.0.nbtpkg"))
+        // Not a range: refused, as the agent refuses it.
+        try {
+            requires("bad/requires-app-not-range.nbtpkg")
+            fail("a requires.app that is no range was taken")
+        } catch (e: PackageFormatException) {
+            assertEquals(PackageFormatException.BAD_MANIFEST, e.code)
+        }
+    }
+
+    @Test
     fun `the logs a package names are read, in the order of the text`() {
         fun logs(file: String) =
             PackageArchive.verify(AgentVectors.file("packages/good/$file"), listOf(AgentVectors.packageKey)).manifest.logs
@@ -98,17 +115,19 @@ class PackageCorpusTest {
     }
 
     /**
-     * Every broken package is refused with the code the agent gives, except one whose only fault is in `settings`: the
-     * one planned difference between the readers (see [ManifestParser]). The agent refuses it, and the app takes it
-     * with no settings, so that a later format of `settings`, which an agent that knows it takes behind
-     * `requires.agent`, does not stop this app from downloading the package.
+     * Every broken package is refused with the code the agent gives, except one that `vectors.json` marks with `app`
+     * `no-settings`, whose only fault is in `settings`: the one planned difference between the readers (see
+     * [ManifestParser]). The agent refuses it, and the app takes it with no settings, so that a later format of
+     * `settings`, which an agent that knows it takes behind `requires.agent`, does not stop this app from downloading
+     * the package.
      */
     @Test
     fun `every broken package is refused, with the code the agent gives, but one whose fault is in its settings`() {
         val bad = vectors.getValue("bad").jsonArray.map { it.jsonObject }
         assertTrue("the corpus looks cut short", bad.size >= 71)
-        val (settings, others) = bad.partition { it.text("file").startsWith("bad/settings-") }
+        val (settings, others) = bad.partition { it["app"]?.jsonPrimitive?.content == "no-settings" }
         assertTrue("the corpus has no broken settings", settings.size >= 50)
+        assertTrue(settings.all { it.text("file").startsWith("bad/settings-") })
         for (entry in others) {
             val what = "${entry.text("file")} (${entry.text("what")})"
             try {
@@ -127,16 +146,26 @@ class PackageCorpusTest {
         }
     }
 
+    /**
+     * What the package tool refuses to a package's author and the agent takes, the app takes too: a log in a folder
+     * the agent does not know, and a `requires.app` with no `requires.agent`.
+     */
     @Test
     fun `a log in a folder the agent does not know is taken, as the agent takes it`() {
         val skipped = vectors.getValue("skipped").jsonArray.map { it.jsonObject }
-        assertTrue("the corpus looks cut short", skipped.size >= 3)
+        assertTrue("the corpus looks cut short", skipped.size >= 4)
         for (entry in skipped) {
             val what = "${entry.text("file")} (${entry.text("what")})"
             val file = AgentVectors.file("packages/${entry.text("file")}")
-            val logs = PackageArchive.verify(file, listOf(AgentVectors.packageKey)).manifest.logs
-            assertEquals(what, 2, logs.size)
-            assertEquals(what, "\${data}/hello.log", logs[0])
+            val manifest = PackageArchive.verify(file, listOf(AgentVectors.packageKey)).manifest
+            when (entry.text("names")) {
+                "requires.app" -> assertEquals(what, PackageRequirements(agent = null, app = ">=0.8.0"), manifest.requires)
+                "logs[1].path" -> {
+                    assertEquals(what, 2, manifest.logs.size)
+                    assertEquals(what, "\${data}/hello.log", manifest.logs[0])
+                }
+                else -> fail("$what names ${entry.text("names")}")
+            }
         }
     }
 

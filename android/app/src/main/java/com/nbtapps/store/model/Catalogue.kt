@@ -164,6 +164,11 @@ data class PackageVersion(
 data class PackageRequirements(
     /** Semver range on the head-unit agent version, such as `>=1.0.0`. */
     val agent: String? = null,
+    /**
+     * Semver range on this app's own version, such as `>=0.8.0`: the versions of the app that may install the package.
+     * The app checks it against its own version; the agent takes it and does not act on it.
+     */
+    val app: String? = null,
 )
 
 @Serializable

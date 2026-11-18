@@ -159,6 +159,16 @@ int main() {
     // The least a manifest can be.
     assert(code(make(kHead, "", ""), &m) == "");
     assert(m.reboot == "none" && !m.hasHooks && m.placements.empty() && riskFlags(m).empty() && m.serialServices.empty());
+    assert(m.agentRange.empty() && m.appRange.empty());
+
+    // requires.app is the phone app's: a range, kept, and nothing more; in either order beside requires.agent.
+    assert(code(make(std::string(kHead) + "\"requires\":{\"agent\":\">=1.6.0\",\"app\":\">=0.8.0 <2.0.0\"},", "", ""), &m) == "");
+    assert(m.agentRange == ">=1.6.0" && m.appRange == ">=0.8.0 <2.0.0");
+    assert(code(make(std::string(kHead) + "\"requires\":{\"app\":\"0.8.0\"},", "", ""), &m) == "" && m.appRange == "0.8.0");
+    assert(m.agentRange.empty());
+    assert(head(std::string(kHead) + "\"requires\":{\"app\":\">=0.8\"},") == bad);
+    assert(head(std::string(kHead) + "\"requires\":{\"app\":8},") == bad);
+    assert(head(std::string(kHead) + "\"requires\":{\"app\":\">=0.8.0\",\"phone\":\">=1.0.0\"},") == unsupported);
 
     // 2. The top level: the JSON profile, manifestVersion, the required members.
     assert(code("") == bad && code("[]") == bad && code("{\"manifestVersion\":1,}") == bad);

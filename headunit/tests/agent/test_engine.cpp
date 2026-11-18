@@ -867,6 +867,18 @@ static void testKeysAndChecks() {
         refused(old.engine.install(bad("settings-applies-unknown"), "", 0), "agent-too-old");
         CHECK(same(snap(old), before));
         refused(newer.engine.install(bad("settings-applies-unknown"), "", 0), "bad-manifest");
+        // requires.app, which an agent knows from 1.6.0, comes with a requires.agent that keeps out the agents
+        // before it: one of those says agent-too-old, not that it does not know the key. 1.6.0 takes it, and does
+        // not act on it.
+        Bench before16("app-old", keys(), false, "1.5.1");
+        Snapshot was = snap(before16);
+        StepReport r = before16.engine.install(good("requires-app"), "", 0);
+        refused(r, "agent-too-old");
+        CHECK(has(r.error.message, ">=1.6.0") && same(snap(before16), was));
+        Bench at16("app-new", keys(), false, "1.6.0");
+        installDone(at16, "org.nbtapp.runtime-2.1.0");
+        done(at16.engine.install(good("requires-app"), "", 0));
+        CHECK(at16.record("org.nbtapp.hello").manifest.appRange == ">=0.8.0");
     }
     {
         // Not enough room: refused before anything is written outside staging.

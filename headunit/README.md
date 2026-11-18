@@ -111,10 +111,23 @@ format and the protocol.
   the package's author to that, as it does with a `logs` path, and is stricter there than the agent: it refuses
   (`bad-manifest`) a manifest that places a file or a link in `${var_plugins}` unless `requires.agent` has a
   comparator `>=`, `>` or `=` (or none) at 1.6.0 or above, the three numbers compared and a pre-release part not
-  looked at. A phone app that does not know `${var_plugins}` refuses such a package as a bad manifest when it
-  downloads it, whatever agent the head unit has. Such a package's record is one that an older agent cannot read (see "Once a version is confirmed"
+  looked at. A phone app that does not know `${var_plugins}` and reads `install` strictly, as the apps from
+  before `requires.app` do, refuses such a package as a bad manifest when it downloads it, whatever agent the head
+  unit has. Such a package's record is one that an older agent cannot read (see "Once a version is confirmed"
   under [The agent updates itself](#the-agent-updates-itself)). On the bench, with `--root DIR`, the folder is
   `DIR/var-plugins`.
+- A manifest's `requires` holds two version ranges. `requires.agent` is the agents that install the package: an
+  agent outside it refuses the package with `agent-too-old` when the job is planned, and reads it before the rest
+  of the manifest, so that a package that uses a later format of the manifest names the first agent that knows
+  that format and an older agent does not call it broken. `requires.app` is the versions of the phone app that may
+  install the package: the app checks it against its own version, and neither offers nor downloads a version that
+  leaves it out. The agent takes it, checks that it is a range and does not act on it. An agent knows
+  `requires.app` from 1.6.0 and an older one refuses a manifest that has it (`unsupported-manifest`), so a manifest
+  that has it names 1.6.0 or later in `requires.agent`; `nbtpkg.py` refuses (`bad-manifest`) one that does not, by
+  the rule it has for `${var_plugins}`. A phone app that knows `requires.app` reads the rest of `install` and
+  `requires` leniently: a folder variable, a key, a `reboot` value, a hook name or a requirement that it does not
+  know does not stop it downloading the package. It works out the risk flags from what it knows and says that the
+  package uses features it does not know. The agent has the last word on all of it.
 - The official package key is built in (`agent/embedded_keys.hpp`): the public half of the key that signs the
   official catalogue's packages. An agent built for the head unit trusts that key and no other. The host build
   also takes `--test-key` for the test keys.
@@ -876,9 +889,9 @@ as failed with `not-confirmed`. The starter in place is as it was. The update ca
 Once a version is confirmed nothing goes back by itself. Going back by hand, by writing an older version's name to
 `current`, has one limit: the agent reads each installed package's manifest again from its record, and an older
 agent refuses a manifest whose form it does not know. A package installed by a newer agent with, for example, a
-`logs` path in `/dev/shmem` or in a folder only that agent knows (skipped there), or a file in `${var_plugins}`,
-is then a record the older agent cannot read, so it cannot list, update or remove that package until the newer
-version is back.
+`logs` path in `/dev/shmem` or in a folder only that agent knows (skipped there), a file in `${var_plugins}`, or a
+`requires.app`, is then a record the older agent cannot read, so it cannot list, update or remove that package
+until the newer version is back.
 
 What an agent accepts of its own package:
 

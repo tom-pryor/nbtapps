@@ -15,10 +15,11 @@ same input gives the same bytes.
 
 `verify` applies the checks the Android app and the head-unit agent apply, and names a failure with the code the
 agent reports for it: bad-archive, bad-signature, bad-manifest or unsupported-manifest. Without --key the signature is
-not checked, and the output says so. In two places the tool is stricter than the agent, for the package's author:
-it refuses a logs path that an agent would skip (skipped_log_message), and a file or link placed in a folder only a
-later agent knows, such as ${var_plugins}, without a requires.agent that leaves the older agents out
-(VARIABLE_FIRST_AGENT). Both are bad-manifest here.
+not checked, and the output says so. In three places the tool is stricter than the agent, for the package's author:
+it refuses a logs path that an agent would skip (skipped_log_message); a file or link placed in a folder only a later
+agent knows, such as ${var_plugins}, without a requires.agent that leaves the older agents out (VARIABLE_FIRST_AGENT);
+and a requirement only a later agent knows, such as requires.app, the phone app's, without such a requires.agent
+(REQUIREMENT_FIRST_AGENT). All three are bad-manifest here.
 
 The format, as the plan document sets it:
   - a zip archive under a strict profile: manifest.json first, manifest.sig second, stored or deflated entries one
@@ -67,6 +68,9 @@ OWN_DIRS = ("${app}/", "${data}/", "${plugins}/", "${var_plugins}/")   # not mod
 # requires.agent leaves that agent out, in which case it says agent-too-old and the phone app offers the agent's
 # update. So this tool asks for that requirement (agent_requirement_ok); the agent does not.
 VARIABLE_FIRST_AGENT = {"${var_plugins}": (1, 6, 0)}
+# The same for the members of requires, which an older agent refuses as unsupported-manifest: requires.app, the
+# versions of the phone app that may install the package, which the agent takes and does not act on.
+REQUIREMENT_FIRST_AGENT = {"app": (1, 6, 0)}
 _COMPARATOR = re.compile(r"(>=|<=|>|<|=)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
@@ -327,15 +331,24 @@ def check_manifest(manifest):
             place(dest)
     for link in install.get("links", []):
         place(link["path"])
-    requirement = manifest.get("requires", {}).get("agent")
+    requires = manifest.get("requires", {})
+    requirement = requires.get("agent")
+
+    def needs_newer_agent(what, first, broken):
+        if not agent_requirement_ok(requirement, first):
+            version = "%d.%d.%d" % first
+            bad("%s, which an agent knows from %s, and its requires.agent (%s) lets an older agent take it: add "
+                "\"requires\": {\"agent\": \">=%s\"}, or raise it to that, so that an older agent says the package "
+                "needs a newer agent (agent-too-old) and does not report it as %s"
+                % (what, version, "none" if requirement is None else repr(requirement), version, broken))
+
     for variable, first in sorted(VARIABLE_FIRST_AGENT.items()):
         uses = sorted(p for p in placed if p.startswith(variable + "/"))
-        if uses and not agent_requirement_ok(requirement, first):
-            version = "%d.%d.%d" % first
-            bad("places %s in %s, which an agent knows from %s, and its requires.agent (%s) lets an older agent "
-                "take it: add \"requires\": {\"agent\": \">=%s\"}, or raise it to that, so that an older agent says "
-                "the package needs a newer agent (agent-too-old) and does not report it as broken (bad-manifest)"
-                % (uses[0], variable, version, "none" if requirement is None else repr(requirement), version))
+        if uses:
+            needs_newer_agent("places %s in %s" % (uses[0], variable), first, "broken (bad-manifest)")
+    for key, first in sorted(REQUIREMENT_FIRST_AGENT.items()):
+        if key in requires:
+            needs_newer_agent("has requires.%s" % key, first, "of a format it does not know (unsupported-manifest)")
     for name, hook in sorted(install.get("hooks", {}).items()):
         if hook["script"] not in paths:
             bad("names %s as %s, which is not listed in contents" % (hook["script"], name))

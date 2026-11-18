@@ -6,9 +6,9 @@ build/agent-host/test_package --codes). Makes changed copies of the test package
 every one of them the same verdict: accepted, or refused with the same code. There are two planned differences. A
 logs path in a folder the schema does not know: nbtpkg.py refuses it and the agent skips it, so the Python verdict
 is taken with such paths put in ${data}. And a file or link in a folder only a later agent knows, such as
-${var_plugins}, without a requires.agent that leaves the older agents out: nbtpkg.py refuses it, and the agent's
-reader, which is given no version of its own here, holds a package to no requirement; so that rule of nbtpkg.py is
-left out of the comparison.
+${var_plugins}, or a requirement only a later agent knows, such as requires.app, without a requires.agent that leaves
+the older agents out: nbtpkg.py refuses it, and the agent's reader, which is given no version of its own here, holds
+a package to no requirement; so those rules of nbtpkg.py are left out of the comparison.
 
   python3 tests/compare_readers.py [COUNT] [SEED]      (default 4000 cases, seed 1; needs `make build/agent-host/test_package testdata` first)
 
@@ -35,6 +35,7 @@ import nbtpkg
 
 CHECKER = os.path.join(ROOT, "build", "agent-host", "test_package")
 nbtpkg.VARIABLE_FIRST_AGENT = {}   # the second planned difference (above)
+nbtpkg.REQUIREMENT_FIRST_AGENT = {}
 
 STRINGS = ["", "a", "a.b", "org.nbtapp.hello", "Org.x", "1.0.0", "1.0", "01.0.0", "1.0.0-rc.1", ">=1.0.0", ">=1.0.0 <2.0.0",
            ">= 1.0.0", "none", "required", "hmi-restart", "maybe", "0644", "0755", "644", "0999", "payload/bin/hello",
@@ -46,7 +47,8 @@ STRINGS = ["", "a", "a.b", "org.nbtapp.hello", "Org.x", "1.0.0", "1.0", "01.0.0"
            "0" * 64, "f" * 64, "F" * 64, "0" * 63, "hello", "x\u007fy", ".", "..", "...", "a/.", "a/.b"]
 VALUES = STRINGS + [0, 1, 2, -1, 30, 600, 601, 4294967294, 4294967295, 2 ** 53 - 1, True, False, None, [], {}, [1], ["a"],
                     [{}], {"a": 1}, [{"id": "a.b"}], {"sha256": ["0" * 64]}, {"sha256": []}, {"script": "scripts/pre-install.sh", "timeout": 5},
-                    [{"path": "${app}/l", "target": "t"}], {"agent": ">=1.0.0"},
+                    [{"path": "${app}/l", "target": "t"}], {"agent": ">=1.0.0"}, {"app": ">=0.8.0"},
+                    {"agent": ">=1.6.0", "app": ">=0.8.0 <2.0.0"},
                     # settings
                     "bool", "int", "text", "select", "colour", "LAMP", "LAMP_2", "lamp", "safe", "any", "now",
                     "app-start", "reboot", "${data}/settings", "${data}/a/", "${data}/../x", "é é", " a", "a b",
@@ -57,7 +59,7 @@ VALUES = STRINGS + [0, 1, 2, -1, 30, 600, 601, 4294967294, 4294967295, 2 ** 53 -
                     {"options": [{"key": "LAMP", "label": "Lamp", "type": "int", "min": 0, "max": 9, "default": 3}]}]
 KEYS = ["manifestVersion", "id", "name", "version", "requires", "depends", "conflicts", "contents", "install", "files",
         "links", "hooks", "reboot", "src", "dest", "mode", "config", "replaces", "sha256", "path", "target", "script",
-        "timeout", "preInstall", "postInstall", "preRemove", "postRemove", "agent", "size", "patch", "extra", "firmware",
+        "timeout", "preInstall", "postInstall", "preRemove", "postRemove", "agent", "app", "size", "patch", "extra", "firmware",
         "settings", "file", "options", "key", "label", "type", "description", "default", "unset", "applies",
         "advanced", "min", "max", "unit", "maxLength", "characters", "values", "value"]
 
