@@ -148,6 +148,12 @@ class PairingNeeded : IOException("This phone has to be paired with the head uni
 /** The agent no longer takes the pairing key this phone holds for it. */
 private class StaleKey : IOException("The head unit no longer knows this phone")
 
+/** A request a connect made, [method], that had no answer in [Greeting.answerMs]. */
+private class Unanswered(val method: String) : IOException(NO_ANSWER)
+
+/** Why a connect failed whose agent did not answer. */
+private const val NO_ANSWER = "The head unit didn't answer"
+
 /** A job on a head unit as the app last saw it. */
 data class JobView(
     val planId: String,
@@ -195,6 +201,12 @@ class Greeting(
     val retryTimeoutMs: Long = 4_000,
     /** The pause before the next link is opened, for the car to take the last one down. */
     val pauseMs: Long = 700,
+    /**
+     * The wait for the answer to each request a connect makes after `hello`: `auth`, `info.get`, `packages.list`,
+     * `autostart.get` and `job.status`. One with none ends the link, and on Bluetooth serial another is opened,
+     * within [serialTries]: see `JobRepository.dial`. The requests made once the link is up wait as long as it takes.
+     */
+    val answerMs: Long = 10_000,
 )
 
 /**
@@ -502,6 +514,8 @@ class JobRepository(
                     e.message ?: "The head unit couldn't be reached"
                 }
                 opened?.let { abandon(it, reason) }
+                // A link that failed after it was shown as connected, as one whose `job.status` got no answer, is not.
+                connectionState.value = ConnectionState.Connecting(headUnitId)
                 failures += endpoint to reason
             }
         } catch (e: CancellationException) {
@@ -1285,31 +1299,56 @@ class JobRepository(
      * A Bluetooth serial link that comes up is not yet a link to the agent: the car gives it to whichever program
      * there reads it first, and the agent lets go a link it took too late to see how it opened. Such a link ends
      * before `hello` is answered, or stays silent. It is closed and another is opened, [Greeting.serialTries]
-     * times in all. An answer of any kind, a refusal too, is the agent's and is not tried again.
+     * times in all, counted in [tries] with the links [dial] opened before for the same reason. An answer of any
+     * kind, a refusal too, is the agent's and is not tried again.
      */
-    private suspend fun greet(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit): Pair<AgentSession, Hello> {
-        var attempt = 0
+    private suspend fun greet(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit, tries: Tries): Pair<AgentSession, Hello> {
         while (true) {
-            attempt++
-            val link = first.takeIf { attempt == 1 } ?: connector.connect(endpoint, unit.serialDial)
+            val link = first.takeIf { tries.opened == 0 } ?: connector.connect(endpoint, unit.serialDial)
+            tries.opened++
             val next = AgentSession(link, scope, now = clock).also(holding)
-            val last = next.kind != Link.SERIAL || attempt >= greeting.serialTries
+            val last = next.kind != Link.SERIAL || tries.opened >= greeting.serialTries
             val failure = try {
                 val hello = withTimeoutOrNull(if (last) greeting.timeoutMs else greeting.retryTimeoutMs) {
                     next.client.hello(identity.id(), identity.name)
                 }
                 if (hello != null) return next to hello
-                "The head unit didn't answer"
+                NO_ANSWER
             } catch (e: LinkClosedException) {
                 e.message ?: "The link to the head unit was lost"
             }
             // The words are the last link's; the ones before it failed in one of the same two ways.
-            if (last) throw IOException(if (attempt == 1) failure else "$failure ($attempt links were tried)")
+            if (last) throw IOException(tries.said(failure))
             abandon(next, failure)
             holding(null)
             delay(greeting.pauseMs)
         }
     }
+
+    /** The links a connect has opened to one endpoint, of the [Greeting.serialTries] it may: see [greet] and [dial]. */
+    private class Tries {
+        var opened = 0
+
+        /** [failure], the last link's, and how many links were tried where there was more than one. */
+        fun said(failure: String) = if (opened <= 1) failure else "$failure ($opened links were tried)"
+    }
+
+    /**
+     * [block], the request [method] that a connect makes, given [Greeting.answerMs] for its answer, where [limited]:
+     * one that has none fails with [Unanswered], and the link log says which it was. The caller ends the link.
+     */
+    private suspend fun <T> answered(method: String, limited: Boolean = true, block: suspend () -> T): T {
+        if (!limited) return block()
+        val answer = withTimeoutOrNull(greeting.answerMs) { Answer(block()) }
+        if (answer == null) {
+            log.line("no answer to $method in ${greeting.answerMs} ms while connecting: the link is ended")
+            throw Unanswered(method)
+        }
+        return answer.value
+    }
+
+    /** What [answered] waited for, which may itself be null. */
+    private class Answer<T>(val value: T)
 
     /**
      * Opens a link to [unit] over [endpoint] and takes it as far as it goes: connected, which is true, or
@@ -1318,22 +1357,35 @@ class JobRepository(
      * A key the agent no longer takes is of no use again: the agent forgot its phones, or holds another key for
      * this one. It is dropped, and since the agent ends a link on which `auth` failed, a new link is opened, on
      * which the phone has no key and is paired anew.
+     *
+     * A request after `hello` that gets no answer in [Greeting.answerMs] ends the link. On Bluetooth serial the link
+     * may be one the agent no longer serves, as a `hello` with no answer may be, so another is opened as [greet] does,
+     * within the same [Greeting.serialTries]; on any other link the connect fails.
      */
     private suspend fun dial(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit): Boolean {
         var stale = false
         var given = first
+        var tries = Tries()
         while (true) {
-            val (next, hello) = greet(unit, endpoint, given.also { given = null }, holding)
+            val (next, hello) = greet(unit, endpoint, given.also { given = null }, holding, tries)
             try {
                 return open(unit, endpoint, next, hello, stale)
             } catch (e: StaleKey) {
-                // Once: the second link is opened with no key to be stale.
+                // Once: the second link is opened with no key to be stale, and has tries of its own.
                 if (stale) throw e
                 stale = true
+                tries = Tries()
                 keys.remove(requireNotNull(hello.headUnitId))
                 abandon(next, e.message.orEmpty())
                 holding(null)
                 if (next.kind == Link.SERIAL) delay(greeting.pauseMs)
+            } catch (e: Unanswered) {
+                if (next.kind != Link.SERIAL || tries.opened >= greeting.serialTries) throw IOException(tries.said(NO_ANSWER))
+                abandon(next, NO_ANSWER)
+                holding(null)
+                // It may have been shown as connected before the request that got no answer.
+                connectionState.value = ConnectionState.Connecting(unit.id)
+                delay(greeting.pauseMs)
             }
         }
     }
@@ -1347,10 +1399,10 @@ class JobRepository(
         val dials = ProtocolConstants.CAPABILITY_SERIAL_DIAL in hello.capabilities
         if (unit.serialDial != dials) headUnits.update(unit.id) { it.copy(serialDial = dials) }
         val agentId = requireNotNull(hello.headUnitId)
-        if (keys.has(agentId)) prove(next, agentId)
+        if (keys.has(agentId)) answered("auth") { prove(next, agentId) }
         // The first thing asked also tells whether the agent takes this phone as it is.
         val info = try {
-            next.client.info()
+            answered("info.get") { next.client.info() }
         } catch (e: RemoteException) {
             if (e.code != "unauthenticated") throw e
             val waiting = Unpaired(next, unit, endpoint, hello)
@@ -1359,7 +1411,7 @@ class JobRepository(
             scope.launch { attend(waiting) }
             return false
         }
-        finish(unit, endpoint, next, hello, info)
+        finish(unit, endpoint, next, hello, info, limited = true)
         return true
     }
 
@@ -1385,29 +1437,51 @@ class JobRepository(
 
     /** Publishes the end of a link that waited to be paired, if it ends still waiting. */
     private suspend fun attend(waiting: Unpaired) {
-        val reason = waiting.session.ended.await()
-        connectLock.withLock {
-            if (unpaired !== waiting) return@withLock
+        val reason = endReason(waiting.session, waiting.session.ended.await())
+        val failed = connectLock.withLock {
+            if (unpaired !== waiting) return@withLock null
             unpaired = null
-            connectionState.value = ConnectionState.Failed(waiting.unit.id, reason)
+            ConnectionState.Failed(waiting.unit.id, reason).also { connectionState.value = it }
         }
+        if (failed != null) offAfter(waiting.session, failed)
     }
 
-    /** Makes [next], which the agent answers on, the app's link: reads what the head unit holds and follows its job. */
-    private suspend fun finish(unit: HeadUnit, endpoint: Endpoint, next: AgentSession, hello: Hello, info: AgentInfo) {
+    /**
+     * Why the end of [link] is shown: [reason], as the link has it, or, for a Bluetooth serial link that ended with
+     * the phone's Bluetooth off, that. The link's read fails as Bluetooth goes off, a moment before or after the
+     * phone says it is off: for the moment after, see [offAfter].
+     */
+    private fun endReason(link: AgentSession, reason: String): String =
+        if (link.kind == Link.SERIAL && !bluetoothOn.value) BLUETOOTH_OFF else reason
+
+    /**
+     * Where the phone's Bluetooth goes off within [BLUETOOTH_OFF_WITHIN_MS] of the end of [link], a Bluetooth serial
+     * link, shown as [failed]: that is why it ended, and the reason shown becomes that, if nothing has been shown since.
+     */
+    private suspend fun offAfter(link: AgentSession, failed: ConnectionState.Failed) {
+        if (link.kind != Link.SERIAL || failed.reason == BLUETOOTH_OFF) return
+        withTimeoutOrNull(BLUETOOTH_OFF_WITHIN_MS) { bluetoothOn.first { !it } } ?: return
+        connectionState.compareAndSet(failed, failed.copy(reason = BLUETOOTH_OFF))
+    }
+
+    /**
+     * Makes [next], which the agent answers on, the app's link: reads what the head unit holds and follows its job.
+     * Where [limited], as on a connect, each request is given [Greeting.answerMs] for its answer ([answered]).
+     */
+    private suspend fun finish(unit: HeadUnit, endpoint: Endpoint, next: AgentSession, hello: Hello, info: AgentInfo, limited: Boolean = false) {
         // The id is kept only now: before `auth` it was no more than what the other side said of itself.
         headUnits.update(unit.id) { it.copy(headUnitId = hello.headUnitId) }
         val installed = try {
-            next.client.packages()
+            answered("packages.list", limited) { next.client.packages() }
         } catch (e: RemoteException) {
             if (e.code != "busy") throw e
             unit.profile?.installed.orEmpty()
         }
         session = next
         if (forgottenBy == unit.id) forgottenBy = null
-        show(unit.id, endpoint, info, installed, autostartOf(next), next.client.capabilities)
+        show(unit.id, endpoint, info, installed, answered("autostart.get", limited) { autostartOf(next) }, next.client.capabilities)
         val before = jobState.value
-        follow(next, unit.id)
+        follow(next, unit.id, limited)
         // A job of this app's that ended while there was no link, as the agent's own update does: it ends on the
         // new version, which the `job.status` just asked is what confirms. What was read above is from before
         // that, so it is read again, as it is after any job that ends with the link up.
@@ -1435,10 +1509,13 @@ class JobRepository(
         headUnits.update(headUnitId) { it.copy(profile = profile) }
     }
 
-    /** Picks up the job the agent has on record, if any, with the log lines this app has not seen. */
-    private suspend fun follow(current: AgentSession, headUnitId: String) {
+    /**
+     * Picks up the job the agent has on record, if any, with the log lines this app has not seen. Where [limited],
+     * each `job.status` is given [Greeting.answerMs] for its answer ([answered]).
+     */
+    private suspend fun follow(current: AgentSession, headUnitId: String, limited: Boolean) {
         val known = jobState.value?.takeIf { it.headUnitId == headUnitId }
-        val found = current.client.status().job
+        val found = answered("job.status", limited) { current.client.status() }.job
         if (found == null) {
             // A job of ours that had not ended is gone with the head unit's staging area.
             if (known != null && !known.ended) jobState.value = known.copy(forgotten = true, linkLost = false, reconnecting = false)
@@ -1450,7 +1527,7 @@ class JobRepository(
         var after = same?.job?.seq ?: 0
         val replayed = ArrayList<JobLog>()
         while (true) {
-            val status = current.client.status(found.planId, after)
+            val status = answered("job.status", limited) { current.client.status(found.planId, after) }
             replayed += status.events.filterIsInstance<JobEvent.Log>().map { it.log }
             status.job?.let { view = view.copy(job = it) }
             after = status.events.lastOrNull()?.seq ?: break
@@ -1495,17 +1572,19 @@ class JobRepository(
                 scope.launch { ensureChecked() }
             }
         }
-        val reason = current.ended.await()
+        val ended = current.ended.await()
         val told = current.closing
-        log.line("the link ended: $reason" + told?.let { " (link.closing $it)" }.orEmpty())
-        connectLock.withLock {
+        // What the agent said of why it ended the link stands; otherwise the phone's Bluetooth going off may be why.
+        val reason = if (told == null) endReason(current, ended) else ended
+        log.line("the link ended: $ended" + told?.let { " (link.closing $it)" }.orEmpty() + if (reason != ended) " ($reason)" else "")
+        val failed = connectLock.withLock {
             // The app has moved on to another link: the end of this one, `other-link` too, is nothing to show.
-            if (session !== current) return@withLock
+            if (session !== current) return@withLock null
             session = null
             if (resetting === current) {
                 // The car ended the link because the app asked it to, and the app connects again: see [resetSerial].
                 connectionState.value = ConnectionState.Connecting(headUnitId)
-                return@withLock
+                return@withLock null
             }
             val unfinished = { view: JobView? -> view != null && !view.ended && view.headUnitId == headUnitId }
             if (told == LinkClosing.RESTARTING) {
@@ -1516,7 +1595,7 @@ class JobRepository(
                 rejoining.set(scope.launch { rejoin(headUnitId) })
                 jobState.update { if (unfinished(it)) it?.copy(reconnecting = true, linkLost = false) else it }
                 connectionState.value = ConnectionState.Connecting(headUnitId)
-                return@withLock
+                return@withLock null
             }
             if (told == LinkClosing.FORGOTTEN) {
                 // The key is good for nothing now. Without it the next link goes straight to being paired, where
@@ -1530,8 +1609,9 @@ class JobRepository(
             }
             // The job is marked first, so whoever sees the failed connection also sees what it did to the job.
             jobState.update { if (unfinished(it)) it?.copy(linkLost = true) else it }
-            connectionState.value = ConnectionState.Failed(headUnitId, reason)
+            ConnectionState.Failed(headUnitId, reason).also { connectionState.value = it }
         }
+        if (failed != null && told == null) offAfter(current, failed)
     }
 
     private fun apply(headUnitId: String, event: JobEvent) = jobState.update { known ->
@@ -1605,6 +1685,15 @@ class JobRepository(
 
         /** Why the app ends a link the car was asked to end and did not. */
         const val RESET_BY_APP = "The car was asked to end the link, and the app ended it"
+
+        /** Why a Bluetooth serial link ended where the phone's Bluetooth was switched off: see [endReason]. */
+        const val BLUETOOTH_OFF = "This phone's Bluetooth was switched off"
+
+        /**
+         * How long after a Bluetooth serial link has ended the phone's Bluetooth going off is still taken for why it
+         * ended: the phone says it is off a moment after the link's read has failed, or before.
+         */
+        const val BLUETOOTH_OFF_WITHIN_MS = 2_000L
 
         /** How long an `armed` reset lasts where the agent's answer does not say: the agent's own time. */
         const val ARMED_FOR_MS = 60_000L

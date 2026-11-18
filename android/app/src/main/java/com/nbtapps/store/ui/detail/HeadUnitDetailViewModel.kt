@@ -251,15 +251,25 @@ class HeadUnitDetailViewModel internal constructor(
             page.copy(fix = fix, laterFormat = laterFormat(page.installed, stored))
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
 
+    init {
+        // Bluetooth switched off or on while the page is open changes what it says at once.
+        viewModelScope.launch { bluetooth.on.collect { readBluetooth() } }
+    }
+
     /**
      * Reads what the phone's Bluetooth says of the head unit's serial endpoint: when the screen comes up, on
-     * return to it, and after the permission prompt. Pairing and switching Bluetooth on happen outside the app.
+     * return to it, and after the permission prompt. Pairing and switching Bluetooth on happen outside the app;
+     * Bluetooth being switched on or off is followed meanwhile ([PhoneBluetooth.on]).
      */
     fun refreshBluetooth() {
-        viewModelScope.launch {
-            val status = bluetooth.serialStatus(repository.headUnit(headUnitId).first())
-            local.update { it.copy(serial = status) }
-        }
+        // Also has [PhoneBluetooth.on] read again, which a change of permission does not announce.
+        bluetooth.refreshConnected()
+        viewModelScope.launch { readBluetooth() }
+    }
+
+    private suspend fun readBluetooth() {
+        val status = bluetooth.serialStatus(repository.headUnit(headUnitId).first())
+        local.update { it.copy(serial = status) }
     }
 
     fun connect() {

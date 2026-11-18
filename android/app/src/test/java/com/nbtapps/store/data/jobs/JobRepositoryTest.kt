@@ -13,6 +13,7 @@ import com.nbtapps.store.data.link.FakeRadio
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.LinkConnectors
+import com.nbtapps.store.data.link.LinkLog
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.data.link.SerialListener
 import com.nbtapps.store.data.packages.PackageStore
@@ -334,6 +335,112 @@ class JobRepositoryTest {
         assertTrue(jobs.connect("car").isFailure)
         assertEquals(1, connector.agents.size)
         assertFalse((jobs.connection.value as ConnectionState.Failed).reason.contains("were tried"))
+    }
+
+    // ---- a request of the connect's that gets no answer ---------------------------------------------------------------
+
+    /** The requests a connect makes after `hello`, each of which it waits for a limited time. */
+    private val connectRequests = listOf("auth", "info.get", "packages.list", "autostart.get", "job.status")
+
+    /**
+     * An agent behind [over] that asks for all of [connectRequests]: `auth` with the phone's key known to it, and
+     * `autostart.get` for the switch it lists. [silentOn] is told of each agent and says what it leaves unanswered.
+     */
+    private suspend fun asksAll(over: FakeConnector, silentOn: (FakeAgent) -> String?) {
+        val phones = FakePhones().also { over.phones = it }
+        keys.put(agentId, phones.pair(phoneId))
+        over.onConnect = { agent ->
+            withSwitch(agent, AtomicReference("off"))
+            silentOn(agent)?.let { agent.silent += it }
+        }
+    }
+
+    /** A repository whose waits for answers while connecting are short enough for a test to sit them out. */
+    private fun waiting(connector: LinkConnector, lines: MutableList<String> = CopyOnWriteArrayList()) = JobRepository(
+        headUnits, connector, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L },
+        greeting = Greeting(timeoutMs = 3_000, retryTimeoutMs = 300, pauseMs = 10, answerMs = 300),
+        log = LinkLog { lines += it },
+    )
+
+    @Test
+    fun `a request of the connect's that gets no answer fails it, ends the link, and leaves nothing of it behind`() = test {
+        for (method in connectRequests) {
+            val tcp = FakeConnector()
+            val counting = Counting(tcp)
+            asksAll(tcp) { method }
+            val lines = CopyOnWriteArrayList<String>()
+            val jobs = waiting(counting, lines)
+
+            val result = jobs.connect("car")
+
+            assertEquals(method, "The head unit didn't answer", result.exceptionOrNull()?.message)
+            assertEquals(method, ConnectionState.Failed("car", "The head unit didn't answer"), jobs.connection.value)
+            assertTrue(method, tcp.agent.requestsOf(method).isNotEmpty())
+            // Over TCP nothing else can have taken the link: one link, closed.
+            assertEquals(method, 1, tcp.agents.size)
+            assertEquals("$method: the link stayed open", 1, counting.closed.get())
+            assertTrue("$method: $lines", lines.any { it.startsWith("no answer to $method in 300 ms") })
+            // Nothing is asked over it any more, and no job is followed.
+            assertTrue(method, jobs.refresh().isFailure)
+            assertNull(method, jobs.job.value)
+        }
+    }
+
+    @Test
+    fun `on Bluetooth serial a request with no answer has another link opened, which connects`() = test {
+        headUnits.add(bluetoothCar)
+        for (method in connectRequests) {
+            val serial = FakeConnector(serial = true)
+            val counting = Counting(serial)
+            asksAll(serial) { method.takeIf { serial.agents.isEmpty() } }
+            val jobs = waiting(counting)
+
+            assertTrue(method, jobs.connect("bt").isSuccess)
+
+            assertTrue(method, jobs.connection.value is ConnectionState.Connected)
+            assertEquals(method, 2, serial.agents.size)
+            assertEquals("$method: the first link stayed open", 1, counting.closed.get())
+            assertTrue(method, jobs.refresh().isSuccess)
+            jobs.disconnect()
+        }
+    }
+
+    @Test
+    fun `on Bluetooth serial, with no answer on any link, the connect fails after the tries, and listening goes on`() = test {
+        headUnits.add(bluetoothCar)
+        val serial = FakeConnector(serial = true)
+        asksAll(serial) { "job.status" }
+        val jobs = waiting(serial)
+        val seen = states(jobs)
+
+        assertTrue(jobs.connect("bt").isFailure)
+
+        assertEquals(ConnectionState.Failed("bt", "The head unit didn't answer (3 links were tried)"), jobs.connection.value)
+        assertEquals(3, serial.agents.size)
+        assertTrue("a link stayed open", serial.agents.all { it.phoneLeft() })
+        // Shown as connected for a moment each time, and connecting again after it: never left so.
+        assertTrue("$seen", seen.any { it is ConnectionState.Connected })
+        assertTrue(jobs.refresh().isFailure)
+        await(serial.listening, "listening for the car again") { it > 0 }
+    }
+
+    @Test
+    fun `a link the car opens whose request gets no answer fails quietly, and listening goes on`() = test {
+        headUnits.add(bluetoothCar)
+        val jobs = JobRepository(
+            headUnits, dialler, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L },
+            greeting = Greeting(timeoutMs = 3_000, retryTimeoutMs = 300, pauseMs = 10, answerMs = 300), foreground = shown, bluetoothOn = bluetoothOn,
+        )
+        val seen = states(jobs)
+        dialler.onConnect = { it.silent += "info.get" }
+
+        val first = dialIn()
+
+        assertTrue("the phone held the link", first.phoneLeft())
+        until("listening again, as before") {
+            dialler.agents.size == 3 && dialler.listening.value > 0 && jobs.connection.value == ConnectionState.Disconnected
+        }
+        assertTrue("$seen", seen.none { it is ConnectionState.Failed })
     }
 
     // Pairing and `auth`, against an agent that asks for them as the real one does on Bluetooth serial.
@@ -1976,6 +2083,49 @@ class JobRepositoryTest {
         assertTrue("the phone held the link", second.phoneLeft())
         until("listening again, as before") { dialler.listening.value > 0 && jobs.connection.value == failed }
         assertEquals(1, second.requestsOf("hello").size)
+    }
+
+    private val bluetoothOff = ConnectionState.Failed("bt", "This phone's Bluetooth was switched off")
+
+    @Test
+    fun `a Bluetooth serial link that ends as the phone's Bluetooth is switched off says so, whichever the phone tells first`() = test {
+        val jobs = listening()
+        assertTrue(jobs.connect("bt").isSuccess)
+        // The phone says Bluetooth is off, and then the link's read fails.
+        bluetoothOn.value = false
+        dialler.agent.drop()
+        assertEquals(bluetoothOff, await(jobs.connection, "the end") { it is ConnectionState.Failed })
+
+        // The link's read fails first, and the phone says Bluetooth is off a moment later.
+        bluetoothOn.value = true
+        assertTrue(jobs.connect("bt").isSuccess)
+        dialler.agent.drop()
+        val first = await(jobs.connection, "the end") { it is ConnectionState.Failed }
+        assertFalse("$first", first == bluetoothOff)
+        bluetoothOn.value = false
+        await(jobs.connection, "the reason it ended") { it == bluetoothOff }
+
+        // A link that waits for the phone to be paired, the same.
+        bluetoothOn.value = true
+        dialler.phones = FakePhones()
+        assertTrue(jobs.connect("bt").exceptionOrNull() is PairingNeeded)
+        bluetoothOn.value = false
+        dialler.agent.drop()
+        assertEquals(bluetoothOff, await(jobs.connection, "the end") { it is ConnectionState.Failed })
+    }
+
+    @Test
+    fun `a link that is not Bluetooth serial is not taken to have ended with the phone's Bluetooth`() = test {
+        val jobs = JobRepository(
+            headUnits, connector, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L }, bluetoothOn = bluetoothOn,
+        )
+        assertTrue(jobs.connect("car").isSuccess)
+        bluetoothOn.value = false
+        connector.agent.drop()
+        val failed = await(jobs.connection, "the end") { it is ConnectionState.Failed } as ConnectionState.Failed
+        assertFalse(failed.reason, failed.reason.contains("Bluetooth"))
+        delay(300)
+        assertEquals(failed, jobs.connection.value)
     }
 
     @Test

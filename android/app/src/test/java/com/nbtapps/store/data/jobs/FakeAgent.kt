@@ -333,6 +333,9 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
     /** Every request received, in order: the method and its params. */
     val requests = CopyOnWriteArrayList<Pair<String, JsonObject>>()
 
+    /** The methods it takes and never answers, as an agent whose answer is lost. */
+    val silent: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /** The JSON array text `packages.list` answers with. */
     @Volatile
     var installed = "[]"
@@ -540,6 +543,7 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
 
     /** [payload] is the request as it came: `hello`'s is hashed for `auth`. */
     private fun answer(id: String, method: String, params: JsonObject, payload: ByteArray) {
+        if (method in silent) return
         try {
             val known = phones
             if (method == "files.fetch" && !handlers.containsKey(method) && (known == null || trusted)) return sendFile(id, params)
