@@ -12,7 +12,9 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -278,13 +280,14 @@ class PackageArchiveTest {
     }
 
     @Test
-    fun `an install key the app doesn't know is refused, and an unknown key elsewhere is ignored`() {
-        assertRefused(
-            PackageFormatException.UNSUPPORTED_MANIFEST,
-            members(manifest(install = """{ "files": [], "services": [] }""")),
-        )
+    fun `an install key the app doesn't know is taken as of a later format, and an unknown key elsewhere is ignored`() {
+        val later = verify(members(manifest(install = """{ "files": [], "services": [] }"""))).manifest
+        assertTrue(later.laterFormat)
+        assertEquals("org.example.app", later.id)
         val extra = manifest().decodeToString().replaceFirst("{", """{ "homepage": "https://example.invalid",""").encodeToByteArray()
-        assertEquals("org.example.app", verify(members(extra)).manifest.id)
+        val ignored = verify(members(extra)).manifest
+        assertEquals("org.example.app", ignored.id)
+        assertFalse(ignored.laterFormat)
     }
 
     @Test
@@ -338,12 +341,15 @@ class PackageArchiveTest {
 
         assertEquals("$v/Hello/hello", verify(members(manifest(install = install("$v/Hello/hello")))).manifest.files.single().dest)
         assertEquals("$v/Hello/h", verify(members(manifest(install = link("$v/Hello/h")))).manifest.links.single().path)
-        for (dest in listOf(v, "$v/", "$v/Hello/", "${v}x/a", "${'$'}{var_pluginsx}/a", "${'$'}{VAR_PLUGINS}/a", "$v//a", "$v/../a")) {
+        for (dest in listOf(v, "$v/", "$v/Hello/", "${v}x/a", "${'$'}{VAR_PLUGINS}/a", "$v//a", "$v/../a")) {
             assertRefused(badManifest, members(manifest(install = install(dest))))
         }
-        for (path in listOf(v, "$v/", "$v/Hello/", "${'$'}{var_pluginsx}/a")) {
+        for (path in listOf(v, "$v/", "$v/Hello/")) {
             assertRefused(badManifest, members(manifest(install = link(path))))
         }
+        // A folder variable this app does not know, of the right shape, is of a later format: ManifestLaterFormatTest.
+        assertTrue(verify(members(manifest(install = install("${'$'}{var_pluginsx}/a")))).manifest.laterFormat)
+        assertTrue(verify(members(manifest(install = link("${'$'}{var_pluginsx}/a")))).manifest.laterFormat)
     }
 
     @Test

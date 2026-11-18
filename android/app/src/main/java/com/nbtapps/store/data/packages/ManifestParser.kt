@@ -32,18 +32,34 @@ import kotlinx.serialization.json.longOrNull
 
 /**
  * Reads `manifest.json` under the rules of `spec/manifest.schema.json` in the agent repo, plus the rules that
- * span fields and that a schema cannot express. It is the same walk as the agent's `agent/manifest.cpp`, and
- * outside `settings` it must give the same verdict: a manifest one of them takes and the other refuses is a bug in
- * one of them.
+ * span fields and that a schema cannot express. It is the same walk as the agent's `agent/manifest.cpp`.
  *
- * `settings` is the one planned difference. The agent refuses a manifest whose `settings` breaks its rules, and the
- * app takes it with [PackageManifest.settings] null: a later agent may extend the format behind `requires.agent`, and
- * an app that refused it could not be loosened for those who do not update it. Nothing in the app acts on a manifest's
- * settings (the settings screen reads the options from the agent, see [settingOption]), so none are lost.
+ * The rule: the app takes every manifest the agent takes. Of the rest, it refuses what it relies on itself, and
+ * takes what it does not, marking where that is of a later format ([PackageManifest.laterFormat]). A later agent may
+ * extend the format behind `requires.agent`, and an app that refused such a manifest could not be loosened for those
+ * who do not update it. Every package goes through the agent, which checks it all again when the job is planned and
+ * has the last word.
  *
- * Unknown keys are refused inside `requires` and `install`, because an install key that is skipped could
- * place a file wrongly, and ignored everywhere else, a `logs` entry, `settings` and its options included. An option
- * of a type this app does not know is skipped, with only its `key` and `label` checked.
+ * What the app relies on, and refuses as the agent does: the archive and its signature, `manifestVersion`, `id`,
+ * `name`, `version`, `contents` and the hashes in it, `depends` and `conflicts`, the form of the ranges in `requires`
+ * (`requires.app` is checked against this app's own version), and every field this app knows that has a value it does
+ * not take: a mode, a path with `..`, a path placed twice, a hook script not in `contents`, and so on.
+ *
+ * The planned differences from the agent's reader, where the app takes a manifest the agent refuses:
+ *
+ *  - `settings` that break the agent's rules: the app takes them as none ([PackageManifest.settings] null), and does
+ *    not mark the manifest. Nothing in the app acts on a manifest's settings (the settings screen reads the options
+ *    from the agent, see [settingOption]), so none are lost. An option of a type this app does not know is skipped,
+ *    with only its `key` and `label` checked, as the agent does.
+ *  - In `install` and `requires`, what this app does not know, which it skips and marks as of a later format: a folder
+ *    variable in a file's `dest` or a link's `path`, of the shape `${name}` that a `logs` entry's has, with the rest
+ *    of the path held to the usual rules; a key in `install`, a file, `replaces`, a link, a hook, a serial service or
+ *    `requires`; a string for `install.reboot`; and a hook name, whose hook is not read. The risk flags
+ *    ([PackageManifest.flags]) come from what the app knows, and the app says that the package uses features it does
+ *    not know instead of guessing at the rest.
+ *
+ * Unknown keys elsewhere are ignored, as the agent ignores them: at the top, in a dependency, a `contents` entry, a
+ * `logs` entry, `settings` and its options.
  */
 object ManifestParser {
     const val SUPPORTED_MANIFEST_VERSION = 1
@@ -94,6 +110,7 @@ object ManifestParser {
             if (key !in root) bad("has no \"$key\"")
         }
 
+        val walk = Walk()
         var requires = PackageRequirements()
         var depends = emptyList<PackageDependency>()
         var conflicts = emptyList<PackageDependency>()
@@ -107,11 +124,11 @@ object ManifestParser {
                 "id" -> text(value, "id", ::isPackageId)
                 "name" -> text(value, "name", ::isName)
                 "version" -> text(value, "version") { SemVer.parseOrNull(it) != null }
-                "requires" -> requires = requires(value)
+                "requires" -> requires = requires(value, walk)
                 "depends" -> depends = dependencies(value, "depends")
                 "conflicts" -> conflicts = dependencies(value, "conflicts")
                 "contents" -> contents = contents(value)
-                "install" -> install = install(value)
+                "install" -> install = install(value, walk)
                 "logs" -> logs = logs(value)
                 "settings" -> settings = settingsOrNull(value)
             }
@@ -132,9 +149,16 @@ object ManifestParser {
             serialServices = install.serialServices,
             logs = logs,
             settings = settings,
+            laterFormat = walk.laterFormat,
         )
         crossFields(manifest)
         return manifest
+    }
+
+    /** What one walk of a manifest has met, which the parser, an object of its own, does not keep between them. */
+    private class Walk {
+        /** Something of a later format than this app's, in `install` or `requires`: see the class's comment. */
+        var laterFormat = false
     }
 
     private class Install(
@@ -147,7 +171,8 @@ object ManifestParser {
 
     // ---- the schema, walked in the order of the text ----
 
-    private fun requires(value: JsonElement): PackageRequirements {
+    /** `requires`: a requirement this app does not know is the agent's to judge. */
+    private fun requires(value: JsonElement, walk: Walk): PackageRequirements {
         val obj = value as? JsonObject ?: bad("requires must be an object")
         var agent: String? = null
         var app: String? = null
@@ -155,7 +180,7 @@ object ManifestParser {
             when (key) {
                 "agent" -> agent = text(member, "requires.agent", ::isRange)
                 "app" -> app = text(member, "requires.app", ::isRange)
-                else -> unknown("requires", key)
+                else -> walk.laterFormat = true
             }
         }
         return PackageRequirements(agent, app)
@@ -201,7 +226,7 @@ object ManifestParser {
         }
     }
 
-    private fun install(value: JsonElement): Install {
+    private fun install(value: JsonElement, walk: Walk): Install {
         val obj = value as? JsonObject ?: bad("install must be an object")
         var files = emptyList<ManifestFile>()
         var links = emptyList<ManifestLink>()
@@ -210,21 +235,22 @@ object ManifestParser {
         var serialServices = emptyList<ManifestSerialService>()
         for ((key, member) in obj) {
             when (key) {
-                "files" -> files = files(member)
-                "links" -> links = links(member)
-                "hooks" -> hooks = hooks(member)
+                "files" -> files = files(member, walk)
+                "links" -> links = links(member, walk)
+                "hooks" -> hooks = hooks(member, walk)
                 "reboot" -> {
-                    reboot = (member as? JsonPrimitive)?.takeIf { it.isString }?.content ?: ""
-                    if (reboot !in REBOOT_VALUES) bad("install.reboot must be one of: none, hmi-restart, required")
+                    reboot = (member as? JsonPrimitive)?.takeIf { it.isString }?.content
+                        ?: bad("install.reboot must be one of: none, hmi-restart, required")
+                    if (reboot !in REBOOT_VALUES) walk.laterFormat = true
                 }
-                "serialServices" -> serialServices = serialServices(member)
-                else -> unknown("install", key)
+                "serialServices" -> serialServices = serialServices(member, walk)
+                else -> walk.laterFormat = true
             }
         }
         return Install(files, links, hooks, reboot, serialServices)
     }
 
-    private fun serialServices(value: JsonElement): List<ManifestSerialService> {
+    private fun serialServices(value: JsonElement, walk: Walk): List<ManifestSerialService> {
         val array = value as? JsonArray ?: bad("install.serialServices must be an array")
         return array.mapIndexed { i, item ->
             val at = "install.serialServices[$i]"
@@ -238,7 +264,7 @@ object ManifestParser {
                 when (key) {
                     "name" -> name = text(member, "$at.name", ::isSerialServiceName)
                     "program" -> program = text(member, "$at.program", ::isProgramName)
-                    else -> unknown(at, key)
+                    else -> walk.laterFormat = true
                 }
             }
             ManifestSerialService(name, program)
@@ -508,7 +534,7 @@ object ManifestParser {
         }
     }
 
-    private fun files(value: JsonElement): List<ManifestFile> {
+    private fun files(value: JsonElement, walk: Walk): List<ManifestFile> {
         val array = value as? JsonArray ?: bad("install.files must be an array")
         return array.mapIndexed { i, item ->
             val at = "install.files[$i]"
@@ -525,15 +551,18 @@ object ManifestParser {
             for ((key, member) in obj) {
                 when (key) {
                     "src" -> src = text(member, "$at.src", ::isSrc)
-                    "dest" -> dest = text(member, "$at.dest", ::isDest)
+                    "dest" -> {
+                        dest = text(member, "$at.dest") { isDest(it, later = true) }
+                        if (!isDest(dest)) walk.laterFormat = true
+                    }
                     "mode" -> mode = text(member, "$at.mode", ::isMode)
                     "config" -> {
                         config = (member as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull
                             ?: bad("$at.config must be true or false")
                         hasConfig = true
                     }
-                    "replaces" -> replaces = replaces(member, "$at.replaces")
-                    else -> unknown(at, key)
+                    "replaces" -> replaces = replaces(member, "$at.replaces", walk)
+                    else -> walk.laterFormat = true
                 }
             }
             if (src.endsWith("/") && (hasConfig || replaces != null)) bad("sets config or replaces on the folder $src")
@@ -541,12 +570,15 @@ object ManifestParser {
         }
     }
 
-    private fun replaces(value: JsonElement, where: String): List<String> {
+    private fun replaces(value: JsonElement, where: String, walk: Walk): List<String> {
         val obj = value as? JsonObject ?: bad("$where must be an object")
         if ("sha256" !in obj) bad("$where has no \"sha256\"")
         var hashes = emptyList<String>()
         for ((key, member) in obj) {
-            if (key != "sha256") unknown(where, key)
+            if (key != "sha256") {
+                walk.laterFormat = true
+                continue
+            }
             val list = member as? JsonArray ?: bad("$where.sha256 must be an array")
             if (list.isEmpty()) bad("$where.sha256 needs at least one hash")
             hashes = list.mapIndexed { i, hash -> text(hash, "$where.sha256[$i]", Hex::isSha256) }
@@ -554,7 +586,7 @@ object ManifestParser {
         return hashes
     }
 
-    private fun links(value: JsonElement): List<ManifestLink> {
+    private fun links(value: JsonElement, walk: Walk): List<ManifestLink> {
         val array = value as? JsonArray ?: bad("install.links must be an array")
         return array.mapIndexed { i, item ->
             val at = "install.links[$i]"
@@ -566,20 +598,27 @@ object ManifestParser {
             var target = ""
             for ((key, member) in obj) {
                 when (key) {
-                    "path" -> path = text(member, "$at.path", ::isLinkPath)
+                    "path" -> {
+                        path = text(member, "$at.path") { isLinkPath(it, later = true) }
+                        if (!isLinkPath(path)) walk.laterFormat = true
+                    }
                     "target" -> target = text(member, "$at.target", ::isLinkTarget)
-                    else -> unknown(at, key)
+                    else -> walk.laterFormat = true
                 }
             }
             ManifestLink(path, target)
         }
     }
 
-    private fun hooks(value: JsonElement): Map<String, ManifestHook> {
+    /** `install.hooks`: a hook of a name this app does not know is not read, and is the agent's to judge. */
+    private fun hooks(value: JsonElement, walk: Walk): Map<String, ManifestHook> {
         val obj = value as? JsonObject ?: bad("install.hooks must be an object")
         val out = LinkedHashMap<String, ManifestHook>()
         for ((name, member) in obj) {
-            if (name !in HOOK_NAMES) unknown("install.hooks", name)
+            if (name !in HOOK_NAMES) {
+                walk.laterFormat = true
+                continue
+            }
             val at = "install.hooks.$name"
             val hook = member as? JsonObject ?: bad("$at must be an object")
             for (key in listOf("script", "timeout")) {
@@ -591,7 +630,7 @@ object ManifestParser {
                 when (key) {
                     "script" -> script = text(field, "$at.script", ::isPath)
                     "timeout" -> timeout = integer(field, "$at.timeout", 1, 600)
-                    else -> unknown(at, key)
+                    else -> walk.laterFormat = true
                 }
             }
             out[name] = ManifestHook(script, timeout.toInt())
@@ -678,18 +717,25 @@ object ManifestParser {
     /** The folders a destination or a link's path may start in, besides an absolute path (`$defs/file/dest`). */
     private val DEST_VARIABLES = listOf("\${app}", "\${data}", "\${plugins}", "\${var_plugins}")
 
-    private fun isDest(text: String): Boolean {
+    /**
+     * A file's `dest`: in one of [DEST_VARIABLES], with a relative path or nothing after it, or an absolute path; a slash
+     * at the end for a folder. With [later], also in a folder variable this app does not know, of the shape a `logs`
+     * entry's variable has ([LOG_VARIABLE]), with the rest held to the same rules: one of a later format.
+     */
+    private fun isDest(text: String, later: Boolean = false): Boolean {
         if (Utf8.length(text) > 255) return false
-        for (variable in DEST_VARIABLES) {
-            val prefix = "$variable/"
-            if (text.startsWith(prefix)) return text.length == prefix.length || segments(text.substring(prefix.length), true)
-        }
-        return text.startsWith("/") && segments(text.substring(1), true)
+        val variable = LOG_VARIABLE.matchAt(text, 0)?.value ?: return text.startsWith("/") && segments(text.substring(1), true)
+        if (variable !in DEST_VARIABLES && !later) return false
+        val prefix = "$variable/"
+        return text.startsWith(prefix) && (text.length == prefix.length || segments(text.substring(prefix.length), true))
     }
 
-    private fun isLinkPath(text: String): Boolean {
+    /** A link's `path`: as [isDest], with a relative path after the variable and no slash at the end. */
+    private fun isLinkPath(text: String, later: Boolean = false): Boolean {
         if (Utf8.length(text) > 255) return false
-        val rest = DEST_VARIABLES.firstOrNull { text.startsWith(it) }?.let { text.substring(it.length) } ?: text
+        val variable = LOG_VARIABLE.matchAt(text, 0)?.value
+        if (variable != null && variable !in DEST_VARIABLES && !later) return false
+        val rest = variable?.let { text.substring(it.length) } ?: text
         return rest.startsWith("/") && segments(rest.substring(1), false)
     }
 
@@ -786,9 +832,4 @@ object ManifestParser {
 
     private fun bad(what: String): Nothing =
         throw PackageFormatException("The package's manifest isn't valid: it $what", PackageFormatException.BAD_MANIFEST)
-
-    private fun unknown(where: String, key: String): Nothing = throw PackageFormatException(
-        "The package's manifest uses \"$key\" in $where, which this version of the app doesn't know",
-        PackageFormatException.UNSUPPORTED_MANIFEST,
-    )
 }

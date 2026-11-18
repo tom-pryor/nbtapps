@@ -48,6 +48,7 @@ class PackageCorpusTest {
             assertEquals(what, entry.text("signature"), Hex.encode(verified.signature))
             assertArrayEquals(what, key, verified.key)
             assertEquals(what, entry.getValue("flags").jsonArray.map { it.jsonPrimitive.content }, verified.manifest.flags)
+            assertFalse(what, verified.manifest.laterFormat)
         }
     }
 
@@ -115,19 +116,23 @@ class PackageCorpusTest {
     }
 
     /**
-     * Every broken package is refused with the code the agent gives, except one that `vectors.json` marks with `app`
-     * `no-settings`, whose only fault is in `settings`: the one planned difference between the readers (see
-     * [ManifestParser]). The agent refuses it, and the app takes it with no settings, so that a later format of
-     * `settings`, which an agent that knows it takes behind `requires.agent`, does not stop this app from downloading
-     * the package.
+     * Every broken package is refused with the code the agent gives, except one that `vectors.json` marks with `app`:
+     * the planned differences between the readers (see [ManifestParser]), which the agent refuses and the app takes,
+     * so that a later format, which an agent that knows it takes behind `requires.agent`, does not stop this app from
+     * downloading the package. `no-settings`, whose only fault is in `settings`, is taken with no settings and no mark.
+     * `later-format`, which has in `install` or `requires` what this app does not know, is taken with the mark, and
+     * with the risk flags of what the app could read: hello's own.
      */
     @Test
-    fun `every broken package is refused, with the code the agent gives, but one whose fault is in its settings`() {
+    fun `every broken package is refused, with the code the agent gives, but one the app takes as a later format`() {
         val bad = vectors.getValue("bad").jsonArray.map { it.jsonObject }
         assertTrue("the corpus looks cut short", bad.size >= 71)
-        val (settings, others) = bad.partition { it["app"]?.jsonPrimitive?.content == "no-settings" }
+        val (taken, others) = bad.partition { it["app"] != null }
+        val (settings, later) = taken.partition { it.text("app") == "no-settings" }
         assertTrue("the corpus has no broken settings", settings.size >= 50)
         assertTrue(settings.all { it.text("file").startsWith("bad/settings-") })
+        assertTrue("the corpus has too few of a later format", later.size >= 6)
+        val hello = vectors.getValue("good").jsonArray.map { it.jsonObject }.single { it.text("file") == "good/org.nbtapp.hello-1.2.0.nbtpkg" }
         for (entry in others) {
             val what = "${entry.text("file")} (${entry.text("what")})"
             try {
@@ -137,12 +142,22 @@ class PackageCorpusTest {
                 assertEquals(what, entry.text("code"), e.code)
             }
         }
-        for (entry in settings) {
+        for (entry in taken) {
             val what = "${entry.text("file")} (${entry.text("what")})"
-            assertEquals(what, "bad-manifest", entry.text("code"))
+            assertTrue(what, entry.text("code") in listOf("bad-manifest", "unsupported-manifest"))
             val manifest = PackageArchive.verify(AgentVectors.file("packages/${entry.text("file")}"), listOf(AgentVectors.packageKey)).manifest
             assertEquals(what, "org.nbtapp.hello", manifest.id)
-            assertNull(what, manifest.settings)
+            when (entry.text("app")) {
+                "no-settings" -> {
+                    assertNull(what, manifest.settings)
+                    assertFalse(what, manifest.laterFormat)
+                }
+                "later-format" -> {
+                    assertTrue(what, manifest.laterFormat)
+                    assertEquals(what, hello.getValue("flags").jsonArray.map { it.jsonPrimitive.content }, manifest.flags)
+                }
+                else -> fail("$what: app is ${entry.text("app")}")
+            }
         }
     }
 
@@ -158,6 +173,7 @@ class PackageCorpusTest {
             val what = "${entry.text("file")} (${entry.text("what")})"
             val file = AgentVectors.file("packages/${entry.text("file")}")
             val manifest = PackageArchive.verify(file, listOf(AgentVectors.packageKey)).manifest
+            assertFalse(what, manifest.laterFormat)
             when (entry.text("names")) {
                 "requires.app" -> assertEquals(what, PackageRequirements(agent = null, app = ">=0.8.0"), manifest.requires)
                 "logs[1].path" -> {

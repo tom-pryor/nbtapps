@@ -116,11 +116,12 @@ class ManifestSettingsTest {
         assertEquals("kept", code("""{"options":[{"key":"LAMP","label":"${"L".repeat(20)}","type":"bool","description":"$accents"}]}"""))
         assertEquals("dropped", code("""{"options":[{"key":"LAMP","label":"${"L".repeat(21)}","type":"bool","description":"$accents"}]}"""))
 
-        // Settings never refuse a manifest, so whatever they hold, a key unknown in install decides.
-        assertEquals("unsupported-manifest", code("""{"options":[{"key":"A","label":"A","type":"bool","default":1}]}""", "\"later\":1"))
-        assertEquals("unsupported-manifest", code("""{"options":[{"key":"a","label":"A","type":"bool"}]}""", "\"later\":1"))
+        // Settings never refuse a manifest, nor does a key unknown in install, which is of a later format.
+        assertEquals("dropped", code("""{"options":[{"key":"A","label":"A","type":"bool","default":1}]}""", "\"later\":1"))
+        assertEquals("dropped", code("""{"options":[{"key":"a","label":"A","type":"bool"}]}""", "\"later\":1"))
         // Nor do they hide a fault elsewhere.
-        assertEquals("bad-manifest", code("""{"options":[{"key":"a","label":"A","type":"bool"}]}""", "\"reboot\":\"soon\""))
+        assertEquals("bad-manifest", code("""{"options":[{"key":"a","label":"A","type":"bool"}]}""", "\"reboot\":1"))
+        assertEquals("bad-manifest", code("""{"options":[{"key":"a","label":"A","type":"bool"}]}""", "\"later\":1,\"files\":{}"))
     }
 
     @Test

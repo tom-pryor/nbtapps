@@ -21,7 +21,7 @@ data class PackageManifest(
     val links: List<ManifestLink> = emptyList(),
     /** Keyed by `preInstall`, `postInstall`, `preRemove` and `postRemove`. */
     val hooks: Map<String, ManifestHook> = emptyMap(),
-    /** `none`, `hmi-restart` or `required`. */
+    /** `none`, `hmi-restart` or `required`; or a value of a later format ([laterFormat]), which means nothing here. */
     val reboot: String = "none",
     /** The Bluetooth serial services the package's programs register on the car, for the agent to clear up after them. */
     val serialServices: List<ManifestSerialService> = emptyList(),
@@ -29,25 +29,40 @@ data class PackageManifest(
     val logs: List<String> = emptyList(),
     /** `settings`: what a phone shows and changes for the package; null when the manifest names none. */
     val settings: PackageSettings? = null,
+    /**
+     * The manifest uses, in `install` or `requires`, something of a later format than this app knows: a folder
+     * variable, a key, a `reboot` value, a hook name or a requirement. It was skipped, and [flags] leave it out: the app
+     * says that the package uses features it does not know (see `ManifestParser`).
+     */
+    val laterFormat: Boolean = false,
 ) {
     /**
      * The risk flags, worked out from the install plan the way the agent does it. The app shows these, not
-     * the ones a catalogue publishes, once it holds the package: a source cannot understate them.
+     * the ones a catalogue publishes, once it holds the package: a source cannot understate them. Only what this app
+     * knows counts: a destination or a link in a folder variable it does not know, a hook of a name it does not know
+     * (which is not in [hooks]) and a [reboot] value it does not know add nothing. What they would add is the agent's
+     * to say, in its plan.
      */
     val flags: List<String>
         get() = buildList {
             if (hooks.isNotEmpty()) add(RiskFlag.RUNS_SCRIPTS.id)
-            val system = files.any { !inOwnDirectories(it.dest) || it.replaces.isNotEmpty() } ||
-                links.any { !inOwnDirectories(it.path) }
+            val system = files.any { outsideOwnPlaces(it.dest) || it.replaces.isNotEmpty() } ||
+                links.any { outsideOwnPlaces(it.path) }
             if (system) add(RiskFlag.MODIFIES_SYSTEM.id)
-            if (reboot != "none") add(RiskFlag.NEEDS_REBOOT.id)
+            if (reboot in RESTARTS) add(RiskFlag.NEEDS_REBOOT.id)
         }
+
+    /** Outside the package's own places, as [flags] count it: an absolute path, and not one in a folder variable. */
+    private fun outsideOwnPlaces(path: String): Boolean = !inOwnDirectories(path) && !path.startsWith("\${")
 
     private fun inOwnDirectories(dest: String): Boolean = OWN_DIRECTORIES.any { dest.startsWith(it) }
 
     private companion object {
         /** The package's own places: a destination in one is not `modifies-system`. Both plugin folders count. */
         val OWN_DIRECTORIES = listOf("\${app}/", "\${data}/", "\${plugins}/", "\${var_plugins}/")
+
+        /** The [reboot] values that restart something. */
+        val RESTARTS = listOf("hmi-restart", "required")
     }
 }
 
