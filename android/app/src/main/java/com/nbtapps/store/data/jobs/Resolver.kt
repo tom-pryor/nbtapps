@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.data.jobs
 
+import com.nbtapps.store.model.AppVersion
 import com.nbtapps.store.model.CatalogueIndex
 import com.nbtapps.store.model.CataloguePackage
 import com.nbtapps.store.model.InstalledPackage
@@ -134,9 +135,16 @@ object Resolver {
         }
 
     /**
+     * Whether [version] runs on an agent of [agentVersion] ([suitsAgent]), and this app may install it: its
+     * `requires.app` takes this app in ([AppVersion]). A version this app is too old for is offered nowhere.
+     */
+    fun suits(version: PackageVersion, agentVersion: String?): Boolean =
+        AppVersion.takes(version.requires.app) && suitsAgent(version, agentVersion)
+
+    /**
      * Whether [version] runs on an agent of [agentVersion]: see [PackageVersion.agentRange]. An unknown agent
      * version rules nothing out.
      */
-    fun suits(version: PackageVersion, agentVersion: String?): Boolean =
+    fun suitsAgent(version: PackageVersion, agentVersion: String?): Boolean =
         agentVersion == null || VersionRange.matches(agentVersion, version.agentRange)
 }

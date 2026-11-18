@@ -5,6 +5,7 @@ package com.nbtapps.store.data.packages
 import com.nbtapps.store.data.crypto.Ed25519
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.link.Blob
+import com.nbtapps.store.model.AppVersion
 import com.nbtapps.store.model.Offer
 import com.nbtapps.store.model.PackageDependency
 import com.nbtapps.store.model.PackageVersion
@@ -136,7 +137,8 @@ class PackageStore(
      * copied so far.
      *
      * The signature is the archive's `manifest.sig`, or where the entry [expected] has one, the entry's
-     * [signature][PackageVersion.signature] in its place.
+     * [signature][PackageVersion.signature] in its place. A package whose `requires.app` leaves this app out
+     * ([AppVersion]) is refused too, with the code `unsupported-manifest`.
      *
      * @throws PackageFormatException if the archive is refused. The message is for the user.
      * @throws IOException if it cannot be read or stored.
@@ -170,6 +172,13 @@ class PackageStore(
             }
             val verified = PackageArchive.verify(part, trustedKeys, detached)
             expected?.let { (id, version) -> verified.requireMatches(id, version) }
+            val forApp = verified.manifest.requires.app
+            if (!AppVersion.takes(forApp)) {
+                throw PackageFormatException(
+                    "The package needs app $forApp; this app is ${AppVersion.current}. Update the app to install it.",
+                    PackageFormatException.UNSUPPORTED_MANIFEST,
+                )
+            }
 
             val pkg = StoredPackage(
                 id = verified.manifest.id,

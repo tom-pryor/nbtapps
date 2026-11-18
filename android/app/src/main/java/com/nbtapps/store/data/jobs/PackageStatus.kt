@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.data.jobs
 
+import com.nbtapps.store.model.AppVersion
 import com.nbtapps.store.model.CatalogueIndex
 import com.nbtapps.store.model.CataloguePackage
 import com.nbtapps.store.model.InstalledPackage
@@ -57,13 +58,16 @@ data class PackageStatus(
      * With none that does, or with no head unit known, the newest of all.
      */
     val offered: PackageVersion,
-    /** Whether [offered] runs on the head unit's agent. True when no head unit is known. */
+    /**
+     * Whether [offered] runs on the head unit's agent, and this app may install it ([Resolver.suits]). True when no
+     * head unit is known and this app is not too old for it.
+     */
     val suits: Boolean,
     /** The version on the head unit. Null when the package is not there, and when no head unit is known. */
     val installed: String?,
     /**
-     * The catalogue's newest version, when the head unit's agent cannot run it and can run [offered], which is
-     * older: what a newer agent would bring.
+     * The catalogue's newest version, when the head unit's agent cannot run it or this app is too old for it, and
+     * [offered], which is older, is neither: what a newer agent, or a newer app ([heldBackByApp]), would bring.
      */
     val heldBack: PackageVersion?,
     /** [offered] is a pre-release: see [CataloguePackage.isPrerelease]. */
@@ -82,6 +86,13 @@ data class PackageStatus(
      * only by the [packageStatus] that is given the catalogue.
      */
     val asks: List<PrereleaseAsk> = emptyList(),
+    /**
+     * [offered] does not [suits] because this app is too old for it: its `requires.app` leaves [AppVersion] out.
+     * Then no version of the package is offered at all.
+     */
+    val needsApp: Boolean = false,
+    /** [heldBack] is held back by this app's version alone: the head unit's agent runs it, and this app is too old. */
+    val heldBackByApp: Boolean = false,
 ) {
     /**
      * [offered] is what the head unit already has, or older than it. With the switch off, a pre-release on the
@@ -130,14 +141,17 @@ fun packageStatus(
     val suitable = versions.firstOrNull { Resolver.suits(it, agentVersion) }
     val offered = suitable ?: newest
     val have = installedVersion(pkg.id, installed, agentVersion)
+    val heldBack = newest.takeIf { suitable != null && suitable !== newest }
     return PackageStatus(
         offered = offered,
         suits = suitable != null,
         installed = have,
-        heldBack = newest.takeIf { suitable != null && suitable !== newest },
+        heldBack = heldBack,
         offeredPrerelease = pkg.isPrerelease(offered.version),
         installedPrerelease = have != null && pkg.isPrerelease(have),
         needsSwitch = needsSwitch,
+        needsApp = !AppVersion.takes(offered.requires.app),
+        heldBackByApp = heldBack != null && !AppVersion.takes(heldBack.requires.app) && Resolver.suitsAgent(heldBack, agentVersion),
     )
 }
 

@@ -252,7 +252,9 @@ internal fun PackageStatus.note(): String? {
             1 -> "${offered.version} needs ${ask.name} ${ask.version}, a pre-release"
             else -> "${offered.version} needs pre-releases of ${ask.name} and ${asks.size - 1} more"
         }
+        needsApp -> NEEDS_NEWER_APP
         !suits -> offered.agentRange?.let { "Needs agent ${rangeLabel(it)}" }
+        held != null && heldBackByApp -> "${held.version} needs a newer version of the app"
         held != null -> held.agentRange?.let { "${held.version} needs agent ${rangeLabel(it)}" }
         else -> null
     }

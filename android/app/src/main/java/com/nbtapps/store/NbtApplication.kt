@@ -6,6 +6,8 @@ import android.app.Activity
 import android.app.Application
 import android.os.Bundle
 import com.nbtapps.store.data.ActivityForeground
+import com.nbtapps.store.data.update.InstalledApp
+import com.nbtapps.store.model.AppVersion
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 
@@ -15,8 +17,13 @@ class NbtApplication : Application() {
     @Inject
     lateinit var foreground: ActivityForeground
 
+    @Inject
+    lateinit var installed: InstalledApp
+
     override fun onCreate() {
         super.onCreate()
+        // The version a package's requires.app is held against, before anything reads it.
+        AppVersion.current = AppVersion.of(installed.versionName)
         // Whether the app is in front of the user, from its activities' starts and stops: see [ActivityForeground].
         registerActivityLifecycleCallbacks(
             object : ActivityLifecycleCallbacks {

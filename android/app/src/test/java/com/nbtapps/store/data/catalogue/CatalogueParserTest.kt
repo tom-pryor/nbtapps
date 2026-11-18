@@ -3,6 +3,7 @@
 package com.nbtapps.store.data.catalogue
 
 import com.nbtapps.store.model.PackageDependency
+import com.nbtapps.store.model.PackageRequirements
 import com.nbtapps.store.model.RiskFlag
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -65,7 +66,17 @@ class CatalogueParserTest {
         assertEquals("", pkg.summary)
         assertNull(pkg.details)
         assertNull(pkg.latest?.requires?.agent)
+        assertNull(pkg.latest?.requires?.app)
         assertEquals(emptyList<PackageDependency>(), pkg.latest?.depends)
+    }
+
+    @Test
+    fun `the versions of the app a version needs are read as published`() {
+        val pkg = CatalogueParser.parseIndex(
+            index("""{ "id": "a", "name": "A", "versions": [${version("1.0.0", """, "requires": { "agent": ">=1.6.0", "app": ">=0.8.0" }""")}] }"""),
+        ).packages.single()
+
+        assertEquals(PackageRequirements(agent = ">=1.6.0", app = ">=0.8.0"), pkg.latest?.requires)
     }
 
     @Test
@@ -79,6 +90,8 @@ class CatalogueParserTest {
 
         assertEquals(listOf("future-flag", "runs-scripts"), pkg.latest?.flags)
         assertEquals(listOf(RiskFlag.RUNS_SCRIPTS), pkg.latest?.riskFlags)
+        // Kept, so that the page can say there is a flag it cannot explain.
+        assertTrue(pkg.latest?.unknownFlags == true)
     }
 
     @Test

@@ -306,6 +306,9 @@ private fun GetCard(
             else -> Text("Version ${get.version.version} is on this phone, checked and ready to install.")
         }
         if (get.laterFormat) LaterFeatures()
+        get.needsNewerApp?.let { newer ->
+            Text("Version $newer ${NEEDS_NEWER_APP.lowercase()}.", style = MaterialTheme.typography.bodyMedium)
+        }
         get.asks.forEach { ask ->
             Text("Needs ${ask.name} ${ask.version}, which is a pre-release.", style = MaterialTheme.typography.bodyMedium)
             OutlinedButton(onClick = { onAsk(ask) }) { Text("Turn on pre-releases of ${ask.name}") }
@@ -332,6 +335,7 @@ private fun LatestVersionCard(version: PackageVersion, prerelease: Boolean) {
         if (prerelease) PrereleaseLabel()
         Text(versionFacts(version))
         version.agentRange?.let { Text("Needs agent ${rangeLabel(it)}") }
+        version.requires.app?.let { Text("Needs app ${rangeLabel(it)}") }
     }
 }
 
@@ -447,6 +451,9 @@ private fun versionFacts(version: PackageVersion): String {
     val size = Formatter.formatShortFileSize(LocalContext.current, version.size)
     return listOfNotNull(version.released?.let { "Released $it" }, size).joinToString(" · ")
 }
+
+/** What a version that only a newer version of this app may install says for itself ([AppVersion][com.nbtapps.store.model.AppVersion]). */
+internal const val NEEDS_NEWER_APP = "Needs a newer version of the app"
 
 /** Makes a semver range readable: ">=2.0.0 <3.0.0" becomes "2.0.0 or later, below 3.0.0". */
 internal fun rangeLabel(range: String): String =

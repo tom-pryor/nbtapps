@@ -22,6 +22,7 @@ import com.nbtapps.store.data.packages.DownloadState
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
+import com.nbtapps.store.model.AppVersion
 import com.nbtapps.store.model.CatalogueIndex
 import com.nbtapps.store.model.CataloguePackage
 import com.nbtapps.store.model.ChangelogEntry
@@ -80,6 +81,11 @@ data class GetState(
     val installedAsOf: Long? = null,
     /** Why the package cannot go on that head unit, if it cannot. */
     val incompatible: String? = null,
+    /**
+     * A version newer than [version] that only a newer version of this app may install, where the head unit's agent
+     * runs it ([PackageStatus.heldBackByApp][com.nbtapps.store.data.jobs.PackageStatus.heldBackByApp]).
+     */
+    val needsNewerApp: String? = null,
     /** [version] is a pre-release. */
     val offeredPrerelease: Boolean = false,
     /** [installedVersion] is a pre-release. */
@@ -221,7 +227,10 @@ private fun getState(
         installedVersion = status.installed,
         installedAsOf = head?.seenAt?.takeIf { !head.live && status.installed != null },
         incompatible = when {
-            agentVersion == null || status.needsSwitch -> null
+            status.needsSwitch -> null
+            // This app's own, whatever the head unit.
+            status.needsApp -> "$NEEDS_NEWER_APP: ${version.requires.app?.let(::rangeLabel)}. This app is ${AppVersion.current}."
+            agentVersion == null -> null
             // Asked for instead: the agent that would run it is a pre-release.
             agentAsk -> null
             !status.suits -> "Needs agent ${version.agentRange?.let(::rangeLabel)}; this head unit's agent is $agentVersion."
@@ -234,6 +243,7 @@ private fun getState(
         needsSwitch = status.needsSwitch,
         asks = status.asks,
         upToDate = status.upToDate,
+        needsNewerApp = status.heldBack?.version?.takeIf { status.heldBackByApp },
         headUnitId = head?.headUnitId,
         settings = status.installed != null && head?.installed?.firstOrNull { it.id == pkg.id }?.settings == true,
     )

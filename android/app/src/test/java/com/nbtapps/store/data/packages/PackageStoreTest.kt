@@ -6,6 +6,7 @@ import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.crypto.sha256Hex
 import com.nbtapps.store.data.link.Blob
+import com.nbtapps.store.model.AppVersion
 import com.nbtapps.store.model.PackageVersion
 import java.io.File
 import kotlinx.coroutines.test.runTest
@@ -152,6 +153,30 @@ class PackageStoreTest {
         record.writeText(JsonObject(members - "laterFormat").toString())
         val older = PackageStore(dir).also { it.load() }.packages.value.single { it.sha256 == stored.sha256 }
         assertEquals(stored.copy(laterFormat = false), older)
+    }
+
+    @Test
+    fun `a package whose requires app leaves this app out is refused, naming both, and leaves nothing behind`() = runTest {
+        val store = PackageStore(dir).also { it.load() }
+        // hello 1.2.0 for app >=0.8.0 and agent >=1.6.0.
+        val forNewer = AgentVectors.file("packages/good/requires-app.nbtpkg")
+        try {
+            AppVersion.current = "0.7.0"
+            val refusal = assertThrows(PackageFormatException::class.java) {
+                kotlinx.coroutines.runBlocking { forNewer.inputStream().use { store.add(it, keys) } }
+            }
+            assertEquals(PackageFormatException.UNSUPPORTED_MANIFEST, refusal.code)
+            assertTrue(refusal.message, refusal.message!!.contains(">=0.8.0") && refusal.message!!.contains("0.7.0"))
+            assertTrue(store.packages.value.isEmpty())
+            assertEquals(emptyList<String>(), leftovers())
+
+            // A trial of the version it needs counts as that version.
+            AppVersion.current = AppVersion.of("0.8.0-trial")
+            val stored = forNewer.inputStream().use { store.add(it, keys) }
+            assertEquals(listOf(stored), store.packages.value)
+        } finally {
+            AppVersion.current = null
+        }
     }
 
     /** A package its author signed, and the catalogue's signature for it: from the agent repo's test packages. */
