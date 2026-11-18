@@ -172,8 +172,8 @@ void handAppPlugins(const CheckContext& context, const Fence& fence, std::vector
     }
 }
 
-// A folder directly in the app's folder that a fix has moved there, or that looks so: a real folder, not a link,
-// whose name ends in one of the two endings a move gives.
+// A folder directly in the app's folder or the folder of its data that a fix has moved there, or that looks so: a
+// real folder, not a link, whose name ends in one of the two endings a move gives.
 bool parkedName(const std::string& name) {
     static const char* const endings[] = {".old", ".nbtappsold"};
     for (size_t i = 0; i < sizeof endings / sizeof endings[0]; ++i) {
@@ -208,20 +208,30 @@ void detectHandApp(const CheckContext& context, CheckFinding* out) {
     Fence fence;
     std::string why;
     if (!fenceOf(context, &fence, &why)) return unknown(out, "the records of the installed packages cannot be read: " + why);
-    std::string app = context.platform->systemPath(kHandAppDir);
+    std::string app = context.platform->systemPath(kHandAppDir), data = context.platform->systemPath(kHandAppDataDir);
+    std::string varPlugins = context.platform->varPluginsDir();
     std::vector<std::string> plugins;
     handAppPlugins(context, fence, &plugins);
     fs::Kind appKind = fenced(fence, app) ? fs::kNone : fs::kindOf(app);
-    // The folder of its data is listed with the rest, and is not enough by itself to say that the app is there.
+    fs::Kind dataKind = fenced(fence, data) ? fs::kNone : fs::kindOf(data);
+    // The folder of its data is listed with the rest, and is not enough by itself to say that the app is there; nor
+    // is a plugin parked in it.
     if (plugins.empty() && appKind == fs::kNone) return;
     std::string held;
 
-    // Each plugin folder is moved into the app's folder, whole, under a name that is free now.
+    // Each plugin folder is moved, whole, under a name that is free now, into a folder of the app's on its own file
+    // system: one in the HMI's plugin folder under /var into the folder of the app's data, which is on the writable
+    // partition too, and any other into the app's folder.
     std::vector<CheckMove> moves;
     std::set<std::string> taken;
+    size_t intoApp = 0, intoData = 0;
     for (size_t i = 0; i < plugins.size() && moves.size() < kCheckMaxMoves; ++i) {
-        std::string name = plugins[i].substr(plugins[i].rfind('/') + 1), first = app + "/" + name + ".old", to = first;
-        if (fs::kindOf(to) != fs::kNone || taken.count(to) != 0) to = app + "/" + name + ".nbtappsold";
+        bool toData = under(plugins[i], varPlugins);
+        const std::string& dir = toData ? data : app;
+        if (toData) ++intoData;
+        else ++intoApp;
+        std::string name = plugins[i].substr(plugins[i].rfind('/') + 1), first = dir + "/" + name + ".old", to = first;
+        if (fs::kindOf(to) != fs::kNone || taken.count(to) != 0) to = dir + "/" + name + ".nbtappsold";
         if ((fs::kindOf(to) != fs::kNone || taken.count(to) != 0) && held.empty()) {
             held = "Its plugin's folder, " + plugins[i] + ", would be moved to " + first + " or " + to +
                    ", and both are taken. No fix is offered.";
@@ -229,8 +239,8 @@ void detectHandApp(const CheckContext& context, CheckFinding* out) {
         taken.insert(to);
         moves.push_back(CheckMove(plugins[i], to));
         uint64_t from = 0, into = 0;
-        if (held.empty() && (!deviceOf(fs::parentOf(plugins[i]), &from) || !deviceOf(app, &into) || from != into)) {
-            held = "Its plugin's folder, " + plugins[i] + ", is on another file system than " + app +
+        if (held.empty() && (!deviceOf(fs::parentOf(plugins[i]), &from) || !deviceOf(dir, &into) || from != into)) {
+            held = "Its plugin's folder, " + plugins[i] + ", is on another file system than " + dir +
                    ", and a fix moves it only by renaming it. No fix is offered.";
         }
         if (held.empty() && (!showable(plugins[i]) || !showable(to))) {
@@ -240,23 +250,33 @@ void detectHandApp(const CheckContext& context, CheckFinding* out) {
     if (plugins.size() > kCheckMaxMoves && held.empty()) {
         held = "There is too much here to move safely: more than " + number(kCheckMaxMoves) + " plugin folders. No fix is offered.";
     }
-    if (!moves.empty() && appKind != fs::kNone && appKind != fs::kDir && held.empty()) {
+    if (intoApp != 0 && appKind != fs::kNone && appKind != fs::kDir && held.empty()) {
         held = app + " is not a folder, and nothing is moved through a link or onto a file. No fix is offered.";
     }
+    if (intoData != 0 && dataKind != fs::kNone && dataKind != fs::kDir && held.empty()) {
+        held = data + " is not a folder, and nothing is moved through a link or onto a file. No fix is offered.";
+    }
 
-    // What a fix moved there before stays there, and is not listed.
-    if (appKind == fs::kDir) parkedIn(app, &fence.parked);
+    // What a fix moved into either folder before stays there, and is not listed.
+    std::set<std::string> parkedApp, parkedData;
+    if (appKind == fs::kDir) parkedIn(app, &parkedApp);
+    if (dataKind == fs::kDir) parkedIn(data, &parkedData);
+    fence.parked.insert(parkedApp.begin(), parkedApp.end());
+    fence.parked.insert(parkedData.begin(), parkedData.end());
     std::vector<std::string> roots;
     roots.push_back(app);
-    roots.push_back(context.platform->systemPath(kHandAppDataDir));
+    roots.push_back(data);
     Listing listing;
     listBounded(roots, fence, &listing);
     if (!listing.error.empty()) return unknown(out, "what the app left cannot be listed: " + listing.error);
-    // The app's folder stays where it receives a plugin or holds one already: it is not listed to be removed.
-    if ((!moves.empty() || !fence.parked.empty()) && appKind == fs::kDir) {
+    // Either folder stays where it receives a plugin or holds one already: it is not listed to be removed.
+    bool keepApp = (intoApp != 0 || !parkedApp.empty()) && appKind == fs::kDir;
+    bool keepData = (intoData != 0 || !parkedData.empty()) && dataKind == fs::kDir;
+    if (keepApp || keepData) {
         std::vector<CheckEntry> kept;
         for (size_t i = 0; i < listing.entries.size(); ++i) {
-            if (listing.entries[i].path != app) kept.push_back(listing.entries[i]);
+            const std::string& path = listing.entries[i].path;
+            if (!(keepApp && path == app) && !(keepData && path == data)) kept.push_back(listing.entries[i]);
         }
         listing.entries.swap(kept);
     }
@@ -298,8 +318,9 @@ const Check kChecks[] = {
      kFixRemove,
      "Remove that app",
      "Stops the programs that run from /opt/aa. Then moves the plugin's folder out of the plugin folder into "
-     "/opt/aa, under a name that ends in .old, and leaves it there, where the HMI no longer loads it: it is moved "
-     "and not removed because the HMI may have it loaded. Then removes the rest as listed and nothing else; a "
+     "/opt/aa, or into /var/opt/aa from the HMI's plugin folder under /var, under a name that ends in .old, and "
+     "leaves it there, where the HMI no longer loads it: it is moved and not removed because the HMI may have it "
+     "loaded. Then removes the rest as listed and nothing else; a "
      "folder goes only when it is empty. The configuration of the packet filter is not touched: what that app "
      "changed there stays as it is. The HMI needs a restart afterwards.",
      "hmi-restart", kHandAppDir, detectHandApp},

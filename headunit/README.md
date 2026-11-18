@@ -99,15 +99,20 @@ format and the protocol.
   alike in everything else. Each is one of the package's own places, so a package that places files there is not
   flagged `modifies-system`. A head unit that never had a plugin in one has no such folder: the first package
   that places a file there makes it, and takes it away again when that package goes and the folder is empty. The
-  folder that holds it has to be there: where it is not, the install fails with `io-error` and is undone. The
-  agent writes over no file there that is in no package's record (`stock-mismatch`). A plugin's connector id and
+  folder that holds it is never made: where it is not there, as for `${var_plugins}` on a head unit without
+  `/var/opt/hmi/data/ID5`, whose HMI does not load plugins from there, a package that places a file or a link in
+  it is refused with `stock-mismatch` when the job is planned, before anything is fetched. The agent writes over
+  no file there that is in no package's record (`stock-mismatch`). A plugin's connector id and
   focus ids are checked against the apps in both folders, whichever it goes into. Hooks get the folder as
   `NBT_VAR_PLUGINS_DIR`. `${var_plugins}` is not a folder a `logs` entry may name. An agent that does not know
   `${var_plugins}` refuses a manifest that uses it, so a package that places anything there sets
-  `requires.agent` to the first agent that knows it: an older agent then refuses it with `agent-too-old` instead
-  of as a bad manifest, and the phone app says that the package needs a newer agent. A phone app that does not
-  know `${var_plugins}` refuses such a package as a bad manifest when it downloads it, whatever agent the head
-  unit has. Such a package's record is one that an older agent cannot read (see "Once a version is confirmed"
+  `requires.agent` to the first agent that knows it, 1.6.0: an older agent then refuses it with `agent-too-old`
+  instead of as a bad manifest, and the phone app says that the package needs a newer agent. `nbtpkg.py` holds
+  the package's author to that, as it does with a `logs` path, and is stricter there than the agent: it refuses
+  (`bad-manifest`) a manifest that places a file or a link in `${var_plugins}` unless `requires.agent` has a
+  comparator `>=`, `>` or `=` (or none) at 1.6.0 or above, the three numbers compared and a pre-release part not
+  looked at. A phone app that does not know `${var_plugins}` refuses such a package as a bad manifest when it
+  downloads it, whatever agent the head unit has. Such a package's record is one that an older agent cannot read (see "Once a version is confirmed"
   under [The agent updates itself](#the-agent-updates-itself)). On the bench, with `--root DIR`, the folder is
   `DIR/var-plugins`.
 - The official package key is built in (`agent/embedded_keys.hpp`): the public half of the key that signs the
@@ -966,15 +971,16 @@ the capability `checks` in `hello`.
 | Check | What it finds | Its fix |
 |---|---|---|
 | `system-writable` | The system partition writable where no install step runs and the agent did not remount it: it was remounted by hand and not put back | Remounts it read-only with the configured command, and asks the file system whether it is. Nothing is listed, moved or removed. On a folder that stands in for a head unit the question does not apply, and the check finds nothing |
-| `aa-fix` | An app that was installed by hand: `/opt/aa` is there, or a plugin folder whose `<Name>.manifest` claims the connector id 210 and in which no installed package owns anything. It lists such a plugin folder to be moved, and everything in `/opt/aa` and `/var/opt/aa` to be removed | Stops the programs that run from `/opt/aa`. Moves the plugin's folder, whole, out of the plugin folder into `/opt/aa` as `<Name>.old`, or `<Name>.nbtappsold` where that is taken, and leaves it there, where the HMI no longer loads it. Then removes the rest as listed. The packet filter's configuration is not read or written: what that app changed there stays as it is. The HMI needs a restart |
+| `aa-fix` | An app that was installed by hand: `/opt/aa` is there, or a plugin folder whose `<Name>.manifest` claims the connector id 210 and in which no installed package owns anything. It lists such a plugin folder to be moved, and everything in `/opt/aa` and `/var/opt/aa` to be removed | Stops the programs that run from `/opt/aa`. Moves the plugin's folder, whole, out of the plugin folder into `/opt/aa`, or into `/var/opt/aa` from `${var_plugins}`, as `<Name>.old`, or `<Name>.nbtappsold` where that is taken, and leaves it there, where the HMI no longer loads it. Then removes the rest as listed. The packet filter's configuration is not read or written: what that app changed there stays as it is. The HMI needs a restart |
 
 The plugin's folder is moved and not removed because the HMI may have the plugin loaded, and its files are not
 taken away under it. The check looks for it in every folder the HMI loads plugins from, `${plugins}` and
 `${var_plugins}` both. On a car the second is on another partition than `/opt/aa`, and a move is one rename
-(below), so a plugin found there is a problem with no fix. A folder directly in `/opt/aa` that is a real folder,
-not a link, and whose name ends in `.old` or `.nbtappsold` is parked: neither it nor anything in it is listed,
-moved or removed, and a check that finds nothing else says `ok`. `/opt/aa` itself is not listed for removal while
-it receives a plugin or holds a parked one.
+(below), so a plugin found there is moved into `/var/opt/aa`, the folder of the app's data, which is on the
+writable partition too; a plugin found anywhere else goes into `/opt/aa`. A folder directly in `/opt/aa` or
+`/var/opt/aa` that is a real folder, not a link, and whose name ends in `.old` or `.nbtappsold` is parked: neither
+it nor anything in it is listed, moved or removed, and a check that finds nothing else says `ok`. Neither folder
+is listed for removal itself while it receives a plugin or holds a parked one.
 
 Every fix keeps to these rules:
 
@@ -984,8 +990,9 @@ Every fix keeps to these rules:
   A file that came after the list stays, and so does its folder.
 - A move is one rename, to the destination the user was shown, and only within one file system: it is never a copy
   and a removal. A move onto something that is there is not made, and the folder is reported as left. Where both
-  names are taken, where the plugin's folder is on another file system than `/opt/aa`, or where `/opt/aa` is a link
-  or a file, there is no fix. The moves come before any removal.
+  names are taken, where the plugin's folder is on another file system than the folder it goes into (`/opt/aa`, or
+  `/var/opt/aa` for one from `${var_plugins}`), or where that folder is a link or a file, there is no fix. The
+  moves come before any removal.
 - It removes one path at a time: a file or a link is unlinked by its full path, and a folder is removed only when
   it is empty, the deepest first. Nothing is removed by a wildcard or with what it holds, and nothing is walked at
   the time of the removal.

@@ -54,7 +54,9 @@ std::string number(uint64_t value) {
 // The folders above a destination, as destinations, parents first. ${app} and ${data} themselves are among them,
 // because the package owns them, and so are ${plugins} and ${var_plugins}: a head unit that never had a plugin in
 // one has no such folder, and the first plugin installed there makes it, and takes it away again if it is empty
-// when that plugin goes. Only the folder itself is made: the one that holds it has to be there. / is not among them.
+// when that plugin goes. Only the folder itself is made, never the one that holds it: the platform does not start
+// without the one that holds ${plugins}, and a package for ${var_plugins} on a head unit without the one that holds
+// it is refused when the step is planned (checkVarPluginsParent). / is not among them.
 std::vector<std::string> ancestorsOf(const std::string& dest) {
     size_t root = 0;
     bool includeRoot = false;
@@ -840,6 +842,7 @@ private:
                   const std::map<std::string, size_t>& oldFiles, const std::map<std::string, std::string>& oldLinks);
     bool planLink(const ManifestLink& link, const std::map<std::string, std::string>& others,
                   const std::map<std::string, size_t>& oldFiles, const std::map<std::string, std::string>& oldLinks);
+    bool checkVarPluginsParent();
     bool checkHmiIds();
     bool checkSpace();
     // The agent's own package only: what plan() refuses of it, and the look at the program it has placed.
@@ -1054,6 +1057,7 @@ bool InstallStep::unpack() {
 // Works out what the step will do at every destination, and refuses what it may not do. Nothing is changed here.
 bool InstallStep::plan() {
     if (self_ && !checkSelf()) return false;
+    if (!checkVarPluginsParent()) return false;
     // Every path another package owns, and every path the old version of this one owns.
     std::map<std::string, std::string> others;
     std::map<std::string, size_t> oldFiles;
@@ -1123,6 +1127,28 @@ bool InstallStep::plan() {
         }
     }
     return true;
+}
+
+// ${var_plugins} is made by the first package that places a file in it, and the folder that holds it is not: a head
+// unit without that folder has an HMI that does not read from it, and a plugin placed there would load nowhere. So
+// such a package is refused here, before anything is fetched or written, as one that does not fit the head unit.
+// Where a step before this one in the job touches a path in that folder, what is there now says nothing: the step
+// itself decides, as for the destinations.
+bool InstallStep::checkVarPluginsParent() {
+    bool uses = false;
+    for (size_t i = 0; i < m().placements.size() && !uses; ++i) uses = startsWith(m().placements[i].dest, "${var_plugins}/");
+    for (size_t i = 0; i < m().links.size() && !uses; ++i) uses = startsWith(m().links[i].path, "${var_plugins}/");
+    if (!uses) return true;
+    std::string folder = platform()->varPluginsDir(), parent = fs::parentOf(folder);
+    if (fs::isDir(parent)) return true;
+    if (undecided_ != 0) {
+        std::set<std::string>::const_iterator it = undecided_->lower_bound(parent);
+        for (; it != undecided_->end() && startsWith(*it, parent); ++it) {
+            if (under(*it, parent)) return true;
+        }
+    }
+    return fail("stock-mismatch", "the package places files in ${var_plugins}, " + folder + ", and this head unit has no " +
+                                      parent + " to hold it: its HMI does not load plugins from there");
 }
 
 bool InstallStep::planFile(const Placement& placement, const std::map<std::string, std::string>& others,

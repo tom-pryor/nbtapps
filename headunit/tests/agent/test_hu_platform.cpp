@@ -471,7 +471,7 @@ static void testEngine() {
     CarPlatform p(c);
     prepared(p);
     std::vector<TrustedKey> keys(1, gPackageKey);
-    Engine engine(&p, keys, "1.0.0");
+    Engine engine(&p, keys, "1.6.0");   // the first agent that knows ${var_plugins}
     std::string why;
     bool found = true;
     StepReport recovered;
@@ -509,13 +509,35 @@ static void testEngine() {
     CHECK(fs::removeTree(plugins, &why));
 
     // A plugin in ${var_plugins}, which is on the writable partition: nothing is remounted, for the install or for
-    // the removal. Where the folder that holds it is not there either, the install fails and leaves nothing: the
-    // agent makes the plugin folder, and no folder of the HMI's above it.
+    // the removal. Where the folder that holds it is not there, the HMI does not load plugins from there, and the
+    // package does not fit the head unit: a plan's precheck and the install refuse it with stock-mismatch, and
+    // nothing is made. The agent makes the plugin folder, and never a folder of the HMI's above it.
     std::string varPlugins = c.config.varPluginsDir, hmiVar = fs::parentOf(varPlugins), nbtVar = varPlugins + "/NbtVar";
     CHECK(!there(c.root + "/var/opt/hmi"));
+    {
+        FileSource source;
+        Package package;
+        Error error, refusal;
+        CHECK_IN(why, source.open(good("org.nbtapp.varplugin-1.0.0"), &why));
+        CHECK_IN(error.message, package.open(&source, keys, &error));
+        std::vector<InstalledPackage> installed;
+        CHECK_IN(why, engine.store().loadAll(&installed, &why));
+        CHECK(!engine.precheck(package.manifest(), installed, std::set<std::string>(), &refusal));
+        CHECK_IN(refusal.code + ": " + refusal.message, refusal.code == "stock-mismatch" && has(refusal.message, hmiVar));
+        // Where a step before it in the job touches a path in that folder, what is there now says nothing, and the
+        // step itself decides.
+        std::set<std::string> undecided;
+        undecided.insert(hmiVar + "/Other/Other.manifest");
+        CHECK_IN(refusal.message, engine.precheck(package.manifest(), installed, undecided, &refusal));
+        undecided.clear();
+        undecided.insert(fs::parentOf(hmiVar) + "/ID5x/Other.manifest");   // a folder that only starts like it
+        CHECK(!engine.precheck(package.manifest(), installed, undecided, &refusal) && refusal.code == "stock-mismatch");
+    }
     r = engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
-    CHECK_IN(r.error.code + ": " + r.error.message, r.outcome == kStepFailed && r.error.code == "io-error");
+    CHECK_IN(r.error.code + ": " + r.error.message, r.outcome == kStepFailed && r.error.code == "stock-mismatch" &&
+                                                        has(r.error.message, hmiVar));
     CHECK(!there(c.root + "/var/opt/hmi") && !there(p.appDir("org.nbtapp.varplugin")) && c.calls().empty());
+    CHECK(!there(p.stateDir() + "/installed/org.nbtapp.varplugin"));
     CHECK(fs::makeDirs(hmiVar, &why));
     r = engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
     done(r);

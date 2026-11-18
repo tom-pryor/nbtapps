@@ -126,11 +126,13 @@ struct Check {
 //                     folder whose <Name>.manifest claims the connector id 210 and in which no installed package
 //                     owns anything. Such a plugin folder is moved, whole, out of the plugin folder into /opt/aa
 //                     as <Name>.old, or <Name>.nbtappsold where that is taken: the HMI may have the plugin loaded,
-//                     and its files are not removed under it. It is left there. Everything else in /opt/aa and
-//                     /var/opt/aa is listed and removed, but for a folder directly in /opt/aa, not a link, whose
-//                     name ends in .old or .nbtappsold: that is parked, and neither it nor anything in it is
-//                     listed. The fix stops the programs that run from /opt/aa first. It never reads or writes
-//                     the configuration of the packet filter
+//                     and its files are not removed under it. One in varPluginsDir() goes into /var/opt/aa
+//                     instead, which is on its file system where /opt/aa is not. It is left there. Everything
+//                     else in /opt/aa and /var/opt/aa is listed and removed, but for a folder directly in either,
+//                     not a link, whose name ends in .old or .nbtappsold: that is parked, and neither it nor
+//                     anything in it is listed. Neither folder is listed itself while it receives a plugin or
+//                     holds a parked one. The fix stops the programs that run from /opt/aa first. It never reads
+//                     or writes the configuration of the packet filter
 size_t checkCount();
 const Check& checkAt(size_t index);
 const Check* findCheck(const std::string& id);

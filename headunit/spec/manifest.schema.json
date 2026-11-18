@@ -208,7 +208,7 @@
           "pattern": "^(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)*/?$"
         },
         "dest": {
-          "description": "Where the file or folder goes: under ${app} or ${data}, the package's own folders; under ${plugins}, the HMI's plugin folder on the system partition, which the agent remounts for the write; under ${var_plugins}, the HMI's second plugin folder, on the writable data partition, which only an agent that knows ${var_plugins} takes (a package that places anything there sets requires.agent to the first agent that knows it, so that an older one refuses it as agent-too-old, not as a bad manifest); or an absolute path, which flags the package modifies-system. A folder src ends in a slash, and so does its dest.",
+          "description": "Where the file or folder goes: under ${app} or ${data}, the package's own folders; under ${plugins}, the HMI's plugin folder on the system partition, which the agent remounts for the write; under ${var_plugins}, the HMI's second plugin folder, on the writable data partition, which only an agent that knows ${var_plugins} takes (a package that places anything there sets requires.agent to the first agent that knows it, 1.6.0, so that an older one refuses it as agent-too-old, not as a bad manifest); or an absolute path, which flags the package modifies-system. A folder src ends in a slash, and so does its dest.",
           "type": "string",
           "maxLength": 255,
           "pattern": "^(\\$\\{(app|data|plugins|var_plugins)\\}/((?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)*/?)?|(/(?!\\.{1,2}(/|$))[^/\\\\\\u0000-\\u001f]+)+/?)$"

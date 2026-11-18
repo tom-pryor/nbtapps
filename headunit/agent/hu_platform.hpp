@@ -51,7 +51,8 @@ struct HeadUnitConfig {
     std::string dataDir;       // ${data} of a package is <dataDir>/<id>
     std::string tmpDir;        // ${tmp} of a package is <tmpDir>/<id>: on the RAM disk, lost at power down
     std::string pluginsDir;    // ${plugins}: on the system partition
-    std::string varPluginsDir; // ${var_plugins}: on a writable partition. It need not be there, nor its parent
+    std::string varPluginsDir; // ${var_plugins}: on a writable partition. It need not be there. Where its parent is
+                               // not, a package that places files in it is refused
     std::string agentDir;      // the agent's own folder: its versions, and the files the launcher reads
     // Further folders the HMI loads plugins from, which no package places files in: only the ids in them are read.
     std::vector<std::string> otherPluginDirs;
@@ -98,7 +99,8 @@ public:
     // dead one's.
     // False with *error set, and nothing made, if the configuration is incomplete or this machine is not the one
     // it describes: systemMount and the folder that holds pluginsDir have to be folders already; pluginsDir itself
-    // need not be there. Nothing is asked of varPluginsDir or the folders above it, and neither is made here.
+    // need not be there. Nothing is asked of varPluginsDir or the folders above it, and neither is made here: the
+    // engine refuses a package for varPluginsDir where the folder that holds it is not there.
     // False also if a folder cannot be made.
     bool prepare(std::string* error);
     const HeadUnitConfig& config() const { return config_; }

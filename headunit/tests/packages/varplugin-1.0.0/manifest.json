@@ -3,6 +3,7 @@
   "id": "org.nbtapp.varplugin",
   "name": "Demo plugin on the data partition",
   "version": "1.0.0",
+  "requires": { "agent": ">=1.6.0" },
   "install": {
     "files": [
       {

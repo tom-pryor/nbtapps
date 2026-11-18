@@ -43,7 +43,8 @@ public:
     // ${plugins}, the HMI's plugin folder on the system partition, which is remounted for a write; and
     // ${var_plugins}, the second folder the HMI loads plugins from, on the writable data partition, which is not.
     // Neither need be there: the first package that places a file in one makes it, and takes it away again when
-    // that package goes and the folder is empty.
+    // that package goes and the folder is empty. The folder that holds either is never made: where the one that
+    // holds ${var_plugins} is not there, a package that places files in it is refused with stock-mismatch.
     virtual std::string pluginsDir() const = 0;
     virtual std::string varPluginsDir() const = 0;
     // The agent's own folder (agent_home.hpp): a folder for each version of it, and the files that say which one

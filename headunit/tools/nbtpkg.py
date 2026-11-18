@@ -15,7 +15,10 @@ same input gives the same bytes.
 
 `verify` applies the checks the Android app and the head-unit agent apply, and names a failure with the code the
 agent reports for it: bad-archive, bad-signature, bad-manifest or unsupported-manifest. Without --key the signature is
-not checked, and the output says so.
+not checked, and the output says so. In two places the tool is stricter than the agent, for the package's author:
+it refuses a logs path that an agent would skip (skipped_log_message), and a file or link placed in a folder only a
+later agent knows, such as ${var_plugins}, without a requires.agent that leaves the older agents out
+(VARIABLE_FIRST_AGENT). Both are bad-manifest here.
 
 The format, as the plan document sets it:
   - a zip archive under a strict profile: manifest.json first, manifest.sig second, stored or deflated entries one
@@ -59,6 +62,12 @@ ALREADY_COMPRESSED = (".zip", ".gz", ".xz", ".bz2", ".png", ".jpg", ".jpeg")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_PATH = os.path.join(ROOT, "spec", "manifest.schema.json")
 OWN_DIRS = ("${app}/", "${data}/", "${plugins}/", "${var_plugins}/")   # not modifies-system (risk_flags)
+# The variables of a destination or a link's path that an older agent does not know, each with the first agent that
+# knows it. An agent that does not know one refuses a manifest that uses it as bad-manifest, unless the manifest's
+# requires.agent leaves that agent out, in which case it says agent-too-old and the phone app offers the agent's
+# update. So this tool asks for that requirement (agent_requirement_ok); the agent does not.
+VARIABLE_FIRST_AGENT = {"${var_plugins}": (1, 6, 0)}
+_COMPARATOR = re.compile(r"(>=|<=|>|<|=)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 class PkgError(Exception):
@@ -249,6 +258,19 @@ def skipped_log_message(manifest, error):
     return str(error)
 
 
+def agent_requirement_ok(range_text, first):
+    """Whether a requires.agent range ($defs/range: comparators separated by spaces, all of which hold) leaves out
+    every agent below `first`, a (major, minor, patch): it has a comparator >=V, >V or =V, or a bare V, whose three
+    numbers are at or above `first`. A pre-release or build part is not looked at, so >=1.6.0-beta.1 counts as
+    1.6.0. None, for no requirement, is not enough."""
+    for part in (range_text or "").split(" "):
+        match = _COMPARATOR.match(part)
+        if match and match.group(1) in (None, ">=", ">", "=") and \
+                tuple(int(n) for n in match.group(2, 3, 4)) >= first:
+            return True
+    return False
+
+
 # ---- manifest --------------------------------------------------------------------------------------------------
 
 def check_manifest(manifest):
@@ -305,6 +327,15 @@ def check_manifest(manifest):
             place(dest)
     for link in install.get("links", []):
         place(link["path"])
+    requirement = manifest.get("requires", {}).get("agent")
+    for variable, first in sorted(VARIABLE_FIRST_AGENT.items()):
+        uses = sorted(p for p in placed if p.startswith(variable + "/"))
+        if uses and not agent_requirement_ok(requirement, first):
+            version = "%d.%d.%d" % first
+            bad("places %s in %s, which an agent knows from %s, and its requires.agent (%s) lets an older agent "
+                "take it: add \"requires\": {\"agent\": \">=%s\"}, or raise it to that, so that an older agent says "
+                "the package needs a newer agent (agent-too-old) and does not report it as broken (bad-manifest)"
+                % (uses[0], variable, version, "none" if requirement is None else repr(requirement), version))
     for name, hook in sorted(install.get("hooks", {}).items()):
         if hook["script"] not in paths:
             bad("names %s as %s, which is not listed in contents" % (hook["script"], name))

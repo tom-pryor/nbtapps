@@ -561,10 +561,20 @@ static void testOwnPlugin() {
 
 static void testVarPlugin() {
     const char* const id = "org.nbtapp.varplugin";
-    Bench b("var-plugin", keys());
+    Bench b("var-plugin", keys(), false, "1.6.0");   // the first agent that knows ${var_plugins}
     const std::string folder = b.platform.varPluginsDir(), plugin = folder + "/NbtVar";
     std::string why;
     CHECK(fs::kindOf(folder) == fs::kNone);   // a head unit that never had a plugin there
+
+    // An agent from before ${var_plugins} is left out by the package's requires.agent: agent-too-old, not a bad
+    // manifest, and nothing is made.
+    {
+        Bench old("var-plugin-old", keys(), false, "1.5.1");
+        Snapshot was = snap(old);
+        StepReport r = old.engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
+        refused(r, "agent-too-old");
+        CHECK(has(r.error.message, ">=1.6.0") && same(snap(old), was) && fs::kindOf(old.platform.varPluginsDir()) == fs::kNone);
+    }
 
     // The install makes the folder and the plugin's folder in it, and remounts nothing. The hook finds the folder
     // in its environment.
@@ -954,6 +964,9 @@ struct Scenario {
     StepReport (*step)(Engine&);
     bool succeeds;   // false: the step fails by itself and is undone
 };
+// The agent of every scenario: the first that knows ${var_plugins}, which one scenario places files in. The other
+// packages require less.
+static const char kCrashAgent[] = "1.6.0";
 
 static void setupRuntime(Bench& b) { installDone(b, "org.nbtapp.runtime-2.1.0"); }
 static void setupHello11(Bench& b) {
@@ -1033,7 +1046,7 @@ static bool dieDuringRecover(Bench& b, int n) {
 // whole, and that the agent agrees with itself about which.
 static void recoverAndCheck(const Scenario& s, const std::string& bench, const std::string& name, const Snapshot& before,
                             const Snapshot& after) {
-    Bench again(bench, keys(), true);
+    Bench again(bench, keys(), true, kCrashAgent);
     bool found = false;
     StepReport r;
     CHECK(again.engine.recover(&found, &r, 0));
@@ -1086,7 +1099,7 @@ static int testCrashRecovery(bool copyMoves, int pairs) {
         std::string name = std::string(copyMoves ? "crash-copy-" : "crash-") + s.name;
 
         // What the step does when nothing goes wrong.
-        Bench reference(name, keys());
+        Bench reference(name, keys(), false, kCrashAgent);
         s.setup(reference);
         Snapshot before = snap(reference);
         StepReport r = s.step(reference.engine);
@@ -1097,7 +1110,7 @@ static int testCrashRecovery(bool copyMoves, int pairs) {
         // The agent dies at the first point, the second, ... until the step gets through.
         int points = 0;
         for (int n = 1;; ++n) {
-            Bench b(name, keys());
+            Bench b(name, keys(), false, kCrashAgent);
             s.setup(b);
             if (!dieDuringStep(b, s.step, n)) break;
             char where[64];
@@ -1114,10 +1127,10 @@ static int testCrashRecovery(bool copyMoves, int pairs) {
         if (pairs == 1 && which != "upgrade" && which != "upgrade-fails" && which != "stock-let-go" && which != "remove-stock") continue;
         for (int n = 1; n <= points; ++n) {
             for (int k = 1;; ++k) {
-                Bench b(name, keys());
+                Bench b(name, keys(), false, kCrashAgent);
                 s.setup(b);
                 CHECK(dieDuringStep(b, s.step, n));
-                Bench restarted(name, keys(), true);
+                Bench restarted(name, keys(), true, kCrashAgent);
                 if (!dieDuringRecover(restarted, k)) break;
                 char where[96];
                 snprintf(where, sizeof where, ", died at point %d and then at point %d of the recovery", n, k);

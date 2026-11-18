@@ -315,10 +315,11 @@ static void testHandApp() {
     f = p.run("aa-fix");
     CHECK_IN(movesOf(p, f), f.moves.size() == 2 && movesOf(p, f).find("/stock-plugins/Demo2 -> /system/opt/aa/Demo2.old\n") != std::string::npos);
     // And so does ${var_plugins}, the HMI's plugin folder on the writable partition, where apps are copied by hand.
-    // Here it is on the file system that holds /opt/aa; on a car it is not, and the check then offers no fix.
+    // A plugin there goes into the folder of the app's data, which on a car is on that partition and /opt/aa is not.
     write(p.platform.varPluginsDir() + "/Demo3/Demo3.manifest", pluginManifest(210, "Demo3"));
     f = p.run("aa-fix");
-    CHECK_IN(movesOf(p, f), f.moves.size() == 3 && movesOf(p, f).find("/var-plugins/Demo3 -> /system/opt/aa/Demo3.old\n") != std::string::npos);
+    CHECK_IN(movesOf(p, f), f.fixable && f.moves.size() == 3 &&
+                                movesOf(p, f).find("/var-plugins/Demo3 -> /system/var/opt/aa/Demo3.old\n") != std::string::npos);
     // Two folders of one name go to the two names.
     write(p.root + "/stock-plugins/Demo/Demo.manifest", pluginManifest(210, "Demo"));
     f = p.run("aa-fix");
@@ -496,6 +497,77 @@ static void testFixMove() {
     out = fixNow(p, "aa-fix");
     CHECK(out.moved.size() == 1 && out.removed == 0 && out.state == kCheckOk && fs::kindOf(p.sys("/opt/aa")) == fs::kDir);
     CHECK(there(p.sys("/opt/aa/Demo.old/Demo.manifest")));
+}
+
+// A plugin in ${var_plugins} is moved into /var/opt/aa, the folder of the app's data, and every other into /opt/aa:
+// each on its own file system. A folder parked in /var/opt/aa is fenced as one in /opt/aa is.
+static void testFixMoveVarPlugins() {
+    Head h("fix-move-var");
+    handInstall(h);
+    std::string varPlugins = h.platform.varPluginsDir(), data = h.sys("/var/opt/aa");
+    write(varPlugins + "/Demo/Demo.manifest", pluginManifest(210, "Demo"));
+    write(varPlugins + "/Demo/libDemo.so", "library under /var\n");
+    // The two folders of one name each take .old, in a folder of their own. /var/opt/aa receives one, and is not
+    // listed itself; what is in it is.
+    CheckFinding f = h.run("aa-fix");
+    CHECK_IN(movesOf(h, f), f.fixable && movesOf(h, f) == "/plugins/Demo -> /system/opt/aa/Demo.old\n"
+                                                         "/var-plugins/Demo -> /system/var/opt/aa/Demo.old\n");
+    CHECK_IN(listed(h, f), listed(h, f).find("d /system/var/opt/aa\n") == std::string::npos &&
+                               listed(h, f).find("f /system/var/opt/aa/state.txt\n") != std::string::npos);
+    FixOutcome out = fixNow(h, "aa-fix");
+    CHECK_IN(num((long long)out.removed), out.removed == f.entries.size() && out.left.empty() && out.moved.size() == 2);
+    CHECK(out.state == kCheckOk && !there(varPlugins + "/Demo") && !there(h.plugins() + "/Demo"));
+    CHECK(readFile(data + "/Demo.old/libDemo.so") == "library under /var\n" && there(h.sys("/opt/aa/Demo.old/Demo.manifest")));
+    std::vector<std::string> names;
+    CHECK(fs::listDir(data, &names, 0) && names.size() == 1 && names[0] == "Demo.old");
+    // Run again: nothing, with /opt/aa there or not.
+    CHECK(h.run("aa-fix").state == kCheckOk);
+    std::string why;
+    CHECK_IN(why, fs::removeTree(h.sys("/opt/aa"), &why));
+    CHECK(h.run("aa-fix").state == kCheckOk);
+    // With /opt/aa back, what is in it is listed, and neither /var/opt/aa nor what is parked in it is.
+    write(h.sys("/opt/aa/bin/demod"), "program\n");
+    f = h.run("aa-fix");
+    CHECK_IN(listed(h, f), f.fixable && f.moves.empty() && listed(h, f) == "d /system/opt/aa\nd /system/opt/aa/bin\nf /system/opt/aa/bin/demod\n");
+    out = fixNow(h, "aa-fix");
+    CHECK(out.state == kCheckOk && !there(h.sys("/opt/aa")) && there(data + "/Demo.old/Demo.manifest"));
+
+    // The plugin alone: /var/opt/aa is made for it, and /opt/aa is not.
+    Head a("fix-move-var-alone");
+    write(a.platform.varPluginsDir() + "/Demo/Demo.manifest", pluginManifest(210, "Demo"));
+    f = a.run("aa-fix");
+    CHECK_IN(movesOf(a, f), f.fixable && f.entries.empty() && movesOf(a, f) == "/var-plugins/Demo -> /system/var/opt/aa/Demo.old\n");
+    out = fixNow(a, "aa-fix");
+    CHECK(out.moved.size() == 1 && out.state == kCheckOk && !there(a.sys("/opt/aa")) && there(a.sys("/var/opt/aa/Demo.old/Demo.manifest")));
+    CHECK(a.run("aa-fix").state == kCheckOk);
+
+    // Both names taken in /var/opt/aa: no fix, though they are free in /opt/aa.
+    Head t("fix-move-var-taken");
+    write(t.platform.varPluginsDir() + "/Demo/Demo.manifest", pluginManifest(210, "Demo"));
+    write(t.sys("/var/opt/aa/Demo.old/Demo.manifest"), pluginManifest(210, "Demo"));
+    write(t.sys("/var/opt/aa/Demo.nbtappsold"), "a file\n");
+    f = t.run("aa-fix");
+    CHECK_IN(f.why, f.state == kCheckProblem && !f.fixable && f.why.find("both are taken") != std::string::npos);
+    CHECK(fixWith(t, "aa-fix", f.token, 0) == "unsupported" && there(t.platform.varPluginsDir() + "/Demo/Demo.manifest"));
+
+    // /var/opt/aa that is a link, or a file: nothing is moved through it or onto it, and there is no fix.
+    Head l("fix-move-var-link");
+    write(l.platform.varPluginsDir() + "/Demo/Demo.manifest", pluginManifest(210, "Demo"));
+    write(l.root + "/elsewhere/x", "x\n");
+    CHECK_IN(why, fs::makeDirs(l.sys("/var/opt"), &why) && fs::makeLink(l.root + "/elsewhere", l.sys("/var/opt/aa"), &why));
+    f = l.run("aa-fix");
+    CHECK_IN(f.why, f.state == kCheckProblem && !f.fixable && f.why.find(l.sys("/var/opt/aa") + " is not a folder") != std::string::npos);
+    CHECK(listed(l, f) == "l /system/var/opt/aa\n");
+    CHECK_IN(why, fs::removeFile(l.sys("/var/opt/aa"), &why));
+    write(l.sys("/var/opt/aa"), "a file\n");
+    f = l.run("aa-fix");
+    CHECK_IN(f.why, f.state == kCheckProblem && !f.fixable && f.why.find("is not a folder") != std::string::npos);
+    CHECK(fixWith(l, "aa-fix", f.token, 0) == "unsupported" && there(l.platform.varPluginsDir() + "/Demo/Demo.manifest"));
+    // A plugin that goes into /opt/aa is not held back by it: the file is listed to be removed.
+    CHECK_IN(why, fs::removeTree(l.platform.varPluginsDir(), &why));
+    write(l.plugins() + "/Demo/Demo.manifest", pluginManifest(210, "Demo"));
+    f = l.run("aa-fix");
+    CHECK_IN(f.why, f.fixable && listed(l, f) == "f /system/var/opt/aa\n" && movesOf(l, f) == "/plugins/Demo -> /system/opt/aa/Demo.old\n");
 }
 
 // A move that cannot be done: something came to the destination since the list. The fix goes on with the rest, and
@@ -730,6 +802,7 @@ int main(int argc, char** argv) {
     testHandApp();
     testBounds();
     testFixMove();
+    testFixMoveVarPlugins();
     testFixMoveRefused();
     testFixRefused();
     testFixHandApp();

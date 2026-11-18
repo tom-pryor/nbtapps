@@ -170,6 +170,30 @@ def main():
     refused("bad-manifest", settings, dict(lamp, label="L"), dict(lamp, label="L", type="colour"))
     print("[ok] settings")
 
+    # 2c. A file or a link in ${var_plugins}, which an agent knows from 1.6.0, needs a requires.agent that leaves
+    # the older agents out; the tool is stricter here than the agent, which would refuse such a package as broken.
+    def placing(requirement, files=(), links=()):
+        manifest = {"manifestVersion": 1, "id": "org.nbtapp.t", "name": "T", "version": "1.0.0",
+                    "contents": [{"path": "payload/a", "size": 1, "sha256": "0" * 64}],
+                    "install": {"files": [{"src": "payload/a", "dest": d, "mode": "0644"} for d in files],
+                                "links": [{"path": p, "target": "a"} for p in links]}}
+        if requirement is not None:
+            manifest["requires"] = {"agent": requirement}
+        nbtpkg.check_manifest(manifest)
+    for where in ({"files": ["${var_plugins}/A/a"]}, {"files": ["${app}/a"], "links": ["${var_plugins}/A/l"]}):
+        for requirement in (None, ">=1.5.1", "<2.0.0", "<=1.6.0", ">=1.5.9 <1.6.0", "1.5.1", ">1.5.9"):
+            message = refused("bad-manifest", placing, requirement, **where)
+            assert "${var_plugins}" in message and "\"requires\": {\"agent\": \">=1.6.0\"}" in message, message
+            assert "agent-too-old" in message, message
+        for requirement in (">=1.6.0", ">=1.6.0-beta.1", "=1.7.0", ">=1.6.0 <2.0.0", "<2.0.0 >=1.6.0", "1.6.0",
+                            ">1.6.0", ">=2.0.0+build.1"):
+            placing(requirement, **where)
+    # Elsewhere nothing is asked. The numbers are compared as numbers.
+    placing(None, files=["${plugins}/A/a", "/opt/x"], links=["${data}/l"])
+    assert nbtpkg.agent_requirement_ok(">=1.6.0", (1, 6, 0)) and not nbtpkg.agent_requirement_ok(None, (1, 6, 0))
+    assert not nbtpkg.agent_requirement_ok(">=1.10.0", (2, 0, 0)) and nbtpkg.agent_requirement_ok(">=1.10.0", (1, 9, 9))
+    print("[ok] requires.agent for ${var_plugins}")
+
     with tempfile.TemporaryDirectory() as tmp:
         # 3. The test packages.
         vectors = make_packages.build_all(os.path.join(tmp, "data"))

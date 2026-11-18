@@ -3,9 +3,12 @@
 # Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 """Holds the two package readers together: tools/nbtpkg.py and the agent's (agent/package.cpp, through
 build/agent-host/test_package --codes). Makes changed copies of the test packages and checks that both readers give
-every one of them the same verdict: accepted, or refused with the same code. A logs path in a folder the schema does
-not know is the one planned difference: nbtpkg.py refuses it and the agent skips it, so the Python verdict is taken
-with such paths put in ${data}.
+every one of them the same verdict: accepted, or refused with the same code. There are two planned differences. A
+logs path in a folder the schema does not know: nbtpkg.py refuses it and the agent skips it, so the Python verdict
+is taken with such paths put in ${data}. And a file or link in a folder only a later agent knows, such as
+${var_plugins}, without a requires.agent that leaves the older agents out: nbtpkg.py refuses it, and the agent's
+reader, which is given no version of its own here, holds a package to no requirement; so that rule of nbtpkg.py is
+left out of the comparison.
 
   python3 tests/compare_readers.py [COUNT] [SEED]      (default 4000 cases, seed 1; needs `make build/agent-host/test_package testdata` first)
 
@@ -31,6 +34,7 @@ import make_packages
 import nbtpkg
 
 CHECKER = os.path.join(ROOT, "build", "agent-host", "test_package")
+nbtpkg.VARIABLE_FIRST_AGENT = {}   # the second planned difference (above)
 
 STRINGS = ["", "a", "a.b", "org.nbtapp.hello", "Org.x", "1.0.0", "1.0", "01.0.0", "1.0.0-rc.1", ">=1.0.0", ">=1.0.0 <2.0.0",
            ">= 1.0.0", "none", "required", "hmi-restart", "maybe", "0644", "0755", "644", "0999", "payload/bin/hello",

@@ -81,8 +81,9 @@ HeadUnitConfig HeadUnitConfig::car() {
     c.tmpDir = "/tmp/nbtapp/apps";                     // plan document, "Pulling files": ${tmp} on the RAM disk
     c.pluginsDir = "/opt/hmi/ID5/data/ro/Plugins";     // README, "Installing"
     // The HMI's second plugin folder, under /var, which is on the writable partition: apps installed by hand go
-    // there, and packages that have this path built into their programs. A stock head unit has /var/opt/hmi, and
-    // may have nothing below it yet; the first package that places a file in it makes the folder.
+    // there, and packages that have this path built into their programs. The first package that places a file in
+    // it makes the folder, and never the one that holds it: on a head unit without /var/opt/hmi/data/ID5 the HMI
+    // does not read from it, and such a package is refused with stock-mismatch when it is planned.
     c.varPluginsDir = "/var/opt/hmi/data/ID5/Plugins";
     c.agentDir = "/var/opt/nbtapp/agent";              // plan document, "Agent updates"; hu_install.sh puts it there
     c.systemMount = "/fs/sda0";                        // the probe: /opt is a link into it
@@ -149,6 +150,7 @@ bool HeadUnitPlatform::prepare(std::string* error) {
     // or the configuration is wrong about this one. Not the plugins folder itself: a head unit that never had a
     // plugin has none, and the first plugin installed makes it in the HMI's folder that is checked here. Nothing
     // of varPluginsDir either: a head unit may lack it and the folders above it, and is a head unit all the same.
+    // It only takes no package that places files there (the engine's checkVarPluginsParent).
     std::string hmiData = fs::parentOf(config_.pluginsDir);
     const std::string* stock[] = {&config_.systemMount, &hmiData};
     for (size_t i = 0; i < sizeof stock / sizeof stock[0]; ++i) {
