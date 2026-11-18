@@ -5,7 +5,8 @@
 `cryptography` module. Exits non-zero on the first failure.
 
   1. the strict JSON profile agrees with every line of spec/json-profile.vectors
-  2. the manifest schema uses only keywords the tool implements, and agrees with every line of spec/log-paths.vectors
+  2. the manifest schema uses only keywords the tool implements, agrees with every line of spec/log-paths.vectors,
+     and names the tool's folder variables (FOLDER_VARIABLES) in its patterns for a destination and a link's path
   3. every good test package verifies and every bad or skipped one is refused with the code vectors.json gives it,
      and each detached-signature case gets the verdict it gives
   4. the same source builds the same bytes, and `build` + `sign` equals a signed `build`
@@ -16,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -144,6 +146,11 @@ def main():
             raise AssertionError("link path %r accepted" % wrong)
         except nbtpkg.SchemaError:
             pass
+    # Both patterns name exactly the tool's folder variables, the table OWN_DIRS and VARIABLE_FIRST_AGENT come from.
+    names = set(v[2:-1] for v in nbtpkg.FOLDER_VARIABLES)
+    for where, pattern in (("dest", dest["pattern"]), ("link path", link["pattern"])):
+        alternatives = re.findall(r"\\\$\\\{\(([a-z_|]+)\)\\\}", pattern)
+        assert len(alternatives) == 1 and set(alternatives[0].split("|")) == names, (where, alternatives)
     print("[ok] manifest schema")
 
     # 2b. Settings: what a text option takes, and the edges the test packages do not reach.

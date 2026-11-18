@@ -658,6 +658,227 @@ static void testVarPlugin() {
     tidy(b);
 }
 
+// A plugin's name, its folder in the plugin folder, must not be that of another app's plugin in another folder the
+// HMI loads plugins from, whatever its ids: hmi-id-taken, and nothing is changed.
+static void testPluginName() {
+    const char* const id = "org.nbtapp.varplugin";
+    Bench b("plugin-name", keys(), false, "1.6.0");
+    const std::string plugins = b.platform.pluginsDir(), varPlugins = b.platform.varPluginsDir();
+    std::string why;
+
+    // An app that was installed by hand, in ${plugins}, under the name the package's plugin has in ${var_plugins}.
+    write(plugins + "/NbtVar/NbtVar.manifest", pluginManifest(254, "NbtVar"));
+    Snapshot before = snap(b);
+    StepReport r = b.engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
+    refused(r, "hmi-id-taken");
+    CHECK_IN(r.error.message, has(r.error.message, "NbtVar") && has(r.error.message, plugins + ","));
+    CHECK(same(snap(b), before));
+    tidy(b);
+
+    // Another package's plugin of that name. The package here is the demo plugin, whose record is made to say it
+    // placed the manifest: what counts is that the file is not this package's.
+    installDone(b, "org.nbtapp.demoplugin-1.0.0");
+    InstalledPackage demo = b.record("org.nbtapp.demoplugin");
+    InstalledFile f;
+    f.dest = "${plugins}/NbtVar/NbtVar.manifest";
+    f.sha256 = hashOf(readFile(plugins + "/NbtVar/NbtVar.manifest"));
+    f.mode = 0644;
+    demo.files.push_back(f);
+    CHECK_IN(why, fs::writeFile(b.engine.store().recordDir("org.nbtapp.demoplugin") + "/record.json", Store::encodeRecord(demo), 0644, &why));
+    before = snap(b);
+    refused(b.engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0), "hmi-id-taken");
+    CHECK(same(snap(b), before));
+    done(b.engine.remove("org.nbtapp.demoplugin", true, 0));
+    // The manifest was in its record and went with it, and so did its folder, which was empty then.
+    CHECK(fs::kindOf(plugins + "/NbtVar") == fs::kNone && fs::isDir(plugins));
+    tidy(b);
+
+    // The names are compared as they are spelt: nbtvar is another name.
+    write(plugins + "/nbtvar/nbtvar.manifest", pluginManifest(254, "nbtvar"));
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    done(b.engine.remove(id, true, 0));
+    CHECK_IN(why, fs::removeTree(plugins + "/nbtvar", &why));
+
+    // A folder of that name with no manifest in it is no plugin: the package installs, and the folder is as it was.
+    write(plugins + "/NbtVar/notes.txt", "not a plugin\n");
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    CHECK(readFile(plugins + "/NbtVar/notes.txt") == "not a plugin\n");
+    done(b.engine.remove(id, true, 0));
+    CHECK_IN(why, fs::removeTree(plugins + "/NbtVar", &why));
+
+    // The other way round, a plugin for ${plugins} with one of that name in ${var_plugins}; and in a third folder
+    // the HMI loads plugins from.
+    write(varPlugins + "/NbtVar/NbtVar.manifest", pluginManifest(254, "NbtVar"));
+    before = snap(b);
+    r = b.engine.install(good("org.nbtapp.varplugin-1.1.0"), "", 0);
+    refused(r, "hmi-id-taken");
+    CHECK(has(r.error.message, varPlugins + ",") && same(snap(b), before));
+    CHECK_IN(why, fs::removeTree(varPlugins, &why));
+    const std::string stock = b.root + "/stock-plugins";
+    write(stock + "/NbtVar/NbtVar.manifest", pluginManifest(254, "NbtVar"));
+    b.platform.morePluginDirs.push_back(stock);
+    before = snap(b);
+    r = b.engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0);
+    refused(r, "hmi-id-taken");
+    CHECK(has(r.error.message, stock + ",") && same(snap(b), before));
+    b.platform.morePluginDirs.clear();
+    tidy(b);
+
+    // The package's own plugin is not another app's: an upgrade moves it from ${var_plugins} to ${plugins} under
+    // the same name and ids, and the folders it made in ${var_plugins} go.
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    r = b.engine.install(good("org.nbtapp.varplugin-1.1.0"), "", 0);
+    done(r);
+    CHECK(r.action == "upgrade" && fs::kindOf(plugins + "/NbtVar/NbtVar.manifest") == fs::kFile && linkOf(plugins + "/NbtVar/libNbtVar.so") == "libNbtVar.txt");
+    CHECK(fs::kindOf(varPlugins) == fs::kNone);
+    tidy(b);
+    done(b.engine.remove(id, true, 0));
+    CHECK(fs::kindOf(plugins + "/NbtVar") == fs::kNone && fs::isDir(plugins));   // ${plugins} was there before
+    tidy(b);
+}
+
+// ---- folders that stay ---------------------------------------------------------------------------------------------
+
+// Writes a file into a folder while the postInstall hook runs, as a program of the package's might.
+class WritesDuringHook : public StepListener {
+public:
+    explicit WritesDuringHook(const std::string& path) : path_(path) {}
+    virtual void log(const char* source, const std::string& text) {
+        if (std::string(source) == "postInstall" && fs::kindOf(path_) == fs::kNone) write(path_, "written by the program\n");
+        logs += std::string(source) + ": " + text;
+    }
+    std::string logs;
+
+private:
+    std::string path_;
+};
+
+// A folder of a package's goes when the package goes, and when an upgrade or an undo no longer needs it, only if it
+// is empty: the agent removes no file the package did not place. The folders tried are those the package made and
+// those below a plugin folder that it placed files or links in. Of those that stay, the log names the ones the
+// package made, except a plugin folder itself, which other apps' plugins share; one it only placed files in may be
+// another app's, and stays without a word.
+static void testFoldersLeft() {
+    const char* const id = "org.nbtapp.varplugin";
+    Bench b("folders-left", keys(), false, "1.6.0");
+    const std::string folder = b.platform.varPluginsDir(), plugin = folder + "/NbtVar", plugins = b.platform.pluginsDir();
+    const std::string left = "left " + plugin + ": it is not empty\n";
+    std::string why;
+    Recorder rec;
+
+    // The plugin wrote a file into its folder while it ran: the folder stays with that file in it, and so does
+    // ${var_plugins}, which holds it, though the package made both. The log names the first and not the second.
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    write(plugin + "/state.txt", "run-time state\n");
+    done(b.engine.remove(id, true, &rec));
+    std::vector<std::string> names;
+    CHECK(fs::listDir(plugin, &names, &why) && names.size() == 1 && names[0] == "state.txt");
+    CHECK_IN(rec.logs, has(rec.logs, "agent: " + left) && !has(rec.logs, "left " + folder + ":"));
+    CHECK(has(readFile(b.engine.store().logPath()), left));
+    tidy(b);
+
+    // Installed again, the package finds both folders there and makes neither. Its removal tries the plugin's
+    // folder all the same, as one it placed files in: while the file is in it, the folder stays without a word,
+    // and once the file is gone it goes. ${var_plugins} is nobody's now, and stays.
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    InstalledPackage p = b.record(id);
+    CHECK(std::find(p.dirs.begin(), p.dirs.end(), "${var_plugins}/NbtVar") == p.dirs.end());
+    CHECK(std::find(p.dirs.begin(), p.dirs.end(), "${var_plugins}") == p.dirs.end());
+    CHECK(readFile(plugin + "/state.txt") == "run-time state\n");
+    rec.clear();
+    done(b.engine.remove(id, true, &rec));
+    CHECK_IN(rec.logs, readFile(plugin + "/state.txt") == "run-time state\n" && !has(rec.logs, "left "));
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    CHECK_IN(why, fs::removeFile(plugin + "/state.txt", &why));
+    rec.clear();
+    done(b.engine.remove(id, true, &rec));
+    CHECK(fs::kindOf(plugin) == fs::kNone && fs::isDir(folder) && !has(rec.logs, "left "));
+    tidy(b);
+
+    // A folder that was there before, with another app's file in it, is left as it was, and the log says nothing
+    // of it.
+    write(plugin + "/other.dat", "another app's\n", 0600);
+    Snapshot before = snap(b);
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    rec.clear();
+    done(b.engine.remove(id, true, &rec));
+    CHECK(same(snap(b), before) && !has(rec.logs, "left "));
+    tidy(b);
+
+    // An upgrade that moves the plugin to ${plugins}: the folder of its name that the old version placed its files
+    // in goes after the commit once it is empty, though another made it. While another app's file is in it, it
+    // stays without a word.
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    rec.clear();
+    done(b.engine.install(good("org.nbtapp.varplugin-1.1.0"), "", &rec));
+    CHECK(readFile(plugin + "/other.dat") == "another app's\n" && !has(rec.logs, "left "));
+    done(b.engine.remove(id, true, 0));
+    CHECK_IN(why, fs::removeFile(plugin + "/other.dat", &why));
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    rec.clear();
+    done(b.engine.install(good("org.nbtapp.varplugin-1.1.0"), "", &rec));
+    CHECK(fs::kindOf(plugin) == fs::kNone && fs::isDir(folder) && fs::isDir(plugins + "/NbtVar") && !has(rec.logs, "left "));
+    done(b.engine.remove(id, true, 0));
+    CHECK(fs::kindOf(plugins) == fs::kNone);   // the new version made it, and it was empty when it went
+    tidy(b);
+
+    // The same upgrade where the old version made the plugin's folder and the plugin wrote into it: the folder
+    // stays, and the log names it.
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+    p = b.record(id);
+    CHECK(std::find(p.dirs.begin(), p.dirs.end(), "${var_plugins}/NbtVar") != p.dirs.end());
+    write(plugin + "/state.txt", "run-time state\n");
+    rec.clear();
+    done(b.engine.install(good("org.nbtapp.varplugin-1.1.0"), "", &rec));
+    CHECK_IN(rec.logs, readFile(plugin + "/state.txt") == "run-time state\n" && has(rec.logs, "agent: " + left));
+    done(b.engine.remove(id, true, 0));
+    tidy(b);
+
+    // An install that is undone leaves a folder it made that a hook wrote into, and says so.
+    Bench h("folders-left-undo", keys());
+    write(h.data("org.nbtapp.syshook") + "/fail", "");
+    const std::string demo = h.sys("/opt/demo");
+    WritesDuringHook hook(demo + "/written.txt");
+    refused(h.engine.install(good("org.nbtapp.syshook-1.0.0"), "", &hook), "hook-failed");
+    CHECK(readFile(demo + "/written.txt") == "written by the program\n" && fs::kindOf(demo + "/extra.conf") == fs::kNone);
+    CHECK_IN(hook.logs, has(hook.logs, "agent: left " + demo + ": it is not empty\n"));
+    tidy(h);
+}
+
+// A head unit whose ${var_plugins} is on the stand-in for the system partition, as on a car, where an absolute
+// destination is the path itself: there a manifest can name one folder both ways.
+class VarPluginsOnSystem : public HostPlatform {
+public:
+    explicit VarPluginsOnSystem(const std::string& root) : HostPlatform(root) {}
+    virtual std::string varPluginsDir() const { return systemPath("/var-plugins"); }
+};
+
+// A removal takes the folders by their real paths, children before parents, however the record spells them: here
+// it says the package made ${var_plugins}, written as an absolute path, which sorts after the folders in it written
+// with the variable. Both ${var_plugins} and the plugin's folder go, and nothing is named as left.
+static void testFolderSpelledTwice() {
+    const char* const id = "org.nbtapp.varplugin";
+    const std::string root = gWork + "/folder-spelled-twice";
+    std::string why;
+    CHECK_IN(why, fs::removeTree(root, &why));
+    VarPluginsOnSystem platform(root);
+    Engine engine(&platform, keys(), "1.6.0");
+    CHECK_IN(why, platform.prepare(&why) && engine.init(&why));
+    done(engine.install(good("org.nbtapp.varplugin-1.0.0"), "", 0));
+
+    InstalledPackage p;
+    CHECK_IN(why, engine.store().load(id, &p, &why));
+    std::vector<std::string>::iterator made = std::find(p.dirs.begin(), p.dirs.end(), "${var_plugins}");
+    CHECK(made != p.dirs.end() && std::find(p.dirs.begin(), p.dirs.end(), "${var_plugins}/NbtVar") != p.dirs.end());
+    *made = "/var-plugins";
+    CHECK_IN(why, fs::writeFile(engine.store().recordDir(id) + "/record.json", Store::encodeRecord(p), 0644, &why));
+
+    Recorder rec;
+    done(engine.remove(id, true, &rec));
+    CHECK_IN(rec.logs, fs::kindOf(platform.varPluginsDir()) == fs::kNone && !has(rec.logs, "left "));
+    CHECK_IN(why, fs::removeTree(root, &why));
+}
+
 // ---- a stock file -------------------------------------------------------------------------------------------------
 
 static void testStockFile() {
@@ -1007,6 +1228,13 @@ static void setupPluginsFolder(Bench& b) {
     CHECK_IN(why, fs::makeDirs(b.platform.pluginsDir(), &why));
 }
 
+// The plugin installed into a folder of its name in ${var_plugins} that was there before it, empty, and is nobody's.
+static void setupVarPluginThere(Bench& b) {
+    std::string why;
+    CHECK_IN(why, fs::makeDirs(b.platform.varPluginsDir() + "/NbtVar", &why));
+    installDone(b, "org.nbtapp.varplugin-1.0.0");
+}
+
 static StepReport stepHello12(Engine& e) { return e.install(good("org.nbtapp.hello-1.2.0"), "", 0); }
 static StepReport stepHello13(Engine& e) { return e.install(good("org.nbtapp.hello-1.3.0"), "", 0); }
 static StepReport stepPatch10(Engine& e) { return e.install(good("org.nbtapp.menupatch-1.0.0"), "", 0); }
@@ -1014,6 +1242,8 @@ static StepReport stepPatch11(Engine& e) { return e.install(good("org.nbtapp.men
 static StepReport stepPatch20(Engine& e) { return e.install(good("org.nbtapp.menupatch-2.0.0"), "", 0); }
 static StepReport stepPlugin(Engine& e) { return e.install(good("org.nbtapp.demoplugin-1.0.0"), "", 0); }
 static StepReport stepVarPlugin(Engine& e) { return e.install(good("org.nbtapp.varplugin-1.0.0"), "", 0); }
+static StepReport stepVarPlugin11(Engine& e) { return e.install(good("org.nbtapp.varplugin-1.1.0"), "", 0); }
+static StepReport stepRemoveVarPlugin(Engine& e) { return e.remove("org.nbtapp.varplugin", false, 0); }
 static StepReport stepRemoveHello(Engine& e) { return e.remove("org.nbtapp.hello", false, 0); }
 static StepReport stepRemovePatch(Engine& e) { return e.remove("org.nbtapp.menupatch", true, 0); }
 
@@ -1102,8 +1332,10 @@ static int testCrashRecovery(bool copyMoves, int pairs) {
         {"plugin", setupNothing, stepPlugin, true},
         {"plugin-folder-there", setupPluginsFolder, stepPlugin, true},
         {"var-plugin", setupNothing, stepVarPlugin, true},
+        {"var-plugin-move", setupVarPluginThere, stepVarPlugin11, true},
         {"remove", setupHello12, stepRemoveHello, true},
         {"remove-stock", setupPatch10, stepRemovePatch, true},
+        {"remove-var-plugin", setupVarPluginThere, stepRemoveVarPlugin, true},
     };
     int deaths = 0;
     for (size_t i = 0; i < sizeof scenarios / sizeof scenarios[0]; ++i) {
@@ -1680,6 +1912,9 @@ int main(int argc, char** argv) {
     testPlugin();
     testOwnPlugin();
     testVarPlugin();
+    testPluginName();
+    testFoldersLeft();
+    testFolderSpelledTwice();
     testStockFile();
     testOwnershipAndConflicts();
     testKeysAndChecks();

@@ -103,7 +103,11 @@ format and the protocol.
   `/var/opt/hmi/data/ID5`, whose HMI does not load plugins from there, a package that places a file or a link in
   it is refused with `stock-mismatch` when the job is planned, before anything is fetched. The agent writes over
   no file there that is in no package's record (`stock-mismatch`). A plugin's connector id and
-  focus ids are checked against the apps in both folders, whichever it goes into. Hooks get the folder as
+  focus ids are checked against the apps in both folders, whichever it goes into. So is its name, the folder it
+  has in the plugin folder: where another app's plugin of that name is in the other folder, or in any other folder
+  the HMI loads plugins from, the package is refused with `hmi-id-taken`, as for an id in use, because two plugins
+  of one name would be confusing. A folder of that name that holds no `.manifest` does not count, and neither do
+  the package's own files, so an upgrade may move its plugin from one folder to the other. Hooks get the folder as
   `NBT_VAR_PLUGINS_DIR`. `${var_plugins}` is not a folder a `logs` entry may name. An agent that does not know
   `${var_plugins}` refuses a manifest that uses it, so a package that places anything there sets
   `requires.agent` to the first agent that knows it, 1.6.0: an older agent then refuses it with `agent-too-old`
@@ -116,6 +120,22 @@ format and the protocol.
   unit has. Such a package's record is one that an older agent cannot read (see "Once a version is confirmed"
   under [The agent updates itself](#the-agent-updates-itself)). On the bench, with `--root DIR`, the folder is
   `DIR/var-plugins`.
+- A removal takes away the files and links the package placed, then its folders, each only if it is empty and
+  the deepest first: the folders the package made, and every folder below a plugin folder that it placed a file
+  or a link in, whoever made it, such as a plugin's folder that was there before the package was installed. A
+  plugin folder itself (`${plugins}`, `${var_plugins}`) goes only if this package made it. `${app}` goes whole,
+  and `${data}` goes whole or stays as the user chooses. The agent never removes a file the package did not
+  place, so a folder that still holds one stays. The install log names such a folder (`left <folder>: it is not
+  empty`) when the package made it, unless it is a plugin folder itself. A folder the package only placed files
+  in may be another app's, and stays without a word; so does the plugin's folder of a package that was installed
+  again over the folder an earlier removal left. An upgrade does the same, after its commit, with the folders
+  that only the old version used, naming those the old version made, and an install that is undone with the
+  folders it made. After a power cut the agent finishes an upgrade without naming any folder: its journal does
+  not say which ones the old version made. A plugin in `${var_plugins}` can write into its own folder
+  while it runs, and what it writes there keeps that folder on the head unit after the package is gone. So a
+  plugin that writes files at run time keeps them in `${data}`, the package's data folder
+  (`/var/opt/nbtapp/data/<id>` on a car), or removes them in its `preRemove` hook, which finds the folder in
+  `NBT_VAR_PLUGINS_DIR`.
 - A manifest's `requires` holds two version ranges. `requires.agent` is the agents that install the package: an
   agent outside it refuses the package with `agent-too-old` when the job is planned, and reads it before the rest
   of the manifest, so that a package that uses a later format of the manifest names the first agent that knows

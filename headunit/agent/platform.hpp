@@ -52,8 +52,8 @@ public:
     // onto the machine that way: the platform does not make it.
     virtual std::string agentHome() const = 0;
     // Every folder the HMI loads plugins from: pluginsDir(), varPluginsDir(), and any other, such as the stock,
-    // read-only one on a head unit whose ${plugins} is the writable one. The ids already in use are read from all
-    // of them, so those of an app copied into one by hand are seen.
+    // read-only one on a head unit whose ${plugins} is the writable one. The ids and the plugin names already in
+    // use are read from all of them, so those of an app copied into one by hand are seen.
     virtual std::vector<std::string> pluginScanDirs() const = 0;
     // Where an absolute destination from a manifest really is: the path itself on the head unit, the same path
     // under a folder on a build host.

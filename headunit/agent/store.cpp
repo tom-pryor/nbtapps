@@ -180,11 +180,17 @@ std::string Store::appDir(const Manifest& of) const {
 }
 
 std::string Store::resolve(const Manifest& of, const std::string& dest) const {
-    if (dest.compare(0, 6, "${app}") == 0) return appDir(of) + dest.substr(6);
-    if (dest.compare(0, 7, "${data}") == 0) return platform_->dataDir(of.id) + dest.substr(7);
-    if (dest.compare(0, 10, "${plugins}") == 0) return platform_->pluginsDir() + dest.substr(10);
-    if (dest.compare(0, 14, "${var_plugins}") == 0) return platform_->varPluginsDir() + dest.substr(14);
-    return platform_->systemPath(dest);
+    size_t rest = 0;
+    const FolderVariable* variable = folderVariableOf(dest, &rest);
+    if (variable == 0) return platform_->systemPath(dest);
+    std::string folder;
+    switch (variable->kind) {
+    case kFolderApp: folder = appDir(of); break;
+    case kFolderData: folder = platform_->dataDir(of.id); break;
+    case kFolderPlugins: folder = platform_->pluginsDir(); break;
+    case kFolderVarPlugins: folder = platform_->varPluginsDir(); break;
+    }
+    return folder + dest.substr(rest);
 }
 
 }  // namespace nbt

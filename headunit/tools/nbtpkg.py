@@ -62,12 +62,16 @@ ALREADY_COMPRESSED = (".zip", ".gz", ".xz", ".bz2", ".png", ".jpg", ".jpeg")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_PATH = os.path.join(ROOT, "spec", "manifest.schema.json")
-OWN_DIRS = ("${app}/", "${data}/", "${plugins}/", "${var_plugins}/")   # not modifies-system (risk_flags)
-# The variables of a destination or a link's path that an older agent does not know, each with the first agent that
-# knows it. An agent that does not know one refuses a manifest that uses it as bad-manifest, unless the manifest's
-# requires.agent leaves that agent out, in which case it says agent-too-old and the phone app offers the agent's
-# update. So this tool asks for that requirement (agent_requirement_ok); the agent does not.
-VARIABLE_FIRST_AGENT = {"${var_plugins}": (1, 6, 0)}
+# The folder variables a destination or a link's path may start with, the package's own places, each with the first
+# agent that knows it, or None where every agent does. The schema's patterns for $defs/file/dest and $defs/link/path
+# name the same ones (tests/test_nbtpkg.py checks that they do).
+FOLDER_VARIABLES = {"${app}": None, "${data}": None, "${plugins}": None, "${var_plugins}": (1, 6, 0)}
+OWN_DIRS = tuple(variable + "/" for variable in FOLDER_VARIABLES)   # not modifies-system (risk_flags)
+# The variables an older agent does not know. An agent that does not know one refuses a manifest that uses it as
+# bad-manifest, unless the manifest's requires.agent leaves that agent out, in which case it says agent-too-old and
+# the phone app offers the agent's update. So this tool asks for that requirement (agent_requirement_ok); the agent
+# does not.
+VARIABLE_FIRST_AGENT = {variable: first for variable, first in FOLDER_VARIABLES.items() if first is not None}
 # The same for the members of requires, which an older agent refuses as unsupported-manifest: requires.app, the
 # versions of the phone app that may install the package, which the agent takes and does not act on.
 REQUIREMENT_FIRST_AGENT = {"app": (1, 6, 0)}

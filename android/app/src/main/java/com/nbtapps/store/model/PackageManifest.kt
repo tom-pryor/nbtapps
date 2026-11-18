@@ -55,14 +55,18 @@ data class PackageManifest(
     /** Outside the package's own places, as [flags] count it: an absolute path, and not one in a folder variable. */
     private fun outsideOwnPlaces(path: String): Boolean = !inOwnDirectories(path) && !path.startsWith("\${")
 
-    private fun inOwnDirectories(dest: String): Boolean = OWN_DIRECTORIES.any { dest.startsWith(it) }
+    private fun inOwnDirectories(dest: String): Boolean = FOLDER_VARIABLES.any { dest.startsWith("$it/") }
 
-    private companion object {
-        /** The package's own places: a destination in one is not `modifies-system`. Both plugin folders count. */
-        val OWN_DIRECTORIES = listOf("\${app}/", "\${data}/", "\${plugins}/", "\${var_plugins}/")
+    companion object {
+        /**
+         * The folder variables a destination or a link's path may start with (`$defs/file/dest`, `$defs/link/path`):
+         * the package's own places, both plugin folders among them. `ManifestParser` takes these and marks any other as
+         * of a later format, and a destination in one is not `modifies-system` ([flags]).
+         */
+        val FOLDER_VARIABLES = listOf("\${app}", "\${data}", "\${plugins}", "\${var_plugins}")
 
         /** The [reboot] values that restart something. */
-        val RESTARTS = listOf("hmi-restart", "required")
+        private val RESTARTS = listOf("hmi-restart", "required")
     }
 }
 

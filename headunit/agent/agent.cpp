@@ -1476,7 +1476,6 @@ void Agent::infoGet(Session* s, int64_t id) {
     } places[] = {{"app", fs::parentOf(platform_->appDir("x"))},
                   {"data", fs::parentOf(platform_->dataDir("x"))},
                   {"plugins", platform_->pluginsDir()},
-                  {"varPlugins", platform_->varPluginsDir()},
                   {"staging", platform_->stagingDir()}};
     json::Writer w;
     w.beginObject().key("agentVersion").string(agentVersion_).key("headUnitId").string(headUnitId_);

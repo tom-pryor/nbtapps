@@ -1,0 +1,17 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.varplugin",
+  "name": "Demo plugin on the data partition",
+  "version": "1.1.0",
+  "install": {
+    "files": [
+      {
+        "src": "payload/plugin/",
+        "dest": "${plugins}/NbtVar/",
+        "mode": "0644"
+      }
+    ],
+    "links": [{ "path": "${plugins}/NbtVar/libNbtVar.so", "target": "libNbtVar.txt" }],
+    "reboot": "hmi-restart"
+  }
+}

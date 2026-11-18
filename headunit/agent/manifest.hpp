@@ -224,8 +224,30 @@ bool validSettingsFile(const std::string& path);
 // U+007F) and no space at its start or end.
 bool validSettingText(const std::string& value, size_t maxLength, bool anyCharacters);
 
-// True for a destination inside one of the package's own places: ${app}/, ${data}/, ${plugins}/ or
-// ${var_plugins}/.
+// The folder variables a destination or a link's path may start with: the package's own places. Each is a
+// folder on the head unit (Store::resolve), and the names are the schema's ($defs/file/dest, $defs/link/path).
+// The kinds and the table list them in the same order.
+enum FolderKind {
+    kFolderApp,          // ${app}, the package's own folder
+    kFolderData,         // ${data}, its data
+    kFolderPlugins,      // ${plugins}, the HMI's plugin folder on the system partition
+    kFolderVarPlugins    // ${var_plugins}, the HMI's plugin folder on the writable partition
+};
+
+struct FolderVariable {
+    const char* name;   // as a manifest writes it, braces and all
+    FolderKind kind;
+};
+
+extern const FolderVariable kFolderVariables[];
+extern const size_t kFolderVariableCount;
+
+// The folder variable `path` starts with, with *rest set to where the rest of the path begins (the length of the
+// variable's name); 0 when it starts with none. The rest may be empty, or anything: the caller decides whether it
+// has to start with a slash.
+const FolderVariable* folderVariableOf(const std::string& path, size_t* rest);
+
+// True for a destination inside one of the package's own places: one of the folder variables, then a slash.
 bool inOwnDirs(const std::string& dest);
 
 }  // namespace nbt

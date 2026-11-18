@@ -6,6 +6,8 @@
 // The two ids of an iDrive PluginApp that must be unique across every app on the car: the connector id in its
 // <Name>.manifest, and the entryButtonFocusID of each pluginApp in its UI description. A package's own manifest
 // does not repeat them; they are read from the plugin's files, the new package's and the ones already in Plugins.
+// The plugin's name, its folder in Plugins, must be unique too: an install refuses a plugin whose name is that
+// of another app's plugin in another folder the HMI loads plugins from (InstallStep::checkHmiIds).
 //
 //   <plugin> ... <pluginAppConnector> <id>211</id> ... <DescFile>{pluginDir}/NbtApp.xml</DescFile>
 //   <pluginApps> <pluginApp entryButtonFocusID="32754" ...>

@@ -51,34 +51,48 @@ std::string number(uint64_t value) {
     return text;
 }
 
-// The folders above a destination, as destinations, parents first. ${app} and ${data} themselves are among them,
-// because the package owns them, and so are ${plugins} and ${var_plugins}: a head unit that never had a plugin in
-// one has no such folder, and the first plugin installed there makes it, and takes it away again if it is empty
-// when that plugin goes. Only the folder itself is made, never the one that holds it: the platform does not start
-// without the one that holds ${plugins}, and a package for ${var_plugins} on a head unit without the one that holds
-// it is refused when the step is planned (checkVarPluginsParent). / is not among them.
+// The folders above a destination, as destinations, parents first. The folder variable it starts with
+// (kFolderVariables) is among them: ${app} and ${data} because the package owns them, and ${plugins} and
+// ${var_plugins} because a head unit that never had a plugin in one has no such folder, and the first plugin
+// installed there makes it, and takes it away again if it is empty when that plugin goes. Only the folder itself
+// is made, never the one that holds it: the platform does not start without the one that holds ${plugins}, and a
+// package for ${var_plugins} on a head unit without the one that holds it is refused when the step is planned
+// (checkVarPluginsParent). / is not among them.
 std::vector<std::string> ancestorsOf(const std::string& dest) {
     size_t root = 0;
-    bool includeRoot = false;
-    if (startsWith(dest, "${app}")) {
-        root = 6;
-        includeRoot = true;
-    } else if (startsWith(dest, "${data}")) {
-        root = 7;
-        includeRoot = true;
-    } else if (startsWith(dest, "${plugins}")) {
-        root = 10;
-        includeRoot = true;
-    } else if (startsWith(dest, "${var_plugins}")) {
-        root = 14;
-        includeRoot = true;
-    }
+    bool includeRoot = folderVariableOf(dest, &root) != 0;
+    if (!includeRoot) root = 0;
     std::vector<std::string> out;
     if (includeRoot) out.push_back(dest.substr(0, root));
     for (size_t i = root + 1; i < dest.size(); ++i) {
         if (dest[i] == '/') out.push_back(dest.substr(0, i));
     }
     return out;
+}
+
+// The folders above a destination in ${plugins} or ${var_plugins} that are below the plugin folder itself, as
+// destinations: the plugin's own folder, and any folder in it. None for a destination anywhere else.
+void addPluginFolders(const std::string& dest, std::set<std::string>* out) {
+    size_t rest = 0;
+    const FolderVariable* variable = folderVariableOf(dest, &rest);
+    if (variable == 0 || (variable->kind != kFolderPlugins && variable->kind != kFolderVarPlugins)) return;
+    if (rest == dest.size() || dest[rest] != '/') return;
+    std::vector<std::string> dirs = ancestorsOf(dest);
+    out->insert(dirs.begin() + 1, dirs.end());   // dirs[0] is the plugin folder
+}
+
+// Folders to remove where they are empty, by real path, each with whether the package made it. A folder's path is
+// the start of the paths of the folders in it, so these are in the map after it: walked from the end, the map
+// gives children before their parents.
+typedef std::map<std::string, bool> FolderSet;
+
+// Whether the new record of an upgrade uses a folder, as a destination: ${app}, ${data} and anything in it, or a
+// folder that one of its files or links is in.
+bool usedBy(const InstalledPackage& record, const std::string& dir) {
+    bool used = dir == "${app}" || startsWith(dir, "${data}");
+    for (size_t k = 0; !used && k < record.files.size(); ++k) used = startsWith(record.files[k].dest, dir + "/");
+    for (size_t k = 0; !used && k < record.links.size(); ++k) used = startsWith(record.links[k].path, dir + "/");
+    return used;
 }
 
 // One line of the journal, read back.
@@ -299,6 +313,19 @@ private:
     std::string text_;
 };
 
+// Removes a folder if it is empty, where a removal, an upgrade or an undo takes away a folder of a package's. One
+// that holds something stays, files the package did not place included. With a `log`, which the caller gives for
+// a folder the package made, the log says so; except for a plugin folder itself, where other apps' plugins are
+// expected. A folder the package only placed files in may be another app's too, and stays without a word. Gone
+// already counts as removed, so a step that is finished again after a power cut does this a second time to no harm.
+static void removeFolder(Platform* platform, const std::string& real, StepLog* log) {
+    std::string why;
+    if (!platform->makeWritable(real, &why) || fs::removeEmptyDir(real)) return;
+    if (log == 0 || real == platform->pluginsDir() || real == platform->varPluginsDir()) return;
+    std::vector<std::string> names;
+    if (fs::kindOf(real) == fs::kDir && fs::listDir(real, &names, 0) && !names.empty()) log->line("left " + real + ": it is not empty");
+}
+
 // ---- the engine ---------------------------------------------------------------------------------------------------
 
 Engine::Engine(Platform* platform, const std::vector<TrustedKey>& keys, const std::string& agentVersion)
@@ -390,7 +417,7 @@ bool Engine::rollBack(StepLog* log) {
             if (fs::kindOf(op.to) != fs::kNone) ok = platform_->makeWritable(op.path, &why) && fs::moveFile(op.to, op.path, &why);
         } else if (op.op == "mkdir") {
             // A folder that something else has put a file into since is left.
-            if (platform_->makeWritable(op.path, &why)) fs::removeEmptyDir(op.path);
+            removeFolder(platform_, op.path, log);
         }
         if (!ok) {
             log->line("cannot undo: " + why);
@@ -408,7 +435,8 @@ bool Engine::rollBack(StepLog* log) {
     return true;
 }
 
-bool Engine::finishCommitted(const std::string& id, const std::vector<std::string>& rmdirs, StepLog* log) {
+bool Engine::finishCommitted(const std::string& id, const std::vector<std::string>& rmdirs,
+                             const std::set<std::string>& named, StepLog* log) {
     std::string why;
     std::string record = store_.journalDir() + "/record", oldRecord = store_.journalDir() + "/old-record";
     std::string target = store_.recordDir(id);
@@ -428,10 +456,9 @@ bool Engine::finishCommitted(const std::string& id, const std::vector<std::strin
         fs::syncDir(store_.journalDir());
         crash("finish");
     }
-    // Folders only the old version used. Best effort: one that still holds something stays.
-    for (size_t i = 0; i < rmdirs.size(); ++i) {
-        if (platform_->makeWritable(rmdirs[i], &why)) fs::removeEmptyDir(rmdirs[i]);
-    }
+    // Folders only the old version used. Best effort: one that still holds something stays, and is named in the log
+    // if it is in `named`, the old version's own.
+    for (size_t i = 0; i < rmdirs.size(); ++i) removeFolder(platform_, rmdirs[i], named.count(rmdirs[i]) != 0 ? log : 0);
     clearJournalFolder();
     crash("finish");
     if (!fs::removeFile(journalPath(), &why)) {
@@ -493,10 +520,23 @@ bool Engine::removeFiles(const InstalledPackage& p, bool deleteData, bool runPre
         }
         crash("action");
     }
-    for (size_t i = p.dirs.size(); i-- > 0;) {
-        if (startsWith(p.dirs[i], "${data}") || startsWith(p.dirs[i], "${app}")) continue;
-        std::string real = store_.resolve(m, p.dirs[i]);
-        if (platform_->makeWritable(real, &why)) fs::removeEmptyDir(real);
+    // Folders: those the package made, and those below a plugin folder that it placed files or links in, whoever
+    // made them. Each goes only if it is empty, so nothing the package did not place is removed. A plugin folder
+    // itself goes only if this package made it: other apps' plugins may come and go there. They are taken by their
+    // real paths, children before parents, so a folder the manifest names two ways is tried once and after the
+    // folders in it. Only those the package made are named in the log when they stay.
+    std::set<std::string> placedIn;
+    for (size_t i = 0; i < p.files.size(); ++i) addPluginFolders(p.files[i].dest, &placedIn);
+    for (size_t i = 0; i < p.links.size(); ++i) addPluginFolders(p.links[i].path, &placedIn);
+    FolderSet dirs;
+    for (size_t i = 0; i < p.dirs.size(); ++i) {
+        if (!startsWith(p.dirs[i], "${data}") && !startsWith(p.dirs[i], "${app}")) dirs[store_.resolve(m, p.dirs[i])] = true;
+    }
+    for (std::set<std::string>::const_iterator it = placedIn.begin(); it != placedIn.end(); ++it) {
+        dirs.insert(std::make_pair(store_.resolve(m, *it), false));   // one the package made stays named
+    }
+    for (FolderSet::reverse_iterator it = dirs.rbegin(); it != dirs.rend(); ++it) {
+        removeFolder(platform_, it->first, it->second ? log : 0);
     }
     // ${app} is the package's own: whatever is left in it goes too.
     if (!fs::removeTree(store_.appDir(m), &why)) failure.fail("io-error", why);
@@ -694,7 +734,8 @@ bool Engine::recover(bool* found, StepReport* report, StepListener* listener) {
         }
         if (commit != 0) {
             log.phase("record");
-            if (finishCommitted(first.id, commit->rmdirs, &log)) {
+            // The journal does not say which of the folders the old version made, so none is named in the log.
+            if (finishCommitted(first.id, commit->rmdirs, std::set<std::string>(), &log)) {
                 report->outcome = kStepDone;
                 InstalledPackage package;
                 if (store_.load(first.id, &package, &why)) report->restart = package.manifest.reboot;
@@ -882,6 +923,7 @@ private:
     std::vector<std::pair<std::string, std::string> > linkRemovals_;   // real path, target
     std::vector<std::string> createdDirs_;                             // as destinations
     std::vector<std::string> rmdirs_;                                  // real paths
+    std::set<std::string> namedRmdirs_;                                // those of them the old version made
     unsigned backups_, moved_;
 };
 
@@ -1020,7 +1062,7 @@ StepReport InstallStep::run(const std::string& archivePath, const std::string& e
     }
 
     // The commit line is written: the step is decided, and what is left is clearing up.
-    bool finished = engine_->finishCommitted(m().id, rmdirs_, &log_);
+    bool finished = engine_->finishCommitted(m().id, rmdirs_, namedRmdirs_, &log_);
     engine_->putBackReadOnly(&log_);
     if (!finished) {
         report_.outcome = kStepBroken;
@@ -1296,10 +1338,13 @@ bool InstallStep::planLink(const ManifestLink& link, const std::map<std::string,
     return true;
 }
 
-// The connector id and the focus ids of a plugin this package places must not be in use by another app on the car.
+// The connector id and the focus ids of a plugin this package places must not be in use by another app on the car,
+// and its name, the folder it has in the plugin folder, must not be that of another app's plugin in another folder
+// the HMI loads plugins from: two plugins of one name would be confusing, whatever the HMI made of them. A folder
+// of that name in the same plugin folder is the package's to share or not, as for any destination.
 bool InstallStep::checkHmiIds() {
     // A plugin of this package is one it places in either folder that a package places plugins in.
-    std::string plugins = platform()->pluginsDir(), varPlugins = platform()->varPluginsDir();
+    const std::string roots[] = {platform()->pluginsDir(), platform()->varPluginsDir()};
     std::set<std::string> ours;   // what this package places now or placed before: not "another app"
     std::map<std::string, std::string> unpacked;
     for (size_t i = 0; i < files_.size(); ++i) {
@@ -1311,9 +1356,21 @@ bool InstallStep::checkHmiIds() {
     }
 
     std::vector<long> connectors, focus;
+    std::set<std::string> names, folders;   // of the plugins, and the folders this package places them in
     for (size_t i = 0; i < files_.size(); ++i) {
         const FileAction& a = files_[i];
-        if (!(under(a.real, plugins) || under(a.real, varPlugins)) || !endsWith(a.real, ".manifest")) continue;
+        if (!endsWith(a.real, ".manifest")) continue;
+        size_t r = 0;
+        while (r < 2 && !startsWith(a.real, roots[r] + "/")) ++r;
+        if (r == 2) continue;
+        // The plugin's name is the folder directly in the plugin folder; a manifest in the plugin folder itself
+        // is in no plugin's folder, and the HMI does not load it.
+        std::string rest = a.real.substr(roots[r].size() + 1);
+        size_t slash = rest.find('/');
+        if (slash != std::string::npos) {
+            names.insert(rest.substr(0, slash));
+            folders.insert(roots[r] + "/" + rest.substr(0, slash));
+        }
         std::string text, desc;
         if (!fs::readFile(a.unpacked, kMaxPluginFile, &text, 0)) continue;
         readPluginManifest(text, &connectors, &desc);
@@ -1321,17 +1378,26 @@ bool InstallStep::checkHmiIds() {
         std::map<std::string, std::string>::const_iterator it = unpacked.find(fs::parentOf(a.real) + "/" + desc.substr(12));
         if (it != unpacked.end() && fs::readFile(it->second, kMaxPluginFile, &text, 0)) readPluginDescription(text, &focus);
     }
-    if (connectors.empty() && focus.empty()) return true;
+    if (connectors.empty() && focus.empty() && names.empty()) return true;
 
-    // Every folder the HMI loads plugins from counts, not only the one this package goes into.
+    // Every folder the HMI loads plugins from counts, not only the one this package goes into. The scan passes
+    // over this package's own files, new and old, so an upgrade that moves its plugin to the other folder finds
+    // nothing of its own there.
     std::set<long> usedConnectors, usedFocus;
-    std::vector<PluginFolder> folders;
-    scanPluginFolders(platform()->pluginScanDirs(), ours, &folders);
-    for (size_t i = 0; i < folders.size(); ++i) {
-        for (size_t k = 0; k < folders[i].manifests.size(); ++k) {
-            const PluginManifest& found = folders[i].manifests[k];
-            usedConnectors.insert(found.connectorIds.begin(), found.connectorIds.end());
-            usedFocus.insert(found.focusIds.begin(), found.focusIds.end());
+    std::vector<PluginFolder> found;
+    scanPluginFolders(platform()->pluginScanDirs(), ours, &found);
+    for (size_t i = 0; i < found.size(); ++i) {
+        const PluginFolder& folder = found[i];
+        if (names.count(folder.name) != 0 && folders.count(folder.dir) == 0 && !folder.manifests.empty()) {
+            return fail("hmi-id-taken", "a plugin named " + folder.name + " is already in " + fs::parentOf(folder.dir) +
+                                            ", another folder the HMI loads plugins from");
+        }
+    }
+    for (size_t i = 0; i < found.size(); ++i) {
+        for (size_t k = 0; k < found[i].manifests.size(); ++k) {
+            const PluginManifest& other = found[i].manifests[k];
+            usedConnectors.insert(other.connectorIds.begin(), other.connectorIds.end());
+            usedFocus.insert(other.focusIds.begin(), other.focusIds.end());
         }
     }
     for (size_t i = 0; i < connectors.size(); ++i) {
@@ -1699,17 +1765,27 @@ bool InstallStep::writeRecord() {
         record.links.push_back(l);
     }
     // Folders: the ones the old version made that are still in use, then the ones made now. The rest of the old
-    // version's folders are removed after the commit, if they are empty by then.
+    // version's folders are removed after the commit, if they are empty by then, and so are the folders below a
+    // plugin folder that the old version placed files or links in and the new one does not, whoever made them, as
+    // a removal does: a plugin that moves to the other plugin folder leaves no empty folder of its name behind.
     if (old_ != 0) {
+        std::set<std::string> placedIn;   // destinations
+        FolderSet gone;
+        for (size_t i = 0; i < old_->files.size(); ++i) addPluginFolders(old_->files[i].dest, &placedIn);
+        for (size_t i = 0; i < old_->links.size(); ++i) addPluginFolders(old_->links[i].path, &placedIn);
         for (size_t i = 0; i < old_->dirs.size(); ++i) {
             const std::string& dir = old_->dirs[i];
             // The agent's own package: the old version's ${app} is another folder, and stays as it is.
             if (self_ && startsWith(dir, "${app}")) continue;
-            bool used = dir == "${app}" || startsWith(dir, "${data}");
-            for (size_t k = 0; !used && k < record.files.size(); ++k) used = startsWith(record.files[k].dest, dir + "/");
-            for (size_t k = 0; !used && k < record.links.size(); ++k) used = startsWith(record.links[k].path, dir + "/");
-            if (used) record.dirs.push_back(dir);
-            else rmdirs_.insert(rmdirs_.begin(), store().resolve(old_->manifest, dir));   // children before parents
+            if (usedBy(record, dir)) record.dirs.push_back(dir);
+            else gone[store().resolve(old_->manifest, dir)] = true;
+        }
+        for (std::set<std::string>::const_iterator it = placedIn.begin(); it != placedIn.end(); ++it) {
+            if (!usedBy(record, *it)) gone.insert(std::make_pair(store().resolve(old_->manifest, *it), false));
+        }
+        for (FolderSet::reverse_iterator it = gone.rbegin(); it != gone.rend(); ++it) {   // children before parents
+            rmdirs_.push_back(it->first);
+            if (it->second) namedRmdirs_.insert(it->first);
         }
     }
     for (size_t i = 0; i < createdDirs_.size(); ++i) record.dirs.push_back(createdDirs_[i]);

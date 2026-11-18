@@ -16,8 +16,11 @@
 // A failure before the commit undoes everything, from the journal, last change first ("rollback"). After a power
 // cut recover() does the same from the journal file: undo before the commit, finish after it.
 //
-// A removal runs preRemove, removes the package's files, links and folders, puts stock files back, runs
-// postRemove and deletes the record. It is finished after a power cut, not undone.
+// A removal runs preRemove, removes the package's files and links, puts stock files back, removes the folders the
+// package made and those below a plugin folder that it placed files or links in, each only if it is empty, runs
+// postRemove and deletes the record. It is finished after a power cut, not undone. A folder the package made that
+// stays because something is in it is named in the log; one it only placed files in stays without a word, as it
+// may be another app's.
 //
 // The agent's own package, org.nbtapp.agent (the plan document, "Agent updates"; agent_home.hpp), is an install
 // like any other up to the record, with these differences:
@@ -222,8 +225,10 @@ private:
     // Undoes every change the journal lists, last first, and removes the journal. False if something could not be
     // undone; the journal then stays, and recover() tries again.
     bool rollBack(class StepLog* log);
-    // After the commit line: puts the new record in place, clears up, and removes the journal.
-    bool finishCommitted(const std::string& id, const std::vector<std::string>& rmdirs, class StepLog* log);
+    // After the commit line: puts the new record in place, clears up, and removes the journal. `rmdirs` are the
+    // commit line's folders, removed where they are empty; one of `named` that stays is named in the log.
+    bool finishCommitted(const std::string& id, const std::vector<std::string>& rmdirs, const std::set<std::string>& named,
+                         class StepLog* log);
     // The removal itself, also used to finish one after a power cut.
     bool removeFiles(const InstalledPackage& package, bool deleteData, bool runPreRemove, class StepLog* log, Error* error);
     // Clears what a step leaves beside the journal's log. With no log there, none of it is needed.

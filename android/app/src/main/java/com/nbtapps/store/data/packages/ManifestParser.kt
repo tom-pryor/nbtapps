@@ -714,18 +714,16 @@ object ManifestParser {
 
     private fun isSrc(text: String): Boolean = Utf8.length(text) <= 255 && segments(text, trailingSlash = true)
 
-    /** The folders a destination or a link's path may start in, besides an absolute path (`$defs/file/dest`). */
-    private val DEST_VARIABLES = listOf("\${app}", "\${data}", "\${plugins}", "\${var_plugins}")
-
     /**
-     * A file's `dest`: in one of [DEST_VARIABLES], with a relative path or nothing after it, or an absolute path; a slash
-     * at the end for a folder. With [later], also in a folder variable this app does not know, of the shape a `logs`
-     * entry's variable has ([LOG_VARIABLE]), with the rest held to the same rules: one of a later format.
+     * A file's `dest`: in one of [PackageManifest.FOLDER_VARIABLES], with a relative path or nothing after it, or an
+     * absolute path; a slash at the end for a folder. With [later], also in a folder variable this app does not know,
+     * of the shape a `logs` entry's variable has ([LOG_VARIABLE]), with the rest held to the same rules: one of a later
+     * format.
      */
     private fun isDest(text: String, later: Boolean = false): Boolean {
         if (Utf8.length(text) > 255) return false
         val variable = LOG_VARIABLE.matchAt(text, 0)?.value ?: return text.startsWith("/") && segments(text.substring(1), true)
-        if (variable !in DEST_VARIABLES && !later) return false
+        if (variable !in PackageManifest.FOLDER_VARIABLES && !later) return false
         val prefix = "$variable/"
         return text.startsWith(prefix) && (text.length == prefix.length || segments(text.substring(prefix.length), true))
     }
@@ -734,7 +732,7 @@ object ManifestParser {
     private fun isLinkPath(text: String, later: Boolean = false): Boolean {
         if (Utf8.length(text) > 255) return false
         val variable = LOG_VARIABLE.matchAt(text, 0)?.value
-        if (variable != null && variable !in DEST_VARIABLES && !later) return false
+        if (variable != null && variable !in PackageManifest.FOLDER_VARIABLES && !later) return false
         val rest = variable?.let { text.substring(it.length) } ?: text
         return rest.startsWith("/") && segments(rest.substring(1), false)
     }

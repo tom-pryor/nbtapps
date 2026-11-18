@@ -40,9 +40,28 @@ const char* settingTypeName(SettingType type) {
     }
 }
 
+const FolderVariable kFolderVariables[] = {
+    {"${app}", kFolderApp},
+    {"${data}", kFolderData},
+    {"${plugins}", kFolderPlugins},
+    {"${var_plugins}", kFolderVarPlugins},
+};
+const size_t kFolderVariableCount = sizeof kFolderVariables / sizeof kFolderVariables[0];
+
+const FolderVariable* folderVariableOf(const std::string& path, size_t* rest) {
+    for (size_t i = 0; i < kFolderVariableCount; ++i) {
+        size_t n = strlen(kFolderVariables[i].name);
+        if (path.compare(0, n, kFolderVariables[i].name) == 0) {
+            *rest = n;
+            return &kFolderVariables[i];
+        }
+    }
+    return 0;
+}
+
 bool inOwnDirs(const std::string& dest) {
-    return dest.compare(0, 7, "${app}/") == 0 || dest.compare(0, 8, "${data}/") == 0 ||
-           dest.compare(0, 11, "${plugins}/") == 0 || dest.compare(0, 15, "${var_plugins}/") == 0;
+    size_t rest = 0;
+    return folderVariableOf(dest, &rest) != 0 && rest < dest.size() && dest[rest] == '/';
 }
 
 namespace {
@@ -145,27 +164,23 @@ bool isSha256(const std::string& text) {
 bool isPath(const std::string& text) { return utf8Length(text) <= 255 && segments(text, 0, false); }
 bool isSrc(const std::string& text) { return utf8Length(text) <= 255 && segments(text, 0, true); }
 
-// $defs/file/dest: ${app}/, ${data}/, ${plugins}/ or ${var_plugins}/ and then nothing or a relative path; or an
-// absolute path. Either may end in a slash, for a folder.
+// $defs/file/dest: one of the folder variables and a slash, and then nothing or a relative path; or an absolute
+// path. Either may end in a slash, for a folder.
 bool isDest(const std::string& text) {
     if (utf8Length(text) > 255) return false;
     size_t rest = 0;
-    if (startsWith(text, "${app}/", &rest) || startsWith(text, "${data}/", &rest) ||
-        startsWith(text, "${plugins}/", &rest) || startsWith(text, "${var_plugins}/", &rest)) {
+    if (folderVariableOf(text, &rest) != 0 && rest < text.size() && text[rest] == '/') {
+        ++rest;
         return rest == text.size() || segments(text, rest, true);
     }
     return !text.empty() && text[0] == '/' && segments(text, 1, true);
 }
 
-// $defs/link/path: an absolute path, or one under ${app}, ${data}, ${plugins} or ${var_plugins}; no slash at the
-// end.
+// $defs/link/path: an absolute path, or one under one of the folder variables; no slash at the end.
 bool isLinkPath(const std::string& text) {
     if (utf8Length(text) > 255) return false;
     size_t rest = 0;
-    if (!startsWith(text, "${app}", &rest) && !startsWith(text, "${data}", &rest) &&
-        !startsWith(text, "${plugins}", &rest) && !startsWith(text, "${var_plugins}", &rest)) {
-        rest = 0;
-    }
+    if (folderVariableOf(text, &rest) == 0) rest = 0;
     return rest < text.size() && text[rest] == '/' && segments(text, rest + 1, false);
 }
 

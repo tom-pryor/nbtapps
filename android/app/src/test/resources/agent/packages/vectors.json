@@ -509,6 +509,21 @@
       "what": "built from tests/packages/varplugin-1.0.0"
     },
     {
+      "id": "org.nbtapp.varplugin",
+      "version": "1.1.0",
+      "name": "Demo plugin on the data partition",
+      "sha256": "6193f9c4e40562519a193d7eb1db598a3185879a015cf471703c387eca244d78",
+      "size": 1581,
+      "manifestSha256": "f138a2b5eeee4b85c657397bc711770002eeeee5cddab4986834e67630b05cb1",
+      "flags": [
+        "needs-reboot"
+      ],
+      "signature": "3dc8228a24d12470bfb6a168524b9707ca6e0500e64c3fa88540a69ee0eaf0d6defeb48eff1576598ad0927cbbc078b09d6663c30f69a1ea6ce068348ae57105",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.varplugin-1.1.0.nbtpkg",
+      "what": "built from tests/packages/varplugin-1.1.0"
+    },
+    {
       "id": "org.nbtapp.hello",
       "version": "1.2.0",
       "name": "Hello NBT",
