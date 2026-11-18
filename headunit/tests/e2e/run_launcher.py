@@ -376,16 +376,16 @@ def trial_that_fails(c):
         check(c.status() == 0 and c.starts() == ["1.1.0", "1.0.0"], "the trial once, then the version in current")
         check(c.home_file("trial") is None and c.home_file("trial.started") == "1.1.0\n", "trial was renamed, not removed")
         check(c.home_file("current") == "1.0.0\n", "the launcher does not write current")
-        check(in_order(c.log(1), "launcher: trying version 1.1.0, once; starter revision 2", "launcher: starting version 1.1.0",
+        check(in_order(c.log(1), "launcher: trying version 1.1.0, once; starter revision 3", "launcher: starting version 1.1.0",
                        "fake agent 1.1.0, start 1", "launcher: the agent ended with status 1, on its one try",
                        "launcher: the try of version 1.1.0 ended with status 1",
                        "launcher: what this try said is kept as " + c.trial_log), "the log of the try, on the RAM disk")
         check(c.kept() is not None and c.kept().endswith("launcher: the try of version 1.1.0 ended with status 1\n") and
-              c.log(1).startswith(c.kept()) and c.kept().startswith("launcher: trying version 1.1.0, once; starter revision 2\n"),
+              c.log(1).startswith(c.kept()) and c.kept().startswith("launcher: trying version 1.1.0, once; starter revision 3\n"),
               "and a copy of it in the agent's folder, up to the try's end")
         check(os.listdir(os.path.join(c.home, "log")) == ["trial.log"], "which is all that folder holds")
         check(in_order(c.log(), "launcher: version 1.1.0 was tried and has not confirmed itself; %s is what the last try said"
-                       " that failed while the head unit was on; starter revision 2" % c.trial_log, "launcher: starting version 1.0.0"),
+                       " that failed while the head unit was on; starter revision 3" % c.trial_log, "launcher: starting version 1.0.0"),
               "the log of the way back")
         check(c.lognames() == [os.path.join(c.ram_log, "agent.log")] * 2, "both agents are told the same file for their log")
     return look
@@ -401,7 +401,7 @@ def trial_that_confirms(c):
         check(c.status() == 0 and c.starts() == ["1.1.0", "1.1.0"], "a version that confirmed itself is started from current")
         check(c.home_file("current") == "1.1.0\n" and c.home_file("trial") is None and c.home_file("trial.started") is None,
               "what the agent wrote")
-        check(in_order(c.log(1), "launcher: trying version 1.1.0, once; starter revision 2", "launcher: the agent asked to be started again"),
+        check(in_order(c.log(1), "launcher: trying version 1.1.0, once; starter revision 3", "launcher: the agent asked to be started again"),
               "status 4, in the log of the try")
         check("tried" not in c.log() and "trying" not in c.log() and "kept" not in c.log(1), "nothing about a trial once it is over")
         check(sorted(os.listdir(c.home)) == ["1.0.0", "1.1.0", "current", "launcher"], "a try that works leaves no log in the agent's folder")
@@ -419,7 +419,7 @@ def trial_already_started(c):
         check(c.home_file("trial.started") == "1.1.0\n", "trial.started is the agent's to remove")
         check(sorted(os.listdir(c.home)) == ["1.0.0", "1.1.0", "current", "launcher", "trial.started"],
               "and a start that tries nothing leaves no log in the agent's folder")
-        check("launcher: version 1.1.0 was tried and has not confirmed itself; no try has left a log; starter revision 2\n" in c.log(),
+        check("launcher: version 1.1.0 was tried and has not confirmed itself; no try has left a log; starter revision 3\n" in c.log(),
               "the log says that the try's own is gone")
     return look
 
@@ -466,7 +466,7 @@ def bad_trial(c, content):
     def look():
         check(c.status() == 0 and c.starts() == ["1.0.0"], "a trial that names nothing usable: the version in current")
         check(c.home_file("trial") is None and c.home_file("trial.started") == content, "it is renamed all the same")
-        check("launcher: the file trial names no version that is here; starter revision 2\n" in c.log(), "and the log says so")
+        check("launcher: the file trial names no version that is here; starter revision 3\n" in c.log(), "and the log says so")
         check(not os.path.exists(os.path.join(c.home, "log")), "on the RAM disk: nothing was tried")
     return look
 
@@ -501,6 +501,8 @@ def ends_with(c, status):
     def look():
         check(c.status() == status and c.starts() == ["1.0.0"], "status %d ends the launcher with the same" % status)
         check("launcher: the agent ended with status %d, which a new start would not change\n" % status in c.log(), "the log")
+        check(c.log().endswith("launcher: version 1.0.0's launcher ended with status %d: the starter ends with the same\n"
+                               % status), "and the starter's last line says why it ends")
     return look
 
 
@@ -531,10 +533,36 @@ def failures(c):
 
     def look():
         check(c.status() == 1 and len(c.starts()) == 5, "five failures in a row: the launcher gives up with status 1")
-        check(in_order(c.log(), "launcher: the agent ended with status 1: failure 5 of 5", "launcher: giving up"), "the last log")
+        check(in_order(c.log(), "launcher: the agent ended with status 1: failure 5 of 5", "launcher: giving up",
+                       "launcher: version 1.0.0's launcher ended with status 1: the starter ends with the same"), "the last log")
         check("launcher: the agent ended with status 126: failure 4 of 5\n" in c.log(1), "the log before it")
         check("launcher: the agent ended with status 137: failure 3 of 5\n" in c.log(2), "an agent that a signal ended is a failure")
     return look
+
+
+def launcher_not_run(c, shell, status, line):
+    """The version's launcher cannot be run at all: the shell the starter runs it with is not there, or is not a
+    program. The starter ends with the shell's status, and its line is the last in the log."""
+    c.make_home(["1.0.0"], current="1.0.0\n")
+    c.plan(["0"])
+    if shell == "not-a-program":
+        write(c.path(shell), "not a program\n", 0o644)
+    env = c.launch_env()
+    env["NBT_TEST_LAUNCH_SH"] = c.path(shell)
+    c.run(["sh", os.path.join(c.home, "launcher")], env=env)
+
+    def look():
+        check(c.status() == status and c.starts() == [], "the starter ends with status %d, nothing started" % status)
+        check(c.log() is not None and c.log().endswith(line + "\n"), "the starter says so before it ends")
+    return look
+
+
+for shell, status, line in (
+        ("no-such-shell", 127, "launcher: version 1.0.0's launcher, or the shell that runs it, was not found "
+                               "(status 127): the starter ends"),
+        ("not-a-program", 126, "launcher: version 1.0.0's launcher could not be run (status 126): the starter ends")):
+    c = Case("launcher-not-run-%d" % status)
+    cases.append((c.name, launcher_not_run(c, shell, status, line), c))
 
 
 @case
@@ -584,7 +612,7 @@ def a_failed_try_takes_the_place_of_the_last(c):
 
     def look():
         check(c.status() == 0 and c.starts() == ["1.1.0", "1.0.0"], "the trial once, then the version in current")
-        check(c.kept().startswith("launcher: trying version 1.1.0, once; starter revision 2\n") and
+        check(c.kept().startswith("launcher: trying version 1.1.0, once; starter revision 3\n") and
               "launcher: the agent ended with status 137, on its one try\n" in c.kept() and
               c.kept().endswith("launcher: the try of version 1.1.0 ended with status 137\n") and "the try before" not in c.kept(),
               "one copy: of the last try that failed", c.kept())
@@ -626,7 +654,7 @@ def trial_whose_launcher_does_not_run(c):
         check(c.kept() is not None and "launcher: the try of version 1.1.0 ended with status " in c.kept(),
               "what is known of the try is kept in the agent's folder", str(c.kept()))
         check(in_order(c.log(), "launcher: version 1.1.0 was tried and has not confirmed itself; %s is what the last try said"
-                       " that failed while the head unit was on; starter revision 2" % c.trial_log, "launcher: starting version 1.0.0",
+                       " that failed while the head unit was on; starter revision 3" % c.trial_log, "launcher: starting version 1.0.0",
                        "fake agent 1.0.0, start 1", "launcher: the agent was stopped"), "the log of the way back")
         check("nbtlaunch.sh" in c.err(), "what the shell said of the launcher goes where the starter's own output goes", c.err())
     return look
@@ -649,7 +677,7 @@ def each_version_has_its_own_launcher(c):
 
     def look():
         check(c.status() == 0 and c.starts() == ["1.1.0|--root|/somewhere"] * 2, "the new version, on trial and then from current")
-        check(read(c.path("handed")) == "1.1.0|1|1|trying version 1.1.0, once; starter revision 2|2\n1.1.0|1||starter revision 2|2\n",
+        check(read(c.path("handed")) == "1.1.0|1|1|trying version 1.1.0, once; starter revision 3|2\n1.1.0|1||starter revision 3|2\n",
               "both times by the launcher in its own folder, which is told when it is a try, and why", read(c.path("handed")))
         check(c.log() is None, "and the launcher of the version before, which keeps the log, was never run")
     return look
@@ -671,7 +699,7 @@ def try_that_a_power_down_ended(c):
         check(c.snap("before") == c.snap("after") and c.trial_log in c.snap("before"), "nothing in the agent's folder is written",
               c.snap("before") + "---\n" + c.snap("after"))
         check("launcher: version 1.1.0 was tried and has not confirmed itself; %s is what the last try said that failed while"
-              " the head unit was on; starter revision 2\n" % c.trial_log in c.log(), "and the log names the copy that is there")
+              " the head unit was on; starter revision 3\n" % c.trial_log in c.log(), "and the log names the copy that is there")
     return look
 
 
@@ -686,7 +714,7 @@ def failed_try_with_no_folder_for_its_log(c):
         check(c.status() == 0 and c.starts() == ["1.1.0", "1.0.0"], "the launcher goes on to the version in current")
         check("launcher: what this try said could not be kept as %s\n" % c.trial_log in c.log(1), "and says that there is no copy")
         check(c.home_file("log") == "a file where the folder would be\n", "the file is left alone")
-        check("has not confirmed itself; no try has left a log; starter revision 2\n" in c.log(), "and the way back finds none")
+        check("has not confirmed itself; no try has left a log; starter revision 3\n" in c.log(), "and the way back finds none")
     return look
 
 
@@ -760,7 +788,7 @@ def real_agent_with_a_long_log(c):
     def look():
         check(c.status() == 0 and c.starts() == ["real"], "nbtagent started and stopped")
         older = os.path.join(c.ram_log, "agent.log.1")
-        check(c.log(1).startswith("launcher: starter revision 2\nlauncher: starting version 1.0.0\nxxxx") and len(c.log(1)) > 600 * 1024,
+        check(c.log(1).startswith("launcher: starter revision 3\nlauncher: starting version 1.0.0\nxxxx") and len(c.log(1)) > 600 * 1024,
               "what the log held is set aside")
         check(c.log().split("\n")[0].endswith("nbtagent: the log had passed 512 KB and was begun again; what it held is in " + older),
               "the new file says so in its first line", c.log()[:400])
@@ -960,7 +988,7 @@ find "$home" "$root/state" -exec stat -c '%%n|%%F|%%a|%%s|%%i|%%y|%%z' {} + | so
         old, tried = said(c, "was-ram/log/agent.log.1"), said(c, "was-ram/log/agent.log")
         check(in_order(old, "launcher: starting version " + VERSION) and "ending, for the launcher to start it" in old and
               "launcher: the agent asked to be started again" in old, "the old version ended with status 4", old[-3000:])
-        check(in_order(tried, "launcher: trying version %s, once; starter revision 2" % NEXT_VERSION, "launcher: starting version " + NEXT_VERSION) and
+        check(in_order(tried, "launcher: trying version %s, once; starter revision 3" % NEXT_VERSION, "launcher: starting version " + NEXT_VERSION) and
               "ON TRIAL" in tried and "It is confirmed" in tried and "launcher: the agent was stopped" in tried,
               "the new version was tried once, and confirmed", tried[-3000:])
         check("launcher is now the starter that version %s came with" % NEXT_VERSION in tried and "is now the starter" not in old,
@@ -1001,11 +1029,11 @@ echo $? > "$top/launcher.status"
               "it is version %s that answers, and nothing of the agent's package is installed" % VERSION, said(c, "info-after.out"))
         check(said(c, "home-after").split() == [VERSION, "current", "launcher", "log"] and c.home_file("current") == VERSION + "\n",
               "the new version's folder and the trial file are gone", said(c, "home-after"))
-        check(c.kept() is not None and c.kept().startswith("launcher: trying version %s, once; starter revision 2\n" % NEXT_VERSION) and "ON TRIAL" in c.kept() and
+        check(c.kept() is not None and c.kept().startswith("launcher: trying version %s, once; starter revision 3\n" % NEXT_VERSION) and "ON TRIAL" in c.kept() and
               c.kept().endswith("launcher: the try of version %s ended with status 137\n" % NEXT_VERSION),
               "what the try said is kept on flash", str(c.kept())[:2000])
         check(in_order(c.log(), "launcher: version %s was tried and has not confirmed itself; %s is what the last try said"
-                       " that failed while the head unit was on; starter revision 2" % (NEXT_VERSION, c.trial_log), "launcher: starting version " + VERSION) and
+                       " that failed while the head unit was on; starter revision 3" % (NEXT_VERSION, c.trial_log), "launcher: starting version " + VERSION) and
               "the update of the agent to %s was undone" % NEXT_VERSION in c.log(), "the log of the way back", c.log()[:3000])
         check(c.home_file("launcher") == OLDER_STARTER, "and the starter in place is the one that was there")
         check(said(c, "plan-again.status") == "0\n" and "org.nbtapp.agent" in said(c, "plan-again.out"),

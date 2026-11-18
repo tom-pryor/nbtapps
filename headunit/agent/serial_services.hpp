@@ -89,6 +89,10 @@ public:
     // is not the agent's. A program whose state cannot be told counts as running. From any thread.
     enum Readers { kNoneDeclared, kNoneRunning, kSomeMayRun };
     Readers readers();
+    // Whether a program of software put on by hand runs, which may read a serial link too: one whose executable is
+    // in the folder of a check's that stops programs before its fix (checks.hpp). *names: their file names. Only
+    // kProgramRunning says that one does. From any thread.
+    ProgramState handInstalledRunning(std::string* names);
 
     // Asks for the removal of every declared service that no program answers for. Returns how many removals were
     // asked for. `why` goes into the log. From any thread.

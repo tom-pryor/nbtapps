@@ -75,7 +75,8 @@ void DsiGapClient::onData(DsiClient*, uint32_t type, uint32_t id, uint32_t, cons
 SppService::SppService(GapClient* gap, Events* events)
     : gap_(gap), events_(events), type_(0), state_(kIdle), mode_(kModeOff), subscribed_(false), otherSentAt_(0),
       otherReplyS_(kOtherRemovalReplyS), unknownLeft_(0), removeError_(kNoError), clearError_(kNoError),
-      disconnectOut_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0) {
+      disconnectOut_(false), refusalAsked_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0), checkOut_(false), checkSentAt_(0),
+      unansweredSaid_(false), restoredRun_(0), oddRun_(false) {
     pthread_mutex_init(&mu_, NULL);
 }
 
@@ -217,6 +218,105 @@ bool SppService::askDeviceList() {
     return send(kReqDeviceListGet, std::vector<uint8_t>());
 }
 
+bool SppService::askAboutRefused() {
+    if (!gap_->attached()) return false;
+    pthread_mutex_lock(&mu_);
+    refusalAsked_ = true;
+    pthread_mutex_unlock(&mu_);
+    if (send(kReqDeviceListGet, std::vector<uint8_t>())) return true;
+    pthread_mutex_lock(&mu_);
+    refusalAsked_ = false;
+    pthread_mutex_unlock(&mu_);
+    return false;
+}
+
+bool SppService::checkRegistration(double replyS) {
+    if (!gap_->attached()) return false;
+    bool lost = false, sayLost = false;
+    pthread_mutex_lock(&mu_);
+    double now = monoNow();
+    if (checkOut_ && now - checkSentAt_ >= replyS) {
+        checkOut_ = false;
+        lost = true;
+        ++checks_.unanswered;
+        sayLost = !unansweredSaid_;
+        unansweredSaid_ = true;
+    }
+    bool go = state_ == kRegistered && !checkOut_;
+    if (go) {
+        checkOut_ = true;
+        checkSentAt_ = now;
+        ++checks_.sent;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (lost && sayLost)
+        say("the registration check of '%s' had no reply in %.0f s; until one is answered, later ones without a reply "
+            "are only counted", name_.c_str(), replyS);
+    if (!go) return false;
+    // Quietly: the check is not a registration of its own, and goes out every half minute.
+    if (gap_->request(kReqSppUuidRegister, buildRegister(name_, uuid_, uuid_, type_))) return true;
+    pthread_mutex_lock(&mu_);
+    checkOut_ = false;
+    --checks_.sent;
+    pthread_mutex_unlock(&mu_);
+    return false;
+}
+
+SppService::CheckCounts SppService::checkCounts() {
+    pthread_mutex_lock(&mu_);
+    CheckCounts c = checks_;
+    pthread_mutex_unlock(&mu_);
+    return c;
+}
+
+// What a registration check came to: the stack's answer, or kNoError with the type of a rejection.
+// A stack that keeps giving the same answer would write a line every round: an answer is said when it is news.
+void SppService::checkAnswered(uint32_t err, uint32_t rejectedType) {
+    bool odd = rejectedType != 0 || (err != 0 && err != 5 && err != 1 && err != 2);
+    bool sayIt = false;
+    unsigned restoredRun = 0;
+    pthread_mutex_lock(&mu_);
+    unansweredSaid_ = false;
+    if (odd) {
+        ++checks_.other;
+        if (oddRun_ && checks_.lastOdd == err && checks_.lastOddRejected == rejectedType) {
+            ++checks_.lastOddTimes;
+        } else {
+            checks_.lastOdd = err;
+            checks_.lastOddRejected = rejectedType;
+            checks_.lastOddTimes = 1;
+            oddRun_ = true;
+            sayIt = true;
+        }
+    } else if (err == 0) {
+        ++checks_.restored;
+        restoredRun = ++restoredRun_;
+        sayIt = restoredRun <= 2;
+    } else {
+        if (err == 5) ++checks_.present;
+        else ++checks_.busy;
+        restoredRun_ = 0;
+        oddRun_ = false;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (!sayIt) return;
+    if (err == 0 && restoredRun == 1) {
+        say("the car's Bluetooth had dropped the registration of '%s', as switching Bluetooth off and on in iDrive "
+            "does, with no word of it: the registration check found it gone and has registered it again",
+            name_.c_str());
+    } else if (err == 0) {
+        say("the registration of '%s' keeps being dropped: the check has found it gone and registered it again %u "
+            "times with no check finding it there in between. From now on this is only counted", name_.c_str(),
+            restoredRun);
+    } else if (rejectedType != 0) {
+        say("the Bluetooth server rejected the registration check (type 0x%x). The same answer again is only "
+            "counted", rejectedType);
+    } else {
+        say("the registration check of '%s' was answered %s. The same answer again is only counted", name_.c_str(),
+            registerErrorText(err).c_str());
+    }
+}
+
 SppService::Heard SppService::heard() {
     pthread_mutex_lock(&mu_);
     Heard h = heard_;
@@ -320,7 +420,12 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
             return true;
         }
         if (id == kReqDeviceListGet) {
+            pthread_mutex_lock(&mu_);
+            bool refusal = refusalAsked_;
+            refusalAsked_ = false;
+            pthread_mutex_unlock(&mu_);
             say("the Bluetooth server rejected DeviceListGet (type 0x%x)", type);
+            if (refusal) events_->sppRefusedPhone(PhoneInList());
             return true;
         }
         return false;
@@ -335,7 +440,11 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
             heard_.devices = l.devices;
             heard_.devicesKnown = true;
         }
+        bool refusal = id == kRspDeviceListGet && refusalAsked_;
+        if (refusal) refusalAsked_ = false;
+        std::string refused = refusedAddress_;
         pthread_mutex_unlock(&mu_);
+        if (refusal) events_->sppRefusedPhone(phoneInList(l, refused));
         if (!l.ok) {
             unread = kUnreadDeviceList;
             what = "a device list";
@@ -473,11 +582,13 @@ void SppService::gapDetached() {
     bool had = state_ == kRegSent || state_ == kClearSent || state_ == kRetrySent || state_ == kRegistered;
     if (had) state_ = kWaiting;
     subscribed_ = false;
+    checkOut_ = false;
     // Every registration went with the server, the ones that removeOther() was asked to remove among them.
     otherWaiting_.clear();
     otherSent_.clear();
     // No reply comes from a server that has gone, and what it said of the phones is old.
     disconnectOut_ = false;
+    refusalAsked_ = false;
     versionAsked_ = false;
     heard_.devicesKnown = false;
     heard_.devices.clear();
@@ -494,6 +605,11 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
             pthread_mutex_lock(&mu_);
             phoneAddress_ = q.address;
             phoneService_ = q.service;
+            pthread_mutex_unlock(&mu_);
+        }
+        if (id == kInfServiceRequestError) {
+            pthread_mutex_lock(&mu_);
+            refusedAddress_ = q.ok ? q.address : std::string();
             pthread_mutex_unlock(&mu_);
         }
         events_->sppPhone(id == kInfServiceRequest ? kPhoneAsked
@@ -524,6 +640,17 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
             else say("SppUuidDeregister reply for '%s': %s", other.c_str(), deregisterErrorText(err).c_str());
             events_->sppOtherRemoved(other, err);
             sendNextOther();
+            return;
+        }
+    }
+
+    if ((id == kRspSppUuidRegister && !rejected) || (id == kReqSppUuidRegister && rejected)) {
+        pthread_mutex_lock(&mu_);
+        bool check = checkOut_;
+        checkOut_ = false;
+        pthread_mutex_unlock(&mu_);
+        if (check) {
+            checkAnswered(rejected ? kNoError : readError(payload, len), rejected ? type : 0);
             return;
         }
     }

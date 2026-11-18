@@ -6,7 +6,7 @@
 //   nbtagent --root DIR [--socket PATH]      on a folder that stands in for the head unit
 //   nbtagent                                 on the head unit itself: in the build for the head unit only
 //   (host build also: [--test-key FILE]... [--debug-tcp [ADDRESS:]PORT])
-//   (head unit's build also: [--bluetooth] [--no-bluetooth] [--decide MS] [--decide-hold], and
+//   (head unit's build also: [--bluetooth] [--no-bluetooth] [--decide MS] [--decide-hold] [--register-check S], and
 //    `nbtagent --look PATH` for its own use)
 //
 // With --root, everything it touches is inside DIR, laid out as host_platform.hpp says: installed records,
@@ -60,6 +60,10 @@
 // the agent ends with status 4 and the launcher starts that version, on trial: see agent.hpp. Anywhere else the
 // package is refused, because nothing would start the new version.
 //
+// Once Bluetooth serial (below) has started, the start-up report (serial_report.hpp) puts into the log what the head
+// unit says of its Bluetooth: the stack's version and libraries, the software version, the stack's options, the
+// serial nodes there, and what the checks find of software put on by hand.
+//
 // Bluetooth serial (serial_link.hpp), in the build for the head unit only: phone apps connect to the agent through
 // the car's Bluetooth stack. The agent registers a serial service with the stack at run time and puts a gate in
 // front of /dev/btspp0 that refuses the car's media process, and takes both away again when it stops; nothing of
@@ -75,7 +79,9 @@
 // (serial_link.hpp): --decide MS waits that long for a link's magic bytes in place of the protocol's
 // serial.decideMs, and --decide-hold keeps the node of a link that is let go open, unread, until the link ends,
 // in place of closing it for another program or reading it to its end. The agent's first lines in the log say which of the two it goes by, and which programs
-// the gate holds off a link meanwhile.
+// the gate holds off a link meanwhile. Switching Bluetooth off and on in iDrive drops the registration, and the car
+// says nothing of it, so the agent checks it by registering it again while all is quiet: every 30 seconds, or as
+// often as --register-check S says (0: never).
 // `nbtagent --look PATH` is how the gate is checked, by this program run again: one stat() of PATH, answered by
 // the exit code.
 //
@@ -116,6 +122,7 @@
 #include <sys/stat.h>
 
 #include "hu_platform.hpp"
+#include "process.hpp"
 #include "serial_link.hpp"
 #if defined(NBT_TEST_KEYS) || defined(NBT_DEBUG_TCP) || defined(NBT_TEST_AGENT_VERSION)
 #error "the head unit's nbtagent takes no test key, has no debug TCP link and says its own version: those are for the test bench"
@@ -131,10 +138,10 @@ static void onStop(int) { gStop = 1; }
 static int usage() {
     fprintf(stderr,
 #ifdef NBT_HEAD_UNIT
-            "usage: nbtagent [--no-bluetooth] [--decide MS] [--decide-hold]\n"
+            "usage: nbtagent [--no-bluetooth] [--decide MS] [--decide-hold] [--register-check S]\n"
             "                                             work on this head unit\n"
-            "       nbtagent --root DIR [--socket PATH] [--bluetooth [--decide MS] [--decide-hold]]\n"
-            "                                             work on a folder that stands in for one\n"
+            "       nbtagent --root DIR [--socket PATH] [--bluetooth [--decide MS] [--decide-hold]\n"
+            "                [--register-check S]]           work on a folder that stands in for one\n"
             "  (no --root)     state in /var/opt/nbtapp, the socket at %s; the system\n"
             "                  partition is remounted for a write and put back, the HMI restarted\n"
             "  --bluetooth     also take phone apps' links over Bluetooth serial: the default without\n"
@@ -146,6 +153,10 @@ static int usage() {
             "                  (1 to %u; default %u, the protocol's)\n"
             "  --decide-hold   with Bluetooth serial: a link that is let go keeps its node open, unread,\n"
             "                  until the link ends, in place of having it closed or read to its end\n"
+            "  --register-check S\n"
+            "                  with Bluetooth serial: every how many seconds the registration, which\n"
+            "                  switching Bluetooth off and on drops, is checked (0 to %u; 0: never;\n"
+            "                  default %u)\n"
 #else
             "usage: nbtagent --root DIR [--socket PATH]"
 #ifdef NBT_TEST_KEYS
@@ -169,7 +180,8 @@ static int usage() {
             "  --version\n"
 #ifdef NBT_HEAD_UNIT
             ,
-            kHeadUnitSocket, kSerialDecideMostMs, (unsigned)kSerialDecideMs
+            kHeadUnitSocket, kSerialDecideMostMs, (unsigned)kSerialDecideMs, kSerialCheckMostS,
+            SerialConfig().checkMs / 1000
 #endif
             );
     return kExitUsage;
@@ -202,9 +214,11 @@ struct Options {
     int bluetooth;                 // 1: Bluetooth serial, 0: none, below 0: not said. Only the head unit's build
     unsigned decideMs;             // --decide; 0: not given, so the protocol's time. Only the head unit's build
     bool decideHold;               // --decide-hold. Only the head unit's build
+    int checkS;                    // --register-check; below 0: not given. Only the head unit's build
     std::string self;              // how this program was started, to start it again for the gate's check
 
-    Options() : debugTcpPort(-1), debugTcpAddress("127.0.0.1"), bluetooth(-1), decideMs(0), decideHold(false) {}
+    Options()
+        : debugTcpPort(-1), debugTcpAddress("127.0.0.1"), bluetooth(-1), decideMs(0), decideHold(false), checkS(-1) {}
 };
 
 #ifdef NBT_HEAD_UNIT
@@ -219,6 +233,31 @@ public:
 
 static void serviceClientLine(const char* line, void*) { logLine(stderr, std::string("bluetooth: ") + line); }
 
+// What the system's log says of the car's Bluetooth service, for a client that has not attached: the service
+// broker's line naming the version it has, from sloginfo. Its output is read as it comes and only that line is
+// kept; sloginfo is given four seconds.
+class SystemLogLook : public ServerLook, private OutputSink {
+public:
+    SystemLogLook() : finder_(0) {}
+    virtual std::string look(const std::string& iface, std::string* why) {
+        BrokerLineFinder finder(iface);
+        finder_ = &finder;
+        std::vector<std::string> argv(1, "/bin/sloginfo"), env(1, "PATH=/bin:/usr/bin:/proc/boot");
+        ProcessResult result;
+        std::string error;
+        bool ran = runProcess("/bin/ksh", argv, env, "/", 4, this, &result, &error);
+        finder_ = 0;
+        std::string line = finder.line();
+        if (!line.empty()) return line;
+        *why = brokerLookWhy(ran, error, result, 4, finder.bytes());
+        return std::string();
+    }
+
+private:
+    virtual void output(const char* data, size_t len) { finder_->feed(data, len); }
+    BrokerLineFinder* finder_;
+};
+
 // Everything Bluetooth serial is made of. Made once and never freed: the car's service library goes on calling
 // into its client for as long as the process lives.
 struct Bluetooth {
@@ -227,10 +266,12 @@ struct Bluetooth {
     SppNodeGate gate;
     SerialListener listener;
     SerialServices services;   // what other programs register, for the removal of what one leaves behind
+    SystemLogLook look;
 
     Bluetooth(const std::string& self, const Platform* platform, const Store* store, const SerialConfig& config)
         : gate(self, &log), listener(&gap, &gate, &log, config), services(platform, store, &log) {
         gap.setLog(&serviceClientLine, 0);
+        listener.setServerLook(&look);
     }
 };
 
@@ -239,6 +280,7 @@ static SerialConfig serialConfigOf(const Options& options) {
     SerialConfig config;
     if (options.decideMs != 0) config.decideMs = options.decideMs;
     config.letGoKeepsNode = options.decideHold;
+    if (options.checkS >= 0) config.checkMs = (unsigned)options.checkS * 1000;
     return config;
 }
 
@@ -319,6 +361,7 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
 
 #ifdef NBT_HEAD_UNIT
     Bluetooth* bluetooth = 0;
+    SerialReport* report = 0;
     if (options.bluetooth > 0) {
         gBluetoothTried = true;
         const SerialConfig config = serialConfigOf(options);
@@ -343,7 +386,11 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
             logLine(stderr, "bluetooth: " + describeSerialDecide(config));
             logLine(stderr, "bluetooth: " + describeSerialLinger(config));
             logLine(stderr, "bluetooth: " + describeSerialRetry(config));
+            logLine(stderr, "bluetooth: " + describeSerialCheck(config));
             logLine(stderr, "bluetooth: " + describeSerialHold(bluetooth->services.programs()));
+            // What the head unit says of its Bluetooth, on a thread of its own once the registration has gone out.
+            report = new SerialReport(platform, &agent.engine().store(), &bluetooth->log, &bluetooth->listener);
+            report->start();
         } else {
             bluetooth->services.setRemover(0);
             logLine(stderr, "no Bluetooth serial link: " + why);
@@ -376,6 +423,10 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
     // link when it hears that, and connects again if a newer version is about to start.
     agent.endPhoneLinks(handOver ? kClosingRestarting : kClosingStopping, 2000);
 #ifdef NBT_HEAD_UNIT
+    if (report != 0) {
+        report->finish();
+        delete report;
+    }
     if (bluetooth != 0) {
         // The process stays a while for the phones to end their serial links: a node closed under a link that is
         // still up leaves what the phone goes on sending ahead of every later link. The registration and the gate
@@ -498,6 +549,14 @@ int main(int argc, char** argv) {
             ++i;
         } else if (arg == "--decide-hold") {
             options.decideHold = true;
+        } else if (arg == "--register-check" && value != 0) {
+            unsigned s = 0;
+            if (!parseSerialCheckS(value, &s)) {
+                fprintf(stderr, "nbtagent: --register-check takes seconds from 0 to %u\n", kSerialCheckMostS);
+                return kExitUsage;
+            }
+            options.checkS = (int)s;
+            ++i;
 #endif
 #ifdef NBT_TEST_KEYS
         } else if (arg == "--test-key" && value != 0) {
@@ -534,8 +593,8 @@ int main(int argc, char** argv) {
     // On the head unit the socket's place is fixed: see the top of this file.
     if (options.root.empty() && !options.socketPath.empty()) return usage();
     if (options.bluetooth < 0) options.bluetooth = options.root.empty() ? 1 : 0;
-    if (options.bluetooth == 0 && (options.decideMs != 0 || options.decideHold)) {
-        fprintf(stderr, "nbtagent: --decide and --decide-hold are about Bluetooth serial, which is off%s\n",
+    if (options.bluetooth == 0 && (options.decideMs != 0 || options.decideHold || options.checkS >= 0)) {
+        fprintf(stderr, "nbtagent: --decide, --decide-hold and --register-check are about Bluetooth serial, which is off%s\n",
                 options.root.empty() ? "" : ": with --root it takes --bluetooth");
         return kExitUsage;
     }

@@ -45,10 +45,12 @@
 //     counted, dropped and said in the log, and the magic bytes are looked for after them. A link that opens with
 //     the magic bytes, so, is the agent's, and goes to the agent with those bytes. Any other link is let go, with
 //     no byte written into it, and that includes one on which the leftovers are followed by anything else, or by
-//     nothing in the time: another program's link may have the agent's old bytes in front of it. If a program
-//     declared for a serial service runs, or may run, its node is closed for that program, which finds the link as
-//     it would have, short of what the phone had said by then. If none does, nobody would ever read the link, and
-//     its node is read, with what comes dropped, until the link ends. A link nobody answers is a sign of a service that was left behind, so
+//     nothing in the time: another program's link may have the agent's old bytes in front of it. If another
+//     program may read it (a program declared for a serial service runs, or may run; the gate has seen another
+//     program open the node since the link's node appeared; or a program of software put on by hand runs), its
+//     node is closed for that program, which finds the link as it would have, short of what the phone had said by
+//     then. If none may, nobody would ever read the link, and its node is read, with what comes dropped, until the
+//     link ends. A link nobody answers is a sign of a service that was left behind, so
 //     the list of other programs' services is swept then (serial_services.hpp). SerialConfig::letGoKeepsNode
 //     (`nbtagent --decide-hold`) keeps the node of a link that is let go open instead, unread, until the link ends.
 //   * The hold. From a phone's request until its link has been let go, and for as long as a link of the agent's is
@@ -83,6 +85,7 @@
 #include "node_reader.hpp"
 #include "protocol_constants.hpp"
 #include "serial_log.hpp"
+#include "serial_report.hpp"
 #include "serial_reset.hpp"
 #include "serial_services.hpp"
 #include "spp_gate.hpp"
@@ -138,6 +141,10 @@ public:
     // looks at the node. From any thread, attached or not.
     virtual void hold(const std::vector<std::string>& programs) = 0;
     virtual void release() = 0;
+    // Whether a program other than this one has opened the node, or tried to, at `since` (monotonic seconds) or
+    // later, and would read a link there: a program the gate refuses every time is not one. *who: the last such
+    // program. From any thread.
+    virtual bool sawOtherOpen(double /*since*/, std::string* /*who*/) { return false; }
 };
 
 // The real one, for the head unit only: SppGate on /dev/btspp0, refusing the car's media process. The check is a
@@ -153,6 +160,7 @@ public:
     virtual void detach();
     virtual void hold(const std::vector<std::string>& programs);
     virtual void release();
+    virtual bool sawOtherOpen(double since, std::string* who);
 
 private:
     SppNodeGate(const SppNodeGate&);
@@ -162,7 +170,9 @@ private:
         Count() : opens(0), refused(0) {}
     };
     static void onOpen(const btspp::GateOpen& open, void* self);
+    bool attachNow(std::string* why);
     void say(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+    void sayLine(const std::string& line);    // from any thread
     bool look(long* pid, int* exitCode);
     btspp::GateCheck check(const char* when, bool* looked);
 
@@ -170,9 +180,17 @@ private:
     SerialLog* log_;
     btspp::SppGate gate_;
     bool node_;                           // the stack's node was behind the gate at the last look
-    pthread_mutex_t mu_;                  // by_, logged_
+    pthread_mutex_t mu_;                  // everything below up to held_; never held while a line is logged
     std::map<std::string, Count> by_;     // by program name; "" for a name that could not be read
     unsigned logged_;
+    double otherAt_;                      // the last open by another program that would read a link; 0: none
+    std::string other_;
+    // attach(): the lines said on the thread that runs it are held until it is known whether they are news. A line
+    // said on another thread meanwhile (the gate's own) is logged at once.
+    bool buffering_;
+    pthread_t attacher_;
+    std::vector<std::string> held_;
+    std::string lastFailure_;             // why the last attach failed; empty after one that worked
 };
 
 struct SerialConfig {
@@ -191,13 +209,92 @@ struct SerialConfig {
                                  // long after: the log says so. Its node is kept and read until the link ends
     NodeReadFn readNode;         // the timed read of a node; 0: the platform's (node_reader.hpp)
     unsigned resetArmedMs;       // serial.reset with no node open: for how long the next link is ended at its open
+    unsigned checkMs;            // the registration check (SppService::checkRegistration): how often, while the
+                                 // service is registered and quiet; 0: never
+    unsigned checkQuietMs;       // quiet: no link of the agent's up or being decided on, and no phone's request
+                                 // for a link for this long
+    unsigned attachWaitMs;       // the car's Bluetooth service not attached for this long: the log says so, once
 
     SerialConfig()
         : name(kSerialServiceName), uuid(kSerialServiceUuid), carService(kCarSerialService),
           nodePrefix("/dev/btspp"), registerMs(20000), retryMs(30000), requestWindowS(15), decideMs((unsigned)kSerialDecideMs),
           linkWaitMs(3000), letGoKeepsNode(false), lingerMs((unsigned)kSerialLingerMs), readNode(0),
-          resetArmedMs(60000) {}
+          resetArmedMs(60000), checkMs(30000), checkQuietMs(30000), attachWaitMs(10000) {}
 };
+
+// What the system's log says of the car's Bluetooth service, for a client of it that has not attached: on the head
+// unit, the service broker's line that names the version of the interface it has. A client that asks for a
+// version the server does not have is never attached, and the broker says so only in the system's log.
+class ServerLook {
+public:
+    virtual ~ServerLook() {}
+    // A line for the log; empty, with *why, if none can be given. `iface` is the interface's name. It may take a
+    // few seconds, and runs on the listener's thread.
+    virtual std::string look(const std::string& iface, std::string* why) = 0;
+};
+
+// Finds the broker's line in the system's log as it is read, a piece at a time: the last line that names `iface`
+// and the version available. A line longer than kMostLine is passed over, and so is what it holds.
+class BrokerLineFinder {
+public:
+    enum { kMostLine = 1024 };
+    explicit BrokerLineFinder(const std::string& iface) : iface_(iface), skipping_(false), bytes_(0) {}
+    void feed(const char* data, size_t len) {
+        bytes_ += len;
+        for (size_t i = 0; i < len; ++i) {
+            char c = data[i];
+            if (c == '\n') {
+                if (!skipping_) look(part_);
+                part_.clear();
+                skipping_ = false;
+            } else if (!skipping_) {
+                if (part_.size() >= kMostLine) {
+                    part_.clear();
+                    skipping_ = true;
+                } else {
+                    part_ += c;
+                }
+            }
+        }
+    }
+    // The line found, as the log may show it; empty for none. A last line with no line end counts too.
+    std::string line() {
+        if (!skipping_ && !part_.empty()) {
+            look(part_);
+            part_.clear();
+        }
+        return found_;
+    }
+
+private:
+    void look(const std::string& l) {
+        if (l.find(iface_) == std::string::npos || l.find("version available") == std::string::npos) return;
+        std::string shown;
+        for (size_t i = 0; i < l.size() && shown.size() < 300; ++i) {
+            char c = l[i];
+            if (c == '\r') continue;
+            shown += (c >= 0x20 && c < 0x7f) ? c : '?';
+        }
+        while (!shown.empty() && shown[0] == ' ') shown.erase(0, 1);
+        found_ = shown;
+    }
+
+    std::string iface_, part_, found_;
+    bool skipping_;
+    unsigned long long bytes_;
+
+public:
+    // How much has been fed in all.
+    unsigned long long bytes() const { return bytes_; }
+};
+
+struct ProcessResult;
+// Why a look at the system's log with sloginfo (run by a shell, `timeoutS` at most) gave no broker line: that
+// sloginfo could not be started (`ran` false, `error`), was not there or could not be run (the shell's 127 and 126),
+// did not end in time, ended with another status or by a signal; or, when it ran to its end, how much of the log it
+// gave, which tells an empty or short log from one that has no such line.
+std::string brokerLookWhy(bool ran, const std::string& error, const ProcessResult& result, unsigned timeoutS,
+                          unsigned long long bytes);
 
 // serial.reset with a node open: how long after the request ServiceDisconnect goes to the car, so that a caller on
 // that very link has its answer first; and how long after that the log waits to say what came of it.
@@ -225,6 +322,36 @@ inline bool parseSerialDecideMs(const char* text, unsigned* out) {
     return true;
 }
 
+// The most `--register-check` takes, in seconds.
+const unsigned kSerialCheckMostS = 3600;
+
+// The value of `--register-check`: a whole number of seconds from 0 (no check) to kSerialCheckMostS, in digits and
+// nothing else.
+inline bool parseSerialCheckS(const char* text, unsigned* out) {
+    if (text == 0 || *text == 0) return false;
+    unsigned s = 0;
+    for (const char* c = text; *c != 0; ++c) {
+        if (*c < '0' || *c > '9') return false;
+        s = s * 10 + (unsigned)(*c - '0');
+        if (s > kSerialCheckMostS) return false;
+    }
+    *out = s;
+    return true;
+}
+
+// What the listener does to find out that the car's Bluetooth has dropped the registration.
+inline std::string describeSerialCheck(const SerialConfig& config) {
+    if (config.checkMs == 0)
+        return "the registration is not checked (--register-check 0): a registration that switching Bluetooth off and "
+               "on drops stays lost until the agent is started again";
+    char every[32], quiet[32];
+    snprintf(every, sizeof every, "%u s", config.checkMs / 1000);
+    snprintf(quiet, sizeof quiet, "%u s", config.checkQuietMs / 1000);
+    return std::string("while the service is registered, no link of the agent's is up and no phone has asked for a "
+                       "link for ") + quiet + ", the registration is checked every " + every +
+           " by registering it again: switching Bluetooth off and on drops it, and the car says nothing";
+}
+
 // What the listener does with a link once it has opened its node.
 inline std::string describeSerialDecide(const SerialConfig& config) {
     char ms[96];
@@ -237,7 +364,9 @@ inline std::string describeSerialDecide(const SerialConfig& config) {
            " of the open of its node, after any whole frames left over from an earlier link. Any other is let go: " +
            (config.letGoKeepsNode ? "its node stays open, unread, until the link ends (--decide-hold)"
                                   : "its node is closed for the program it belongs to if a program declared for a "
-                                    "serial service is running, and read until the link ends if none is");
+                                    "serial service is running, the gate has seen another program open the node, "
+                                    "or a program of software put on by hand is running, and otherwise read until "
+                                    "the link ends or one of those signs comes");
 }
 
 // What becomes of a link of the agent's when the agent ends it.
@@ -271,6 +400,64 @@ inline std::string describeSerialHold(const std::vector<std::string>& programs) 
     return "while a link is being decided on or is the agent's, the gate also refuses opens by " + names;
 }
 
+// ---- what the log says when the car refuses a phone's link ----------------------------------------------------
+
+// What the agent can find out about a refusal: what the car's device list says of that phone, and the serial
+// nodes there.
+struct RefusalFacts {
+    enum List {
+        kListNotAsked,    // the device list could not be asked for
+        kListNoAnswer,    // nor did it come in time
+        kListRead         // `phone` says what came
+    };
+    enum Node { kNoNode, kNodeOurs, kNodeOther };
+    List list;
+    btspp::PhoneInList phone;
+    Node node;
+    RefusalFacts() : list(kListNotAsked), node(kNoNode) {}
+};
+
+// How long the device list is waited for after a refusal.
+const unsigned kRefusalListWaitMs = 3000;
+
+// The log's line for the `count`th refusal of a link that may be the agent's: what was found, then the other
+// causes, in the order to look at them. Never a phone's name or address.
+inline std::string describeRefusal(unsigned count, const RefusalFacts& f) {
+    char text[200];
+    snprintf(text, sizeof text, "the car refused the phone's link (%u so far). ", count);
+    std::string s = text;
+    bool pairingSaid = false;
+    if (f.list == RefusalFacts::kListNotAsked) {
+        s += "The car's device list could not be asked for. ";
+    } else if (f.list == RefusalFacts::kListNoAnswer) {
+        snprintf(text, sizeof text, "The car's device list did not come in %u s. ", kRefusalListWaitMs / 1000);
+        s += text;
+    } else if (!f.phone.ok) {
+        s += "The car's device list could not be read. ";
+    } else if (f.phone.error != 0) {
+        s += "The car did not give its device list (" + btspp::gapErrorText(f.phone.error, "") + "). ";
+    } else if (!f.phone.known) {
+        s += "The refusal named no phone to look for in the car's device list. ";
+    } else if (!f.phone.listed) {
+        s += "The phone is not in the car's device list: its pairing with the car is missing. ";
+        pairingSaid = true;
+    } else {
+        snprintf(text, sizeof text, "In the car's device list the phone is %s (connection %u), security %u. ",
+                 btspp::connectionName(f.phone.connection), f.phone.connection, f.phone.security);
+        s += text;
+    }
+    if (f.node == RefusalFacts::kNodeOther)
+        s += "A serial node is there already and is not the agent's: the car takes one phone-opened serial link at a "
+             "time. ";
+    else if (f.node == RefusalFacts::kNodeOurs)
+        s += "A serial link of the agent's is up already: the car takes one phone-opened serial link at a time. ";
+    else
+        s += "No serial node is there. ";
+    s += "Other causes, in the order to look at them: the iDrive Bluetooth pairing menu is open; the ignition is off; ";
+    if (!pairingSaid) s += "the phone's pairing with the car is broken or missing; ";
+    return s + "the car's coding does not allow serial links for phones";
+}
+
 // Where phone apps connect to the agent over Bluetooth serial.
 //
 // start() puts the gate in front, registers the service and starts the thread that opens a link's node as soon as
@@ -288,7 +475,7 @@ inline std::string describeSerialHold(const std::vector<std::string>& programs) 
 //
 // The hold goes by the links of the serial kind that are up in this process (serialLinksOpen()), so a process has
 // one listener at a time.
-class SerialListener : public Listener, public SerialServiceRemover, public SerialReset,
+class SerialListener : public Listener, public SerialServiceRemover, public SerialReset, public StackAsk,
                        private btspp::SppService::Events {
 public:
     // Nothing passed in is owned; all of it must outlive the listener, and `gap` the process (see DsiGapClient).
@@ -297,9 +484,15 @@ public:
 
     // Before start(). The services of other programs (serial_services.hpp); 0, which is how it starts, for none.
     void setServices(SerialServices* services) { services_ = services; }
+    // Before start(). What the system's log says of the car's Bluetooth service, asked once when it has not attached
+    // for SerialConfig::attachWaitMs; 0, which is how it starts, for nothing.
+    void setServerLook(ServerLook* look) { serverLook_ = look; }
     virtual bool removeSerialService(const std::string& name) { return spp_.removeOther(name); }
 
-    // False with *why if the gate is not in front or the stack cannot be reached; nothing is left behind then.
+    // Puts the gate in front and opens the client of the car's Bluetooth service. If either does not work, the
+    // listener says why in the log and tries again SerialConfig::retryMs later, and so on, each reason said once;
+    // with no retryMs, start() is false with *why instead, and nothing is left behind. False with *why also when
+    // the listener cannot run at all (no pipe or thread).
     bool start(std::string* why);
     void stop();
     // False before start(), after stop(), and from when the listener gives up until it has set itself up again.
@@ -317,6 +510,14 @@ public:
     virtual Outcome resetSerialLink(const std::string& device, const std::string& instance, const std::string& service,
                                     int64_t* forMs, std::string* why);
 
+    // For the start-up report (serial_report.hpp): whether the registration has gone to the car's Bluetooth
+    // service, and VersionGet. From any thread.
+    virtual bool registrationSent() {
+        btspp::SppService::State s = spp_.state();
+        return s != btspp::SppService::kIdle && s != btspp::SppService::kWaiting;
+    }
+    virtual bool askStackVersion() { return spp_.askVersion(); }
+
 private:
     SerialListener(const SerialListener&);
     SerialListener& operator=(const SerialListener&);
@@ -324,6 +525,9 @@ private:
     virtual void sppSay(const std::string& line);
     virtual void sppState(btspp::SppService::State now);
     virtual void sppPhone(btspp::SppService::Phone what, const std::string& service, bool parsed);
+    virtual void sppRefusedPhone(const btspp::PhoneInList& phone);
+    void sayRefusal(RefusalFacts::List list, const btspp::PhoneInList& phone);
+    void tendRefusal();
 
     static void* threadMain(void* self);
     void run();
@@ -337,17 +541,22 @@ private:
     Decided decide(NodeReader* reader, const std::string& path, double openedAt, std::vector<uint8_t>* first,
                    uint64_t* leftOver, std::string* why);
     void letGo(NodeReader* reader, int node, const std::string& path, double openedAt, const std::string& why);
+    bool otherReader(int node, std::string* why);
     void keep(int node, int fd, NodeReader* reader, const char* what);
     enum Closing { kEndedOnly, kAllButRead, kEvery };
     void closeKept(Closing which);
+    void tendLetGo();
     void tendReset();
     void watchNodes(const bool nodes[btspp::NodeTracker::kNodes], double from);
     void updateHold();
     void waitForPass();
+    void checkRegistrationIfDue();
     bool linkExpected();
     bool stopping();
     void shutDown();
+    bool setUp(std::string* why);
     bool comeBack();
+    void watchAttach(bool registered);
 
     // A link that is not the agent's, on the listener's thread only: with its node read and what comes dropped
     // (reader), or kept open and unread (fd >= 0), until the link ends; or closed, and then only for the log to say
@@ -362,6 +571,7 @@ private:
     NodeGate* gate_;
     SerialLog* log_;
     SerialServices* services_;
+    ServerLook* serverLook_;
     SerialConfig config_;
     btspp::SppService spp_;
     int wakeRead_, wakeWrite_;   // a byte per link in ready_: what the agent's select() waits on
@@ -397,6 +607,25 @@ private:
     unsigned kept_;              // the nodes in letGo_ that are open still: read, or kept unread
     Reset reset_;
     double resetHotUntil_;       // until then the thread looks without a pause, for serial.reset
+    double askedAt_;             // when a phone last asked for a link, for any service; 0: never
+    double checkedAt_;           // the listener's thread: when the registration was last checked, or registered
+    // The set-up and the attach, on the thread that sets the listener up: start()'s, then the listener's own.
+    bool opened_;                // the client of the car's Bluetooth service is open
+    bool final_;                 // it failed to open in a way no later try can mend: no more tries in this run
+    std::string lastTry_;        // why the last set-up did not work; empty after one that did
+    double unattachedSince_;     // since when the client has not been attached; 0 while it is
+    bool everAttached_;
+    bool attachSaid_;            // the log has said that it has not attached, since it last was
+    bool lookDone_;              // the server look has run, once in the listener's life
+    // The listener's thread: when it last looked at the nodes, and for each node the look before it appeared.
+    double scannedAt_;
+    double appeared_[btspp::NodeTracker::kNodes];
+    // A refusal whose line waits for the car's device list (mu_): its count, what was there, and since when.
+    unsigned refusalCount_;
+    RefusalFacts::Node refusalNode_;
+    double refusalAt_;           // 0: none waits
+    // The listener's thread: when tendLetGo() last looked for running programs of software put on by hand.
+    double handLookAt_;
 };
 
 }  // namespace nbt

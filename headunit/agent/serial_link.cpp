@@ -5,6 +5,7 @@
 #include "serial_link.hpp"
 
 #include "frame.hpp"
+#include "process.hpp"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -339,7 +340,8 @@ namespace {
 const unsigned kGateLogged = 24;
 }  // namespace
 
-SppNodeGate::SppNodeGate(const std::string& self, SerialLog* log) : self_(self), log_(log), node_(false), logged_(0) {
+SppNodeGate::SppNodeGate(const std::string& self, SerialLog* log)
+    : self_(self), log_(log), node_(false), logged_(0), otherAt_(0), buffering_(false), attacher_() {
     pthread_mutex_init(&mu_, NULL);
 }
 
@@ -353,7 +355,15 @@ void SppNodeGate::say(const char* fmt, ...) {
     va_start(ap, fmt);
     std::string line = format(fmt, ap);
     va_end(ap);
-    log_->line(line);
+    sayLine(line);
+}
+
+void SppNodeGate::sayLine(const std::string& line) {
+    pthread_mutex_lock(&mu_);
+    bool hold = buffering_ && pthread_equal(attacher_, pthread_self());
+    if (hold) held_.push_back(line);
+    pthread_mutex_unlock(&mu_);
+    if (!hold) log_->line(line);
 }
 
 // The gate's thread: an open by another program has reached the gate.
@@ -365,11 +375,16 @@ void SppNodeGate::onOpen(const GateOpen& o, void* self) {
     Count& c = g->by_[o.program];
     ++c.opens;
     if (o.answer == EACCES) ++c.refused;
+    // Another program that would read a link there: for a link that is let go (SerialListener::otherReader()).
+    if (!ownLook && gateOpenReads(o)) {
+        g->otherAt_ = monoNow();
+        g->other_ = o.program.empty() ? "a program whose name could not be read" : o.program;
+    }
     unsigned n = ownLook ? 0 : ++g->logged_;
     pthread_mutex_unlock(&g->mu_);
     if (n == 0 || n > kGateLogged) return;
-    g->log_->line(describeOpen(o, kGateBlock, kGateRefuseDefault));
-    if (n == kGateLogged) g->log_->line("gate: further opens are counted and no longer logged one by one");
+    g->sayLine(describeOpen(o, kGateBlock, kGateRefuseDefault));
+    if (n == kGateLogged) g->sayLine("gate: further opens are counted and no longer logged one by one");
 }
 
 // Runs `self --look <path>` as a process of its own and waits for it. False (errno set) if it did not start.
@@ -407,8 +422,28 @@ GateCheck SppNodeGate::check(const char* when, bool* looked) {
     return c;
 }
 
+// A listener that cannot attach the gate tries again every half minute: what an attach that fails says is logged
+// only when it fails otherwise than the one before. Only this thread's lines wait: what the gate's thread says while
+// the attach runs is not part of the attach, and say() logs it at once.
 bool SppNodeGate::attach(std::string* why) {
     if (gate_.attached()) return true;
+    pthread_mutex_lock(&mu_);
+    buffering_ = true;
+    attacher_ = pthread_self();
+    pthread_mutex_unlock(&mu_);
+    bool ok = attachNow(why);
+    std::vector<std::string> lines;
+    pthread_mutex_lock(&mu_);
+    buffering_ = false;
+    lines.swap(held_);
+    pthread_mutex_unlock(&mu_);
+    if (!ok && *why == lastFailure_) return false;
+    lastFailure_ = ok ? std::string() : *why;
+    for (size_t i = 0; i < lines.size(); ++i) log_->line(lines[i]);
+    return ok;
+}
+
+bool SppNodeGate::attachNow(std::string* why) {
     // This process's own look at the path goes past its gate, now and later: it shows the stack's node only.
     node_ = access(kGatePath, F_OK) == 0;
     if (node_)
@@ -461,6 +496,14 @@ void SppNodeGate::hold(const std::vector<std::string>& programs) {
 
 void SppNodeGate::release() { gate_.hold(false); }
 
+bool SppNodeGate::sawOtherOpen(double since, std::string* who) {
+    pthread_mutex_lock(&mu_);
+    bool saw = otherAt_ != 0 && otherAt_ >= since;
+    if (saw) *who = other_;
+    pthread_mutex_unlock(&mu_);
+    return saw;
+}
+
 void SppNodeGate::detach() {
     if (!gate_.attached()) return;
     gate_.detach();
@@ -478,10 +521,15 @@ void SppNodeGate::detach() {
 // ---- the listener ------------------------------------------------------------------------------------------------
 
 SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, const SerialConfig& config)
-    : gate_(gate), log_(log), services_(0), config_(config), spp_(gap, this), wakeRead_(-1), wakeWrite_(-1),
+    : gate_(gate), log_(log), services_(0), serverLook_(0), config_(config), spp_(gap, this), wakeRead_(-1), wakeWrite_(-1),
       hasThread_(false), watchFrom_(0), stop_(false), active_(false), tracker_(config.requestWindowS), hotUntil_(0),
-      reqAt_(0), refused_(0), deciding_(false), held_(false), holdWhy_(0), kept_(0), resetHotUntil_(0) {
-    for (int i = 0; i < NodeTracker::kNodes; ++i) watched_[i] = false;
+      reqAt_(0), refused_(0), deciding_(false), held_(false), holdWhy_(0), kept_(0), resetHotUntil_(0), askedAt_(0),
+      checkedAt_(0), opened_(false), final_(false), unattachedSince_(0), everAttached_(false), attachSaid_(false), lookDone_(false),
+      scannedAt_(0), refusalCount_(0), refusalNode_(RefusalFacts::kNoNode), refusalAt_(0), handLookAt_(0) {
+    for (int i = 0; i < NodeTracker::kNodes; ++i) {
+        watched_[i] = false;
+        appeared_[i] = 0;
+    }
     pthread_mutex_init(&mu_, NULL);
     pthread_cond_init(&wake_, NULL);
 }
@@ -555,24 +603,57 @@ bool SerialListener::start(std::string* why) {
     for (int i = 0; i < NodeTracker::kNodes; ++i)
         if (present[i]) say("%s exists already: someone else's link, left alone", nodePath(i).c_str());
 
-    // Before the service is registered, so that no link of ours can be there ahead of the gate.
-    if (!gate_->attach(why)) return false;
     spp_.configure(config_.name, config_.uuid, 0);
-    if (!spp_.start()) {
-        gate_->detach();
-        *why = "no connection to the car's Bluetooth service";
-        return false;
+    std::string failed;
+    if (!setUp(&failed)) {
+        if (config_.retryMs == 0) {
+            *why = failed;
+            return false;
+        }
+        if (final_) {
+            *why = failed + ". Bluetooth serial is off until the agent is started again";
+            return false;
+        }
+        // The listener's thread tries again: an agent that starts with the head unit may be there before the
+        // car's Bluetooth service and its library are.
+        say("Bluetooth serial is not set up: %s. Again in %u s, and each time it is tried the log says why only if "
+            "that has changed", failed.c_str(), config_.retryMs / 1000);
+        lastTry_ = failed;
     }
-    pthread_mutex_lock(&mu_);
-    active_ = true;
-    pthread_mutex_unlock(&mu_);
     hasThread_ = pthread_create(&thread_, NULL, &SerialListener::threadMain, this) == 0;
     if (!hasThread_) {
-        shutDown();
+        if (active()) shutDown();
         *why = "the serial listener's thread could not be started";
         return false;
     }
     return true;
+}
+
+// Puts the gate in front and asks for the service: on the client that is open, or on one opened now. False with
+// *why, and nothing left behind, if either does not work.
+bool SerialListener::setUp(std::string* why) {
+    // Before the service is registered, so that no link of ours can be there ahead of the gate.
+    if (!gate_->attach(why)) return false;
+    pthread_mutex_lock(&mu_);
+    active_ = true;
+    pthread_mutex_unlock(&mu_);
+    unattachedSince_ = spp_.attached() ? 0 : monoNow();
+    if (opened_) {
+        spp_.again();
+        return true;
+    }
+    if (spp_.start()) {
+        opened_ = true;
+        return true;
+    }
+    pthread_mutex_lock(&mu_);
+    active_ = false;
+    pthread_mutex_unlock(&mu_);
+    gate_->detach();
+    final_ = spp_.startFinal();
+    *why = final_ ? "the client of the car's Bluetooth service failed to open and cannot be opened again in this run"
+                  : "no connection to the car's Bluetooth service";
+    return false;
 }
 
 void SerialListener::stop() {
@@ -602,6 +683,20 @@ void SerialListener::stop() {
 // Takes the service and the gate away again: the service first, as it came second. On the thread that ends the
 // listener, which is its own when it gives up and the caller's of stop() otherwise; never both.
 void SerialListener::shutDown() {
+    SppService::CheckCounts c = spp_.checkCounts();
+    if (c.sent > 0) {
+        char odd[160] = "";
+        if (c.lastOddTimes > 0) {
+            char type[48];
+            snprintf(type, sizeof(type), "a rejection (type 0x%x)", c.lastOddRejected);
+            snprintf(odd, sizeof(odd), " (the last: %s, %u time%s in a row)",
+                     c.lastOddRejected != 0 ? type : registerErrorText(c.lastOdd).c_str(), c.lastOddTimes,
+                     c.lastOddTimes == 1 ? "" : "s");
+        }
+        say("registration checks so far: %u sent; %u found it there, %u found it dropped and registered it again, %u "
+            "found the stack busy, %u had another answer%s, %u had none", c.sent, c.present, c.restored, c.busy,
+            c.other, odd, c.unanswered);
+    }
     if (spp_.remove("leaving")) {
         double end = monoNow() + 3.0;
         SppService::State s = spp_.state();
@@ -672,6 +767,7 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
     double now = monoNow();
     unsigned refused = 0;
     if (what == SppService::kPhoneAsked) {
+        askedAt_ = now;   // for any service: the registration check keeps out of the way of a phone that asks
         tracker_.onPhoneRequest(monoSec(), maybeOurs);
         if (maybeOurs) {
             reqAt_ = now;
@@ -693,9 +789,47 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
     pthread_mutex_unlock(&mu_);
     // On, before the car accepts the link and its node is there; or off again, if the car has refused it.
     if (maybeOurs && what != SppService::kPhoneLinked) updateHold();
-    if (refused == 1 || (refused && refused % 20 == 0))
-        say("the car refused the phone's link (%u so far). It accepts a phone-opened serial link only while that "
-            "phone's Bluetooth audio is connected, with the ignition on and the pairing menu closed", refused);
+    // What can be found out about it, for the first refusal and every 20th: the serial nodes there now, and what
+    // the car's device list says of the phone, which the line waits for.
+    if (refused == 1 || (refused && refused % 20 == 0)) {
+        RefusalFacts::Node node = RefusalFacts::kNoNode;
+        pthread_mutex_lock(&mu_);
+        for (int i = 0; i < NodeTracker::kNodes; ++i) {
+            NodeTracker::State st = tracker_.state(i);
+            if (st == NodeTracker::kForeign || st == NodeTracker::kPending) node = RefusalFacts::kNodeOther;
+            else if (st == NodeTracker::kOurs && node == RefusalFacts::kNoNode) node = RefusalFacts::kNodeOurs;
+        }
+        refusalCount_ = refused;
+        refusalNode_ = node;
+        refusalAt_ = monoNow();
+        pthread_mutex_unlock(&mu_);
+        if (!spp_.askAboutRefused()) sayRefusal(RefusalFacts::kListNotAsked, PhoneInList());
+    }
+}
+
+// The car's device list has come for the refusal that waits for it: on the Bluetooth service's thread.
+void SerialListener::sppRefusedPhone(const PhoneInList& phone) { sayRefusal(RefusalFacts::kListRead, phone); }
+
+// The line for the refusal that waits, if one does, with what is known of the device list.
+void SerialListener::sayRefusal(RefusalFacts::List list, const PhoneInList& phone) {
+    RefusalFacts f;
+    f.list = list;
+    f.phone = phone;
+    pthread_mutex_lock(&mu_);
+    bool waits = refusalAt_ != 0;
+    refusalAt_ = 0;
+    unsigned count = refusalCount_;
+    f.node = refusalNode_;
+    pthread_mutex_unlock(&mu_);
+    if (waits) say("%s", describeRefusal(count, f).c_str());
+}
+
+// On the listener's thread: a refusal whose device list has not come in time is said without it.
+void SerialListener::tendRefusal() {
+    pthread_mutex_lock(&mu_);
+    bool late = refusalAt_ != 0 && monoNow() - refusalAt_ >= kRefusalListWaitMs / 1000.0;
+    pthread_mutex_unlock(&mu_);
+    if (late) sayRefusal(RefusalFacts::kListNoAnswer, PhoneInList());
 }
 
 // ---- the listener's thread -------------------------------------------------------------------------------------
@@ -727,6 +861,22 @@ void SerialListener::waitForPass() {
     }
     pthread_mutex_unlock(&mu_);
     if (hot) usleep(2000);
+}
+
+// The registration check (SppService::checkRegistration), on the listener's thread while the service is
+// registered: every SerialConfig::checkMs, and only while all is quiet. A registration sent while a phone asks for
+// a link can get in that link's way, and one sent while a link of the agent's is up is not needed: the link is
+// there.
+void SerialListener::checkRegistrationIfDue() {
+    if (config_.checkMs == 0) return;
+    double now = monoNow();
+    if (now - checkedAt_ < config_.checkMs / 1000.0) return;
+    pthread_mutex_lock(&mu_);
+    bool quiet = !deciding_ && reqAt_ == 0 && (askedAt_ == 0 || now - askedAt_ >= config_.checkQuietMs / 1000.0);
+    pthread_mutex_unlock(&mu_);
+    if (!quiet || serialLinksOpen() != 0) return;
+    checkedAt_ = now;
+    spp_.checkRegistration(config_.checkMs / 1000.0);
 }
 
 // ---- serial.reset ------------------------------------------------------------------------------------------------
@@ -999,10 +1149,39 @@ SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::st
     }
 }
 
+// Whether another program may read the link on node `node`, and *why: a program declared for a serial service
+// runs, or may; the gate has seen another program open the node, or try to, since this link's node appeared; or a
+// program of software put on by hand runs, which is not declared and may read serial links of its own. *why says
+// which, or, with none, that none of them is so.
+bool SerialListener::otherReader(int node, std::string* why) {
+    SerialServices::Readers readers = services_ != 0 ? services_->readers() : SerialServices::kNoneDeclared;
+    if (readers == SerialServices::kSomeMayRun) {
+        *why = "a program declared for a serial service is running, or whether one is cannot be told";
+        return true;
+    }
+    std::string who;
+    // The gate is in front of the first node only.
+    if (node == 0 && appeared_[node] > 0 && gate_->sawOtherOpen(appeared_[node], &who)) {
+        *why = "the gate saw " + who + " open the node, or try to, since this link's node appeared";
+        return true;
+    }
+    std::string names;
+    if (services_ != 0 && services_->handInstalledRunning(&names) == kProgramRunning) {
+        *why = "a program of software put on by hand is running (" + names + "), which may read serial links";
+        return true;
+    }
+    *why = std::string(readers == SerialServices::kNoneDeclared ? "No program is declared for a serial service"
+                                                                : "No program declared for a serial service is running") +
+           ", the gate has seen no other program open the node since the link's node appeared, and no program of "
+           "software put on by hand is running";
+    return false;
+}
+
 // Lets the link on the node go: it was not the agent's, and nothing was written into it. Who reads it now decides
-// what becomes of its node. A program declared for a serial service that runs, or may run, gets the node: the
-// reader is stopped and the node closed for it. With none, nobody would ever read the link, and bytes that wait
-// unread ahead of a node come on the next link: the node is read, and what comes dropped, until the link ends.
+// what becomes of its node (otherReader()). If another program may read it, the reader is stopped and the node
+// closed for that program. With none, nobody would ever read the link, and bytes that wait unread ahead of a node
+// come on the next link: the node is read, and what comes dropped, until the link ends or a sign of another reader
+// comes after all (tendLetGo()).
 void SerialListener::letGo(NodeReader* reader, int node, const std::string& path, double openedAt, const std::string& why) {
     double ms = (monoNow() - openedAt) * 1000.0;
     if (config_.letGoKeepsNode) {
@@ -1012,20 +1191,19 @@ void SerialListener::letGo(NodeReader* reader, int node, const std::string& path
         keep(node, fd, 0, "let go");
         return;
     }
-    SerialServices::Readers readers = services_ != 0 ? services_->readers() : SerialServices::kNoneDeclared;
-    if (readers == SerialServices::kSomeMayRun) {
+    std::string reason;
+    if (otherReader(node, &reason)) {
         reader->finish();
         bool there = access(path.c_str(), F_OK) == 0;
-        say("%s let go %.0f ms after the open (%s) and closed: %s", path.c_str(), ms, why.c_str(),
-            there ? "its node is still there" : "its node went with the close");
+        say("%s let go %.0f ms after the open (%s) and closed: %s. It is closed for another reader: %s", path.c_str(),
+            ms, why.c_str(), there ? "its node is still there" : "its node went with the close", reason.c_str());
         if (there) keep(node, -1, 0, "let go");   // until its node goes
         return;
     }
     reader->drain();
+    handLookAt_ = monoNow();   // otherReader() has just looked
     say("%s let go %.0f ms after the open (%s). %s, so nobody would read it: its node is read, with what comes "
-        "dropped, until the link ends", path.c_str(), ms, why.c_str(),
-        readers == SerialServices::kNoneDeclared ? "No program is declared for a serial service"
-                                                 : "No program declared for a serial service is running");
+        "dropped, until the link ends", path.c_str(), ms, why.c_str(), reason.c_str());
     keep(node, -1, reader, "let go");
 }
 
@@ -1043,6 +1221,49 @@ void SerialListener::keep(int node, int fd, NodeReader* reader, const char* what
         pthread_mutex_lock(&mu_);
         ++kept_;
         pthread_mutex_unlock(&mu_);
+    }
+}
+
+namespace {
+// How often tendLetGo() looks for running programs of software put on by hand: the look walks the process list.
+const double kHandLookEveryS = 2.0;
+}  // namespace
+
+// A link that was let go and is read and dropped had no sign of another reader when it was let go. One may come
+// later: a program that the gate sees open the node, or try to, since the link was let go (the first node only),
+// or a program of software put on by hand that has started to run. Then the reading stops and the node is closed
+// for that program. The bytes read and dropped before that moment are gone; the log says how many.
+void SerialListener::tendLetGo() {
+    bool handLooked = false;
+    std::string hand;
+    for (size_t i = 0; i < letGo_.size(); ++i) {
+        LetGo& kept = letGo_[i];
+        if (kept.reader == 0 || strcmp(kept.what, "let go") != 0 || kept.reader->ended()) continue;
+        std::string who, sign;
+        if (kept.node == 0 && gate_->sawOtherOpen(kept.at, &who)) {
+            sign = "the gate saw " + who + " open the node, or try to";
+        } else {
+            double now = monoNow();
+            if (!handLooked && services_ != 0 && (handLookAt_ == 0 || now - handLookAt_ >= kHandLookEveryS)) {
+                handLooked = true;
+                handLookAt_ = now;
+                std::string names;
+                if (services_->handInstalledRunning(&names) == kProgramRunning) hand = names;
+            }
+            if (!hand.empty()) sign = "a program of software put on by hand is running (" + hand + ")";
+        }
+        if (sign.empty()) continue;
+        uint64_t dropped = kept.reader->dropped();
+        kept.reader->finish();
+        kept.reader = 0;
+        pthread_mutex_lock(&mu_);
+        --kept_;
+        pthread_mutex_unlock(&mu_);
+        std::string path = nodePath(kept.node);
+        say("%s: reading it stopped, and its node closed for another reader, %.1f s after it was let go: %s. %llu B "
+            "had been read and dropped by then", path.c_str(), monoNow() - kept.at, sign.c_str(),
+            (unsigned long long)dropped);
+        // It stays on the list, closed, for the log to say when its node goes.
     }
 }
 
@@ -1182,6 +1403,8 @@ void SerialListener::take(int node) {
 void SerialListener::lookForLinks() {
     closeKept(kEndedOnly);
     bool present[NodeTracker::kNodes];
+    double lastLook = scannedAt_;
+    scannedAt_ = monoNow();
     scanNodes(present);
     NodeTracker::State before[NodeTracker::kNodes], after[NodeTracker::kNodes];
     bool other[NodeTracker::kNodes];
@@ -1193,6 +1416,9 @@ void SerialListener::lookForLinks() {
         other[i] = tracker_.otherService(i);
     }
     pthread_mutex_unlock(&mu_);
+    // A node that is new has appeared since the look before this one.
+    for (int i = 0; i < NodeTracker::kNodes; ++i)
+        if (present[i] && before[i] == NodeTracker::kAbsent) appeared_[i] = lastLook > 0 ? lastLook : scannedAt_;
     if (ours >= 0) take(ours);
     for (int i = 0; i < NodeTracker::kNodes; ++i) {
         if (before[i] == after[i] || after[i] != NodeTracker::kForeign) continue;
@@ -1225,21 +1451,96 @@ bool SerialListener::comeBack() {
         tracker_.baseline(present);
         pthread_mutex_unlock(&mu_);
         std::string why;
-        // Before the service is registered, as in start().
-        if (!gate_->attach(&why)) {
-            say("Bluetooth serial is not set up again: %s. Again in %u s", why.c_str(), config_.retryMs / 1000);
+        if (!setUp(&why)) {
+            if (final_) {
+                say("Bluetooth serial is not set up again: %s. It is off until the agent is started again, and not "
+                    "tried again", why.c_str());
+                return false;
+            }
+            // Each reason once, however many tries it takes.
+            if (why != lastTry_)
+                say("Bluetooth serial is not set up again: %s. Again in %u s", why.c_str(), config_.retryMs / 1000);
+            lastTry_ = why;
             continue;
         }
+        lastTry_.clear();
         say("setting Bluetooth serial up again");
-        pthread_mutex_lock(&mu_);
-        active_ = true;
-        pthread_mutex_unlock(&mu_);
-        spp_.again();
         return true;
     }
 }
 
+// On the listener's thread at every pass: says once when the car's Bluetooth service has not attached for
+// SerialConfig::attachWaitMs, with the version asked for, and asks the server look, once in the listener's life,
+// what the system's log says of it.
+void SerialListener::watchAttach(bool registered) {
+    double now = monoNow();
+    if (spp_.attached()) {
+        everAttached_ = true;
+        unattachedSince_ = 0;
+        attachSaid_ = false;
+        return;
+    }
+    if (registered) return;
+    if (unattachedSince_ == 0) unattachedSince_ = now;
+    if (attachSaid_ || now - unattachedSince_ < config_.attachWaitMs / 1000.0) return;
+    attachSaid_ = true;
+    if (everAttached_) {
+        say("the car's Bluetooth service has been gone for %g s: the agent waits for it to come back (it asks the "
+            "service broker for %s)", config_.attachWaitMs / 1000.0, spp_.server().c_str());
+    } else {
+        say("the car's Bluetooth service has not attached %g s after the agent asked the service broker for %s. The "
+            "broker attaches a client only to a server with the same major version and a minor version as high or "
+            "higher, and otherwise tells the client nothing", config_.attachWaitMs / 1000.0, spp_.server().c_str());
+    }
+    if (serverLook_ == 0 || lookDone_) return;
+    lookDone_ = true;
+    double from = monoNow();
+    std::string why;
+    std::string line = serverLook_->look(btspp::kGapInterface, &why);
+    if (!line.empty())
+        say("the system log, %.1f s to read, says of the service: %s", monoNow() - from, line.c_str());
+    else
+        say("the system log gave no line about the service's version: %s", why.c_str());
+}
+
+namespace {
+std::string amount(unsigned long long bytes) {
+    char b[48];
+    if (bytes < 1024) snprintf(b, sizeof(b), "%llu B", bytes);
+    else snprintf(b, sizeof(b), "%llu KB", (bytes + 512) / 1024);
+    return b;
+}
+}  // namespace
+
+std::string brokerLookWhy(bool ran, const std::string& error, const ProcessResult& result, unsigned timeoutS,
+                          unsigned long long bytes) {
+    char b[256];
+    const char* none = "with no line of the service broker's about it";
+    if (!ran) return "sloginfo could not be started: " + error;
+    if (result.timedOut) {
+        snprintf(b, sizeof(b), "sloginfo did not end in %u s; it had given %s by then, %s", timeoutS,
+                 amount(bytes).c_str(), none);
+    } else if (result.exited && result.exitCode == 127) {
+        snprintf(b, sizeof(b), "sloginfo is not there (the shell's status 127)");
+    } else if (result.exited && result.exitCode == 126) {
+        snprintf(b, sizeof(b), "sloginfo is there but could not be run (the shell's status 126)");
+    } else if (result.exited && result.exitCode != 0) {
+        snprintf(b, sizeof(b), "sloginfo ended with status %d after giving %s, %s", result.exitCode,
+                 amount(bytes).c_str(), none);
+    } else if (!result.exited) {
+        snprintf(b, sizeof(b), "sloginfo was ended by signal %d after giving %s, %s", result.signal,
+                 amount(bytes).c_str(), none);
+    } else if (bytes == 0) {
+        snprintf(b, sizeof(b), "sloginfo ran and gave nothing: the system log is empty, or could not be read");
+    } else {
+        snprintf(b, sizeof(b), "sloginfo read %s of the system log, %s", amount(bytes).c_str(), none);
+    }
+    return b;
+}
+
 void SerialListener::run() {
+    // start() could not set the listener up: from here it tries again.
+    if (!active() && !comeBack()) return;
     bool registered = false;
     double deadline = monoNow() + config_.registerMs / 1000.0;
     while (!stopping()) {
@@ -1251,14 +1552,23 @@ void SerialListener::run() {
                 // What another program left registered would have a phone open links that nothing answers, and
                 // those keep the phone's app from this service.
                 if (services_ != 0) services_->sweep("the agent's serial service has just been registered");
+                checkedAt_ = monoNow();
             }
             registered = true;
+            checkRegistrationIfDue();
         } else {
             if (registered) deadline = monoNow() + config_.registerMs / 1000.0;
             registered = false;
             if (s == SppService::kFailed || monoNow() >= deadline) {
-                const char* what = s == SppService::kFailed ? "the car's Bluetooth service did not take the registration"
-                                                            : "the serial service is not registered, and has not been for too long";
+                std::string never = "the car's Bluetooth service never attached (the agent asked the service broker "
+                                    "for " + spp_.server() + ")";
+                const char* what =
+                    s == SppService::kFailed ? "the car's Bluetooth service did not take the registration"
+                    : !spp_.attached() ? (everAttached_ ? "the car's Bluetooth service went away and has not come back"
+                                                        : never.c_str())
+                    : (s == SppService::kRegSent || s == SppService::kClearSent || s == SppService::kRetrySent)
+                        ? "the car's Bluetooth service is attached and has not answered the registration"
+                        : "the serial service is not registered, and has not been for too long";
                 if (config_.retryMs == 0) {
                     say("%s: Bluetooth serial is off until the agent is started again", what);
                     shutDown();
@@ -1271,8 +1581,11 @@ void SerialListener::run() {
                 continue;
             }
         }
+        watchAttach(registered);
         lookForLinks();
+        tendLetGo();
         tendReset();
+        tendRefusal();
         // The hold goes off when the agent's link has ended, or when no link has come of a phone's request.
         updateHold();
         // Not while a link is expected: the check takes some ten milliseconds, and the open must not wait for it.

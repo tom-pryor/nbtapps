@@ -32,7 +32,8 @@
 #   4            the agent asked to be started again: at once, after a new look at the files
 #   any other    of a version on trial: the try has failed. This start's log is copied into the agent's folder,
 #                and the files are looked at again, which starts the version in current
-#                of the version in current: the starter ends with that status
+#                of the version in current: the starter ends with that status, and says so in the log first. 126
+#                and 127 are what the shell answers for a launcher it cannot run or find
 # With no version to start it ends with status 1, and with another starter running, with status 3.
 #
 # What it hands a version's launcher: its own arguments as they are, and in the environment
@@ -69,7 +70,7 @@
 #
 # Its revision. STARTER_REVISION below is this file's own number, raised when the file changes and by nothing
 # else: a version of the agent that comes with the same starter comes with the same number. The log of each
-# start it makes names it ("starter revision 2"), so the log says which starter is in place on a head unit. The
+# start it makes names it ("starter revision 3"), so the log says which starter is in place on a head unit. The
 # starter before the first number, which came with agent 1.1.0, says nothing of it.
 #
 # A version's name starts with a digit and holds letters, digits, '.', '+' and '-' only, 64 at most, so no file's
@@ -83,7 +84,7 @@ EXIT_STOPPED=0
 EXIT_NO_RESTART=3
 EXIT_RESTART=4
 
-STARTER_REVISION=2
+STARTER_REVISION=3
 
 case $0 in
     */*) AGENT_HOME=${0%/*} ;;
@@ -223,7 +224,14 @@ while :; do
     unset NBT_LAUNCH_DELAY     # the wait is before the first start only
     if [ $status -eq $EXIT_STOPPED ]; then exit 0; fi
     if [ $status -eq $EXIT_RESTART ]; then continue; fi
-    if [ -z "$TRYING" ]; then exit $status; fi
+    if [ -z "$TRYING" ]; then
+        case $status in
+            126) say "version $VERSION's launcher could not be run (status 126): the starter ends" ;;
+            127) say "version $VERSION's launcher, or the shell that runs it, was not found (status 127): the starter ends" ;;
+            *) say "version $VERSION's launcher ended with status $status: the starter ends with the same" ;;
+        esac
+        exit $status
+    fi
     # The try is over, and trial.started says so to the next look at the files.
     say "the try of version $VERSION ended with status $status"
     keep_try

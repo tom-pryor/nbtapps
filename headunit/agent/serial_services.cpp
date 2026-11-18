@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 
+#include "checks.hpp"
 #include "fsutil.hpp"
 
 namespace nbt {
@@ -161,6 +162,25 @@ SerialServices::Readers SerialServices::readers() {
         if (platform_->programState(names[i]) != kProgramNotRunning) return kSomeMayRun;
     }
     return kNoneRunning;
+}
+
+ProgramState SerialServices::handInstalledRunning(std::string* names) {
+    std::set<std::string> found;
+    ProgramState state = kProgramNotRunning;
+    for (size_t i = 0; i < checkCount(); ++i) {
+        const Check& check = checkAt(i);
+        if (check.stopUnder == 0) continue;
+        std::vector<RunningProgram> running;
+        ProgramState s = platform_->programsUnder(platform_->systemPath(check.stopUnder), &running);
+        if (s == kProgramRunning) {
+            state = kProgramRunning;
+            for (size_t k = 0; k < running.size(); ++k) found.insert(programName(running[k].path.c_str()));
+        } else if (s == kProgramUnknown && state != kProgramRunning) {
+            state = kProgramUnknown;
+        }
+    }
+    *names = list(found);
+    return state;
 }
 
 unsigned SerialServices::sweep(const char* why) { return sweepOf(declared(), why); }

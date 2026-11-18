@@ -58,7 +58,15 @@ const size_t kStreamSize = 0xbc + 64;
 
 DsiClient::DsiClient()
     : lib_(NULL), conn_(NULL), cli_(NULL), attached_(false), verbose_(false), attachedCb_(NULL), dataCb_(NULL),
-      detachedCb_(NULL), user_(NULL), log_(NULL), logUser_(NULL) {}
+      detachedCb_(NULL), user_(NULL), log_(NULL), logUser_(NULL), symbolsTried_(false), final_(false) {}
+
+// Why open() did not work, said only when it differs from the time before: a caller may try again and again.
+bool DsiClient::failOpen(const char* why, const char* detail) {
+    std::string text = std::string(why) + (detail != 0 && *detail != 0 ? std::string(": ") + detail : std::string());
+    if (text != lastFailure_) say("%s", text.c_str());
+    lastFailure_ = text;
+    return false;
+}
 
 void DsiClient::say(const char* fmt, ...) const {
     char line[512] = "[dsi] ";
@@ -76,7 +84,7 @@ void DsiClient::say(const char* fmt, ...) const {
 
 void* DsiClient::need(const char* name) const {
     void* p = dlsym(lib_, name);
-    if (!p) say("symbol missing in the DSI library: %s", name);
+    if (!p && !symbolsTried_) say("symbol missing in the DSI library: %s", name);
     return p;
 }
 
@@ -87,11 +95,19 @@ void DsiClient::setCallbacks(AttachedCb attached, DataCb data, DetachedCb detach
     user_ = user;
 }
 
+// A failure once the client object exists: the object is half made, and is not taken apart again.
+bool DsiClient::failFinal(const char* why) {
+    final_ = true;
+    std::string text = std::string(why) + ". This client cannot be opened again until the program is started again";
+    return failOpen(text.c_str(), 0);
+}
+
 bool DsiClient::open(const char* iface, const char* role, int major, int minor) {
-    if (cli_) { say("open: this client is already open"); return false; }
+    if (final_) return failOpen(lastFailure_.c_str(), 0);   // said already
+    if (cli_) return failFinal("open: this client is already open");
     // The object sizes, field offsets and vtable slots below are those of the head unit's library, which is 32-bit.
-    if (sizeof(void*) != 4) { say("open: this client works in a 32-bit program only"); return false; }
-    if (g_nslots >= kMaxClients) { say("open: too many clients (max %d)", (int)kMaxClients); return false; }
+    if (sizeof(void*) != 4) return failOpen("open: this client works in a 32-bit program only", 0);
+    if (g_nslots >= kMaxClients) return failOpen("open: too many clients", 0);
 
     const char* const names[] = { "/opt/sys/lib/libsys_dsi_colibry.cpp-ne.so.8",
                                   "/fs/sda0/opt/sys/lib/libsys_dsi_colibry.cpp-ne.so.8",
@@ -101,8 +117,8 @@ bool DsiClient::open(const char* iface, const char* role, int major, int minor) 
         if (verbose_) say("dlopen(%s): %s", names[i], lib_ ? "ok" : dlerror());
     }
     if (!lib_) {
-        say("the DSI library %s could not be loaded: %s", names[2], dlerror());
-        return false;
+        std::string what = std::string("the DSI library ") + names[2] + " could not be loaded";
+        return failOpen(what.c_str(), dlerror());
     }
 
     pthread_mutex_lock(&g_symMutex);
@@ -119,17 +135,23 @@ bool DsiClient::open(const char* iface, const char* role, int major, int minor) 
         g_s.vtable      = need("_ZTV10CDSIClient");
         if (!g_s.connCtor || !g_s.connAdd || !g_s.connStart || !g_s.cliCtor || !g_s.streamCtor ||
             !g_s.streamWrite || !g_s.streamSend || !g_s.streamDtor || !g_s.vtable) {
-            say("this head unit's DSI library lacks symbols this client needs: not connecting");
+            symbolsTried_ = true;
             memset(&g_s, 0, sizeof(g_s));
             pthread_mutex_unlock(&g_symMutex);
-            return false;
+            return failOpen("this head unit's DSI library lacks symbols this client needs: not connecting", 0);
         }
     }
     pthread_mutex_unlock(&g_symMutex);
 
     conn_ = calloc(1, kConnSize);
     cli_  = static_cast<char*>(calloc(1, kClientSize));
-    if (!conn_ || !cli_) return false;
+    if (!conn_ || !cli_) {
+        free(conn_);
+        free(cli_);
+        conn_ = NULL;
+        cli_ = NULL;
+        return failOpen("open: no memory for the client", 0);
+    }
 
     g_s.connCtor(conn_);
     g_s.cliCtor(cli_, iface, role, major, minor);
@@ -137,7 +159,7 @@ bool DsiClient::open(const char* iface, const char* role, int major, int minor) 
     // CDSIClient is abstract: give the object a copy of its vtable (vptr = _ZTV + 8) with three slots replaced.
     // 32 slots are copied so that a virtual beyond the ones known here still resolves to the library's own entry.
     void** vt = static_cast<void**>(calloc(32, sizeof(void*)));
-    if (!vt) return false;
+    if (!vt) return failFinal("open: no memory for the client's vtable");
     memcpy(vt, static_cast<char*>(g_s.vtable) + 8, 32 * sizeof(void*));
     vt[3] = reinterpret_cast<void*>(&DsiClient::onAttachedTramp);   // +0x0c attached
     vt[4] = reinterpret_cast<void*>(&DsiClient::onDetachedTramp);   // +0x10 detached
@@ -159,8 +181,9 @@ bool DsiClient::open(const char* iface, const char* role, int major, int minor) 
     pthread_t t;
     bool started = pthread_create(&t, &at, &DsiClient::threadMain, this) == 0;
     pthread_attr_destroy(&at);
-    if (!started) say("could not start the connection thread");
-    return started;
+    if (!started) return failFinal("could not start the connection thread");
+    lastFailure_.clear();
+    return true;
 }
 
 void* DsiClient::threadMain(void* arg) {

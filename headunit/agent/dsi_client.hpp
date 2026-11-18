@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string>
 #include <vector>
 
 namespace nbt {
@@ -38,8 +39,13 @@ public:
     void setLog(LogFn log, void* user) { log_ = log; logUser_ = user; }
 
     // The server is "<role>.<iface>" at the service broker, e.g. open("SGBluetoothGap", "BSS_GAP", 35, 0).
-    // Returns once the connection thread runs; `attached` follows when the server answers.
+    // Returns once the connection thread runs; `attached` follows when the server answers. False, said in the log,
+    // if it cannot: a caller may try again, and the same reason is not said twice in a row. Unless openFinal().
     bool open(const char* iface, const char* role, int major, int minor);
+    // After open() has returned false: it failed once the client object had been made (no memory for its vtable,
+    // the connection thread not started), and is not made resumable. Every later open() fails the same way, without
+    // a word: the program has to be started again.
+    bool openFinal() const { return final_; }
 
     bool attached() const { return attached_; }
     // Both false when the server is not attached or the message could not be sent; a failed send is logged.
@@ -56,6 +62,8 @@ public:
 private:
     static void* threadMain(void* arg);
     int send(uint32_t requestType, uint32_t id, const std::vector<uint8_t>& payload);
+    bool failOpen(const char* why, const char* detail);
+    bool failFinal(const char* why);
     void say(const char* fmt, ...) const __attribute__((format(printf, 2, 3)));
     void* need(const char* name) const;
 
@@ -70,6 +78,9 @@ private:
     void* user_;
     LogFn log_;
     void* logUser_;
+    std::string lastFailure_;   // why open() last did not work
+    bool symbolsTried_;         // the library's symbols were looked for, and some were missing
+    bool final_;                // see openFinal()
 };
 
 } // namespace nbt

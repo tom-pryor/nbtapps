@@ -114,6 +114,7 @@ public:
         e.parsed = parsed;
         phone.push_back(e);
     }
+    virtual void sppRefusedPhone(const PhoneInList& phone) { refused.push_back(phone); }
     virtual void sppOtherRemoved(const std::string& name, uint32_t error) {
         char b[32];
         snprintf(b, sizeof(b), "=%d", error == kNoError ? -1 : (int)error);
@@ -146,6 +147,7 @@ public:
     std::vector<std::string> lines;
     std::vector<SppService::State> states;
     std::vector<PhoneEvent> phone;
+    std::vector<PhoneInList> refused;
     std::string others;
 };
 
@@ -1051,6 +1053,244 @@ int main() {
         CHECK(seen.said("the Bluetooth server could not be asked for inform 0x80000009: the request could not be sent"));
         gap.takes = false;
         CHECK(!spp.askVersion() && seen.said("DSI request 0x3 not sent: the send to the Bluetooth server failed"));
+    }
+
+    // 20. The registration check: SppUuidRegister for our own name once more. It changes no state, never removes
+    //     anything, and says only what is news.
+    {
+        Registered r;
+        size_t lines = r.seen.lines.size();
+        // Still there: 5, counted only.
+        CHECK(r.spp.checkRegistration(30));
+        isRegister(r.gap.took(kReqSppUuidRegister), 0);
+        CHECK(!r.spp.checkRegistration(30) && r.gap.sent.empty());   // one at a time
+        r.gap.reply(kRspSppUuidRegister, 5);
+        CHECK(r.spp.state() == SppService::kRegistered && r.gap.sent.empty() && r.seen.lines.size() == lines);
+        CHECK(r.seen.passed().empty());
+        // Busy, both ways: counted, and the next round asks again.
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 1);
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 2);
+        CHECK(r.gap.sent.empty() && r.seen.lines.size() == lines && r.spp.state() == SppService::kRegistered);
+        // Lost and registered again: logged.
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 0);
+        CHECK(r.seen.said("the car's Bluetooth had dropped the registration of 'Test_Service', as switching Bluetooth "
+                          "off and on in iDrive does, with no word of it: the registration check found it gone and has "
+                          "registered it again"));
+        CHECK(r.gap.sent.empty() && r.spp.state() == SppService::kRegistered && r.seen.passed().empty());
+        // Anything else: logged, and still nothing removed.
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 12);
+        CHECK(r.seen.said("the registration check of 'Test_Service' was answered 12 HW_NOT_READY"));
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reject(kTypeRejectedA, kReqSppUuidRegister);
+        CHECK(r.seen.said("the Bluetooth server rejected the registration check (type 0x202)"));
+        CHECK(r.gap.sent.empty() && r.spp.state() == SppService::kRegistered && r.seen.passed().empty());
+        // No reply: after the time given, counted, said once, and the next check goes.
+        CHECK(r.spp.checkRegistration(0.05));
+        r.gap.took(kReqSppUuidRegister);
+        usleep(80000);
+        CHECK(r.spp.checkRegistration(0.05));
+        r.gap.took(kReqSppUuidRegister);
+        usleep(80000);
+        CHECK(r.spp.checkRegistration(0.05));
+        r.gap.took(kReqSppUuidRegister);
+        size_t silent = 0;
+        for (size_t i = 0; i < r.seen.lines.size(); ++i) silent += r.seen.lines[i].find("had no reply") != std::string::npos;
+        CHECK(silent == 1);
+        r.gap.reply(kRspSppUuidRegister, 5);
+        SppService::CheckCounts c = r.spp.checkCounts();
+        CHECK(c.sent == 9 && c.present == 2 && c.busy == 2 && c.restored == 1 && c.other == 2 && c.unanswered == 2);
+        // The registration log line of the start-up path is not among what a check says.
+        size_t registers = 0;
+        for (size_t i = 0; i < r.seen.lines.size(); ++i) registers += r.seen.lines[i].find("SppUuidRegister") != std::string::npos;
+        CHECK(registers == 2);   // the start-up's request and its reply
+        // The server goes with a check out: the check goes with it, and none goes while it is away.
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.detach();
+        CHECK(!r.spp.checkRegistration(30) && r.gap.sent.empty());
+        // It comes back: the start-up path registers, and a 5 there is still the start-up path's.
+        r.gap.attach();
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 0);
+        CHECK(r.spp.state() == SppService::kRegistered && r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 5);
+        CHECK(r.gap.sent.empty() && r.spp.state() == SppService::kRegistered);
+    }
+    // 20a. An answer that keeps coming is said once: a stack that gives it every round writes no line every 30 s.
+    {
+        struct Count {
+            static size_t of(const Seen& seen, const char* part) {
+                size_t n = 0;
+                for (size_t i = 0; i < seen.lines.size(); ++i) n += seen.lines[i].find(part) != std::string::npos;
+                return n;
+            }
+        };
+        Registered r;
+        // The same odd answer three times: one line.
+        for (int i = 0; i < 3; ++i) {
+            CHECK(r.spp.checkRegistration(30));
+            r.gap.took(kReqSppUuidRegister);
+            r.gap.reply(kRspSppUuidRegister, 12);
+        }
+        CHECK(Count::of(r.seen, "was answered 12 HW_NOT_READY") == 1);
+        CHECK(r.seen.said("the registration check of 'Test_Service' was answered 12 HW_NOT_READY. The same answer "
+                          "again is only counted"));
+        SppService::CheckCounts c = r.spp.checkCounts();
+        CHECK(c.other == 3 && c.lastOdd == 12 && c.lastOddRejected == 0 && c.lastOddTimes == 3);
+        // Another odd answer is news; the same rejection twice is said once.
+        for (int i = 0; i < 2; ++i) {
+            CHECK(r.spp.checkRegistration(30));
+            r.gap.took(kReqSppUuidRegister);
+            r.gap.reject(kTypeRejectedA, kReqSppUuidRegister);
+        }
+        CHECK(Count::of(r.seen, "rejected the registration check (type 0x202)") == 1);
+        c = r.spp.checkCounts();
+        CHECK(c.other == 5 && c.lastOddRejected == kTypeRejectedA && c.lastOddTimes == 2);
+    }
+    {   // odd, present, odd: two lines
+        Registered r;
+        const uint32_t answers[] = { 12, 5, 12 };
+        for (int i = 0; i < 3; ++i) {
+            CHECK(r.spp.checkRegistration(30));
+            r.gap.took(kReqSppUuidRegister);
+            r.gap.reply(kRspSppUuidRegister, answers[i]);
+        }
+        size_t n = 0;
+        for (size_t i = 0; i < r.seen.lines.size(); ++i)
+            n += r.seen.lines[i].find("was answered 12 HW_NOT_READY") != std::string::npos;
+        CHECK(n == 2);
+        SppService::CheckCounts c = r.spp.checkCounts();
+        CHECK(c.other == 2 && c.present == 1 && c.lastOdd == 12 && c.lastOddTimes == 1);
+    }
+    {   // four restores in a row: the restored line, then once that it keeps being dropped; a 5 starts it afresh
+        Registered r;
+        size_t lines = r.seen.lines.size();
+        for (int i = 0; i < 4; ++i) {
+            CHECK(r.spp.checkRegistration(30));
+            r.gap.took(kReqSppUuidRegister);
+            r.gap.reply(kRspSppUuidRegister, 0);
+        }
+        CHECK(r.seen.lines.size() == lines + 2);
+        CHECK(r.seen.lines[lines].find("had dropped the registration of 'Test_Service'") != std::string::npos);
+        CHECK(r.seen.lines[lines + 1] == "the registration of 'Test_Service' keeps being dropped: the check has found it "
+                                         "gone and registered it again 2 times with no check finding it there in between. "
+                                         "From now on this is only counted");
+        CHECK(r.spp.checkCounts().restored == 4);
+        // Found there, then dropped again: news once more.
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 5);
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 0);
+        CHECK(r.seen.lines.size() == lines + 3 && r.seen.lines[lines + 2].find("had dropped the registration") != std::string::npos);
+        // Busy between restores also starts it afresh.
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 2);
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 0);
+        CHECK(r.seen.lines.size() == lines + 4 && r.seen.lines[lines + 3].find("had dropped the registration") != std::string::npos);
+        CHECK(r.spp.checkCounts().lastOddTimes == 0);
+    }
+    {   // only while registered: never while the start-up's registration waits, and never after a removal
+        FakeGap gap;
+        Seen seen;
+        SppService spp(&gap, &seen);
+        spp.configure(kName, kUuid, 0);
+        CHECK(!spp.checkRegistration(30));
+        CHECK(spp.start());
+        gap.attach();
+        gap.took(kReqSppUuidRegister);
+        CHECK(!spp.checkRegistration(30) && gap.sent.empty());
+        gap.reply(kRspSppUuidRegister, 5);                 // the start-up path: cleared, then tried again
+        isDeregister(gap.took(kReqSppUuidDeregister));
+        CHECK(!spp.checkRegistration(30) && gap.sent.empty());
+        gap.reply(kRspSppUuidDeregister, 0);
+        gap.took(kReqSppUuidRegister);
+        gap.reply(kRspSppUuidRegister, 0);
+        CHECK(spp.state() == SppService::kRegistered);
+        CHECK(spp.remove("leaving"));
+        gap.took(kReqSppUuidDeregister);
+        CHECK(!spp.checkRegistration(30));
+        gap.reply(kRspSppUuidDeregister, 0);
+        CHECK(!spp.checkRegistration(30) && gap.sent.empty());
+    }
+    {   // a check whose reply comes after a removal went out does not take the removal's place
+        Registered r;
+        CHECK(r.spp.checkRegistration(30));
+        r.gap.took(kReqSppUuidRegister);
+        CHECK(r.spp.remove("leaving"));
+        r.gap.took(kReqSppUuidDeregister);
+        r.gap.reply(kRspSppUuidRegister, 5);
+        CHECK(r.spp.state() == SppService::kRemoveSent);
+        r.gap.reply(kRspSppUuidDeregister, 0);
+        CHECK(r.spp.state() == SppService::kRemoved);
+    }
+
+    // 21. A refusal of a link: what the car's device list says of that phone, asked for when the listener wants it.
+    {
+        Registered r;
+        // The device list of two phones, the refused one second and in another form of its address.
+        std::vector<uint8_t> reply;
+        putU32(reply, 0);
+        putU32(reply, 2); putString(reply, "Test Phone A"); putString(reply, kPhoneName);
+        putU32(reply, 2); putString(reply, "66:77:88:99:AA:BB"); putString(reply, "aa:bb:cc:dd:ee:ff");
+        putU32(reply, 2); putU32(reply, 0); putU32(reply, 0);
+        putU32(reply, 2); putU32(reply, 7); putU32(reply, 8);
+        putU32(reply, 2); putU32(reply, kConnInRange); putU32(reply, kConnConnected);
+        r.gap.inform(kInfServiceRequestError, "SPP");
+        CHECK(r.spp.askAboutRefused() && r.gap.took(kReqDeviceListGet).empty());
+        // A device list that changed is not the answer.
+        std::vector<uint8_t> changed(reply.begin() + 4, reply.end());
+        putU32(changed, 0);
+        r.gap.events->gapMessage(0x400, kInfDeviceListChanged, &changed[0], (uint32_t)changed.size());
+        CHECK(r.seen.refused.empty());
+        r.gap.events->gapMessage(kTypeResponse, kRspDeviceListGet, &reply[0], (uint32_t)reply.size());
+        CHECK(r.seen.refused.size() == 1);
+        PhoneInList p = r.seen.refused[0];
+        CHECK(p.ok && p.error == 0 && p.known && p.listed && p.connection == kConnConnected && p.security == 8);
+        // Once: a later list is not for it.
+        r.gap.events->gapMessage(kTypeResponse, kRspDeviceListGet, &reply[0], (uint32_t)reply.size());
+        CHECK(r.seen.refused.size() == 1);
+        // A phone that is not in the list.
+        std::vector<uint8_t> empty;
+        putU32(empty, 0);
+        putU32(empty, 0); putU32(empty, 0); putU32(empty, 0); putU32(empty, 0); putU32(empty, 0);
+        CHECK(r.spp.askAboutRefused());
+        r.gap.took(kReqDeviceListGet);
+        r.gap.events->gapMessage(kTypeResponse, kRspDeviceListGet, &empty[0], (uint32_t)empty.size());
+        CHECK(r.seen.refused.size() == 2 && r.seen.refused[1].ok && !r.seen.refused[1].listed);
+        // The list refused, or rejected.
+        std::vector<uint8_t> error;
+        putU32(error, 5);
+        CHECK(r.spp.askAboutRefused());
+        r.gap.took(kReqDeviceListGet);
+        r.gap.events->gapMessage(kTypeResponse, kRspDeviceListGet, &error[0], (uint32_t)error.size());
+        CHECK(r.seen.refused.size() == 3 && r.seen.refused[2].ok && r.seen.refused[2].error == 5);
+        CHECK(r.spp.askAboutRefused());
+        r.gap.took(kReqDeviceListGet);
+        r.gap.reject(kTypeRejectedA, kReqDeviceListGet);
+        CHECK(r.seen.refused.size() == 4 && !r.seen.refused[3].ok);
+        CHECK(!r.seen.said(kPhoneName) && !r.seen.said(kPhoneAddress) && !r.seen.said("aa:bb"));
+        // phoneInList on its own: the forms of an address are one phone.
+        DeviceList l = parseDeviceList(kRspDeviceListGet, &reply[0], (uint32_t)reply.size());
+        CHECK(phoneInList(l, "66778899AABB").listed && phoneInList(l, "66778899AABB").security == 7);
+        CHECK(!phoneInList(l, "00:00:00:00:00:01").listed && !phoneInList(l, "").known);
+        // With the server gone, nothing is asked.
+        r.gap.detach();
+        CHECK(!r.spp.askAboutRefused());
     }
 
     // 16. The real client is the head unit's: anywhere else it does not open, and nothing can be sent through it.

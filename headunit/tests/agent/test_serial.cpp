@@ -34,6 +34,7 @@
 #include "../../agent/frame.hpp"
 #include "../../agent/fsutil.hpp"
 #include "../../agent/host_platform.hpp"
+#include "../../agent/process.hpp"
 #include "test_util.hpp"
 
 using namespace nbt;
@@ -83,6 +84,15 @@ public:
         pthread_mutex_unlock(&mu_);
         return n;
     }
+    // How many items are `item` and nothing more.
+    unsigned exactly(const std::string& item) {
+        pthread_mutex_lock(&mu_);
+        unsigned n = 0;
+        for (size_t i = 0; i < items_.size(); ++i)
+            if (items_[i] == item) ++n;
+        pthread_mutex_unlock(&mu_);
+        return n;
+    }
     std::string text() {
         pthread_mutex_lock(&mu_);
         std::string all;
@@ -118,18 +128,22 @@ static bool sawWithin(Trace& trace, const std::string& part, int ms) {
 class FakeGap : public GapClient {
 public:
     explicit FakeGap(Trace* trace)
-        : canOpen(true), registerError(0), deregisterError(0), events_(0), up_(false), trace_(trace) {}
+        : canOpen(true), openFinal_(false), silent(false), registerError(0), deregisterError(0), answersList(true), listed(false),
+          connection(0), security(0), events_(0), up_(false), trace_(trace) {}
 
     virtual bool open(Events* events) {
         trace_->add("gap open");
         events_ = events;
         return canOpen;
     }
+    virtual bool openFinal() const { return openFinal_; }
     virtual bool attached() const { return up_; }
     virtual bool request(uint32_t id, const std::vector<uint8_t>& payload) {
         if (!up_) return false;
         std::vector<uint8_t> reply;
-        if (id == kReqSppUuidRegister) {
+        if (id == kReqSppUuidRegister && silent) {
+            trace_->add("register, not answered");
+        } else if (id == kReqSppUuidRegister) {
             trace_->add("register");
             putU32(reply, registerError);
             events_->gapMessage(kTypeResponse, kRspSppUuidRegister, &reply[0], (uint32_t)reply.size());
@@ -141,6 +155,23 @@ public:
         } else if (id == kReqServiceDisconnect) {
             disconnect = payload;   // before the trace says so, which is what the test waits for
             trace_->add("gap disconnect");
+        } else if (id == kReqDeviceListGet) {
+            trace_->add("device list");
+            if (answersList) {
+                // The phone of the test's requests, in the colon form, with the test's connection and security.
+                putU32(reply, 0);
+                putU32(reply, listed ? 1 : 0);
+                if (listed) putString(reply, "Test Phone");
+                putU32(reply, listed ? 1 : 0);
+                if (listed) putString(reply, "AA:BB:CC:DD:EE:FF");
+                putU32(reply, listed ? 1 : 0);
+                if (listed) putU32(reply, 0);
+                putU32(reply, listed ? 1 : 0);
+                if (listed) putU32(reply, security);
+                putU32(reply, listed ? 1 : 0);
+                if (listed) putU32(reply, connection);
+                events_->gapMessage(kTypeResponse, kRspDeviceListGet, &reply[0], (uint32_t)reply.size());
+            }
         }
         return true;
     }
@@ -150,6 +181,10 @@ public:
     void attach() {
         up_ = true;
         events_->gapAttached();
+    }
+    void detach() {
+        up_ = false;
+        events_->gapDetached();
     }
     // A phone asks for a link to `service`, is given it, or is refused.
     void phone(uint32_t informId, const char* service) {
@@ -161,8 +196,13 @@ public:
     }
 
     bool canOpen;
+    bool openFinal_;   // with canOpen false: the failure is one no later try mends
+    bool silent;                     // a registration is not answered
     uint32_t registerError;          // what a registration is answered with
     uint32_t deregisterError;        // and a removal
+    bool answersList;                // DeviceListGet is answered, with the phone in it if `listed`
+    bool listed;
+    uint32_t connection, security;
     std::vector<uint8_t> disconnect;   // the last ServiceDisconnect's payload
 
 private:
@@ -171,9 +211,24 @@ private:
     Trace* trace_;
 };
 
+// What the system's log says, as the test has it.
+class TestLook : public ServerLook {
+public:
+    TestLook() : line("Notification set on BSS_GAP.SGBluetoothGap 36.0, version available: 35.1"), asked(0) {}
+    virtual std::string look(const std::string& name, std::string* why) {
+        ++asked;
+        iface = name;
+        if (line.empty()) *why = "the test's log has nothing";
+        return line;
+    }
+    std::string line, iface;
+    int asked;
+};
+
 class FakeGate : public NodeGate {
 public:
-    explicit FakeGate(Trace* trace) : inFront(true), trace_(trace) {}
+    explicit FakeGate(Trace* trace) : inFront(true), otherAt(0), trace_(trace) { pthread_mutex_init(&mu_, NULL); }
+    ~FakeGate() { pthread_mutex_destroy(&mu_); }
     virtual bool attach(std::string* why) {
         trace_->add("gate attach");
         if (!inFront) *why = "the test's gate is not in front";
@@ -187,8 +242,25 @@ public:
         trace_->add("gate hold " + all);
     }
     virtual void release() { trace_->add("gate release"); }
+    virtual bool sawOtherOpen(double since, std::string* who) {
+        pthread_mutex_lock(&mu_);
+        bool saw = otherAt != 0 && otherAt >= since;
+        if (saw) *who = otherWho;
+        pthread_mutex_unlock(&mu_);
+        return saw;
+    }
+    // Another program opens the node now.
+    void otherOpens(const std::string& who) {
+        pthread_mutex_lock(&mu_);
+        otherAt = monoNow();
+        otherWho = who;
+        pthread_mutex_unlock(&mu_);
+    }
 
     bool inFront;
+    double otherAt;
+    std::string otherWho;
+    pthread_mutex_t mu_;
 
 private:
     Trace* trace_;
@@ -477,6 +549,7 @@ static SerialConfig configFor(const std::string& dir) {
     c.nodePrefix = dir + "/btspp";
     c.decideMs = 300;
     c.lingerMs = 300;
+    c.checkMs = 0;   // testRegistrationCheck() turns it on
     return c;
 }
 
@@ -570,7 +643,8 @@ static void testListener() {
         CHECK_IN(trace.text(), trace.saw("btspp2: the phone asked for another service with it"));
         gap.phone(kInfServiceRequest, kCarSerialService);
         gap.phone(kInfServiceRequestError, kCarSerialService);
-        CHECK(trace.saw("the car refused the phone's link (1 so far)"));
+        CHECK_IN(trace.text(), trace.saw("the car refused the phone's link (1 so far). The phone is not in the car's "
+                                         "device list"));
         unasked.appear();
         CHECK(acceptWithin(listener, 500) == 0);
         CHECK(trace.saw("btspp7 exists already") && !trace.saw("btspp7 opened") && !trace.saw("btspp3 opened"));
@@ -613,13 +687,16 @@ static void testListener() {
             }
         }
     }
-    {   // the gate is not in front: the stack is never asked, and nothing is left behind
+    {   // the gate is not in front, and the listener is not to try again: the stack is never asked, and nothing is
+        // left behind
         Trace trace;
         LinksGone gone;
         FakeGap gap(&trace);
         FakeGate gate(&trace);
         gate.inFront = false;
-        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        SerialConfig config = configFor(dir);
+        config.retryMs = 0;
+        SerialListener listener(&gap, &gate, &trace, config);
         std::string why;
         CHECK(!listener.start(&why) && has(why, "not in front") && !listener.active());
         CHECK(!trace.saw("gap open") && !trace.saw("register"));
@@ -630,10 +707,105 @@ static void testListener() {
         FakeGap gap(&trace);
         FakeGate gate(&trace);
         gap.canOpen = false;
-        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        SerialConfig config = configFor(dir);
+        config.retryMs = 0;
+        SerialListener listener(&gap, &gate, &trace, config);
         std::string why;
         CHECK(!listener.start(&why) && !why.empty() && !listener.active());
         CHECK(trace.at("gate attach") >= 0 && trace.at("gate attach") < trace.at("gate detach"));
+    }
+    {   // otherwise a start that does not work is tried again, each reason said once: the gate not in front, then
+        // the client of the car's Bluetooth service not opening, then all of it working
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        gate.inFront = false;
+        SerialConfig config = configFor(dir);
+        config.retryMs = 1000;
+        SerialListener listener(&gap, &gate, &trace, config);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        CHECK(!listener.active() && !trace.saw("gap open"));
+        CHECK_IN(trace.text(), trace.saw("Bluetooth serial is not set up: the test's gate is not in front. Again in 1 s"));
+        double end = monoNow() + 4.0;
+        while (monoNow() < end && trace.count("gate attach") < 3) pause(5);
+        CHECK_IN(trace.text(), trace.count("gate attach") == 3 && trace.count("not in front") == 1);
+        gate.inFront = true;
+        gap.canOpen = false;
+        CHECK_IN(trace.text(), sawWithin(trace, "Bluetooth serial is not set up again: no connection to the car's "
+                                                "Bluetooth service. Again in 1 s", 2500));
+        end = monoNow() + 3.0;
+        while (monoNow() < end && trace.count("gap open") < 2) pause(5);
+        CHECK_IN(trace.text(), trace.count("gap open") == 2 && trace.count("no connection to the car's") == 1);
+        CHECK(!listener.active() && trace.count("gate detach") == 2);
+        gap.canOpen = true;
+        CHECK_IN(trace.text(), sawWithin(trace, "setting Bluetooth serial up again", 2500));
+        CHECK(listener.active() && trace.count("gap open") == 3);
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        listener.stop();
+        CHECK(trace.saw("deregister NBTApp"));
+    }
+    {   // a client that failed to open for good, at the start: no thread, no retry, said once by the agent
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        gap.canOpen = false;
+        gap.openFinal_ = true;
+        SerialConfig config = configFor(dir);
+        config.retryMs = 1000;
+        SerialListener listener(&gap, &gate, &trace, config);
+        std::string why;
+        CHECK(!listener.start(&why) && !listener.active());
+        CHECK_IN(why, why == "the client of the car's Bluetooth service failed to open and cannot be opened again in "
+                             "this run. Bluetooth serial is off until the agent is started again");
+        CHECK(trace.at("gate attach") >= 0 && trace.at("gate attach") < trace.at("gate detach"));
+        pause(1500);
+        CHECK_IN(trace.text(), trace.count("gap open") == 1 && trace.count("gate attach") == 1);
+        listener.stop();
+    }
+    {   // the same on a later try: the listener says so once and stops trying; one that can mend is tried again
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        gap.canOpen = false;
+        SerialConfig config = configFor(dir);
+        config.retryMs = 500;
+        SerialListener listener(&gap, &gate, &trace, config);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        CHECK_IN(trace.text(), trace.saw("Bluetooth serial is not set up: no connection to the car's Bluetooth service"));
+        double end = monoNow() + 3.0;
+        while (monoNow() < end && trace.count("gap open") < 3) pause(5);
+        CHECK_IN(trace.text(), trace.count("gap open") >= 3);
+        gap.openFinal_ = true;
+        CHECK_IN(trace.text(), sawWithin(trace, "Bluetooth serial is not set up again: the client of the car's Bluetooth "
+                                                "service failed to open and cannot be opened again in this run. It is "
+                                                "off until the agent is started again, and not tried again", 2500));
+        unsigned opens = trace.count("gap open");
+        pause(1500);
+        CHECK_IN(trace.text(), trace.count("gap open") == opens && trace.count("not tried again") == 1);
+        CHECK(!listener.active());
+        listener.stop();
+    }
+    {   // a stop while it waits to try again does not wait for that
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        gate.inFront = false;
+        SerialConfig config = configFor(dir);
+        config.retryMs = 60000;
+        SerialListener listener(&gap, &gate, &trace, config);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        pause(50);
+        double before = monoNow();
+        listener.stop();
+        CHECK(monoNow() - before < 1.0 && trace.count("gate attach") == 1 && !trace.saw("gate detach"));
     }
     {   // the stack does not take the registration: the listener gives up and takes the gate away, for good when
         // it is told not to try again
@@ -723,10 +895,181 @@ static void testListener() {
         CHECK_IN(why, listener.start(&why));
         CHECK(listener.active());
         CHECK(inactiveWithin(listener, 3000));
-        CHECK_IN(trace.text(), trace.saw("has not been for too long: Bluetooth serial is off, and is set up again in 30 s") &&
-                                   trace.saw("gate detach"));
+        CHECK_IN(trace.text(), trace.saw("the car's Bluetooth service never attached (the agent asked the service "
+                                         "broker for Test.Server 1.0): Bluetooth serial is off, and is set up again in "
+                                         "30 s") && trace.saw("gate detach"));
         CHECK(!trace.saw("deregister"));   // the stack was never there to be asked
     }
+    {   // it is there and does not answer the registration: said apart from that
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        gap.silent = true;
+        SerialConfig config = configFor(dir);
+        config.registerMs = 300;
+        SerialListener listener(&gap, &gate, &trace, config);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK(inactiveWithin(listener, 3000));
+        CHECK_IN(trace.text(), trace.saw("the car's Bluetooth service is attached and has not answered the registration: "
+                                         "Bluetooth serial is off, and is set up again in 30 s"));
+        CHECK(!trace.saw("never attached"));
+    }
+    {   // not attached for attachWaitMs: said once, with the version asked for, and the system's log asked once
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        SerialConfig config = configFor(dir);
+        config.attachWaitMs = 100;
+        TestLook look;
+        SerialListener listener(&gap, &gate, &trace, config);
+        listener.setServerLook(&look);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        CHECK_IN(trace.text(), sawWithin(trace, "the car's Bluetooth service has not attached 0.1 s after the agent asked "
+                                                "the service broker for Test.Server 1.0. The broker attaches a client "
+                                                "only to a server with the same major version and a minor version as "
+                                                "high or higher, and otherwise tells the client nothing", 2000));
+        CHECK_IN(trace.text(), sawWithin(trace, "s to read, says of the service: Notification set on "
+                                                "BSS_GAP.SGBluetoothGap 36.0, version available: 35.1", 2000));
+        CHECK(look.asked == 1 && look.iface == "SGBluetoothGap");
+        pause(300);
+        CHECK(trace.count("has not attached") == 1 && look.asked == 1);
+        // It attaches, registers, goes away for longer than the wait: said again, the look not asked again.
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        gap.detach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the car's Bluetooth service has been gone for 0.1 s: the agent waits for "
+                                                "it to come back (it asks the service broker for Test.Server 1.0)", 2000));
+        CHECK(look.asked == 1);
+        listener.stop();
+    }
+    {   // a look that finds nothing says why
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        SerialConfig config = configFor(dir);
+        config.attachWaitMs = 100;
+        TestLook look;
+        look.line = "";
+        SerialListener listener(&gap, &gate, &trace, config);
+        listener.setServerLook(&look);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        CHECK_IN(trace.text(), sawWithin(trace, "the system log gave no line about the service's version: the test's "
+                                                "log has nothing", 2000));
+        listener.stop();
+    }
+}
+
+// ---- a refusal ------------------------------------------------------------------------------------------------
+
+static void testRefusal() {
+    std::string dir = freshFolder("refusal");
+    Trace trace;
+    LinksGone gone;
+    FakeGap gap(&trace);
+    FakeGate gate(&trace);
+    SerialListener listener(&gap, &gate, &trace, configFor(dir));
+    std::string why;
+    CHECK_IN(why, listener.start(&why));
+    gap.attach();
+    CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+    // The phone is in the car's device list; another program's link is up on a node.
+    gap.listed = true;
+    gap.connection = 2;
+    gap.security = 7;
+    Node other(dir + "/btspp", 0);
+    other.appear();
+    pause(450);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    gap.phone(kInfServiceRequestError, kCarSerialService);
+    CHECK_IN(trace.text(), trace.saw("the car refused the phone's link (1 so far). In the car's device list the phone is "
+                                     "connected (connection 2), security 7. A serial node is there already and is not "
+                                     "the agent's: the car takes one phone-opened serial link at a time. Other causes, "
+                                     "in the order to look at them: the iDrive Bluetooth pairing menu is open"));
+    CHECK(trace.exactly("device list") == 1);
+    // The 2nd to 19th are not looked into or said; the 20th is.
+    for (int i = 2; i <= 20; ++i) {
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        gap.phone(kInfServiceRequestError, kCarSerialService);
+    }
+    CHECK_IN(trace.text(), trace.exactly("device list") == 2 && trace.count("the car refused the phone's link (") == 2 &&
+                               trace.saw("the car refused the phone's link (20 so far)"));
+    // A device list that does not come: the line is said without it, after the time.
+    gap.answersList = false;
+    other.vanish();
+    for (int i = 21; i <= 40; ++i) {
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        gap.phone(kInfServiceRequestError, kCarSerialService);
+    }
+    pause(450);
+    CHECK(!trace.saw("(40 so far)"));
+    CHECK_IN(trace.text(), sawWithin(trace, "the car refused the phone's link (40 so far). The car's device list did not "
+                                            "come in 3 s.", 4000));
+    CHECK(!trace.saw("Test Phone") && !trace.saw("AA:BB") && !trace.saw("AABB"));
+    listener.stop();
+}
+
+// ---- the registration check -------------------------------------------------------------------------------------
+
+static unsigned registersIn(Trace& trace) { return trace.exactly("register"); }
+
+static void testRegistrationCheck() {
+    std::string dir = freshFolder("check");
+    Trace trace;
+    LinksGone gone;
+    FakeGap gap(&trace);
+    FakeGate gate(&trace);
+    SerialConfig config = configFor(dir);
+    config.checkMs = 100;
+    config.checkQuietMs = 1000;
+    SerialListener listener(&gap, &gate, &trace, config);
+    std::string why;
+    CHECK_IN(why, listener.start(&why));
+    gap.attach();
+    CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+    // Still there: the stack answers 5, which changes nothing and is not logged.
+    gap.registerError = 5;
+    double end = monoNow() + 3.0;
+    while (monoNow() < end && registersIn(trace) < 4) pause(5);
+    CHECK_IN(trace.text(), registersIn(trace) >= 4);
+    CHECK(!trace.saw("deregister") && !trace.saw("was answered") && !trace.saw("had dropped") && listener.active());
+    // The stack was busy: the next check asks again.
+    gap.registerError = 2;
+    unsigned before = registersIn(trace);
+    end = monoNow() + 3.0;
+    while (monoNow() < end && registersIn(trace) < before + 2) pause(5);
+    CHECK_IN(trace.text(), registersIn(trace) >= before + 2 && !trace.saw("was answered") && !trace.saw("deregister"));
+    // Lost, and registered again: said the first time (and once more that it keeps being dropped, if it does).
+    gap.registerError = 0;
+    CHECK_IN(trace.text(), sawWithin(trace, "the car's Bluetooth had dropped the registration of 'NBTApp', as switching "
+                                            "Bluetooth off and on in iDrive does, with no word of it: the registration "
+                                            "check found it gone and has registered it again", 2000));
+    gap.registerError = 5;
+    // Another answer is logged.
+    gap.registerError = 12;
+    CHECK_IN(trace.text(), sawWithin(trace, "the registration check of 'NBTApp' was answered 12 HW_NOT_READY", 2000));
+    gap.registerError = 5;
+    // A phone that asks for a link, for whatever service, holds the checks off for checkQuietMs.
+    gap.phone(kInfServiceRequest, "Another");
+    pause(50);
+    before = registersIn(trace);
+    pause(600);
+    CHECK_IN(trace.text(), registersIn(trace) == before);
+    end = monoNow() + 3.0;
+    while (monoNow() < end && registersIn(trace) == before) pause(5);
+    CHECK_IN(trace.text(), registersIn(trace) > before);
+    // A check never removes anything, and never sets the service up anew.
+    CHECK(!trace.saw("deregister") && trace.count("is registered:") == 1 && listener.active());
+    listener.stop();
+    CHECK_IN(trace.text(), trace.saw("registration checks so far: ") && trace.saw("found it dropped and registered it again"));
+    CHECK_IN(trace.text(), trace.saw("had another answer (the last: 12 HW_NOT_READY, "));
+    CHECK_IN(trace.text(), trace.count("had dropped the registration") == 1);
 }
 
 // ---- an agent behind the listener ---------------------------------------------------------------------------------
@@ -862,7 +1205,10 @@ static void testAgent() {
         car.connect(node);
         node.say("\x10\x20\x30\x40 another app's opening");
         CHECK_IN(car.trace.text(), sawWithin(car.trace, "btspp1 let go", 3000));
-        CHECK(car.trace.saw("No program is declared for a serial service, so nobody would read it"));
+        CHECK_IN(car.trace.text(), car.trace.saw("No program is declared for a serial service, the gate has seen no "
+                                                 "other program open the node since the link's node appeared, and no "
+                                                 "program of software put on by hand is running, so nobody would read "
+                                                 "it"));
         CHECK(!car.sessionsWithin(1, 200));
         bool closed = false;
         node.say("more of it");
@@ -955,11 +1301,48 @@ static void testAgent() {
 // A machine on which the programs the test names run, and no other.
 class Machine : public HostPlatform {
 public:
-    explicit Machine(const std::string& root) : HostPlatform(root) {}
+    explicit Machine(const std::string& root) : HostPlatform(root) { pthread_mutex_init(&mu_, NULL); }
+    ~Machine() { pthread_mutex_destroy(&mu_); }
+    // How many times the programs were looked for since `since`, counting the looks that came within 0.5 s of the
+    // one before as one: a look walks the process list once for each folder.
+    unsigned looksSince(double since) const {
+        pthread_mutex_lock(&mu_);
+        unsigned n = 0;
+        double last = 0;
+        for (size_t i = 0; i < lookAt_.size(); ++i) {
+            if (lookAt_[i] >= since && (n == 0 || lookAt_[i] - last > 0.5)) ++n;
+            if (lookAt_[i] >= since) last = lookAt_[i];
+        }
+        pthread_mutex_unlock(&mu_);
+        return n;
+    }
     virtual ProgramState programState(const std::string& name) const {
         return name == running ? kProgramRunning : kProgramNotRunning;
     }
-    std::string running;
+    // Software put on by hand: the programs under a folder, as the test says.
+    virtual ProgramState programsUnder(const std::string& dir, std::vector<RunningProgram>* out) const {
+        out->clear();
+        pthread_mutex_lock(&mu_);
+        lookAt_.push_back(monoNow());
+        std::string hand = handRunning;
+        pthread_mutex_unlock(&mu_);
+        if (hand.empty()) return kProgramNotRunning;
+        RunningProgram p;
+        p.pid = 999999;
+        p.path = dir + "/bin/" + hand;
+        out->push_back(p);
+        return kProgramRunning;
+    }
+    void setHandRunning(const std::string& name) {
+        pthread_mutex_lock(&mu_);
+        handRunning = name;
+        pthread_mutex_unlock(&mu_);
+    }
+    std::string running, handRunning;
+
+private:
+    mutable pthread_mutex_t mu_;
+    mutable std::vector<double> lookAt_;
 };
 
 static SerialServiceOwner declares(const char* name, const char* program) {
@@ -1045,7 +1428,9 @@ static void testDecide() {
         double asked = monoNow();
         CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
         CHECK(monoNow() - asked >= 0.25);   // not before the time was over
-        CHECK_IN(trace.text(), trace.saw("(nothing came from the phone in that time) and closed: its node is still there"));
+        CHECK_IN(trace.text(), trace.saw("(nothing came from the phone in that time) and closed: its node is still "
+                                         "there. It is closed for another reader: a program declared for a serial "
+                                         "service is running, or whether one is cannot be told"));
         CHECK(closedUnwritten(silent, 2000) && acceptWithin(listener, 50) == 0);
         // The log says when the node of a link that was let go went.
         silent.vanish();
@@ -1102,6 +1487,132 @@ static void testDecide() {
         leaver.hangUp();
         CHECK_IN(trace.text(), sawWithin(trace, "before it was known whose link it is", 3000));
         CHECK(!trace.saw("btspp5 let go") && acceptWithin(listener, 50) == 0);
+        listener.stop();
+        services.setRemover(0);
+    }
+    {   // no program declared for a serial service runs, and yet another program may read the link: the gate saw it
+        // open the node after the link's node appeared, or a program of software put on by hand runs. Closed for it
+        // then; otherwise read to its end
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        Machine machine(dir + "/root");
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        services.setRemover(&listener);
+        listener.setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+
+        // An open seen before the node appeared is another link's: no sign of a reader for this one.
+        gate.otherOpens("handreader");
+        pause(450);
+        Node first(dir + "/btspp", 0);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        first.appear();
+        first.say("\x10\x20\x30\x40 another app's opening");
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
+        CHECK_IN(trace.text(), trace.saw("No program declared for a serial service is running, the gate has seen no "
+                                         "other program open the node since the link's node appeared"));
+        bool closed = false;
+        CHECK(first.hear(1, 200, &closed).empty() && !closed);   // read by the agent, not closed
+        first.hangUp();
+        first.vanish();
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0: the link ended", 3000));
+        pause(450);
+
+        // The gate sees another program open the node while the link is decided on: closed for that program.
+        Node second(dir + "/btspp", 0);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        second.appear();
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0 opened", 2000));
+        gate.otherOpens("handreader");
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
+        CHECK_IN(trace.text(), sawWithin(trace, "It is closed for another reader: the gate saw handreader open the node, "
+                                                "or try to, since this link's node appeared", 1000));
+        CHECK(closedUnwritten(second, 2000));
+        second.vanish();
+        pause(450);
+
+        // The gate is in front of the first node only: an open it saw says nothing of a link on another node. A
+        // program of software put on by hand that runs does.
+        machine.setHandRunning("aad");
+        Node third(dir + "/btspp", 1);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        third.appear();
+        gate.otherOpens("handreader");
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
+        CHECK_IN(trace.text(), sawWithin(trace, "It is closed for another reader: a program of software put on by hand "
+                                                "is running (aad), which may read serial links", 1000));
+        CHECK(closedUnwritten(third, 2000));
+        third.vanish();
+        listener.stop();
+        services.setRemover(0);
+    }
+    {   // a link that is let go and read, with no sign of another reader then: closed for one when a sign comes
+        // later. Programs of software put on by hand are looked for every 2 s at most meanwhile
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        FakeGate gate(&trace);
+        Machine machine(dir + "/root2");
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        services.setRemover(&listener);
+        listener.setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+
+        // The gate sees another program open the first node a few passes after the link was let go.
+        Node first(dir + "/btspp", 0);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        first.appear();
+        first.say("\x10\x20\x30\x40 another app's opening");
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
+        double letGoAt = monoNow();
+        CHECK_IN(trace.text(), trace.saw("so nobody would read it: its node is read, with what comes dropped"));
+        first.say("more of it");
+        pause(2600);
+        CHECK_IN(trace.text(), !trace.saw("reading it stopped"));
+        unsigned looks = machine.looksSince(letGoAt);
+        CHECK_IN(trace.text(), looks >= 1 && looks <= 2);
+        gate.otherOpens("latereader");
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0: reading it stopped, and its node closed for another reader, ", 2000));
+        CHECK_IN(trace.text(), trace.saw("s after it was let go: the gate saw latereader open the node, or try to. ") &&
+                               trace.saw(" B had been read and dropped by then") &&
+                               !trace.saw(" 0 B had been read and dropped by then"));
+        CHECK(closedUnwritten(first, 2000));
+        first.vanish();
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0 is gone, ", 2000) && trace.saw("s after it was let go and closed"));
+        CHECK_IN(trace.text(), !trace.saw("btspp0: the link ended"));
+        pause(450);
+
+        // A program of software put on by hand starts to run while a link on another node is read.
+        Node second(dir + "/btspp", 1);
+        gap.phone(kInfServiceRequest, kCarSerialService);
+        second.appear();
+        second.say("\x10\x20\x30\x40 another app's opening");
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
+        CHECK_IN(trace.text(), trace.saw("btspp1 let go") && !trace.saw("btspp1: reading it stopped"));
+        gate.otherOpens("latereader");   // the gate is in front of the first node only: no sign for this one
+        pause(300);
+        CHECK_IN(trace.text(), !trace.saw("btspp1: reading it stopped"));
+        machine.setHandRunning("aad");
+        double handAt = monoNow();
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp1: reading it stopped, and its node closed for another reader, ", 3000));
+        CHECK(monoNow() - handAt <= 2.6);
+        CHECK_IN(trace.text(), trace.saw("s after it was let go: a program of software put on by hand is running (aad). "));
+        CHECK(closedUnwritten(second, 2000));
+        second.vanish();
         listener.stop();
         services.setRemover(0);
     }
@@ -1177,7 +1688,9 @@ static void testDecide() {
         first.appear();
         CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
         // Its program is declared and not running: nobody would read the link, so its node is read until it ends.
-        CHECK(trace.saw("No program declared for a serial service is running, so nobody would read it"));
+        CHECK_IN(trace.text(), trace.saw("No program declared for a serial service is running, the gate has seen no "
+                                         "other program open the node since the link's node appeared, and no program "
+                                         "of software put on by hand is running, so nobody would read it"));
         CHECK_IN(trace.text(), sawWithin(trace, "(a phone's link was not the agent's)", 2000));
         for (int i = 0; i < 400 && trace.count("deregister TestRadio") < 2; ++i) pause(5);
         CHECK_IN(trace.text(), trace.count("deregister TestRadio") == 2);
@@ -1538,8 +2051,9 @@ static void testLeftOvers() {
         only.appear();
         only.say(old);
         CHECK_IN(trace.text(), sawWithin(trace, "btspp2 let go", 3000));
-        CHECK(trace.saw("(nothing more came after the leftovers in that time). No program is declared for a serial "
-                        "service, so nobody would read it"));
+        CHECK_IN(trace.text(), trace.saw("(nothing more came after the leftovers in that time). No program is "
+                                         "declared for a serial service, the gate has seen no other program open the "
+                                         "node"));
         CHECK(trace.saw(std::string("btspp2") + said));
         only.say("NBTL late");
         bool closed = false;
@@ -1768,7 +2282,9 @@ static void testOptions() {
     CHECK(describeSerialDecide(config) ==
           "a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any "
           "whole frames left over from an earlier link. Any other is let go: its node is closed for the program it "
-          "belongs to if a program declared for a serial service is running, and read until the link ends if none is");
+          "belongs to if a program declared for a serial service is running, the gate has seen another program open "
+          "the node, or a program of software put on by hand is running, and otherwise read until the link ends or one of "
+          "those signs comes");
     config.decideMs = 1200;
     config.letGoKeepsNode = true;
     CHECK(describeSerialDecide(config) ==
@@ -1788,6 +2304,106 @@ static void testOptions() {
     CHECK(describeSerialRetry(config) ==
           "a serial service that the car's Bluetooth service does not take, or that is not registered for 20 s, is "
           "given up: the gate is taken away, and Bluetooth serial stays off until the agent is started again");
+
+    {   // what the log says of a refusal
+        RefusalFacts f;
+        CHECK(describeRefusal(1, f) ==
+              "the car refused the phone's link (1 so far). The car's device list could not be asked for. No serial "
+              "node is there. Other causes, in the order to look at them: the iDrive Bluetooth pairing menu is open; "
+              "the ignition is off; the phone's pairing with the car is broken or missing; the car's coding does not "
+              "allow serial links for phones");
+        f.list = RefusalFacts::kListRead;
+        f.phone.ok = true;
+        f.phone.known = true;
+        f.phone.listed = true;
+        f.phone.connection = 2;
+        f.phone.security = 7;
+        f.node = RefusalFacts::kNodeOther;
+        CHECK(describeRefusal(20, f) ==
+              "the car refused the phone's link (20 so far). In the car's device list the phone is connected "
+              "(connection 2), security 7. A serial node is there already and is not the agent's: the car takes one "
+              "phone-opened serial link at a time. Other causes, in the order to look at them: the iDrive Bluetooth "
+              "pairing menu is open; the ignition is off; the phone's pairing with the car is broken or missing; the "
+              "car's coding does not allow serial links for phones");
+        f.phone.listed = false;
+        f.node = RefusalFacts::kNodeOurs;
+        CHECK(describeRefusal(40, f) ==
+              "the car refused the phone's link (40 so far). The phone is not in the car's device list: its pairing "
+              "with the car is missing. A serial link of the agent's is up already: the car takes one phone-opened "
+              "serial link at a time. Other causes, in the order to look at them: the iDrive Bluetooth pairing menu is "
+              "open; the ignition is off; the car's coding does not allow serial links for phones");
+        f.phone.error = 5;
+        CHECK(has(describeRefusal(1, f), "The car did not give its device list (5 DEFAULT). "));
+        f.phone.error = 0;
+        f.phone.known = false;
+        CHECK(has(describeRefusal(1, f), "The refusal named no phone to look for in the car's device list. "));
+        f.phone.ok = false;
+        CHECK(has(describeRefusal(1, f), "The car's device list could not be read. "));
+        f.list = RefusalFacts::kListNoAnswer;
+        CHECK(has(describeRefusal(1, f), "The car's device list did not come in 3 s. "));
+    }
+    {   // the broker's line in the system's log, read in pieces
+        BrokerLineFinder finder("SGBluetoothGap");
+        std::string log = "Nov 18 10:00:00    3    18     0 something else\n"
+                          "Nov 18 10:00:01    3    18     0 Notification set on BSS_GAP.SGBluetoothGap 35.9, version "
+                          "available: 35.1\r\n"
+                          "Nov 18 10:00:02    3    18     0 Notification set on BSS_GAP.SGOther 2.0, version available: 1.0\n" +
+                          std::string(5000, 'x') + " SGBluetoothGap version available: a line too long\n"
+                          "Nov 18 10:00:03    3    18     0 Notification set on BSS_GAP.SGBluetoothGap 36.0, version "
+                          "available: 35.1";
+        for (size_t i = 0; i < log.size(); i += 7) finder.feed(log.data() + i, log.size() - i < 7 ? log.size() - i : 7);
+        CHECK_IN(finder.line(), finder.line() == "Nov 18 10:00:03    3    18     0 Notification set on "
+                                                 "BSS_GAP.SGBluetoothGap 36.0, version available: 35.1");
+        BrokerLineFinder none("SGBluetoothGap");
+        none.feed("nothing here\n", 13);
+        CHECK(none.line().empty() && none.bytes() == 13 && finder.bytes() == log.size());
+    }
+    {   // why no broker line came: how sloginfo ended, and how much of the log it gave
+        ProcessResult r;
+        CHECK(brokerLookWhy(false, "fork: no memory", r, 4, 0) == "sloginfo could not be started: fork: no memory");
+        r.exited = true;
+        r.exitCode = 127;
+        CHECK(brokerLookWhy(true, "", r, 4, 30) == "sloginfo is not there (the shell's status 127)");
+        r.exitCode = 126;
+        CHECK(brokerLookWhy(true, "", r, 4, 30) == "sloginfo is there but could not be run (the shell's status 126)");
+        r.exitCode = 1;
+        CHECK(brokerLookWhy(true, "", r, 4, 300) == "sloginfo ended with status 1 after giving 300 B, with no line of the "
+                                                    "service broker's about it");
+        r.exitCode = 0;
+        CHECK(brokerLookWhy(true, "", r, 4, 0) == "sloginfo ran and gave nothing: the system log is empty, or could not "
+                                                  "be read");
+        CHECK(brokerLookWhy(true, "", r, 4, 1023) == "sloginfo read 1023 B of the system log, with no line of the service "
+                                                     "broker's about it");
+        CHECK(brokerLookWhy(true, "", r, 4, 200 * 1024 + 100) == "sloginfo read 200 KB of the system log, with no line of "
+                                                                "the service broker's about it");
+        r.exited = false;
+        r.signal = 9;
+        CHECK(brokerLookWhy(true, "", r, 4, 2048) == "sloginfo was ended by signal 9 after giving 2 KB, with no line of "
+                                                     "the service broker's about it");
+        r.signal = 0;
+        r.timedOut = true;
+        CHECK(brokerLookWhy(true, "", r, 4, 5000) == "sloginfo did not end in 4 s; it had given 5 KB by then, with no "
+                                                     "line of the service broker's about it");
+    }
+
+    unsigned s = 7;
+    CHECK(parseSerialCheckS("0", &s) && s == 0);
+    CHECK(parseSerialCheckS("30", &s) && s == 30);
+    CHECK(parseSerialCheckS("3600", &s) && s == kSerialCheckMostS);
+    s = 7;
+    CHECK(!parseSerialCheckS("3601", &s) && !parseSerialCheckS("", &s) && !parseSerialCheckS(0, &s));
+    CHECK(!parseSerialCheckS("-1", &s) && !parseSerialCheckS("30s", &s) && !parseSerialCheckS("99999999999", &s));
+    CHECK(s == 7);
+    config = SerialConfig();
+    CHECK(config.checkMs == 30000 && config.checkQuietMs == 30000);
+    CHECK(describeSerialCheck(config) ==
+          "while the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, "
+          "the registration is checked every 30 s by registering it again: switching Bluetooth off and on drops it, "
+          "and the car says nothing");
+    config.checkMs = 0;
+    CHECK(describeSerialCheck(config) ==
+          "the registration is not checked (--register-check 0): a registration that switching Bluetooth off and on "
+          "drops stays lost until the agent is started again");
 
     std::vector<std::string> programs;
     CHECK(describeSerialHold(programs) ==
@@ -1809,6 +2425,8 @@ int main(int argc, char** argv) {
     testReader();   // first: the one line of the process on whether a read came back on time is its
     testLink();
     testListener();
+    testRegistrationCheck();
+    testRefusal();
     testAgent();
     testLeftBehind();
     testDecide();

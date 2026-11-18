@@ -136,6 +136,27 @@ int main() {
     CHECK(gateNotInFront(kCheckBehind) && gateNotInFront(kCheckNotReached) && !gateNotInFront(kCheckUnclear));
     for (int c = kCheckFrontNoNode; c <= kCheckUnclear; ++c) CHECK(gateCheckText((GateCheck)c)[0] != 0);
 
+    // Which opens are by a program that would read a link on the node: an open passed on, or one the hold keeps off
+    // for now; never a look, nor the program that is refused every time.
+    {
+        GateOpen o;
+        o.program = "otherd";
+        o.kind = GateOpen::kOpen;
+        o.answer = ENOENT;
+        CHECK(gateOpenReads(o));
+        o.kind = GateOpen::kCombined;
+        CHECK(gateOpenReads(o));
+        o.kind = GateOpen::kLook;
+        CHECK(!gateOpenReads(o));
+        o.kind = GateOpen::kOpen;
+        o.answer = EACCES;
+        o.held = true;
+        CHECK(gateOpenReads(o));
+        o.held = false;
+        o.program = kGateRefuseDefault;
+        CHECK(!gateOpenReads(o));
+    }
+
     printf("test_spp_gate: ok\n");
     return 0;
 }

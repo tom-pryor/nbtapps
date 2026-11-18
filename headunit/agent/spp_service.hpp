@@ -490,6 +490,33 @@ inline std::string shownText(const std::string& s, size_t most) {
     return t;
 }
 
+// What the car's device list says of one phone, without its address.
+struct PhoneInList {
+    bool ok;               // the list was read; if not, nothing below is known
+    uint32_t error;        // the list's error code; 0 for a list that came
+    bool known;            // there was a phone to look for
+    bool listed;           // it is in the list
+    uint32_t connection;   // kConnNotInRange ... kConnServiceConnected
+    uint32_t security;
+    PhoneInList() : ok(false), error(0), known(false), listed(false), connection(0), security(0) {}
+};
+
+inline PhoneInList phoneInList(const DeviceList& list, const std::string& address) {
+    PhoneInList p;
+    p.ok = list.ok;
+    p.error = list.error;
+    p.known = !addressKey(address).empty();
+    if (!p.ok || p.error != 0 || !p.known) return p;
+    for (size_t i = 0; i < list.devices.size(); ++i) {
+        if (addressKey(list.devices[i].address) != addressKey(address)) continue;
+        p.listed = true;
+        p.connection = list.devices[i].connection;
+        p.security = list.devices[i].security;
+        break;
+    }
+    return p;
+}
+
 // ---- the Bluetooth server, as its client sees it ---------------------------------------------------------------
 
 class GapClient {
@@ -510,6 +537,8 @@ public:
 
     // Starts connecting, once; gapAttached() follows when the server answers. False if it cannot start at all.
     virtual bool open(Events* events) = 0;
+    // After open() has returned false: true if no later open() in this process can work, so another try is no use.
+    virtual bool openFinal() const { return false; }
     virtual bool attached() const = 0;
     // False if the server is not attached. From any thread, and from inside an event.
     virtual bool request(uint32_t id, const std::vector<uint8_t>& payload) = 0;
@@ -533,6 +562,7 @@ public:
     void setLog(DsiClient::LogFn log, void* user) { dsi_.setLog(log, user); }
 
     virtual bool open(Events* events);
+    virtual bool openFinal() const { return dsi_.openFinal(); }
     virtual bool attached() const { return dsi_.attached(); }
     virtual bool request(uint32_t id, const std::vector<uint8_t>& payload);
     virtual bool subscribe(uint32_t informId);
@@ -598,6 +628,8 @@ public:
         // What removeOther(name) came to: the server's error code, 0 for done, or kNoError if the server rejected
         // the request, gave no answer in time, or could not be sent it.
         virtual void sppOtherRemoved(const std::string& /*name*/, uint32_t /*error*/) {}
+        // What the car's device list says of the phone of the last refusal, after askAboutRefused().
+        virtual void sppRefusedPhone(const PhoneInList& /*phone*/) {}
     };
 
     // Both outlive this object.
@@ -609,6 +641,8 @@ public:
 
     // False if the client cannot start connecting. Otherwise kWaiting, and the rest follows as events.
     bool start();
+    // After start() or startRemoval() has returned false: no later one can work in this process.
+    bool startFinal() const { return gap_->openFinal(); }
     // In place of start(): only removes the registration under the name, once the server is attached. For a
     // registration that a run which was killed left behind.
     bool startRemoval();
@@ -651,6 +685,9 @@ public:
     bool askVersion();
     // DeviceListGet: the car's device list is read anew, into heard(). The same rules as askVersion().
     bool askDeviceList();
+    // The same, for the phone of the last refusal of a link (kInfServiceRequestError): what the list says of it
+    // goes to sppRefusedPhone() when the reply comes, its address to nobody.
+    bool askAboutRefused();
 
     // What the server's informs and replies have told about the car's phones and their links: kept, and not acted
     // on. A phone's address is in memory only, and never in the log.
@@ -663,6 +700,33 @@ public:
         Heard() : devicesKnown(false), deviceListChanges(0), linksEnded(0), serviceListChanges(0) {}
     };
     Heard heard();
+
+    // The registration check. Switching Bluetooth off and on in iDrive drops every registration, and the stack
+    // says nothing of it: no inform comes, and the registration stays kRegistered here. So, while registered, the
+    // caller sends SppUuidRegister for this object's own name now and then, and the answer says:
+    //   0       the stack had lost the registration, and has it again now: logged the first time; if the next
+    //           check that is not answered 5, 1 or 2 finds it gone again, one line says it keeps being dropped,
+    //           and after that it is counted only, until a check finds it there (5) or the stack busy (1, 2)
+    //   5       it is still there (as it answers a name that is registered already): counted only
+    //   1 or 2  the stack was busy: counted, and the next check asks again
+    //   other   (or a rejection of the request): logged when it differs from the last such answer, or when a
+    //           check answered 5, 1 or 2 came between them; else counted only
+    // A check changes no state. It is never the start-up path, which clears a refused registration by removing
+    // it: a check answered 5 has found what it hoped to find. False, with nothing sent, unless the registration is
+    // kRegistered, the server attached and no check waits for its reply; one that has waited `replyS` counts as
+    // unanswered, and the next may go. From any thread.
+    bool checkRegistration(double replyS);
+    struct CheckCounts {
+        unsigned sent, present, restored, busy, other, unanswered;
+        // The last answer counted in `other`: a GapErrorCode, or kNoError with the type of a rejection; and how
+        // many times it came in its last run. lastOddTimes 0: none came.
+        uint32_t lastOdd, lastOddRejected;
+        unsigned lastOddTimes;
+        CheckCounts()
+            : sent(0), present(0), restored(0), busy(0), other(0), unanswered(0), lastOdd(0), lastOddRejected(0),
+              lastOddTimes(0) {}
+    };
+    CheckCounts checkCounts();
 
     State state();
     // The server's answer to the last removal of this object's own registration: 0, a GapErrorCode, or kNoError
@@ -689,6 +753,7 @@ private:
     void subscribe();
     void subscribeTo(uint32_t informId);
     bool handleKnown(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len);
+    void checkAnswered(uint32_t err, uint32_t rejectedType);
     void sendRegister();
     bool sendDeregister(const char* why);
     void sendNextOther();
@@ -713,10 +778,18 @@ private:
     uint32_t removeError_;                    // see removeError()
     uint32_t clearError_;                     // the answer to kClearSent's removal
     bool disconnectOut_;                      // a ServiceDisconnect of ours waits for its reply
+    std::string refusedAddress_;              // the phone of the last refusal; in memory only
+    bool refusalAsked_;                       // askAboutRefused() waits for the device list
     bool versionAsked_;                       // a VersionGet of ours waits for its reply
     Heard heard_;
     unsigned endsLogged_;                     // ServiceDisconnected informs said in the log so far
     unsigned unreadSaid_;                     // the kinds of message logged once as not read
+    bool checkOut_;                           // a registration check waits for its reply
+    double checkSentAt_;
+    bool unansweredSaid_;                     // since the last answer to a check
+    CheckCounts checks_;
+    unsigned restoredRun_;                    // checks answered 0 since the last one answered 5, 1 or 2
+    bool oddRun_;                             // checks_.lastOdd* is the last other answer, with no 5, 1 or 2 since
 };
 
 }  // namespace btspp

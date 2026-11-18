@@ -130,6 +130,7 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 #   programs     which programs are running, by the file names of their executables
 #   serial_services  the serial services that packages' programs register, and the removal of one whose program
 #                    is not running
+#   serial_report  the start-up report: what the head unit says of its Bluetooth when the agent starts
 #   phones       the paired phones and their pairing keys, on disk
 #   agent_home   the agent's own folder: its versions, and the files that say which one the launcher starts
 #   log_files    the files a controller may pull: the logs a package's manifest names, and the agent's own
@@ -149,7 +150,7 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/planner.cpp agent/job.cpp agent/agent.cpp agent/hu_platform.cpp agent/dsi_client.cpp \
                agent/spp_service.cpp agent/spp_gate.cpp agent/node_reader.cpp agent/serial_link.cpp agent/programs.cpp \
                agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp agent/checks.cpp \
-               agent/settings_file.cpp agent/settings.cpp
+               agent/settings_file.cpp agent/settings.cpp agent/serial_report.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 # src/*.hpp: test_plugin runs the plugin's screens about phones, which are headers, against an agent, and
@@ -250,6 +251,7 @@ run-agent-test_engine: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
 run-agent-test_agent:  TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)/agent
 run-agent-test_hu_platform: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)/hu
 run-agent-test_serial: TEST_ARGS = $(BENCH_WORK)/serial
+run-agent-test_serial_report: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_programs: TEST_ARGS = $(BENCH_WORK)/programs
 run-agent-test_serial_services: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
 run-agent-test_checks: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)

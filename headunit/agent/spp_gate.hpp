@@ -95,6 +95,13 @@ inline bool gateHolds(GateMode mode, const std::string& program, const std::vect
     return false;
 }
 
+// Whether an open that reached the gate is by a program that would read a link on the node: a look (stat,
+// access) reads nothing, and the program the gate refuses every time never gets the node; one that the hold keeps
+// off only for now will try again.
+inline bool gateOpenReads(const GateOpen& o) {
+    return o.kind != GateOpen::kLook && (o.answer != EACCES || o.held);
+}
+
 // The log line for an open.
 inline std::string describeOpen(const GateOpen& o, GateMode mode, const std::string& refuse) {
     std::string s = "gate: ";

@@ -31,7 +31,7 @@ Nothing in HmiMain3D is patched.
 | `tools/plugin_pkg.py` | Builds that package of `release/NbtApp/` (`make plugin-pkg`) and signs it for a release (`make plugin-release`) |
 | `tools/check.py` | `make check` |
 | `tools/make_icons.py`, `tools/update_stubs.sh` | Redraw the images; regenerate `stubs/*.syms` from a firmware dump |
-| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `node_reader` (the one reader of an open serial node, which keeps a read out on it), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running) and `serial_services` (the serial services other programs register, and the removal of one whose program is gone). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). `settings` and `settings_file` are a package's settings: the rules a value is held to, where the file is, and its text edited a key at a time. Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
+| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `node_reader` (the one reader of an open serial node, which keeps a read out on it), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running), `serial_services` (the serial services other programs register, and the removal of one whose program is gone) and `serial_report` (the start-up report: what the head unit says of its Bluetooth when the agent starts). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). `settings` and `settings_file` are a package's settings: the rules a value is held to, where the file is, and its text edited a key at a time. Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
 | `spec/` | Definitions shared with the Android app: `manifest.schema.json`; `json-profile.vectors`, the cases every JSON parser of the project must agree on; and `protocol/`, the frames every codec must build and refuse alike, one whole conversation with the agent, frame by frame, and `constants.txt`, the names and numbers both sides must hold alike |
 | `tools/nbtpkg.py` | Builds, signs and verifies `.nbtpkg` packages |
 | `tools/check_agent.py` | `make agent-check`: `release/agent/` is the head unit's kind of program, holds nothing of the test bench, and its `nbtagent` holds the official package key; and the agent's own package in `release/pkg/` is byte for byte what `tools/agent_pkg.py` makes of that folder |
@@ -541,13 +541,39 @@ and with `--root` when it is given `--bluetooth` (`--no-bluetooth` turns it off)
 with the car's Bluetooth stack and puts the gate in front of `/dev/btspp0` (`agent/spp_gate.hpp`: a resource manager
 attached at the same path, ahead of the Bluetooth stack's node, that passes an open on to the node or refuses the
 car's media process; no data goes through it), and takes both away again when it stops; nothing of it is written to disk. While the agent runs with it, the car
-maker's phone apps do not work over Bluetooth. If it cannot be set up, the agent says why in its log and goes on
-with the local socket. If the car's Bluetooth service does not take the registration, or the service is not
-registered for 20 seconds (an agent that starts with the head unit may be there before the car's Bluetooth
-service is), the agent takes the gate away again, and sets both up anew 30 seconds later, and so on until the
-service is registered. Its lines in the log start with `bluetooth:`. Besides the phones' requests for a link, the
+maker's phone apps do not work over Bluetooth. If it cannot be set up (the gate is not in front, or the car's
+service library cannot be loaded), the agent says why in its log, goes on with the local socket, and tries again
+every 30 seconds, saying why again only when the reason has changed. If the car's Bluetooth service has not
+attached 10 seconds after the agent asked the service broker for it, the log says so with the version of its
+interface the agent asks for (`BSS_GAP.SGBluetoothGap 35.0`; the broker attaches only a server of the same major
+version and a minor version as high or higher, and tells the client nothing otherwise), followed, once, by the
+broker's line from the system log (`sloginfo`) that names the version the car has, or why there is none: sloginfo
+not there, not runnable, ended by a signal, with another status or after 4 s, or, when it ran, how much of the log it
+read (an empty or short log may have no such line any more). If the car's Bluetooth service
+does not take the registration, or the service is not registered for 20 seconds (an agent that starts with the
+head unit may be there before the car's Bluetooth service is), the agent says which it was (never attached,
+attached and no answer to the registration, or refused), takes the gate away again, and sets both up anew 30
+seconds later, and so on until the service is registered. A client of the car's Bluetooth service that fails
+once it has been made (no memory for it, or its connection thread not started) cannot be opened again: the agent
+says so once and Bluetooth serial stays off until the agent is started again. Switching Bluetooth off and on in iDrive drops the registration, and the car says nothing
+of it, so while the service is registered, no link of the agent's is up and no phone has asked for a link for 30
+seconds, the agent checks it every 30 seconds by registering it again (`--register-check <s>`, below): the car
+answers that it has it already, which changes nothing and is only counted, or takes it anew, which the log says
+(`the car's Bluetooth had dropped the registration of 'NBTApp' ... and has registered it again`). If the next
+check finds it gone again, one more line says that it keeps being dropped, and after that it is only counted until
+a check finds it there or the stack busy. Any other answer is logged when it differs from the last such answer
+and only counted while it repeats. A check never removes the registration first, as the agent's start does with
+one that is refused. When it stops, the agent logs how many checks it made and what they found, with the last
+other answer and how many times in a row it came. Its lines in the log start with `bluetooth:`. Besides the phones'
+requests for a link, the
 agent asks the car's Bluetooth service for what it says of the car's device list, of links that end and of a
 phone's services; it keeps that, and logs the first eight links that end, never with a phone's name or address.
+When the car refuses a phone's link that may be the agent's, the first time and every 20th time, the agent asks
+the car for its device list and logs what it says of that phone (not in it, or its connection state and its
+security value), whether a serial node is there already (the car takes one phone-opened serial link at a time),
+and then the other causes in the order to look at them: the iDrive Bluetooth pairing menu is open, the ignition is
+off, the phone's pairing with the car is broken or missing, the car's coding does not allow serial links for
+phones.
 The phone's Bluetooth pairing with
 the car is not enough on this link: until the phone has been paired with the agent and has proved it with `auth`,
 the agent answers `hello`, `ping`, `auth` and `pairing.issue`, and refuses everything else. A link that does not open with the protocol's magic bytes is let go (see "Other programs' links"
@@ -559,6 +585,16 @@ not stay behind:
 /tmp/nbt/nbtagent --root /tmp/hu --bluetooth 2> /tmp/hu.log &
 /tmp/nbt/nbtagent --root /tmp/hu --bluetooth --decide 800 --decide-hold 2> /tmp/hu.log &   # see "Other programs' links"
 ```
+
+Once Bluetooth serial has started and its registration has gone out (or has not, after 15 seconds), a thread of
+its own puts the start-up report into the log, as lines of `bluetooth: start-up report: ...`, within 30 seconds and
+saying how long it took: the stack's version strings (asked with VersionGet, and logged when the reply comes), the
+sizes of `libbssservice.so`, `libdsiservice.so` and `libpal_core.so` in `/opt/conn/lib`, the first line of
+`/opt/sys/etc/nbt_version.txt`, the `#Coded is:` and `Bluetooth.Services` lines of
+`/var/opt/conn/pss_config.cfg`, which of `/dev/btspp0` to `7` are there, and what the checks for software put on
+by hand find (their ids and counts; nothing is fixed). A part that cannot be read is one line, and nothing in it
+holds the agent up. Which program holds a serial node open is not in it: QNX 6.5 can only tell that by asking
+every process for its open files (`pidin fd`), which sends a message to the server behind each of them.
 
 The phone app then asks for a pairing code. The plugin's **Pair a phone** screen shows one; so does `nbtctl`,
 which needs nothing of the HMI:
@@ -633,8 +669,8 @@ asked to. The agent therefore:
   is what an agent from before `serial.reset` answers, and one with no Bluetooth serial listener. One press per
   showing; the page starts over when it is shown again. It needs no SSH and no link from the phone.
 
-A link that the agent lets go as another program's (below) is closed for that program if one runs, and read to
-its end otherwise.
+A link that the agent lets go as another program's (below) is closed for that program if there is a sign of one,
+and read otherwise, until it ends or a sign of one comes.
 
 **Serial services of other programs.** The car's Bluetooth stack keeps a registration until someone removes it or
 the stack restarts. A program that registers a serial service of its own and ends without removing it leaves it
@@ -668,12 +704,18 @@ things keep them apart, both in the agent:
 - The agent opens a link's node and reads what the phone says first. A link that opens with the protocol's magic
   bytes, after any leftovers of an earlier link ("What the node does", above), is the agent's. Any other is let
   go, at once if something else came first and after 500 ms if nothing came, and the agent has written nothing
-  into it. If a program declared for a serial service (above) is running, or whether one is cannot be told, the
-  agent stops reading the node and closes it, so the program the link belongs to finds it as it would have. What
-  the phone had sent by then is lost to that program, so this suits a program whose links start with the car
-  speaking, or a phone that sends again. If none is declared, or none of them runs, nobody would ever read the
-  link, and what waited unread would come ahead of the next link's bytes: the agent reads the node, dropping what
-  comes, until the link ends, and says so in the log.
+  into it. The agent stops reading the node and closes it, so that the program the link belongs to finds it as it
+  would have, when there is a sign of such a program: a program declared for a serial service (above) is running,
+  or whether one is cannot be told; the gate has seen another program open `/dev/btspp0`, or try to, since this
+  link's node appeared (the car's media process, which the gate refuses every time, does not count); or a program
+  of software put on by hand (the checks' `/opt/aa`) is running, which nothing declares. What the phone had sent
+  by then is lost to that program, so this suits a program whose links start with the car speaking, or a phone
+  that sends again. With no such sign nobody would ever read the link, and what waited unread would come ahead of
+  the next link's bytes: the agent reads the node, dropping what comes, until the link ends. If a sign comes while
+  it does (the gate sees another program open the node, or try to, after the link was let go; or a program of
+  software put on by hand starts to run, looked for every 2 seconds at most), the agent stops reading and closes
+  the node for that program; what it had read and dropped by then is gone, and the log says how much. The log
+  says which it was, and why.
 - From a phone's request for a link until that link has been let go, and for as long as a link of the agent's is
   up, the gate also refuses the opens of the programs that are declared for a serial service (above), so that none
   of them takes a link's first bytes or writes into the agent's link. Their looks at the node (`stat`, `access`)
@@ -682,23 +724,25 @@ things keep them apart, both in the agent:
 The log has, for every link, how long after the open its first message came, how many bytes an earlier link had
 left on it, whether it was the agent's or was let go, and why, whether the node was still there after
 the close and when it went, how much was dropped from a node that was read to its end, and each time the gate
-starts and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, and go
-with Bluetooth serial only:
+starts and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, and a
+third the registration check; all three go with Bluetooth serial only:
 
 | Option | What it changes |
 |---|---|
 | `--decide <ms>` | How long the magic bytes are waited for, 1 to 10000, in place of the protocol's 500 ms. A phone app goes by the protocol's time, so this is for measuring, not for a car that is in use |
 | `--decide-hold` | A link that is let go keeps its node open, unread, until the link ends, in place of having it closed or read to its end. For a car on which a link does not outlive the close of its node: there the other program would lose every link the agent lets go. The agent reads and writes nothing on a node it keeps, and the gate's hold is off by then, so the other program can open the node beside it |
+| `--register-check <s>` | Every how many seconds the registration is checked while all is quiet, 0 to 3600, in place of 30; 0 never checks it |
 
-When Bluetooth serial has started, four lines in the log say what the agent goes by: the time and what becomes
+When Bluetooth serial has started, five lines in the log say what the agent goes by: the time and what becomes
 of a link that is let go, what becomes of a link the agent ends, what it does about a registration that is not
-taken or is lost, and the programs the gate holds off as they are declared at that moment (the list is taken anew
-each time the hold goes on):
+taken or is lost, how it checks the registration, and the programs the gate holds off as they are declared at that
+moment (the list is taken anew each time the hold goes on):
 
 ```
-bluetooth: a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any whole frames left over from an earlier link. Any other is let go: its node is closed for the program it belongs to if a program declared for a serial service is running, and read until the link ends if none is
+bluetooth: a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any whole frames left over from an earlier link. Any other is let go: its node is closed for the program it belongs to if a program declared for a serial service is running, the gate has seen another program open the node, or a program of software put on by hand is running, and otherwise read until the link ends or one of those signs comes
 bluetooth: a link the agent ends keeps its node, read and with what comes dropped, until the phone ends the link; the log says so if it is still up 5000 ms after the agent's end closed
 bluetooth: a serial service that the car's Bluetooth service does not take, or that is not registered for 20 s, is given up: the gate is taken away, and both are set up again 30 s later, for as long as it takes
+bluetooth: while the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, the registration is checked every 30 s by registering it again: switching Bluetooth off and on drops it, and the car says nothing
 bluetooth: while a link is being decided on or is the agent's, the gate also refuses opens by radiod
 ```
 
@@ -776,7 +820,11 @@ and what the starter does next on the status the launcher ends with:
 
 A version on trial gets one start. Its launcher ends with the agent's status whatever that is, and for the
 starter any status but 0 and 4 is a try that failed, a launcher that did not run at all included: it copies the
-start's log to `log/trial.log` and looks at the files again, which starts the version in `current`.
+start's log to `log/trial.log` and looks at the files again, which starts the version in `current`. For the
+version in `current`, a starter that ends with its launcher's status other than 0 says so in the log first, as
+the last line of `agent.log`: `launcher: version 1.5.1's launcher ended with status 1: the starter ends with the
+same`, or, for a launcher that cannot be run at all, `... could not be run (status 126)` or `... was not found
+(status 127)`.
 
 To stop the agent, stop the agent: its launcher and the starter follow. A starter or a launcher that is killed
 leaves the agent running with nothing to start it again.
@@ -798,7 +846,7 @@ unit runs. A start that finds the two the same writes nothing.
 
 The starter has a revision of its own, `STARTER_REVISION` in `nbtstart.sh`, which is raised when that file
 changes and by nothing else, so two versions of the agent that come with the same starter replace nothing. The
-log of each start names it: `launcher: starter revision 2`, after what the starter read in the files where it
+log of each start names it: `launcher: starter revision 3`, after what the starter read in the files where it
 read something. The starter that agent 1.1.0 came with has no number and says nothing of it, so a log without
 that line is its log.
 
