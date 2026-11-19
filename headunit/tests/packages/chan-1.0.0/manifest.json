@@ -1,0 +1,19 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.chan",
+  "name": "Channels",
+  "version": "1.0.0",
+  "requires": { "agent": ">=1.7.0-beta.1" },
+  "install": {
+    "files": [
+      { "src": "payload/bin/", "dest": "${app}/bin/", "mode": "0755" }
+    ]
+  },
+  "channels": [
+    { "name": "echo", "apps": [], "access": "both", "start": { "program": "bin/chan_echo" } },
+    { "name": "gated", "apps": [], "access": "both", "switch": true,
+      "start": { "program": "bin/chan_echo", "args": ["--upper"] } },
+    { "name": "feed", "apps": [], "access": "read", "start": { "program": "bin/chan_feed", "args": ["100"] } }
+  ],
+  "logs": [{ "path": "${tmp}/channels/*.log*" }]
+}

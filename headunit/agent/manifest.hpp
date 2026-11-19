@@ -11,9 +11,10 @@
 //   3. spec/manifest.schema.json, walked in the order of the text: a wrong type, form or range is bad-manifest;
 //      a key the schema does not know, inside requires or install, is            unsupported-manifest
 //   4. the cross-field rules: unique paths, every src and hook script listed in contents, a folder to a folder,
-//      no destination placed twice, no serial service declared twice, no log path named twice; and for each
-//      option in settings, its type's definition ($defs/settingBool, ...) and the rules $defs/setting gives
-//                                                                                  bad-manifest
+//      no destination placed twice, no serial service declared twice, no log path named twice, no channel named
+//      twice and every channel's program placed under ${app}; and for each option in settings, its type's
+//      definition ($defs/settingBool, ...) and the rules $defs/setting gives   bad-manifest
+//   In channels a key the schema does not know, and an apps that is not empty, is unsupported-manifest too.
 //
 // The schema is written out by hand in manifest.cpp, because the agent has no regular expressions. The test
 // packages and tests/agent/test_manifest.cpp hold the two implementations together.
@@ -37,6 +38,9 @@ const size_t kMaxSettings = 64;   // options in a manifest's settings, those of 
 const size_t kMaxSettingValues = 16;     // values of a select option
 const size_t kMaxSettingBytes = 1024;    // UTF-8 in one option's strings, so that one fits a serial frame
 extern const char* const kDefaultSettingsFile;   // "${data}/settings": the file when the manifest names none
+const size_t kMaxChannels = 8;           // entries in a manifest's channels
+const size_t kMaxChannelName = 32;       // characters of a channel's name
+const size_t kMaxChannelArgs = 16;       // arguments of a channel's program
 
 struct ManifestDependency {
     std::string id;
@@ -116,6 +120,21 @@ struct ManifestSetting {
           defaultBool(false), defaultInt(0), applies("now"), advanced(false) {}
 };
 
+// One entry of `channels` (agent.hpp, "Channels"): a channel a controller may open to the package's program. This
+// agent knows the channels of NBTApps' own use only: `apps` is there and empty, so that no other phone app may open
+// it. A key it does not know in an entry or in `start`, and an `apps` that names a phone app, are refused as
+// unsupported-manifest, so that a package that uses them names a later agent in requires.agent.
+struct ManifestChannel {
+    std::string name;      // 1 to 32 of [a-z0-9-], the first a letter or a digit; the socket's name in ${tmp}/channels
+    std::string access;    // "read": the phone only reads; "both"
+    bool switched;         // `switch`: off until a controller switches it on (channel.set)
+    bool hasStart;         // `start`: the agent starts the program when a channel is opened and nothing listens
+    std::string program;   // start.program: a file the package places, relative to ${app}
+    std::vector<std::string> args;   // start.args
+
+    ManifestChannel() : switched(false), hasStart(false) {}
+};
+
 // One file the package places: an install.files entry, or one file of a folder entry.
 struct Placement {
     std::string src;    // path in the archive
@@ -144,6 +163,8 @@ struct Manifest {
     bool hasSettings;
     std::string settingsFile;
     std::vector<ManifestSetting> settings;
+    // channels, in manifest order; none when the manifest has no such key.
+    std::vector<ManifestChannel> channels;
 
     std::vector<Placement> placements;   // files, with folder entries expanded, in manifest order
 
@@ -162,9 +183,13 @@ bool parseManifest(const void* data, size_t len, Manifest* out, Error* error);
 // step 3. An empty `agentVersion` is the call above.
 bool parseManifest(const void* data, size_t len, Manifest* out, Error* error, const std::string& agentVersion);
 
-// The flags shown before an install (runs-scripts, modifies-system, needs-reboot), worked out from the manifest
-// so that a source cannot understate them.
+// The flags shown before an install (runs-scripts, modifies-system, needs-reboot, starts-program), worked out from
+// the manifest so that a source cannot understate them. starts-program: a channel's program is started by the agent
+// when a controller opens the channel.
 std::vector<std::string> riskFlags(const Manifest& manifest);
+
+// The channel of that name in the manifest, or 0.
+const ManifestChannel* findChannel(const Manifest& manifest, const std::string& name);
 
 // True for a relative path as the archive and the manifest write one: segments separated by single slashes, none of
 // them empty, "." or "..", and no backslash or control character. With `folder`, one slash at the end is allowed.

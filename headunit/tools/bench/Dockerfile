@@ -31,7 +31,7 @@ COPY src src
 # the test programs come from Docker's cache.
 RUN make -j"$(nproc)" agent-programs -o build/agent-host/nbtagent -o build/agent-host/nbtagent-next \
     && mkdir /out \
-    && cp build/agent-host/nbtctl build/agent-host/test_* /out/
+    && cp build/agent-host/nbtctl build/agent-host/test_* build/agent-host/chan_* /out/
 # The image has no git, so the version comes from outside, as in build.sh.
 ARG VERSION=unknown
 RUN make -j"$(nproc)" agent-programs VERSION="$VERSION" \
