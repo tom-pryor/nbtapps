@@ -1,0 +1,158 @@
+Dropbear's SSH server and OpenSSH's sftp-server, built for the head unit (QNX 6.5.0, armle-v7, GCC 4.4.2) and for
+this machine. Third-party code: its sources are two git submodules, and nothing of them is copied into this
+repository.
+
+  dropbear/  https://github.com/mkj/dropbear, tag DROPBEAR_2026.94, commit 28216cd9af822732a1549b78621c2ea9a76a0fe5
+             (Dropbear 2026.94). MIT, with other free licences for some parts: its LICENSE.
+  openssh/   https://github.com/openssh/openssh-portable, tag V_10_6_P2, commit d449e662b6b8b8cb20e852d8084c269af1c5e8f1
+             (OpenSSH 10.6p2, portable). BSD and licences freer than that: its LICENCE.
+
+Both are shallow (.gitmodules). Ours, beside them:
+
+  dropbear-qnx.patch  changes to Dropbear's source, each said below. MIT, as Dropbear (REUSE.toml)
+  localoptions.h      Dropbear's build options, which override its src/default_options.h. MIT, as Dropbear
+  build-qnx.sh        configure and make for the head unit, run in the QNX SDP image
+  build-host.sh       the same for this machine, with its own compiler
+  ../tools/check_ssh.py  make ssh-check
+
+
+Building
+
+From headunit/:
+
+  make ssh-src     build/ssh/src/: each submodule's pinned commit (the one in the index, which is what
+                   `git submodule update` checks out) exported with `git archive`; Dropbear's copy patched
+                   (patch -F 0, so a hunk whose context has moved fails) and given localoptions.h. The
+                   submodules are fetched first, shallow, when they are not there. They are only read: no build
+                   writes into them, and `git status` stays clean.
+  make ssh         build/ssh/qnx/dropbearmulti and sftp-server, stripped, for the head unit: build-qnx.sh in the
+                   SDP image (QNX_IMAGE, qnx650-sdk when unset). It uses the bare ntoarmv7-gcc driver, which needs
+                   no QNX licence file (qcc does), so no licence folder is mounted.
+  make ssh-host    build/ssh/host/: the same two programs for this machine, for tests.
+  make ssh-check   the head unit's two programs are ARM EABI5 soft-float executables, not position-independent,
+                   that ask for libc.so.3 and libsocket.so.3 only (no zlib); this machine's key tool makes an
+                   ed25519 host key, and its server, given one connection on a socket pair (-i), sends the
+                   banner SSH-2.0-dropbear_<version>.
+
+`make ssh` and `make ssh-host` each export again and build from the start, outside the export, in
+build/ssh/<qnx|host>/obj/, where configure.log and make.log are kept. Everything is under build/, which
+`make clean` removes.
+
+What is built:
+
+  dropbearmulti  PROGRAMS="dropbear dropbearkey scp" MULTI=1: the server, its key tool and scp in one program,
+                 which acts as the one it is started as (a link's name, or its first argument). dbclient, the
+                 client, is not built: the head unit only serves. The server needs nothing of it, and neither
+                 does scp as the far end of a client's copy (scp -t, scp -f); only an scp started on the head
+                 unit to copy to another machine would. Compression is built out (--disable-zlib): the SDP's zlib
+                 is from 2005, and the server then offers "none" only.
+  sftp-server    OpenSSH's, `make sftp-server` only, with no change to its source. Dropbear starts it for an
+                 sftp session by the bare name sftp-server (localoptions.h), looked up in PATH.
+
+The configure options, for the head unit (build-qnx.sh):
+
+  - CC=ntoarmv7-gcc, CFLAGS -O2 -march=armv7-a -mfpu=vfpv3 -mfloat-abi=softfp -D_QNX_SOURCE -std=gnu99: as the
+    agent is built, soft-float calls.
+  - LIBS=-lsocket: configure does not find socket() by itself.
+  - Dropbear ac_cv_have_decl_htole64=yes: QNX defines htole64 and the like as macros in <net/netbyte.h> (through
+    <netinet/in.h>); configure looks only in <endian.h>, misses them, and compat.h's prototypes then collide with
+    the macros.
+  - Dropbear --disable-harden, OpenSSH --without-hardening --without-stackprotect --without-pie: among those
+    flags is -pie, and a position-independent executable does not start on the head unit.
+  - --disable-lastlog, -utmp, -utmpx, -wtmp, -wtmpx (and Dropbear's -loginfunc, -pututline, -pututxline): no
+    login records are written. --disable-shadow / --without-shadow: logins are by public key only.
+  - Dropbear --enable-bundled-libtom: the SDP has no LibTomCrypt or LibTomMath.
+  - OpenSSH --without-openssl (sftp-server needs no cryptography), --without-zlib, --disable-strip (the script
+    strips).
+build-host.sh uses the same options where they apply: not the cross-compiler, CFLAGS, -lsocket, the htole64
+answer, or Dropbear's --disable-harden and OpenSSH's three hardening options.
+
+What dropbear-qnx.patch changes, each for QNX 6.5 or for the server run with -i on a socket pair:
+
+  - src/compat.h: O_NOFOLLOW defined as 0 when the system has none; QNX 6.5 has none. Every use but scp's has
+    O_EXCL, which refuses an existing link anyway.
+  - src/scpmisc.c: a vasprintf() of its own on QNX, whose libc has none.
+  - src/sshpty.c: <unix.h> on QNX, which declares openpty() (it is in libc.a).
+  - src/netio.c: -i on a socket pair or a pipe, which has no IP address, no longer ends "Failed socket address";
+    the address is given as "local", port 0.
+  - src/svr-authpubkey.c: with an absolute -D folder, only that folder's ownership and mode are checked, not
+    every folder above it (the head unit's /tmp and /dev/shmem are mode 777).
+  - src/svr-auth.c (QNX only): with no /etc/shells, an executable login shell is accepted. QNX 6.5's built-in
+    getusershell() list lacks /bin/ksh, root's shell ("User 'root' has invalid shell, rejected"), and making
+    /etc/shells would be a write to the system partition.
+  - src/svr-chansession.c: with -e the PATH the server was started with is kept, where it would otherwise be
+    the compiled DEFAULT_ROOT_PATH.
+
+What localoptions.h sets:
+
+  - no default host key or pid file paths (/nonexistent/...): -r is always given, and nothing is written under
+    /etc;
+  - inetd mode (-i) and the listening mode both built in, no re-exec;
+  - public keys only (with authorized_keys options), no password login, no agent or X11 forwarding;
+  - no message of the day;
+  - DROPBEAR_SVR_DROP_PRIVS 0, and no Unix-socket forwarding either way: QNX 6.5 has no setresgid(), which
+    dropping privileges needs (sysoptions.h stops the build otherwise), and Unix-socket forwarding needs the
+    dropping. Root logs in as root, so nothing is lost. (DROPBEAR_SVR_MULTIUSER 0 builds, but at run time
+    refuses a kernel whose getgroups() works: "Non-multiuser Dropbear requires a non-multiuser kernel".)
+  - the head unit's shell PATH as the default PATH, which is used only without -e;
+  - SFTPSERVER_PATH "sftp-server", found in PATH.
+
+
+Provenance
+
+The submodules are taken from GitHub, which is not where the releases are signed. Each tag's tree was compared,
+once, with the release archive whose PGP signature had been verified:
+
+  https://matt.ucc.asn.au/dropbear/releases/dropbear-2026.94.tar.bz2
+    sha256 e098034a843699200c8c977a991fff73159735bf795d5f72ef672c41a6b1ae81
+    signed by F734 7EF2 EE2E 07A2 6762 8CA9 4493 1494 F29C 6773 (dropbear-key-2015.asc on the same site)
+  https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz
+    sha256 9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b
+    signed by 7168 B983 815A 5EEF 59A4 ADFD 2A3F 414E 7360 60BA (RELEASE_KEY.asc)
+
+Each archive, extracted, against `git archive` of the commit above, extracted: identical. Dropbear 967 files and
+OpenSSH 893, the same names, the same bytes (diff -r) and the same modes, no links, nothing on one side only. So
+the tags carry the generated files the archives carry (configure, config.h.in), and the build needs no autotools.
+(Checked 2026-11-19.)
+
+The same exports build the same bytes: two builds from two fresh exports gave identical stripped programs, for
+the head unit and for this machine. The programs hold the paths of the source files they were compiled from (in
+assertion messages): /src/build/ssh/src/... for the head unit, because the image is given headunit/ at /src, so
+any checkout builds the same program there with the same image; for this machine, the checkout's own path, so
+those differ from one checkout to another. Nothing holds a date.
+
+
+Moving to a new upstream version
+
+  1. In the submodule: git fetch --depth 1 origin tag NEWTAG, git checkout NEWTAG; then, in headunit/,
+     git add ssh/dropbear (or ssh/openssh). That pins it.
+  2. Compare the new tag's tree with its signed release archive as above, and write the result here.
+  3. make ssh-src. A hunk of the patch that no longer applies fails here. Make the change again in a fresh
+     export and write the patch with diff -ruN of the unpatched export against the changed one (paths a/ and b/,
+     -p1), leaving out localoptions.h.
+  4. Read the new src/default_options.h and sysoptions.h for options that localoptions.h has to set, and the
+     CHANGES file for anything that touches -i, -D, -e or what QNX lacks.
+  5. make ssh ssh-host ssh-check, and change the tags and commits at the top of this file.
+
+
+Licences to ship with the programs
+
+Not kept here: they are taken from the exported sources (build/ssh/src/) with the programs. For dropbearmulti:
+
+  - dropbear/LICENSE: Dropbear's MIT licence, and the notices of the parts from OpenSSH, PuTTY and TweetNaCl;
+  - dropbear/libtomcrypt/LICENSE and dropbear/libtommath/LICENSE;
+  - the notices at the head of these compiled files, whose holders or terms LICENSE does not give in full:
+    src/atomicio.c, src/chachapoly.c, src/fake-rfc2553.c, src/gcm.c, src/libcrux_mlkem768_sha3.h (MIT, Cryspen;
+    included by src/mlkem768.c), src/loginrec.c, src/mlkem768.c, src/scp.c, src/scpmisc.c, src/sshpty.c,
+    src/svr-authpam.c, src/svr-authpubkeyoptions.c. (src/progressmeter.c is compiled with its code switched
+    off; src/sntrup761.c is public domain.)
+For sftp-server: openssh/LICENCE, which collects the notices of OpenSSH's files and, in its part 8, those of the
+portable compatibility code.
+
+
+Worktrees
+
+In a linked worktree, the submodules' clones live in the main repository's .git/worktrees/<name>/modules/
+(`git rev-parse --git-dir` in a submodule shows it), not in the worktree's folder. `git worktree remove` refuses
+a worktree with submodules: it takes --force, which also throws away uncommitted changes and untracked files, so
+look at `git status` first. Such a worktree cannot be moved with `git worktree move` either.

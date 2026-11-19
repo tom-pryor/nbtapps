@@ -40,6 +40,7 @@ Nothing in HmiMain3D is patched.
 | `tests/` | Host tests of the Python tools: `test_nbtpkg.py` (`make test-pkg`), `test_agent_pkg.py` (`make test-agent-pkg`) and `test_plugin_pkg.py` (`make test-plugin-pkg`) |
 | `tests/agent/` | Tests of `agent/` (`make agent-test`), run in a Docker container (`tools/bench.py`), and `chan_echo.cpp` and `chan_feed.cpp`, the programs of the test package chan's channels; `tests/compare_readers.py` holds the agent's package reader and the tool's together, `tests/test_protocol_vectors.py` reads `spec/protocol/` with a codec of its own, `tests/e2e/run_agent.py` runs `nbtagent` and `nbtctl` as two processes, and `tests/e2e/run_launcher.py` runs the starter, a version's launcher and the install script on folders |
 | `tests/packages/`, `tests/keys/` | Package sources and test keys for `tests/make_packages.py`, which builds good and deliberately broken packages (`make testdata`); `tests/test_nbtpkg.py` tests the tool against them (`make test-pkg`) |
+| `ssh/` | Third party: Dropbear's SSH server and OpenSSH's `sftp-server`, as git submodules pinned at release tags (`ssh/dropbear`, `ssh/openssh`), with our patch to Dropbear, its build options and the build scripts, for the head unit and for this machine; `tools/check_ssh.py` is `make ssh-check`. `ssh/README` says what each change is for and how the sources were checked against the signed releases |
 | `build/`, `release/` | Build products, not tracked. `release/NbtApp/` is the folder for the head unit; `release/agent/` holds the agent's programs for it, and `release/pkg/` the plugin's and the agent's own packages |
 
 Ids that must not collide with other apps on the car: the manifest's connector id (211; BMW's apps use 17 and 200,
@@ -69,6 +70,16 @@ dependencies, `pluginAppInfo` exported, only HU Framework symbols that exist) an
 
 To link against a head unit's real HU Framework libraries instead of the stubs:
 `make lib FRAMEWORK_LIBDIR=/path/to/opt/hmi/ID5/lib`. The result is identical.
+
+Dropbear and OpenSSH's `sftp-server` (`ssh/`, see `ssh/README`) are built from the submodules, which
+`make ssh-src` fetches when they are not there (a plain `git clone` leaves them out):
+
+```sh
+make ssh-src      # the submodules' pinned commits exported to build/ssh/src/, Dropbear's patched; the submodules are only read
+make ssh          # -> build/ssh/qnx/: dropbearmulti and sftp-server for the head unit, in the SDP image (docker; no QNX licence)
+make ssh-host     # -> build/ssh/host/: the same two for this machine
+make ssh-check    # both looked at; the head unit's are not run
+```
 
 ## Packages and the agent
 
@@ -1640,6 +1651,8 @@ the new version, and then the plugin's, which restarts the HMI.
 PolyForm Strict License 1.0.0, as the whole repo: see [LICENSE.md](../LICENSE.md) at its root.
 
 `agent/vendor/tweetnacl/` is third-party code in the public domain; see the README in that folder.
+`ssh/dropbear` and `ssh/openssh` are third-party code under their own licences, and `ssh/dropbear-qnx.patch` and
+`ssh/localoptions.h` are MIT, as Dropbear; see `ssh/README`.
 
 Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 
