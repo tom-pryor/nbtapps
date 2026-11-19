@@ -29,12 +29,16 @@ inline std::string programName(const char* exePath) {
     return std::string(exePath + start, n - start);
 }
 
-// The path of the executable of process `pid`, read from the system's folder of processes; empty if it cannot be
-// read. Three places are tried, in this order:
-//   <procDir>/<pid>/exefile   a text file that holds the path: the head unit's system
+// The path of the executable of process `pid`, read from the system's folder of processes, from the root: one that
+// the system reports without a leading '/' is given one, unless it begins with "./" or "../" (a program started by
+// a relative path, from a folder not known here). Empty if it cannot be read. Three places are tried, in this
+// order:
+//   <procDir>/<pid>/exefile   a text file that holds the path, where the system has one; the head unit's QNX 6.5
+//                             has none
 //   <procDir>/<pid>/exe       a link to the executable: Linux, where the bench runs
-//   <procDir>/<pid>/as        on the head unit only: the path the process was loaded from, which is what the
-//                             process list shows
+//   <procDir>/<pid>/as        QNX only, and on the head unit the one there is: the path the process was started by,
+//                             which is what the process list shows. QNX gives it as it was given, without its
+//                             leading '/' ("bin/sh"), and does not follow links in it
 std::string exePathOf(long pid, const char* procDir = "/proc");
 
 enum ProgramState {
@@ -49,7 +53,7 @@ enum ProgramState {
 // the program.
 ProgramState programState(const std::string& name, const char* procDir = "/proc", unsigned* unnamed = 0);
 
-// A process, and the path of its executable as the system reports it, without a line end.
+// A process, and the path of its executable as exePathOf gives it, without a line end.
 struct RunningProgram {
     long pid;
     std::string path;

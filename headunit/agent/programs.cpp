@@ -33,6 +33,14 @@ bool isPid(const char* name, long* pid) {
     return true;
 }
 
+// A path the system reports, from the root: QNX gives the path a process was started by without its leading '/'
+// ("bin/sh" for /bin/sh), and the folders it is compared with begin with one. A path that it gives as "./prog" or
+// "../bin/prog" was a relative one, of a program started from a folder that is not known here, and stays as it is.
+std::string fromRoot(const std::string& path) {
+    if (path.empty() || path[0] == '/' || path.compare(0, 2, "./") == 0 || path.compare(0, 3, "../") == 0) return path;
+    return "/" + path;
+}
+
 }  // namespace
 
 std::string exePathOf(long pid, const char* procDir) {
@@ -45,7 +53,7 @@ std::string exePathOf(long pid, const char* procDir) {
         close(fd);
         if (n > 0) {
             text[n] = 0;
-            return std::string(text);
+            return fromRoot(text);
         }
     }
     snprintf(p, sizeof(p), "%s/%ld/exe", procDir, pid);
@@ -57,7 +65,7 @@ std::string exePathOf(long pid, const char* procDir) {
         if (path.size() > gone.size() && path.compare(path.size() - gone.size(), gone.size(), gone) == 0) {
             path.erase(path.size() - gone.size());
         }
-        return path;
+        return fromRoot(path);
     }
 #ifdef __QNXNTO__
     snprintf(p, sizeof(p), "%s/%ld/as", procDir, pid);
@@ -72,7 +80,7 @@ std::string exePathOf(long pid, const char* procDir) {
     close(fd);
     if (r != EOK) return std::string();
     map.more[sizeof(map.more) - 1] = 0;
-    return std::string(map.info.path);
+    return fromRoot(map.info.path);
 #else
     return std::string();
 #endif

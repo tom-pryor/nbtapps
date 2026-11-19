@@ -2,8 +2,8 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 // Host test for agent/serial_services.cpp: the file of serial services that no package declares, which services a
 // sweep removes and which it leaves alone, and the two moments of an install step at which the engine has the
-// list swept and read anew. The machine's processes and the car's Bluetooth service are played by the test. All
-// names are invented.
+// list swept and read anew; and whether a program of software put on by hand runs. The machine's processes and the
+// car's Bluetooth service are played by the test. All names are invented.
 //
 // usage: test_serial_services [testdata folder] [work folder]     (default build/testdata and build/agent-host/work)
 
@@ -26,7 +26,7 @@ static std::string gData, gWork;
 static bool has(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
 
 // A head unit in a folder whose processes are what the test says: a program it has not been told of is not
-// running.
+// running. With `procDir`, the programs under a folder are those of a folder of processes that the test makes.
 class FakeMachine : public HostPlatform {
 public:
     explicit FakeMachine(const std::string& root) : HostPlatform(root), asked(0) {}
@@ -35,7 +35,12 @@ public:
         std::map<std::string, ProgramState>::const_iterator it = programs.find(name);
         return it != programs.end() ? it->second : kProgramNotRunning;
     }
+    virtual ProgramState programsUnder(const std::string& dir, std::vector<RunningProgram>* out) const {
+        if (procDir.empty()) return HostPlatform::programsUnder(dir, out);
+        return nbt::programsUnder(dir, out, procDir.c_str());
+    }
     std::map<std::string, ProgramState> programs;
+    std::string procDir;
     mutable unsigned asked;
 };
 
@@ -296,6 +301,23 @@ static void testSteps(const TrustedKey& key) {
     CHECK(r.outcome == kStepDone && b.remover.took().empty());
 }
 
+// Software put on by hand runs: a program whose executable is in the folder of a check that stops programs, with
+// its path reported as QNX reports it, without its leading '/'.
+static void testHandInstalled() {
+    Bench b("hand");
+    std::string why, names = "-";
+    b.machine.procDir = gWork + "/hand-proc";
+    CHECK_IN(why, fs::removeTree(b.machine.procDir, &why));
+    CHECK(b.services.handInstalledRunning(&names) == kProgramUnknown && names.empty());
+    CHECK_IN(why, fs::makeDirs(b.machine.procDir + "/1", &why));
+    CHECK_IN(why, fs::writeFile(b.machine.procDir + "/1/exefile", "bin/sh\n", 0644, &why));
+    CHECK(b.services.handInstalledRunning(&names) == kProgramNotRunning && names.empty());
+    std::string program = b.machine.systemPath("/opt/aa/bin/demod");
+    CHECK_IN(why, fs::makeDirs(b.machine.procDir + "/77", &why));
+    CHECK_IN(why, fs::writeFile(b.machine.procDir + "/77/exefile", program.substr(1) + "\n", 0644, &why));
+    CHECK_IN(names, b.services.handInstalledRunning(&names) == kProgramRunning && names == "demod");
+}
+
 int main(int argc, char** argv) {
     char here[4096];
     CHECK(getcwd(here, sizeof here) != 0);
@@ -313,6 +335,7 @@ int main(int argc, char** argv) {
     testFile();
     testSweep();
     testSteps(key);
+    testHandInstalled();
 
     printf("test_serial_services: ok\n");
     return 0;

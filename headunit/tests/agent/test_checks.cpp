@@ -65,11 +65,14 @@ static void snapshotOf(const std::string& dir, std::string* out) {
 
 // The folder's platform, with the processes a test says are there. With `programs` below 0 it asks the machine,
 // and then signals only a process this test started itself and named in `mine`: any other makes the fix fail.
+// With `procDir`, the processes are those of a folder of processes that the test makes, read as programs.hpp
+// reads the machine's, and SIGTERM ends one by removing its entry.
 class TestPlatform : public HostPlatform {
 public:
     explicit TestPlatform(const std::string& root) : HostPlatform(root), programs(-1) {}
 
     virtual ProgramState programsUnder(const std::string& dir, std::vector<RunningProgram>* out) const {
+        if (!procDir.empty()) return nbt::programsUnder(dir, out, procDir.c_str());
         if (programs < 0) return HostPlatform::programsUnder(dir, out);
         out->clear();
         if (programs == 0) return kProgramNotRunning;
@@ -82,12 +85,17 @@ public:
     }
     virtual bool signalProcess(long pid, int number) {
         signals.push_back(num(pid) + (number == SIGTERM ? " TERM" : number == SIGKILL ? " KILL" : " other"));
+        if (!procDir.empty()) {
+            std::string why;
+            return number != SIGTERM || fs::removeTree(procDir + "/" + num(pid), &why);
+        }
         if (programs >= 0) return true;
         if (mine.count(pid) == 0) return false;
         return HostPlatform::signalProcess(pid, number);
     }
 
     int programs;   // below 0: the machine's; 0: none; 1: one that does not end; 2: they cannot be read
+    std::string procDir;
     std::set<long> mine;
     std::vector<std::string> signals;
 };
@@ -746,6 +754,25 @@ static void testFixStopsPrograms() {
     CHECK_IN(installLog(h), installLog(h).find("sent SIGTERM to demod (process " + num(pid) + ")\n") != std::string::npos);
 }
 
+// The same where the system reports the program's path without its leading '/', as the head unit's QNX does: the
+// program is found, and stopped before its files go. The process is an entry in a folder of processes.
+static void testFixStopsProgramsAsQnxReports() {
+    Head h("fix-stop-qnx");
+    handInstall(h);
+    std::string why, program = h.sys("/opt/aa/bin/demod");
+    h.platform.procDir = gWork + "/fix-stop-qnx-proc";
+    CHECK_IN(why, fs::removeTree(h.platform.procDir, &why));
+    write(h.platform.procDir + "/4242/exefile", program.substr(1) + "\n");
+    write(h.platform.procDir + "/1/exefile", "bin/sh\n");   // another, which is left alone
+    FixOutcome out = fixNow(h, "aa-fix");
+    CHECK(out.stopped.size() == 1 && out.stopped[0] == "demod" && h.platform.signals.size() == 1);
+    CHECK(h.platform.signals[0] == "4242 TERM" && out.state == kCheckOk && !there(program));
+    CHECK(there(h.platform.procDir + "/1/exefile"));
+    std::string log = installLog(h);
+    size_t sent = log.find("sent SIGTERM to demod (process 4242)\n"), removed = log.find("removed " + program + "\n");
+    CHECK_IN(log, sent != std::string::npos && removed != std::string::npos && sent < removed);
+}
+
 // A program that does not end, and processes that cannot be read: the fix ends before anything is removed.
 static void testFixStopFails() {
     Head h("fix-stop-fails");
@@ -809,6 +836,7 @@ int main(int argc, char** argv) {
     testFixLeavesWhatCameAfter();
     testFixCutOff();
     testFixStopsPrograms();
+    testFixStopsProgramsAsQnxReports();
     testFixStopFails();
     testFixRemount();
 
