@@ -1,0 +1,8 @@
+[submodule "headunit/ssh/dropbear"]
+	path = headunit/ssh/dropbear
+	url = https://github.com/mkj/dropbear
+	shallow = true
+[submodule "headunit/ssh/openssh"]
+	path = headunit/ssh/openssh
+	url = https://github.com/openssh/openssh-portable
+	shallow = true

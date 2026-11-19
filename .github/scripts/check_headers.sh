@@ -7,7 +7,8 @@
 # without its two lines still passes. This looks at the kinds of file that take a comment, and leaves out those
 # that must not have a header, as REUSE.toml lists them: the test packages (hashed and signed), the copies of the
 # head unit's test data in the app, the debug build's signed sample catalogue, and third-party files under their
-# own licence (TweetNaCl, the Gradle wrapper).
+# own licence (TweetNaCl, the Gradle wrapper, and Dropbear's build options for the head unit, which are under
+# Dropbear's). The submodules under headunit/ssh/ are not looked into: git ls-files lists each as one entry.
 #
 #   .github/scripts/check_headers.sh        (from anywhere in the repo)
 set -eu
@@ -18,6 +19,7 @@ missing=$(git ls-files -- \
     '*Makefile' '*Dockerfile' \
     ':!:headunit/tests/packages/**' \
     ':!:headunit/agent/vendor/tweetnacl/**' \
+    ':!:headunit/ssh/localoptions.h' \
     ':!:android/app/src/test/resources/agent/**' \
     ':!:android/app/src/debug/assets/catalogue/**' \
     ':!:android/gradlew' ':!:android/gradlew.bat' ':!:android/gradle/wrapper/**' \

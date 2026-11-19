@@ -28,6 +28,22 @@ precedence = "override"
 SPDX-FileCopyrightText = "2014 Daniel J. Bernstein, Bernard van Gastel, Wesley Janssen, Tanja Lange, Peter Schwabe, Sjaak Smetsers"
 SPDX-License-Identifier = "LicenseRef-TweetNaCl-PublicDomain"
 
+# Dropbear's changes and build options for the head unit (see headunit/ssh/README), under Dropbear's own licence:
+# the patch carries lines of Dropbear's source around ours, and localoptions.h sets Dropbear's options. The
+# sources of Dropbear and OpenSSH themselves are the submodules headunit/ssh/dropbear and headunit/ssh/openssh,
+# which reuse does not look into.
+[[annotations]]
+path = "headunit/ssh/dropbear-qnx.patch"
+precedence = "override"
+SPDX-FileCopyrightText = ["2002-2020 Matt Johnston","Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)"]
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "headunit/ssh/localoptions.h"
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)"
+SPDX-License-Identifier = "MIT"
+
 # The Gradle wrapper. gradlew and gradlew.bat say so themselves; the jar and its properties do not.
 [[annotations]]
 path = ["android/gradle/wrapper/gradle-wrapper.jar", "android/gradle/wrapper/gradle-wrapper.properties"]
