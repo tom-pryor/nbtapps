@@ -41,6 +41,17 @@
 #   make test-pkg   host test of tools/nbtpkg.py and the test packages   needs python3 + cryptography
 #   make testdata   build/testdata/: good and deliberately broken .nbtpkg files for every reader's tests
 #   make icons      redraw assets/*.png             needs python3 + Pillow (host)
+#   make ssh-src    build/ssh/src/: the sources of Dropbear and of OpenSSH, exported from the commits the submodules
+#                   ssh/dropbear and ssh/openssh are pinned at (fetched first, shallow, when they are not there),
+#                   Dropbear's with ssh/dropbear-qnx.patch and ssh/localoptions.h. The submodules are only read
+#                   needs git, patch (host)
+#   make ssh        build/ssh/qnx/: Dropbear's dropbearmulti (server, key tool, scp) and OpenSSH's sftp-server for the
+#                   head unit, stripped, built from those sources in the SDP image (QNX_IMAGE, qnx650-sdk when
+#                   unset) with the bare ntoarmv7-gcc, which needs no QNX licence   needs docker
+#   make ssh-host   build/ssh/host/: the same two programs for this machine, for tests   needs gcc, make (host)
+#   make ssh-check  the two builds looked at: the head unit's programs, which are not run, ask for libc.so.3 and
+#                   libsocket.so.3 only; this machine's key tool makes a host key and its server says it is
+#                   Dropbear on one connection   needs python3 + readelf (host)
 #   make clean
 
 QCC ?= qcc
@@ -71,7 +82,7 @@ HDRS = $(wildcard src/*.hpp) $(wildcard agent/*.hpp)
 
 .PHONY: all lib pkg check agent agent-check agent-test agent-host agent-programs agent-e2e agent-launcher \
         agent-pkg agent-release test-agent-pkg plugin-pkg plugin-release test-plugin-pkg \
-        bench-image \
+        bench-image ssh-src ssh ssh-host ssh-check \
         test-protocol test-pkg testdata icons clean FORCE
 .SECONDARY:
 
@@ -399,6 +410,43 @@ test-plugin-pkg:
 
 testdata:
 	python3 tests/make_packages.py $(BUILD)/testdata
+
+# ---- SSH: Dropbear and OpenSSH's sftp-server, third party (ssh/README) -----------------------------------------
+# Their sources are the submodules ssh/dropbear and ssh/openssh, which no build writes to: each starts from a new
+# export of the commit the index pins (what `git submodule update` checks out) into build/ssh/src/, and builds
+# outside that too, in build/ssh/qnx/obj/ and build/ssh/host/obj/. The image has no git, so the export is made
+# here. Every run builds from the start: a few minutes at most.
+SSH       = $(BUILD)/ssh
+SSH_SRC   = $(SSH)/src
+QNX_IMAGE ?= qnx650-sdk
+
+ssh-src:
+	@test -e ssh/dropbear/.git && test -e ssh/openssh/.git || git submodule update --init --depth 1 -- ssh/dropbear ssh/openssh
+	rm -rf build/ssh/src
+	mkdir -p $(SSH_SRC)/dropbear $(SSH_SRC)/openssh
+	git -C ssh/dropbear archive -o $(CURDIR)/$(SSH_SRC)/dropbear.tar $$(git rev-parse :./ssh/dropbear)
+	git -C ssh/openssh archive -o $(CURDIR)/$(SSH_SRC)/openssh.tar $$(git rev-parse :./ssh/openssh)
+	tar -xf $(SSH_SRC)/dropbear.tar -C $(SSH_SRC)/dropbear
+	tar -xf $(SSH_SRC)/openssh.tar -C $(SSH_SRC)/openssh
+	rm -f build/ssh/src/dropbear.tar build/ssh/src/openssh.tar
+	patch -d $(SSH_SRC)/dropbear -p1 -s -F 0 -i $(CURDIR)/ssh/dropbear-qnx.patch
+	cp ssh/localoptions.h $(SSH_SRC)/dropbear/
+	@echo [DONE] $(SSH_SRC): Dropbear $$(git rev-parse --short :./ssh/dropbear), patched, and OpenSSH $$(git rev-parse --short :./ssh/openssh)
+
+ssh: ssh-src
+	@docker image inspect $(QNX_IMAGE) >/dev/null 2>&1 || { echo "make ssh: Docker image '$(QNX_IMAGE)' not found (set QNX_IMAGE)" >&2; exit 1; }
+	rm -rf build/ssh/qnx
+	docker run --rm -u "$$(id -u):$$(id -g)" -v "$(CURDIR)":/src -w /src $(QNX_IMAGE) \
+	    sh ssh/build-qnx.sh $(SSH_SRC)/dropbear $(SSH_SRC)/openssh $(SSH)/qnx
+	@echo [DONE] $(SSH)/qnx: dropbearmulti and sftp-server for the head unit. make ssh-check looks at them
+
+ssh-host: ssh-src
+	rm -rf build/ssh/host
+	CC=$(HOST_CC) sh ssh/build-host.sh $(SSH_SRC)/dropbear $(SSH_SRC)/openssh $(SSH)/host
+	@echo [DONE] $(SSH)/host: dropbearmulti and sftp-server for this machine
+
+ssh-check:
+	python3 tools/check_ssh.py
 
 # ---- host side -------------------------------------------------------------------------------------------------
 pkg:
