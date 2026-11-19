@@ -135,4 +135,36 @@ object ProtocolConstants {
      * a `text` option's `maxLength` may be.
      */
     const val SETTINGS_MAX_VALUE_BYTES = 255
+
+    /**
+     * A capability: the agent has channels. A controller opens a named channel of an installed package with
+     * `channel.open`, and messages pass both ways as DATA frames on the channel's stream, with credits
+     * (`channel.credit`), until either side closes it (`channel.close`); `channel.get` and `channel.set` say and set
+     * whether a switched channel is on. One that does not list it answers those methods with `unsupported`.
+     */
+    const val CAPABILITY_CHANNELS = "channels"
+
+    /**
+     * Stream numbers: a files stream and the stream of a `blob.fetch` take the numbers from 1 to [STREAM_LAST], and
+     * start again at 1 after it; a channel takes the numbers from [CHANNEL_FIRST_STREAM] to 65,535.
+     */
+    const val STREAM_LAST = 32767
+    const val CHANNEL_FIRST_STREAM = 32768
+
+    /** A channel's message is one DATA frame, with the last flag set, of 1 to this many bytes, on every link. */
+    const val CHANNEL_MAX_MESSAGE = 4096
+
+    /** The messages each side of a channel may send before the other grants more with `channel.credit`, at first. */
+    const val CHANNEL_CREDIT = 16
+
+    /** The most channels open on one link. */
+    const val CHANNEL_PER_LINK = 8
+
+    /**
+     * A channel whose program the agent starts on demand: the agent tries to connect to it every [CHANNEL_START_RETRY_MS]
+     * for [CHANNEL_START_WAIT_MS], and answers `channel.open` with `unavailable` when the program has not taken the
+     * connection by then. So the answer to `channel.open` may take that long.
+     */
+    const val CHANNEL_START_WAIT_MS = 5_000L
+    const val CHANNEL_START_RETRY_MS = 100L
 }
