@@ -7,6 +7,7 @@ import com.nbtapps.store.data.json.JsonProfileException
 import com.nbtapps.store.data.json.StrictJson
 import com.nbtapps.store.data.json.Utf8
 import com.nbtapps.store.data.link.ProtocolConstants
+import com.nbtapps.store.model.ManifestChannel
 import com.nbtapps.store.model.ManifestFile
 import com.nbtapps.store.model.ManifestHook
 import com.nbtapps.store.model.ManifestLink
@@ -51,6 +52,11 @@ import kotlinx.serialization.json.longOrNull
  *    not mark the manifest. Nothing in the app acts on a manifest's settings (the settings screen reads the options
  *    from the agent, see [settingOption]), so none are lost. An option of a type this app does not know is skipped,
  *    with only its `key` and `label` checked, as the agent does.
+ *  - `channels` that break the agent's rules: taken as none ([PackageManifest.channels] empty), with no mark. The app
+ *    reads them only for the risk flag `starts-program` and to know a channel's name and switch; the agent checks
+ *    them again before anything is installed. In a channel, a key this app does not know, in the entry or in its
+ *    `start`, and an `apps` that names a phone app other than this one, are marked as of a later format, and the
+ *    channel is kept with what the app could read.
  *  - In `install` and `requires`, what this app does not know, which it skips and marks as of a later format: a folder
  *    variable in a file's `dest` or a link's `path`, of the shape `${name}` that a `logs` entry's has, with the rest
  *    of the path held to the usual rules; a key in `install`, a file, `replaces`, a link, a hook, a serial service or
@@ -83,6 +89,13 @@ object ManifestParser {
 
     /** UTF-8 in one option's strings, so that one option fits a 4,096-byte serial frame when the agent sends it. */
     const val MAX_SETTING_BYTES = 1024
+
+    /** Entries in `channels`, and arguments of a channel's program. */
+    const val MAX_CHANNELS = 8
+    const val MAX_CHANNEL_ARGS = 16
+
+    /** A channel's `access`: the phone only reads, or both ways. */
+    private val CHANNEL_ACCESS = listOf("read", "both")
 
     /** The limits of an `int` option's numbers. */
     private const val INT_MIN = -2147483648L
@@ -118,6 +131,7 @@ object ManifestParser {
         var install = Install()
         var logs = emptyList<String>()
         var settings: PackageSettings? = null
+        var channels: List<ManifestChannel>? = null
         // Members are checked in the order of the text, as the agent does, so both name the same first fault.
         for ((key, value) in root) {
             when (key) {
@@ -131,6 +145,7 @@ object ManifestParser {
                 "install" -> install = install(value, walk)
                 "logs" -> logs = logs(value)
                 "settings" -> settings = settingsOrNull(value)
+                "channels" -> channels = channelsOrNull(value, walk)
             }
         }
         val manifest = PackageManifest(
@@ -151,8 +166,8 @@ object ManifestParser {
             settings = settings,
             laterFormat = walk.laterFormat,
         )
-        crossFields(manifest)
-        return manifest
+        val files = crossFields(manifest)
+        return manifest.copy(channels = channels?.let { channelRules(it, files) } ?: emptyList())
     }
 
     /** What one walk of a manifest has met, which the parser, an object of its own, does not keep between them. */
@@ -281,6 +296,74 @@ object ManifestParser {
             val path = obj["path"] ?: bad("$at has no \"path\"")
             text(path, "$at.path", ::isLogPath)
         }
+    }
+
+    /**
+     * `channels`, as the agent reads them, or null where they break the agent's rules: see the class's comment. A key
+     * this app does not know in an entry or in its `start`, and an `apps` that names a phone app, mark the manifest as
+     * of a later format, and the entry is kept with what the app could read. Never a refusal of the manifest.
+     */
+    private fun channelsOrNull(value: JsonElement, walk: Walk): List<ManifestChannel>? {
+        val local = Walk()
+        val channels = try {
+            channels(value, local)
+        } catch (e: PackageFormatException) {
+            return null
+        }
+        if (local.laterFormat) walk.laterFormat = true
+        return channels
+    }
+
+    /** `channels`: 1 to [MAX_CHANNELS] entries, each with a name, an `apps` and an `access`. */
+    private fun channels(value: JsonElement, walk: Walk): List<ManifestChannel> {
+        val array = value as? JsonArray ?: bad("channels must be an array")
+        if (array.isEmpty()) bad("channels needs at least one channel")
+        if (array.size > MAX_CHANNELS) bad("channels has more than $MAX_CHANNELS channels")
+        return array.mapIndexed { i, item ->
+            val at = "channels[$i]"
+            val obj = item as? JsonObject ?: bad("$at must be an object")
+            for (key in listOf("name", "apps", "access")) {
+                if (key !in obj) bad("$at has no \"$key\"")
+            }
+            var name = ""
+            var access = ""
+            var switched = false
+            var program: String? = null
+            for ((key, member) in obj) {
+                when (key) {
+                    "name" -> name = text(member, "$at.name", ::isChannelName)
+                    "apps" -> {
+                        val apps = member as? JsonArray ?: bad("$at.apps must be an array")
+                        // A phone app other than NBTApps: a later agent's.
+                        if (apps.isNotEmpty()) walk.laterFormat = true
+                    }
+                    "access" -> access = text(member, "$at.access") { it in CHANNEL_ACCESS }
+                    "switch" -> switched = boolean(member, "$at.switch")
+                    "start" -> program = channelStart(member, "$at.start", walk)
+                    else -> walk.laterFormat = true
+                }
+            }
+            ManifestChannel(name, access, switched, program)
+        }
+    }
+
+    /** A channel's `start`: the program, a path in the archive's form, and up to [MAX_CHANNEL_ARGS] arguments. */
+    private fun channelStart(value: JsonElement, at: String, walk: Walk): String {
+        val obj = value as? JsonObject ?: bad("$at must be an object")
+        if ("program" !in obj) bad("$at has no \"program\"")
+        var program = ""
+        for ((key, member) in obj) {
+            when (key) {
+                "program" -> program = text(member, "$at.program", ::isPath)
+                "args" -> {
+                    val args = member as? JsonArray ?: bad("$at.args must be an array")
+                    if (args.size > MAX_CHANNEL_ARGS) bad("$at.args has more than $MAX_CHANNEL_ARGS arguments")
+                    args.forEachIndexed { i, arg -> text(arg, "$at.args[$i]") { Utf8.length(it) <= 255 && noControls(it) } }
+                }
+                else -> walk.laterFormat = true
+            }
+        }
+        return program
     }
 
     /** `settings` as the walk finds it: the file, and per option what every option has and the object for the rest. */
@@ -640,7 +723,8 @@ object ManifestParser {
 
     // ---- the rules that span fields ----
 
-    private fun crossFields(manifest: PackageManifest) {
+    /** Refuses what breaks them, and returns what `install.files` places, folders opened up, without the links. */
+    private fun crossFields(manifest: PackageManifest): Set<String> {
         val paths = HashMap<String, PackageContent>()
         for (content in manifest.contents) {
             if (content.path == PackageArchive.MANIFEST_NAME || content.path == PackageArchive.SIGNATURE_NAME) {
@@ -680,6 +764,20 @@ object ManifestParser {
         for (log in manifest.logs) {
             if (!logs.add(log)) bad("names the log $log twice")
         }
+        return placed - manifest.links.map { it.path }.toSet()
+    }
+
+    /**
+     * `channels` held to the rules that span fields, given the files the package places: no name twice, and a start's
+     * program placed in `${app}` by `install.files`. Null where it breaks them: see [channelsOrNull].
+     */
+    private fun channelRules(channels: List<ManifestChannel>, files: Set<String>): List<ManifestChannel>? {
+        val names = HashSet<String>()
+        for (channel in channels) {
+            if (!names.add(channel.name)) return null
+            if (channel.program != null && "\${app}/${channel.program}" !in files) return null
+        }
+        return channels
     }
 
     // ---- the string forms of the schema ----
@@ -763,6 +861,10 @@ object ManifestParser {
     }
 
     private fun isLinkTarget(text: String): Boolean = Utf8.length(text) in 1..255 && noControls(text)
+
+    /** A channel's name: 1 to 32 of `[a-z0-9-]`, the first a letter or a digit. */
+    internal fun isChannelName(text: String): Boolean =
+        text.length in 1..32 && text[0] != '-' && text.all { it in 'a'..'z' || it in '0'..'9' || it == '-' }
 
     /** 1 to 32 of `[A-Za-z0-9_-]`, and not a name that is taken: the agent's own service or the car's. */
     internal fun isSerialServiceName(text: String): Boolean =
