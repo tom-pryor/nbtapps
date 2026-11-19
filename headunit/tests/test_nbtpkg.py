@@ -218,6 +218,23 @@ def main():
     refused("unsupported-manifest", requiring, {"agent": ">=1.6.0", "phone": ">=0.8.0"})
     print("[ok] requires.app")
 
+    # 2e. channels, which an agent knows from 1.7.0 and an older one ignores: the same rule again. An apps that names
+    # a phone app is a later format's, as an unknown key is; an apps that is no list is broken.
+    def channelling(requirement, channel=None):
+        manifest = {"manifestVersion": 1, "id": "org.nbtapp.t", "name": "T", "version": "1.0.0", "contents": [],
+                    "channels": [channel or {"name": "a", "apps": [], "access": "both"}]}
+        if requirement is not None:
+            manifest["requires"] = {"agent": requirement}
+        nbtpkg.check_manifest(manifest)
+    for requirement in (None, ">=1.6.0", "1.6.0", "<2.0.0"):
+        message = refused("bad-manifest", channelling, requirement)
+        assert "has channels" in message and "\"requires\": {\"agent\": \">=1.7.0\"}" in message, message
+    for requirement in (">=1.7.0", ">=1.7.0-beta.1", "1.7.0", ">=1.7.0 <2.0.0"):
+        channelling(requirement)
+    refused("unsupported-manifest", channelling, ">=1.7.0", {"name": "a", "apps": ["org.example.app"], "access": "both"})
+    refused("bad-manifest", channelling, ">=1.7.0", {"name": "a", "apps": "org.example.app", "access": "both"})
+    print("[ok] channels")
+
     with tempfile.TemporaryDirectory() as tmp:
         # 3. The test packages.
         vectors = make_packages.build_all(os.path.join(tmp, "data"))
@@ -248,7 +265,7 @@ def main():
             message = refused(entry["code"], nbtpkg.verify_package, data_of(entry), [public])
             assert entry["names"] in message and ("does not know" in message or "knows from" in message), \
                 "%s: %s" % (entry["file"], message)
-        assert {e["names"] for e in vectors["skipped"]} == {"logs[1].path", "requires.app"}
+        assert {e["names"] for e in vectors["skipped"]} == {"logs[1].path", "requires.app", "channels"}
         hello = next(e for e in vectors["good"] if e["file"] == "good/org.nbtapp.hello-1.2.0.nbtpkg")
         assert hello["flags"] == ["runs-scripts"]
         print("[ok] test packages: %d good, %d bad, %d skipped"
@@ -281,6 +298,11 @@ def main():
                                               "links": [{"path": "${var_plugins}/B/l"}]}}) == []
         assert nbtpkg.risk_flags({"install": {"files": [{"dest": "${var_pluginsx}/a"}]}}) == ["modifies-system"]
         assert nbtpkg.risk_flags({}) == []
+        # A channel whose program the agent starts; one with no start starts nothing.
+        assert nbtpkg.risk_flags({"channels": [{"name": "a"}, {"name": "b", "start": {"program": "x"}}]}) == ["starts-program"]
+        assert nbtpkg.risk_flags({"channels": [{"name": "a"}]}) == []
+        chan = next(e for e in vectors["good"] if e["file"] == "good/org.nbtapp.chan-1.0.0.nbtpkg")
+        assert chan["flags"] == ["starts-program"], chan["flags"]
 
         # 4. Reproducible, and signing afterwards gives the same archive as building signed.
         seed = nbtpkg.read_key(os.path.join(KEYS, "test-package.key"))

@@ -163,6 +163,8 @@ AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 AGENT_TEST_HDRS = $(wildcard tests/agent/*.hpp) $(wildcard src/*.hpp)
 AGENT_TESTS  = $(patsubst tests/agent/%.cpp,%,$(wildcard tests/agent/test_*.cpp))
 AGENT_PROGS  = nbtagent nbtctl
+# The programs of the test package chan's channels (tests/agent/chan_program.hpp), which its scripts run on the bench.
+CHAN_PROGS   = chan_echo chan_feed
 agent_objs   = $(patsubst agent/%.cpp,$(1)/%.o,$(AGENT_SRCS)) $(patsubst agent/vendor/tweetnacl/%.c,$(1)/%.o,$(AGENT_C_SRCS))
 
 HOST_CXX ?= g++
@@ -179,7 +181,7 @@ agent-host: $(addprefix $(AGENT_HOST)/,$(AGENT_PROGS))
 	@echo [DONE] $(AGENT_HOST): nbtagent and nbtctl for this machine
 
 # Everything the bench image holds. tools/bench/Dockerfile runs this inside the image.
-agent-programs: $(addprefix $(AGENT_HOST)/,$(AGENT_TESTS) $(AGENT_PROGS) nbtagent-next)
+agent-programs: $(addprefix $(AGENT_HOST)/,$(AGENT_TESTS) $(AGENT_PROGS) $(CHAN_PROGS) nbtagent-next)
 
 # Asked for on every run, because only Docker can tell whether the image is this checkout's; it is quick to say so.
 bench-image:
@@ -222,6 +224,10 @@ $(AGENT_HOST)/libnbtagent.a: $(call agent_objs,$(AGENT_HOST)) Makefile
 
 $(AGENT_HOST)/test_%: tests/agent/test_%.cpp $(AGENT_HOST)/libnbtagent.a $(AGENT_HDRS) $(AGENT_TEST_HDRS)
 	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -o $@ $< $(AGENT_HOST)/libnbtagent.a -lz
+
+$(AGENT_HOST)/chan_%: tests/agent/chan_%.cpp tests/agent/chan_program.hpp
+	@mkdir -p $(AGENT_HOST)
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -o $@ $<
 
 # NBT_TEST_KEYS gives the host's nbtagent its --test-key option and NBT_DEBUG_TCP its --debug-tcp option (a TCP
 # link on the loopback address, over which a phone is paired in the clear). The head unit's build below has
@@ -286,9 +292,9 @@ AGENT_CFLAGS = -O2 -D_QNX_SOURCE -march=armv7-a -mfpu=vfpv3 -mfloat-abi=softfp
 AGENT_OUT = release/agent
 AGENT_SCRIPTS = hu_probe.sh hu_install.sh nbtlaunch.sh nbtstart.sh
 
-agent: $(AGENT_QNX)/libnbtagent.a $(addprefix $(AGENT_QNX)/,$(AGENT_TESTS) $(AGENT_PROGS)) \
+agent: $(AGENT_QNX)/libnbtagent.a $(addprefix $(AGENT_QNX)/,$(AGENT_TESTS) $(AGENT_PROGS) $(CHAN_PROGS)) \
        $(addprefix $(AGENT_OUT)/,$(AGENT_PROGS) $(AGENT_SCRIPTS) version)
-	@echo [DONE] $(AGENT_QNX): the agent library, $(words $(AGENT_TESTS)) test programs, nbtagent and nbtctl compile and link for the head unit
+	@echo [DONE] $(AGENT_QNX): the agent library, $(words $(AGENT_TESTS)) test programs, the two of the test channels, nbtagent and nbtctl compile and link for the head unit
 	@echo [DONE] $(AGENT_OUT): nbtagent, nbtctl, version and $(AGENT_SCRIPTS). make agent-check looks at them
 
 $(addprefix $(AGENT_OUT)/,$(AGENT_SCRIPTS)): $(AGENT_OUT)/%: agent/%
@@ -342,6 +348,11 @@ AGENT_QNX_LIBS = $(AGENT_QNX)/libnbtagent.a -Wl,-Bstatic -lz -Wl,-Bdynamic -lsoc
 $(AGENT_QNX)/test_%: tests/agent/test_%.cpp $(AGENT_QNX)/libnbtagent.a $(AGENT_HDRS) $(AGENT_TEST_HDRS)
 	@echo [BUILD] $@
 	$(TOOL_CXX) $(TOOL_CXXFLAGS) -o $@ $< $(AGENT_QNX_LIBS)
+
+$(AGENT_QNX)/chan_%: tests/agent/chan_%.cpp tests/agent/chan_program.hpp
+	@echo [BUILD] $@
+	@mkdir -p $(AGENT_QNX)
+	$(TOOL_CXX) $(TOOL_CXXFLAGS) -Wextra -o $@ $< -lsocket
 
 $(AGENT_QNX)/nbtagent: agent/nbtagent.cpp $(AGENT_QNX)/libnbtagent.a $(AGENT_HDRS) $(BUILD)/version
 	@echo [BUILD] $@ $(VERSION)
