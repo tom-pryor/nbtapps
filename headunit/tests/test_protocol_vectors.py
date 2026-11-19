@@ -284,6 +284,10 @@ CONSTANTS = {
     "capability.serialKnock": "name",
     "capability.settings": "name",
     "settings.maxValueBytes": "number",
+    "capability.channels": "name",
+    "stream.last": "number", "channel.firstStream": "number", "channel.maxMessage": "number",
+    "channel.credit": "number", "channel.perLink": "number", "channel.startWaitMs": "number",
+    "channel.startRetryMs": "number",
 }
 
 
@@ -328,6 +332,10 @@ def check_constants():
         fail("constants.txt: a knock is one connect, which may fail on the phone while another app's link is up")
     if values["serial.knockHoldMs"] <= values["serial.decideMs"]:
         fail("constants.txt: serial.knockHoldMs ends a knock link before the agent has decided on it")
+    if values["stream.last"] + 1 != values["channel.firstStream"] or values["channel.firstStream"] > 65535:
+        fail("constants.txt: the channels' stream numbers do not follow on from the other streams'")
+    if not values["frame.minPayload"] <= values["channel.maxMessage"] <= values["serial.maxFrame"]:
+        fail("constants.txt: channel.maxMessage does not fit a serial link's frame")
     return values
 
 

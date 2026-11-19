@@ -254,6 +254,43 @@
 // loses its others, a new key goes at the end, a reset takes the key's lines away. At least one key is named, and
 // none both in `set` and in `reset`, or the request is bad-request. It is refused with `busy` while a job runs and
 // on an agent on trial. The log says which keys were set and which reset, never their values.
+//
+// Channels. A package names its channels in its manifest (`channels`, manifest.hpp); a controller opens one, and
+// messages pass both ways between it and the package's program, which the agent reaches through a local socket and
+// may start for it. An agent that has them lists the capability channels in `hello`.
+//
+//   channel.open { "package", "channel", "credit"? }  -> { "stream", "maxMessage": 4096, "credit": 16, "version" }
+//   channel.get  { "package", "channel" }              -> { "switched", "on", "open" }
+//   channel.set  { "package", "channel", "on" }        -> as channel.get
+//   channel.credit { "stream", "messages" }            an event, either way: that many more messages may be sent
+//   channel.close  { "stream", "reason" }              an event, either way: the channel is closed
+//   channel.paused {}, channel.resumed {}              events, the agent's: a job began, or ended
+//
+// channel.open's `stream` is the channel's number on this link, from kChannelFirstStream to 65,535, given out counting
+// up and not used again soon. Its `credit` is what the phone may send at first; the request's `credit` (1 to 65,535,
+// kChannelCredit when left out) is what the agent may. `version` is the package's. Its errors: not-found (no such
+// package installed, or no such channel in its manifest), forbidden (the iDrive plugin), off (a switched channel that
+// is off), busy (a job, or an agent on trial), unavailable (no program takes the connection, and none is to be
+// started, or the one started did not take it in kChannelStartWaitMs), too-many (kChannelPerLink open on this link),
+// unsupported (a phone app other than NBTApps is named, with `app`, or the link's frame is smaller than
+// kChannelMaxMessage). A channel.open with no phone app named is NBTApps itself, and may open any channel.
+//
+// A message is one DATA frame on the channel's stream, with the last flag set, of 1 to kChannelMaxMessage bytes.
+// Each side counts what it may still send, and sends no more: a DATA frame with no last flag, an empty one, one over
+// the size or over the credit, and any frame from the phone on a channel whose access is `read`, closes that channel
+// with the reason `protocol`, and leaves the link as it is. A DATA frame or a channel.credit for a number that is not
+// open is dropped: a close and a message can cross. The agent grants the phone more as the program takes what came.
+//
+// channel.close's reasons from the agent: closed (the program closed its end), off (the channel was switched off),
+// package-changed (a job installs, upgrades or removes the package), protocol (see above), lost (said in the log
+// only: the link ended). A phone's channel.close needs no answer.
+//
+// channel.get says of a channel whether it is switched (its manifest says `switch`), whether it is on (one that is not
+// switched always is) and how many connections it has open, on every link. channel.set switches a switched channel
+// on or off: forbidden to the iDrive plugin, busy while a job runs and on an agent on trial, bad-request for a
+// channel that is not switched, not-found as channel.open. Off closes its channels with `off` and ends a program the
+// agent started for it. A switched channel is off until it is switched on, and the switch lives in the run folder:
+// it is off again after a power down, and nothing is written to flash for it.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdint.h>

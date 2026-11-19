@@ -78,6 +78,14 @@ int main(int argc, char** argv) {
     code["capability.serialKnock"] = kCapabilitySerialKnock;
     code["capability.settings"] = kCapabilitySettings;
     code["settings.maxValueBytes"] = num((long long)kSettingsMaxValueBytes);
+    code["capability.channels"] = kCapabilityChannels;
+    code["stream.last"] = num(kStreamLast);
+    code["channel.firstStream"] = num(kChannelFirstStream);
+    code["channel.maxMessage"] = num((long long)kChannelMaxMessage);
+    code["channel.credit"] = num(kChannelCredit);
+    code["channel.perLink"] = num(kChannelPerLink);
+    code["channel.startWaitMs"] = num(kChannelStartWaitMs);
+    code["channel.startRetryMs"] = num(kChannelStartRetryMs);
 
     for (std::map<std::string, std::string>::const_iterator it = code.begin(); it != code.end(); ++it) {
         CHECK_IN(path + " has no " + it->first, file.count(it->first) != 0);
@@ -104,6 +112,12 @@ int main(int argc, char** argv) {
     CHECK(std::string(kSerialKnockMagic).size() == 4 && std::string(kSerialKnockMagic) != "NBTL");
     CHECK(kSerialKnockAttempts >= 2 && kSerialKnockGapMs > 0);
     CHECK(kSerialKnockHoldMs > kSerialDecideMs);
+    // The two kinds of stream number meet and do not overlap; a channel message fits a serial link's frame; a
+    // credit is granted back in halves (agent.hpp, "Channels"); the agent tries more than once in its wait.
+    CHECK(kStreamLast + 1 == kChannelFirstStream);
+    CHECK(kChannelMaxMessage >= kMinFramePayload && kChannelMaxMessage <= kSerialMaxFrame);
+    CHECK(kChannelCredit >= 2 && kChannelCredit % 2 == 0 && kChannelPerLink >= 1);
+    CHECK(kChannelStartRetryMs > 0 && kChannelStartWaitMs >= 10 * kChannelStartRetryMs);
     // The listener registers exactly this service, and decides on a link in exactly this time.
     SerialConfig config;
     CHECK(config.name == kSerialServiceName && config.uuid == kSerialServiceUuid);
