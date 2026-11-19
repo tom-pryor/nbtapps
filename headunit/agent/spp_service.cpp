@@ -75,7 +75,8 @@ void DsiGapClient::onData(DsiClient*, uint32_t type, uint32_t id, uint32_t, cons
 SppService::SppService(GapClient* gap, Events* events)
     : gap_(gap), events_(events), type_(0), state_(kIdle), mode_(kModeOff), subscribed_(false), otherSentAt_(0),
       otherReplyS_(kOtherRemovalReplyS), unknownLeft_(0), removeError_(kNoError), clearError_(kNoError),
-      disconnectOut_(false), refusalAsked_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0), checkOut_(false), checkSentAt_(0),
+      disconnectOut_(false), disconnectTold_(false), disconnectQuiet_(false), disconnectSentAt_(0), disconnectReplyS_(kDisconnectReplyS),
+      connectOut_(false), pairingInforms_(false), refusalAsked_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0), checkOut_(false), checkSentAt_(0),
       unansweredSaid_(false), restoredRun_(0), oddRun_(false) {
     pthread_mutex_init(&mu_, NULL);
 }
@@ -188,6 +189,11 @@ void SppService::subscribe() {
     subscribeTo(kInfDeviceListChanged);
     subscribeTo(kInfServiceDisconnected);
     subscribeTo(kInfServiceListChanged);
+    // The pairing informs that stop dials; not PairingComplete, which the agent has no use for.
+    if (pairingInforms_) {
+        subscribeTo(kInfPairingError);
+        subscribeTo(kInfSimplePairingConfirmationRequired);
+    }
 }
 
 void SppService::subscribeTo(uint32_t informId) {
@@ -378,7 +384,9 @@ bool SppService::knowsPhone() {
     return known;
 }
 
-bool SppService::disconnectPhone(const std::string& device, const std::string& instance, const std::string& service) {
+bool SppService::disconnectPhone(const std::string& device, const std::string& instance, const std::string& service,
+                                 bool* waits) {
+    if (waits != 0) *waits = false;
     pthread_mutex_lock(&mu_);
     std::string address = phoneAddress_;
     std::string named = service.empty() ? phoneService_ : service;
@@ -386,10 +394,10 @@ bool SppService::disconnectPhone(const std::string& device, const std::string& i
     if (!gap_->attached() || address.empty()) return false;
     std::string d = device.empty() ? std::string(kDisconnectDevice) : device;
     std::string i = instance.empty() ? std::string(kDisconnectInstance) : instance;
-    pthread_mutex_lock(&mu_);
-    unknownLeft_ = kUnknownLogged;
-    disconnectOut_ = true;
-    pthread_mutex_unlock(&mu_);
+    if (!takeDisconnect(address, named, false)) {
+        if (waits != 0) *waits = true;
+        return false;
+    }
     say("ServiceDisconnect device '%s', instance '%s', service '%s', for the phone of the last request for a link",
         d.c_str(), i.c_str(), named.c_str());
     if (send(kReqServiceDisconnect, buildServiceDisconnect(d, i, address, named))) return true;
@@ -400,11 +408,73 @@ bool SppService::disconnectPhone(const std::string& device, const std::string& i
     return false;
 }
 
+// Takes the one ServiceDisconnect that may be out, for `address` and `service`: false, with nothing changed, while
+// another waits for its answer. One that has waited disconnectReplyS_ is given up first. The log says so of
+// disconnectPhone()'s; of disconnectService()'s the caller says it, as it waits for its answer the same time.
+bool SppService::takeDisconnect(const std::string& address, const std::string& service, bool told, bool quiet) {
+    pthread_mutex_lock(&mu_);
+    double now = monoNow();
+    bool lost = disconnectOut_ && now - disconnectSentAt_ >= disconnectReplyS_;
+    bool sayLost = lost && !disconnectTold_;
+    if (lost) disconnectOut_ = disconnectTold_ = false;
+    bool busy = disconnectOut_;
+    if (!busy) {
+        unknownLeft_ = kUnknownLogged;
+        disconnectOut_ = true;
+        disconnectTold_ = told;
+        disconnectQuiet_ = quiet;
+        disconnectAddress_ = address;
+        disconnectService_ = service;
+        disconnectSentAt_ = now;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (sayLost) say("ServiceDisconnect had no reply in %.1f s, and is given up", disconnectReplyS_);
+    return !busy;
+}
+
+bool SppService::connectService(const std::string& device, const std::string& instance, const std::string& address,
+                                const std::string& service) {
+    if (!gap_->attached()) return false;
+    pthread_mutex_lock(&mu_);
+    bool busy = connectOut_;
+    if (!busy) {
+        connectOut_ = true;
+        connectAddress_ = address;
+        connectService_ = service;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (busy) return false;
+    if (send(kReqServiceConnect, buildServiceConnect(device, instance, address, service))) return true;
+    pthread_mutex_lock(&mu_);
+    connectOut_ = false;
+    pthread_mutex_unlock(&mu_);
+    return false;
+}
+
+bool SppService::disconnectService(const std::string& device, const std::string& instance, const std::string& address,
+                                   const std::string& service, bool quiet) {
+    if (!gap_->attached()) return false;
+    if (!takeDisconnect(address, service, true, quiet)) return false;
+    if (!quiet)
+        say("ServiceDisconnect device '%s', instance '%s', service '%s'", device.c_str(), instance.c_str(), service.c_str());
+    if (send(kReqServiceDisconnect, buildServiceDisconnect(device, instance, address, service))) return true;
+    pthread_mutex_lock(&mu_);
+    unknownLeft_ = 0;
+    disconnectOut_ = false;
+    disconnectTold_ = false;
+    pthread_mutex_unlock(&mu_);
+    return false;
+}
+
 namespace {
 // ServiceDisconnected informs are logged one by one up to this many; after that they are only counted.
 const unsigned kEndsLogged = 8;
+// So are ServiceConnect and ServiceDisconnect replies for another client that come while ours waits.
+const unsigned kOthersConnectLogged = 4;
+const unsigned kOthersDisconnectLogged = 4;
 // unreadSaid_: which kind of message has been logged once as one that could not be read.
-enum { kUnreadDeviceList = 1, kUnreadEnded = 2, kUnreadServiceList = 4, kUnreadVersion = 8, kUnreadDisconnect = 16 };
+enum { kUnreadDeviceList = 1, kUnreadEnded = 2, kUnreadServiceList = 4, kUnreadVersion = 8, kUnreadDisconnect = 16,
+       kUnreadConnect = 32 };
 }  // namespace
 
 // The replies and informs that are kept as state, or only logged: true if `id` is one of them. On the client's
@@ -458,6 +528,7 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
         ++heard_.linksEnded;
         unsigned n = d.ok ? ++endsLogged_ : 0;
         pthread_mutex_unlock(&mu_);
+        if (d.ok) events_->sppLinkEnded(d);
         if (!d.ok) {
             unread = kUnreadEnded;
             what = "ServiceDisconnected";
@@ -492,24 +563,81 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
             say("VersionGet reply: %s", gapErrorText(v.error, "").c_str());
         } else {
             std::string parts;
-            for (size_t i = 0; i < v.parts.size(); ++i) parts += (i ? ", '" : "'") + shownText(v.parts[i], 64) + "'";
+            std::vector<std::string> shown;
+            for (size_t i = 0; i < v.parts.size(); ++i) {
+                shown.push_back(shownText(v.parts[i], 64));
+                parts += (i ? ", '" : "'") + shown.back() + "'";
+            }
+            pthread_mutex_lock(&mu_);
+            heard_.version = shown;
+            pthread_mutex_unlock(&mu_);
             say("the Bluetooth stack's version: %s", parts.c_str());
         }
     } else if (id == kRspServiceDisconnect) {
+        ServiceDisconnectReply d = parseServiceDisconnectReply(payload, len);
         pthread_mutex_lock(&mu_);
-        bool out = disconnectOut_;
-        disconnectOut_ = false;
+        bool out = disconnectOut_, told = disconnectTold_, quiet = disconnectQuiet_;
+        // A reply read whole that names another phone is another client's, even while ours waits: ours stays out,
+        // for its own answer. So is one that names another service than disconnectService() sent, which the car's
+        // reply repeats; disconnectPhone()'s service is not settled, and is not compared.
+        bool others = out && d.ok &&
+                      (addressKey(d.address) != addressKey(disconnectAddress_) || (told && d.service != disconnectService_));
+        unsigned n = 0;
+        if (others) n = ++heard_.othersDisconnectReplies;
+        else disconnectOut_ = disconnectTold_ = false;
+        std::string address = disconnectAddress_, service = disconnectService_;
         pthread_mutex_unlock(&mu_);
         if (!out) return true;     // another client's
-        ServiceDisconnectReply d = parseServiceDisconnectReply(payload, len);
+        if (others) {
+            if (n <= kOthersDisconnectLogged)
+                say("a ServiceDisconnect reply for another client came while the agent's ServiceDisconnect waited for "
+                    "its answer, and was left: the agent's waits on%s",
+                    n == kOthersDisconnectLogged ? ". Further ones are counted and not logged" : "");
+            return true;
+        }
         if (!d.ok) {
             unread = kUnreadDisconnect;
             what = "ServiceDisconnect's reply";
-        } else {
+        } else if (!quiet) {
             say("ServiceDisconnect reply: %s, reason %u", gapErrorText(d.error, "").c_str(), d.reason);
         }
+        if (told) {
+            if (!d.ok) {
+                d.address = address;
+                d.service = service;
+                d.error = kNoError;
+            }
+            events_->sppDisconnectReply(d);
+        }
     } else if (id == kRspServiceConnect) {
-        return true;               // this agent asks for none: another client's
+        ServiceConnectReply c = parseServiceConnectReply(payload, len);
+        pthread_mutex_lock(&mu_);
+        bool out = connectOut_;
+        // A reply read whole that names another service or another phone is another client's, even while ours
+        // waits: ours stays out, for its own answer.
+        bool others =
+            out && c.ok && (c.service != connectService_ || addressKey(c.address) != addressKey(connectAddress_));
+        unsigned n = 0;
+        if (others) n = ++heard_.othersConnectReplies;
+        else connectOut_ = false;
+        std::string address = connectAddress_, service = connectService_;
+        pthread_mutex_unlock(&mu_);
+        if (!out) return true;     // another client's
+        if (others) {
+            if (n <= kOthersConnectLogged)
+                say("a ServiceConnect reply for another client came while the agent's dial waited for its answer, and "
+                    "was left: the dial waits on%s",
+                    n == kOthersConnectLogged ? ". Further ones are counted and not logged" : "");
+            return true;
+        }
+        if (!c.ok) {
+            c.address = address;
+            c.service = service;
+            c.error = kNoError;
+            unread = kUnreadConnect;
+            what = "ServiceConnect's reply";
+        }
+        events_->sppConnectReply(c);
     } else {
         return false;
     }
@@ -589,6 +717,8 @@ void SppService::gapDetached() {
     otherSent_.clear();
     // No reply comes from a server that has gone, and what it said of the phones is old.
     disconnectOut_ = false;
+    disconnectTold_ = false;
+    connectOut_ = false;
     refusalAsked_ = false;
     versionAsked_ = false;
     heard_.devicesKnown = false;
@@ -621,11 +751,39 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
     bool rejected = type == kTypeRejectedA || type == kTypeRejectedB;
     if (rejected && id == kReqServiceDisconnect) {
         pthread_mutex_lock(&mu_);
-        disconnectOut_ = false;
+        bool told = disconnectTold_;
+        disconnectOut_ = disconnectTold_ = false;
+        ServiceDisconnectReply d;
+        d.address = disconnectAddress_;
+        d.service = disconnectService_;
+        d.error = kNoError;
+        d.reason = 0;
+        d.ok = false;
         pthread_mutex_unlock(&mu_);
         say("the Bluetooth server rejected ServiceDisconnect (type 0x%x)", type);
+        if (told) events_->sppDisconnectReply(d);
         return;
     }
+    if (rejected && id == kReqServiceConnect) {
+        pthread_mutex_lock(&mu_);
+        bool out = connectOut_;
+        connectOut_ = false;
+        ServiceConnectReply c;
+        c.address = connectAddress_;
+        c.service = connectService_;
+        c.error = kNoError;
+        c.ok = false;
+        pthread_mutex_unlock(&mu_);
+        say("the Bluetooth server rejected ServiceConnect (type 0x%x)", type);
+        if (out) events_->sppConnectReply(c);
+        return;
+    }
+    if (!rejected && isPairingInform(id)) {
+        events_->sppPairing(id, pairingInformAddress(payload, len));
+        return;
+    }
+    // Not asked for, and a pairing that worked stops nothing: one that comes all the same is dropped, unsaid.
+    if (!rejected && id == kInfPairingComplete) return;
     if (handleKnown(type, id, payload, len)) return;
 
     // The answer to a removal of another program's registration, if one is out: it went out before any removal of

@@ -239,6 +239,15 @@ object LinkClosing {
 
     /** The agent heard nothing from the phone for longer than a link may stay silent. */
     const val SILENT = "silent"
+
+    /** `serial.reset` ended a Bluetooth serial link that the car dialled: the car ends it. */
+    const val RESET = "reset"
+
+    /**
+     * Of a Bluetooth serial link the phone opened and one the car dialled to it, the other one finished `hello` first
+     * and stays: this one is ended.
+     */
+    const val OTHER_LINK = "other-link"
 }
 
 /**

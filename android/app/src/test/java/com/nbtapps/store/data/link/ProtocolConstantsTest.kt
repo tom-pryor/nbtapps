@@ -49,6 +49,7 @@ class ProtocolConstantsTest {
         "capability.files" to ProtocolConstants.CAPABILITY_FILES,
         "capability.checks" to ProtocolConstants.CAPABILITY_CHECKS,
         "capability.serialReset" to ProtocolConstants.CAPABILITY_SERIAL_RESET,
+        "capability.serialDial" to ProtocolConstants.CAPABILITY_SERIAL_DIAL,
         "capability.settings" to ProtocolConstants.CAPABILITY_SETTINGS,
         "settings.maxValueBytes" to ProtocolConstants.SETTINGS_MAX_VALUE_BYTES.toString(),
     )

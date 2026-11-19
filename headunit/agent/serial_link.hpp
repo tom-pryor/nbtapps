@@ -61,6 +61,14 @@
 // liked. The agent ends a serial link that has not done `hello` within 30 seconds, and one that has gone silent for
 // as long (agent.hpp).
 //
+// The car can also dial the phone (dial_rules.hpp, SerialConfig::dial): the listener asks the car's Bluetooth service
+// to open a serial link to the agent's service on a phone of the agent's, on the car's instance kDialInstance, whose
+// node, /dev/nbtapp, no other link uses. The phone's app listens on the agent's UUID and accepts the link. The
+// listener opens the node when the car answers 0, and a link whose phone says the magic bytes within
+// DialConfig::magicWaitMs of the open is the agent's, with no gate, no hold and no let-go: nobody else's link is on
+// that node. A link that does not open with them is ended at once by the car (ServiceDisconnect), and the phone is
+// left alone by polls for a while. The dialled link is a serial link like any other for the agent.
+//
 // How a link of the agent's ends. The phone made the link, and the phone ends it:
 //
 //   * when the agent ends a link on purpose it tells the phone first, with the event link.closing (agent.hpp), and
@@ -78,16 +86,19 @@
 #include <stdio.h>
 
 #include <map>
+#include <utility>
 #include <string>
 #include <vector>
 
-#include "dial_config.hpp"
+#include "dial_rules.hpp"
 #include "link.hpp"
 #include "node_reader.hpp"
-#include "presence.hpp"
+#include "phones.hpp"
+#include "problem_log.hpp"
 #include "protocol_constants.hpp"
 #include "serial_log.hpp"
 #include "serial_report.hpp"
+#include "serial_dial.hpp"
 #include "serial_reset.hpp"
 #include "serial_services.hpp"
 #include "spp_gate.hpp"
@@ -95,6 +106,8 @@
 #include "spp_service.hpp"
 
 namespace nbt {
+
+struct DialledLink;
 
 // The agent's serial service, kSerialServiceName and kSerialServiceUuid (the name its registration is filed under,
 // and the UUID a phone app connects to: this project's own, random, version 4), is in protocol_constants.hpp.
@@ -124,8 +137,13 @@ Link* newSerialLink(NodeReader* reader, const std::string& path, SerialLog* log,
 Link* newSerialLink(int nodeFd, const std::string& path, SerialLog* log,
                     const std::vector<uint8_t>& first = std::vector<uint8_t>(),
                     unsigned lingerMs = (unsigned)kSerialLingerMs);
-// How many links of the agent's still have their node open.
+// One write into a serial node, as write() returns: the bytes taken, which may be fewer than `len`, or -1 with errno.
+typedef long (*NodeWriteFn)(int fd, const void* buf, size_t len);
+
+// How many links of the agent's still have their node open: the dialled one among them.
 unsigned serialLinksOpen();
+// How many of those are a link the car dialled (SerialListener): on its own node, which no gate is in front of.
+unsigned dialledLinksOpen();
 // Waits until none is, for `ms` at most. False if some still are.
 bool waitForSerialLinks(int ms);
 
@@ -211,6 +229,7 @@ struct SerialConfig {
     unsigned lingerMs;           // a link of the agent's whose agent's end has closed, and that is still up this
                                  // long after: the log says so. Its node is kept and read until the link ends
     NodeReadFn readNode;         // the timed read of a node; 0: the platform's (node_reader.hpp)
+    NodeWriteFn writeNode;       // a write into a link's node; 0: write(). A test's may take a write short
     unsigned resetArmedMs;       // serial.reset with no node open: for how long the next link is ended at its open
     unsigned checkMs;            // the registration check (SppService::checkRegistration): how often, while the
                                  // service is registered and quiet; 0: never
@@ -222,7 +241,7 @@ struct SerialConfig {
     SerialConfig()
         : name(kSerialServiceName), uuid(kSerialServiceUuid), carService(kCarSerialService),
           nodePrefix("/dev/btspp"), registerMs(20000), retryMs(30000), requestWindowS(15), decideMs((unsigned)kSerialDecideMs),
-          linkWaitMs(3000), letGoKeepsNode(false), lingerMs((unsigned)kSerialLingerMs), readNode(0),
+          linkWaitMs(3000), letGoKeepsNode(false), lingerMs((unsigned)kSerialLingerMs), readNode(0), writeNode(0),
           resetArmedMs(60000), checkMs(30000), checkQuietMs(30000), attachWaitMs(10000) {}
 };
 
@@ -479,8 +498,8 @@ inline std::string describeRefusal(unsigned count, const RefusalFacts& f) {
 //
 // The hold goes by the links of the serial kind that are up in this process (serialLinksOpen()), so a process has
 // one listener at a time.
-class SerialListener : public Listener, public SerialServiceRemover, public SerialReset, public StackAsk,
-                       private btspp::SppService::Events {
+class SerialListener : public Listener, public SerialServiceRemover, public SerialReset, public SerialDial,
+                       public StackAsk, private btspp::SppService::Events {
 public:
     // Nothing passed in is owned; all of it must outlive the listener, and `gap` the process (see DsiGapClient).
     SerialListener(btspp::GapClient* gap, NodeGate* gate, SerialLog* log, const SerialConfig& config = SerialConfig());
@@ -491,6 +510,21 @@ public:
     // Before start(). What the system's log says of the car's Bluetooth service, asked once when it has not attached
     // for SerialConfig::attachWaitMs; 0, which is how it starts, for nothing.
     void setServerLook(ServerLook* look) { serverLook_ = look; }
+    // Before start(). The paired phones' addresses, which the car dials (SerialConfig::dial); 0, which is how it
+    // starts, for none.
+    void setPhoneAddresses(PhoneAddressList* list) { ours_ = list; }
+    // Before start(). The problem file (problem_log.hpp): what goes wrong with Bluetooth serial, the first of each
+    // kind in a run. 0, which is how it starts, for none.
+    void setProblemLog(ProblemLog* problems) { problems_ = problems; }
+    // A round of dials now, one to each phone that is connected to the car and paired with it (DialRules::force()):
+    // how many phones that is. 0, with *why, if there is none or the car cannot be asked. From any thread; the
+    // listener's thread dials.
+    unsigned dialNow(std::string* why);
+    // SerialDial (serial_dial.hpp). From any thread.
+    virtual void pairingWindow(bool open);
+    virtual bool dialOn() { return config_.dial.on; }
+    virtual unsigned dialNow(std::string* why, const char** code);
+    virtual SerialStatus serialStatus();
     virtual bool removeSerialService(const std::string& name) { return spp_.removeOther(name); }
 
     // Puts the gate in front and opens the client of the car's Bluetooth service. If either does not work, the
@@ -509,7 +543,9 @@ public:
     // that is read to its end, ServiceDisconnect goes to the car kSerialResetDelayMs later. With none, the next link
     // whose node opens within SerialConfig::resetArmedMs is ended at the open, with no decide step, and its node read
     // until the link ends; once. The log says how long after ServiceDisconnect a node that was open then went, or
-    // that the link was still up kSerialResetWatchMs after it. kResetFailed if the listener is not active, the car's
+    // that the link was still up kSerialResetWatchMs after it. One ServiceDisconnect is out at a time: while
+    // another, of the dial's or an earlier serial.reset's, waits for its answer, this one goes once that is answered
+    // or given up, and the log says so. A later serial.reset takes the place of one that waits. kResetFailed if the listener is not active, the car's
     // Bluetooth service is not attached, or, with a node open, no phone has asked for a link to be named.
     virtual Outcome resetSerialLink(const std::string& device, const std::string& instance, const std::string& service,
                                     int64_t* forMs, std::string* why);
@@ -532,6 +568,10 @@ private:
                           const std::string& address);
     virtual void sppRefusedPhone(const btspp::PhoneInList& phone);
     virtual void sppDevices(const std::vector<btspp::BtDevice>& devices);
+    virtual void sppConnectReply(const btspp::ServiceConnectReply& reply);
+    virtual void sppDisconnectReply(const btspp::ServiceDisconnectReply& reply);
+    virtual void sppLinkEnded(const btspp::ServiceDisconnected& ended);
+    virtual void sppPairing(uint32_t informId, const std::string& address);
     void sayRefusal(RefusalFacts::List list, const btspp::PhoneInList& phone);
     void tendRefusal();
 
@@ -564,6 +604,40 @@ private:
     bool setUp(std::string* why);
     bool comeBack();
     void watchAttach(bool registered);
+    // The car dials the phone, on the listener's thread.
+    void tendDial();
+    void maybeDial(int64_t now);
+    void dialAnswered(const btspp::ServiceConnectReply& reply, int64_t now);
+    void openDialled(int64_t now);
+    void readMagic(int64_t now);
+    void watchDialled(int64_t now);
+    // What a clean-up of the dialled instance ends, and so what comes after it.
+    enum CleanupKind {
+        kCleanOwn,        // the dial's own link: nothing more
+        kCleanStart,      // a link left behind, there when the listener started: the phones are dialled afresh
+        kCleanBusy,       // one a dial found (answer 2): its phone is dialled again at once if it ended, and backed
+                          // off if not
+        kCleanRegister    // one that may have made the car refuse the registration: registered again if it ended
+    };
+    void startCleanup(const std::vector<std::string>& phones, const std::string& why);
+    void endLeftBehind(const std::vector<std::string>& phones, const std::string& why, CleanupKind kind);
+    void tendCleanup(int64_t now, bool afterReset);
+    void cleanupSay(const std::string& line);
+    void leftOutcome(bool there);
+    // The registration refused while the dialled node is there (DialConfig::registerCleanupMs).
+    enum LeftStep { kLeftGoesOn, kLeftRegister, kLeftGaveUp };
+    bool startLeftForRegistration();
+    LeftStep tendLeftForRegistration();
+    void endDial(const char* why);
+    // A problem for the problem file, from any thread.
+    void problem(const std::string& kind, const std::string& text) {
+        if (problems_ != 0) problems_->note(kind, text);
+    }
+    void flushProblems();
+    // Whether something of the agent's is on a serial link or about to be, a phone's pending request among it.
+    bool dialBusy();
+    // The same without the pending request, which *pending tells.
+    bool linkBusy(bool* pending);
 
     // A link that is not the agent's, on the listener's thread only: with its node read and what comes dropped
     // (reader), or kept open and unread (fd >= 0), until the link ends; or closed, and then only for the log to say
@@ -594,9 +668,12 @@ private:
         double at;
         bool armed;              // the next link that opens before `until` is ended at its open
         double until;
+        // It is due, and another ServiceDisconnect waited for its answer: it goes once that one is answered or given
+        // up (SppService::setDisconnectReplyTime), before any more of the dial's.
+        bool waiting;
         double askedAt;
         std::string device, instance, service;
-        Reset() : due(false), at(0), armed(false), until(0), askedAt(0) {}
+        Reset() : due(false), at(0), armed(false), until(0), waiting(false), askedAt(0) {}
     };
 
     pthread_mutex_t mu_;         // everything below
@@ -633,9 +710,71 @@ private:
     double refusalAt_;           // 0: none waits
     // The listener's thread: when tendLetGo() last looked for running programs of software put on by hand.
     double handLookAt_;
-    // The car dials the phone (SerialConfig::dial). Which of the car's phones are there (mu_): asked for each time
-    // the service has been registered, and forgotten while the car's Bluetooth service is gone.
-    btspp::Presence presence_;
+    // The car dials the phone (SerialConfig::dial, dial_rules.hpp).
+    PhoneAddressList* ours_;     // the paired phones' addresses; 0: none
+    // mu_: the rules, which hold which of the car's phones are there (asked for each time the service has been
+    // registered, and forgotten while the car's Bluetooth service is gone), and what the Bluetooth service's thread
+    // has said for the listener's thread to act on.
+    DialRules rules_;
+    std::vector<std::pair<btspp::ServiceConnectReply, int64_t> > connectReplies_;   // with when each came
+    std::vector<btspp::ServiceDisconnectReply> disconnectReplies_;
+    std::vector<btspp::ServiceDisconnected> dialEnds_;
+    std::vector<std::string> pairingInforms_;   // the address each named, or empty
+    // The listener's thread: where the dial is.
+    enum DialPhase {
+        kDialNone,
+        kDialWait,       // ServiceConnect is out
+        kDialMagic,      // the node is open, and the magic bytes are waited for
+        kDialLinked,     // the dialled link is the agent's
+        kDialCleanup     // ServiceDisconnect to end what is up on the instance, a phone at a time
+    };
+    DialPhase dialPhase_;
+    DialRules::Dial dial_;             // the dial of the phase, from kDialWait on
+    NodeReader* dialReader_;           // kDialMagic, and kDialCleanup of a node that is read until it ends
+    std::vector<uint8_t> dialGot_;     // what came first on the node
+    double dialOpenedAt_;
+    DialledLink* dialLink_;            // kDialLinked: what the listener and the link's threads share
+    std::vector<std::string> cleanupPhones_;   // kDialCleanup: whom ServiceDisconnect is still to name, in turn
+    std::string cleanupWhy_;
+    double discAt_;                    // when the dial's last ServiceDisconnect went out; 0: none waits
+    std::string discAddress_;
+    bool discAnswered_;
+    uint32_t discError_;
+    bool staleAtStart_;                // the dialled node was there when the listener started
+    CleanupKind cleanupKind_;          // what kDialCleanup ends
+    // A link left behind that the car was asked to end and did not: the first such clean-up is logged in full, and
+    // after it, while each comes to the same, only counted. cleanupHeld_ keeps a quiet clean-up's lines until it is
+    // known whether they are news.
+    bool leftFailing_;                 // the last clean-up of a link left behind left its node there
+    std::string leftOutcome_;          // what it came to
+    unsigned leftTimes_;               // how many more came to the same since it was said
+    bool cleanupQuiet_;
+    std::vector<std::string> cleanupHeld_;
+    std::string cleanupOutcome_;       // the answers of this clean-up's ServiceDisconnects, for comparing
+    // The registration refused while the dialled node is there: the link left behind is ended first, once for each
+    // refusal that follows a set-up.
+    enum LeftPhase { kLeftNone, kLeftList, kLeftEnding };
+    LeftPhase leftPhase_;
+    double leftAt_;                    // when it began
+    bool leftTried_;                   // since the last set-up or registration
+    bool pairingOpen_;                 // mu_: the agent's pairing window is open
+    // What serial.status counts (mu_), and when the registration was last checked or registered.
+    SerialStatus counts_;
+    double checkedAtShared_;
+    // The listener's thread: how many links of the agent's were up at the last pass, to tell when one comes and goes.
+    unsigned lastLinks_;
+    // The problem file, and on the listener's thread: the registration checks that found it dropped, as last seen,
+    // whether a failed write of the file has been said, and for each phone the answer its last dial was given and
+    // how many times since it came again, which the log only counts.
+    ProblemLog* problems_;
+    unsigned restoredSeen_;
+    bool problemsSaid_;
+    struct Repeat {
+        std::string answer;
+        unsigned times;
+        Repeat() : times(0) {}
+    };
+    std::map<unsigned, Repeat> repeats_;
 };
 
 }  // namespace nbt

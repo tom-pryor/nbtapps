@@ -421,14 +421,18 @@ private:
     size_t sent_;
 };
 
-// A serial link that knows the phone's Bluetooth address, as one of the listener's does.
+// A serial link that knows the phone's Bluetooth address, as one of the listener's does, and whether the car
+// dialled it.
 class AddressedLink : public SocketLink {
 public:
-    AddressedLink(int fd, const char* kind, const std::string& address) : SocketLink(fd, kind), address_(address) {}
+    AddressedLink(int fd, const char* kind, const std::string& address, bool dialled)
+        : SocketLink(fd, kind), address_(address), dialled_(dialled) {}
     virtual std::string phoneAddress() const { return address_; }
+    virtual bool dialledByCar() const { return dialled_; }
 
 private:
     std::string address_;
+    bool dialled_;
 };
 
 // ---- a head unit in a folder, with its agent ----------------------------------------------------------------------
@@ -488,11 +492,13 @@ struct Bench {
         for (size_t i = 0; i < phones.size(); ++i) delete phones[i];
     }
 
-    // A link with nothing said on it yet; with `address`, one that knows the phone's Bluetooth address.
-    Phone* connect(const char* kind = "local", const std::string& address = std::string()) {
+    // A link with nothing said on it yet; with `address`, one that knows the phone's Bluetooth address, and with
+    // `dialled`, one the car dialled.
+    Phone* connect(const char* kind = "local", const std::string& address = std::string(), bool dialled = false) {
         int fds[2];
         CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
-        agent.adopt(address.empty() ? new SocketLink(fds[0], kind) : new AddressedLink(fds[0], kind, address));
+        agent.adopt(address.empty() && !dialled ? new SocketLink(fds[0], kind)
+                                                : new AddressedLink(fds[0], kind, address, dialled));
         Phone* phone = new Phone(fds[1]);
         phones.push_back(phone);
         return phone;
@@ -3049,7 +3055,8 @@ static std::string sessionText() {
            "# A line that starts with # shows the next frame's payload if it is a message. The phone's lines are examples\n"
            "# of what the agent accepts; another client may order the members of its messages differently. The agent's\n"
            "# lines are what this agent sends when it is in the same state: a head unit with nothing installed, the\n"
-           "# test key as its only package key, 500,000,000 bytes free everywhere, the head-unit id, plan ids, pairing\n"
+           "# test key as its only package key, 500,000,000 bytes free everywhere, no Bluetooth serial listener (so\n"
+           "# the member serial of info.get is {\"listener\":false}), the head-unit id, plan ids, pairing\n"
            "# code, pairing key and nonce that the test's counter gives, and a clock that stands still, so\n"
            "# job.progress comes only when something changes and no ping is due. Before checks.run the test has the\n"
            "# system partition stand as writable, as somebody's hand would leave it, so that one check finds a\n"
@@ -3764,6 +3771,138 @@ static bool listsCapability(const Parsed& hello, const char* name) {
     return false;
 }
 
+// What the agent tells the car's dialling of, and asks of it.
+class FakeDial : public SerialDial {
+public:
+    FakeDial() : on(true), phones(1), code("not-found"), dials(0) {
+        status.registered = true;
+        status.checkedMsAgo = 12000;
+        status.stack.push_back("Stack 1.0");
+        status.stack.push_back("Profile 2");
+        status.phonesPresent = 2;
+        status.phonesEligible = 1;
+        status.dialOn = true;
+        status.lastResult = "DEFAULT";
+        status.dials = 3;
+        status.notListening = 3;
+        status.problemsCounted = 4;
+    }
+    virtual void pairingWindow(bool open) { said += open ? "open " : "closed "; }
+    virtual bool dialOn() { return on; }
+    virtual unsigned dialNow(std::string* why, const char** c) {
+        ++dials;
+        if (phones == 0) {
+            *why = "the test has no phone";
+            *c = code;
+        }
+        return phones;
+    }
+    virtual SerialStatus serialStatus() { return status; }
+    std::string said;
+    bool on;
+    unsigned phones;
+    const char* code;
+    unsigned dials;
+    SerialStatus status;
+};
+
+static void testSerialDial() {
+    Bench b("serial-dial");
+    FakeDial dial;
+    b.agent.setSerialDial(&dial);
+    Phone* ctl = b.connect();
+    CHECK(Parsed(b.hello(ctl, kGoodHello)).result.isObject());
+    // Opened, closed by its controller.
+    CHECK(Parsed(b.call(ctl, "pairing.open", "{}")).result.isObject() && dial.said == "open ");
+    CHECK(Parsed(b.call(ctl, "pairing.close", "{}")).result.isObject() && dial.said == "open closed ");
+    // Opened, and run out.
+    CHECK(Parsed(b.call(ctl, "pairing.open", "{}")).result.isObject());
+    b.clock.now += kPairingWindowSeconds * 1000;
+    b.settle();
+    CHECK(dial.said == "open closed open closed ");
+    // Opened, and used: a key is issued.
+    std::string code = str(Parsed(b.call(ctl, "pairing.open", "{}")).result, "code");
+    Phone* p = b.greeted("5", 4096, "serial");
+    CHECK(Parsed(b.call(p, "pairing.issue", codeParams(code))).result.isObject());
+    CHECK(dial.said == "open closed open closed open closed ");
+
+    // The capability, while the dial is on.
+    CHECK(listsCapability(Parsed(b.hello(b.connect(), kGoodHello)), kCapabilitySerialDial));
+    dial.on = false;
+    CHECK(!listsCapability(Parsed(b.hello(b.connect(), kGoodHello)), kCapabilitySerialDial));
+    dial.on = true;
+
+    // serial.status, and the same in info.get: counts and names.
+    Parsed st(b.call(ctl, "serial.status", "{}"));
+    CHECK_IN(ctl->lastHeard, st.result.isObject() && st.result.find("listener").boolean() && st.result.find("registered").boolean());
+    CHECK(integer(st.result, "checkedMsAgo") == 12000 && st.result.find("stack").size() == 2);
+    CHECK(integer(st.result, "phonesPresent") == 2 && integer(st.result, "phonesEligible") == 1);
+    CHECK(str(st.result, "dial") == "on" && str(st.result, "dialState") == "idle" && str(st.result, "lastResult") == "DEFAULT");
+    CHECK(str(st.result, "link") == "none" && integer(st.result.find("counts"), "dials") == 3);
+    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 12);
+    CHECK(integer(st.result.find("problems"), "recorded") == 0 && integer(st.result.find("problems"), "counted") == 4);
+    std::string status = ctl->lastHeard;
+    std::string info = b.call(ctl, "info.get", "{}");
+    std::string member = status.substr(status.find("\"result\":") + 9);
+    member = member.substr(0, member.size() - 1);
+    CHECK_IN(info, info.find("\"serial\":" + member) != std::string::npos);
+    // A phone may ask too, once it has done auth.
+    Phone* paired = b.phone("6", 4096, "serial");
+    CHECK(Parsed(b.call(paired, "serial.status", "{}")).result.isObject());
+    // No checkedMsAgo before the first registration.
+    dial.status.checkedMsAgo = -1;
+    CHECK(!Parsed(b.call(ctl, "serial.status", "{}")).result.find("checkedMsAgo").present());
+
+    // serial.dial: the head unit's own controllers only, and what came of it.
+    Parsed dialled(b.call(ctl, "serial.dial", "{}"));
+    CHECK(integer(dialled.result, "phones") == 1 && dial.dials == 1);
+    CHECK(Parsed(b.call(paired, "serial.dial", "{}")).code() == "forbidden" && dial.dials == 1);
+    dial.phones = 0;
+    CHECK(Parsed(b.call(ctl, "serial.dial", "{}")).code() == "not-found");
+    dial.code = "busy";
+    CHECK(Parsed(b.call(ctl, "serial.dial", "{}")).code() == "busy");
+    dial.on = false;
+    CHECK(Parsed(b.call(ctl, "serial.dial", "{}")).code() == "unsupported" && dial.dials == 3);
+    b.agent.setSerialDial(0);
+
+    // With no listener: none of it, and info.get says so.
+    CHECK(Parsed(b.call(ctl, "serial.status", "{}")).code() == "unsupported");
+    CHECK(Parsed(b.call(ctl, "serial.dial", "{}")).code() == "unsupported");
+    CHECK(b.call(ctl, "info.get", "{}").find("\"serial\":{\"listener\":false}") != std::string::npos);
+}
+
+// A link the phone opened and one the car dialled, both up: the first to finish hello stays, and the other is told
+// why and ended.
+static void testTwoLinks() {
+    for (int dialledFirst = 0; dialledFirst < 2; ++dialledFirst) {
+        Bench b(dialledFirst ? "two-links-dialled" : "two-links-opened");
+        Phone* first = b.connect("serial", "00:11:22:33:44:55", dialledFirst != 0);
+        Phone* second = b.connect("serial", "00:11:22:33:44:55", dialledFirst == 0);
+        CHECK(Parsed(b.hello(first, Bench::phoneHello("1", 4096))).result.isObject());
+        // The second is answered, and then ended.
+        int64_t id = second->request("hello", Bench::phoneHello("1", 4096));
+        b.settle();
+        CHECK(Parsed(second->reply(id)).result.isObject());
+        CHECK(closingReason(second) == kClosingOtherLink && position(second, "R" + num(id)) < position(second, "Elink.closing"));
+        CHECK(closingReason(first).empty() && !first->closed && b.agent.sessions() == 1);
+        CHECK(Parsed(b.call(first, "ping", "{}")).result.isObject());
+        // Once the first has ended, a link of the other kind is welcome.
+        first->hangUp();
+        b.settle();
+        Phone* third = b.connect("serial", "00:11:22:33:44:55", dialledFirst == 0);
+        CHECK(Parsed(b.hello(third, Bench::phoneHello("1", 4096))).result.isObject());
+        CHECK(closingReason(third).empty() && b.agent.sessions() == 1);
+    }
+    {   // two of the same kind are left to each other, as before
+        Bench b("two-links-same");
+        Phone* one = b.connect("serial", "00:11:22:33:44:55");
+        Phone* two = b.connect("serial", "66:77:88:99:AA:BB");
+        CHECK(Parsed(b.hello(one, Bench::phoneHello("1", 4096))).result.isObject());
+        CHECK(Parsed(b.hello(two, Bench::phoneHello("2", 4096))).result.isObject());
+        CHECK(closingReason(one).empty() && closingReason(two).empty() && b.agent.sessions() == 2);
+    }
+}
+
 static void testSerialReset() {
     {   // an agent with no Bluetooth serial listener does not list the capability, and has no such method
         Bench b("serial-reset-none");
@@ -3810,11 +3949,33 @@ static void testSerialReset() {
     Phone* phone = b.phone("3", 4096, "serial");
     CHECK(str(Parsed(b.call(phone, "serial.reset", "{}")).result, "state") == "sent" && reset.calls == 7);
 
+    // A link the car dialled: the agent ends it, with link.closing and the reason "reset", after the answer. (A
+    // phone's own link would end it at its hello: testTwoLinks.)
+    phone->hangUp();
+    b.settle();
+    reset.outcome = SerialReset::kResetDialled;
+    Phone* dialled = b.connect("serial", "00:11:22:33:44:55", true);
+    CHECK(Parsed(b.hello(dialled, Bench::phoneHello("4", 4096))).result.isObject());
+    b.pair("4");
+    CHECK(Parsed(b.authenticate(dialled, Bench::keyOf("4"))).result.isObject());
+    size_t before = b.agent.sessions();
+    CHECK(str(Parsed(b.call(p, "serial.reset", "{}")).result, "state") == "sent");
+    CHECK(closingReason(dialled) == kClosingReset && b.agent.sessions() == before - 1);
+    // Asked on the dialled link itself: its answer first, then link.closing.
+    Phone* again = b.connect("serial", "00:11:22:33:44:55", true);
+    CHECK(Parsed(b.hello(again, Bench::phoneHello("4", 4096))).result.isObject());
+    CHECK(Parsed(b.authenticate(again, Bench::keyOf("4"))).result.isObject());
+    int64_t id = again->request("serial.reset", "{}");
+    b.settle();
+    CHECK(position(again, "R" + num(id)) >= 0 && position(again, "R" + num(id)) < position(again, "Elink.closing"));
+    CHECK(closingReason(again) == kClosingReset);
+    reset.outcome = SerialReset::kResetSent;
+
     // Not while a job runs: here one that waits for its archives.
     std::string planId = planOk(b, p, kRuntime, "", kRuntime);
     p->serve = false;
     startJob(b, p, planId);
-    CHECK(b.agent.job().active() && Parsed(b.call(p, "serial.reset", "{}")).code() == "busy" && reset.calls == 7);
+    CHECK(b.agent.job().active() && Parsed(b.call(p, "serial.reset", "{}")).code() == "busy" && reset.calls == 9);
 }
 
 // ---- settings -----------------------------------------------------------------------------------------------------
@@ -4205,7 +4366,9 @@ int main(int argc, char** argv) {
     testFiles();
     testChecks();
     testChecksBusy();
+    testTwoLinks();
     testSerialReset();
+    testSerialDial();
     testSettings();
     size_t worst = worstOption();
     testSession(session);

@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
+// Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
+#ifndef NBT_AGENT_SERIAL_DIAL_HPP
+#define NBT_AGENT_SERIAL_DIAL_HPP
+
+// What the agent tells the Bluetooth serial listener (serial_link.hpp) for the car dialling a phone of the agent's
+// (dial_rules.hpp), and asks of it: the pairing window, a dial now, and how Bluetooth serial stands, for the
+// method serial.status and info.get (agent.hpp). The agent's thread calls it; the listener's thread acts on it.
+// QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
+
+#include <stdint.h>
+
+#include <string>
+#include <vector>
+
+namespace nbt {
+
+// How Bluetooth serial stands. Counts, and names of states: never a phone's address or name.
+struct SerialStatus {
+    bool registered;                   // the agent's serial service is registered with the car's Bluetooth service
+    int64_t checkedMsAgo;              // it was last registered or checked this long ago; below 0: never
+    std::vector<std::string> stack;    // the stack's version strings (VersionGet); empty until they have come
+    unsigned phonesPresent;            // phones connected to the car, in its device list
+    unsigned phonesEligible;           // of those, the ones the car may dial now: paired with it, and the agent's
+    bool dialOn;                       // the car dials phones in this run (nbtagent --dial)
+    std::string dialState;             // idle, dialling, up, ending
+    std::string lastResult;            // what the last dial came to: the car's answer by its name (OK, DEFAULT, BUSY,
+                                       // PAGE_TIMEOUT, ...), "rejected", "no answer", "not the app"; "none" before one
+    std::string link;                  // the agent's serial links up: none, phone-opened, dialled, both
+    // Counts since the agent started.
+    unsigned dials, answeredOk, notListening, notInReach, busy, otherAnswers, noAnswer, notTheApp, leftBehind;
+    unsigned checks, checksRestored, refusals;
+    unsigned problemsRecorded;         // lines written to the problem file in this run (serial_link.hpp)
+    unsigned problemsCounted;          // problems that were not written, only counted
+    SerialStatus()
+        : registered(false), checkedMsAgo(-1), phonesPresent(0), phonesEligible(0), dialOn(false), dialState("idle"),
+          lastResult("none"), link("none"), dials(0), answeredOk(0), notListening(0), notInReach(0), busy(0),
+          otherAnswers(0), noAnswer(0), notTheApp(0), leftBehind(0), checks(0), checksRestored(0), refusals(0),
+          problemsRecorded(0), problemsCounted(0) {}
+};
+
+class SerialDial {
+public:
+    virtual ~SerialDial() {}
+    // The agent's pairing window has opened, or has closed: while it is open every phone that is connected to the
+    // car and paired with it is dialled in turn, for a new phone's app to be reached and paired.
+    virtual void pairingWindow(bool open) = 0;
+    // Whether the car dials phones in this run at all.
+    virtual bool dialOn() = 0;
+    // A round of dials now, to each phone connected to the car and paired with it: how many phones that is. 0 with
+    // *why, and *code as an error of the protocol's ("busy" while a link of the agent's is up or a dial is out,
+    // "not-found" with no such phone, "io-error" when the car cannot be asked).
+    virtual unsigned dialNow(std::string* why, const char** code) = 0;
+    virtual SerialStatus serialStatus() = 0;
+};
+
+}  // namespace nbt
+
+#endif

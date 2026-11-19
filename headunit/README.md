@@ -184,15 +184,31 @@ format and the protocol.
   (`{"state":"sent"}`), and with none, at the open of the next serial link within 60 seconds
   (`{"state":"armed","forMs":60000}`). It is refused with `busy` while a job runs, and with `io-error` when the
   car's Bluetooth service cannot be asked. `nbtctl serial reset` asks for it, and so does the plugin's **Reset
-  Bluetooth link** screen (see "How a link ends" below).
+  Bluetooth link** screen (see "How a link ends" below). A link that the car dialled (below) is ended as the agent
+  ends a link, with `link.closing` and the reason `reset` after the answer, which is `sent`.
+- The car can dial the phone, too: an agent whose Bluetooth serial listener dials lists the capability
+  `serial-dial` in `hello`, and a phone app that listens on the agent's UUID is then reached on a link the car
+  opens (see "The car dials the phone" below). Such a link opens with the phone's magic bytes and `hello`, as one
+  the phone opened. Should a link of each kind come up, the first to finish `hello` stays and the other is ended
+  with `link.closing` and the reason `other-link`.
+- `serial.status` says how Bluetooth serial stands, and `info.get` has the same in its member `serial`: whether
+  the service is registered and how long ago it was last checked, the Bluetooth stack's version strings, how many
+  phones are connected to the car and how many of them the car may dial, whether the dial is on, where it is and
+  what the last dial came to, which of the agent's serial links are up (`none`, `phone-opened`, `dialled` or
+  `both`), counts of the dials, their answers and the registration checks, and how many problems were written to
+  the problem file and how many only counted. Never a phone's address or name. An agent with no Bluetooth serial
+  listener answers `serial.status` with `unsupported`, and its `info.get` has `"serial": {"listener": false}`.
+  `serial.dial`, on the local socket only, has the car dial the phones connected to it now (`{"phones": N}`);
+  `nbtctl serial status` and `nbtctl serial dial` send them. `agent/agent.hpp` has the members one by one.
 - The phone made a link, and the phone ends it. When the agent ends a link of its own accord it says so first,
   with the event `link.closing`, and closes its end once that is written out; nothing follows the event. Its
   `reason` is `stopping` (the agent's process ends), `restarting` (it ends for a newer version of itself, which
   the launcher starts), `forgotten` (the phone's pairing was ended on the head unit), `replaced` (a newer link
-  from the same phone took this one's place) or `silent` (the phone answered neither the pings nor a
-  `blob.fetch`). A phone app closes its side as soon as the event arrives. The local socket's links get no such
-  event, and neither does a link that ends for what the phone did wrong: the error in the answer says why. Why
-  this matters on Bluetooth serial is under "How a link ends" below.
+  from the same phone took this one's place), `silent` (the phone answered neither the pings nor a
+  `blob.fetch`), `reset` (`serial.reset` ended a link the car dialled) or `other-link` (a Bluetooth serial link of
+  the other kind did `hello` first). A phone app closes its side as soon as the event arrives. The local socket's
+  links get no such event, and neither does a link that ends for what the phone did wrong: the error in the answer
+  says why. Why this matters on Bluetooth serial is under "How a link ends" below.
 - A controller can pull a package's log files, so that a user can send them to whoever asked. A package names them
   in its manifest's `logs`: files or a folder with a wildcard, in `${app}`, `${data}`, `${tmp}` (the package's own
   folder on the RAM disk, `/tmp/nbtapp/apps/<id>` on a car, which the agent makes for it and a power down empties;
@@ -650,6 +666,9 @@ asked to. The agent therefore:
   300 ms after the answer, so that a phone that asked on that very link has its answer first. With none open, the
   next serial link whose node opens within 60 seconds is ended at the open, with no decide step, and its node read
   until the link ends; that is for a phone whose links come up and carry nothing, which taps Connect once more.
+  One ServiceDisconnect is out at a time, as the car's answers say little of which request they answer: while
+  another (one of the dial's, say) waits for its answer, this one goes once that is answered, or given up after 3
+  seconds with none.
   The log says what the car answered (its error code and a reason), how long after the request the link's node
   went, or that the link was still up 3 seconds after it.
   The phone's address goes into the request and never into the log. Which values the car wants in the request is
@@ -671,6 +690,82 @@ asked to. The agent therefore:
 
 A link that the agent lets go as another program's (below) is closed for that program if there is a sign of one,
 and read otherwise, until it ends or a sign of one comes.
+
+**The car dials the phone.** The car gives every link a phone opens the one node `/dev/btspp0`, and takes one such
+link at a time, so another program that holds it keeps the phone's app from the agent. The car can also open a
+link itself, to a service on the phone: the agent asks the car's Bluetooth service to (ServiceConnect) on the car's
+instance `nbtapp` of `BtCtrl`, for the phone's address and the agent's service, and that link's node is
+`/dev/nbtapp`, which nothing else uses. The phone's app listens on the agent's UUID and accepts it. The link the
+phone opens works as before beside it; `nbtagent --dial off` turns the dial off, and the agent then takes only the
+links phones open, as before.
+
+- **Whom.** A phone that is connected to the car (the car's device list says connection 2 or more) and paired
+  with it with its key (security 7 or 8), and that is one of the agent's: the agent keeps the Bluetooth address of
+  the serial link on which a phone paired or last did `auth` in `phones.json`, in plain text, and nowhere else (not
+  in an answer, not in the log, which names phones as "phone 1", "phone 2" by the order the car's list first had
+  them). While the pairing window is open, every phone connected and paired with the car is dialled, the agent's or
+  not, for a new phone's app to be reached. A phone that has lost its pairing with the car is never dialled: the
+  car would start a new pairing, with a prompt on both screens. A phone that the car says is being paired anew or
+  failed to pair, or whose security becomes 9, is not dialled until the device list shows it paired again after a
+  change; a pairing that worked does not stop its dials.
+- **When.** One dial at a time, and none while a link of the agent's of either kind is up or being decided on, or
+  while the service is not registered. A poll of the agent's phones as soon as the car's device list has come, then
+  every 10 seconds for 2 minutes after a phone connects to the car or a link of the agent's ends, and every 30
+  seconds after that (`--dial-poll 10,120,30`). A phone that asked the car for a serial link and got no link of
+  the agent's within a second is dialled then, even while its request is still pending; that request holds back
+  every other dial until its node has come or its time is over. While the pairing window is open, a round of every
+  phone there every 5 seconds. `nbtctl serial dial` dials the phones connected to the car now, for trials.
+- **What the car answers.** 0: the link is up, and the agent opens `/dev/nbtapp` and waits 3 seconds for the
+  app's magic bytes (the app accepts the link before it writes); with them the link is the agent's, a serial link
+  like any other, with no gate, hold or let-go. Anything else on it, or nothing, is something that answered on the
+  agent's UUID and is not the app: the car is asked to end the link (ServiceDisconnect), and polls leave that phone
+  alone for 30 seconds, twice as long each time it happens again, up to 5 minutes, until a link works or the phone's
+  connection changes; its own request and the pairing window still dial it at once. 5: the phone's app is not
+  listening, which disturbs nothing: the next poll dials again. 14: the phone is not in reach, and polls leave it
+  alone until its connection changes. 2: a link on the instance is up already; with its node there, it is a link an
+  agent that was killed left behind, which is ended and never taken, and the phone is dialled afresh; if the car
+  does not end it, the phone is backed off as above instead, and is not dialled again at once. Any other
+  answer: again in 15 seconds. No answer in 95 seconds: the dial is given up, the car is asked to end what may be
+  up, and the phone is backed off.
+- **How it ends.** The phone ends it, or the car says it ended (ServiceDisconnected for `nbtapp`), and its node is
+  closed at once. When the agent ends it, it says `link.closing` first as on any link, gives the phone 5 seconds to
+  end it, and then has the car end it with ServiceDisconnect, waits up to 3 seconds for the answer, and closes the
+  node: unlike a phone's own link, it is not kept and read. `serial.reset` ends it the same way. When the agent
+  stops, the dialled link is ended before the registration is removed, which the car refuses while a link is up.
+  A link left behind on `/dev/nbtapp` when the agent starts is ended once the car's phones are known, with
+  ServiceDisconnect for each phone connected to the car in turn until its node has gone (an error answer for a
+  phone that has no such link does no harm), and then the agent's phones are dialled afresh. Such a link also
+  makes the car refuse the registration (5 to SppUuidRegister and to SppUuidDeregister alike): with `/dev/nbtapp`
+  there when the registration is refused, the agent asks for the car's device list and ends that link the same way
+  first, within 15 seconds, and registers again at once if it has gone. If it is still there, Bluetooth serial is
+  off and set up again 30 seconds later as for any refusal, and the same is tried once on each new try.
+- **A request the dial overtakes.** The car ends a phone's pending request for a link when its own dial to the
+  phone comes up, and says so just before the dial's answer. A request ended while the dial is out, or within a
+  second of its answer 0, is logged as such and is not counted as a refusal.
+- **The log.** One line for each dial, when it is answered: the phone by its number, why it was dialled (poll,
+  the phone asked for a link, pairing window, asked for, again after an answer not understood, afresh), the car's
+  answer by its name and how long it took. The same answer for the same phone again is only counted, and the next
+  line that differs says how many times it came. A line each when the car's device list says a phone came, went,
+  connected or changed its security. A clean-up of a link left behind that leaves its node there is logged in
+  full the first time; after it, one that comes to the same is only counted, and the next that differs, or that
+  ends the link, says how many came before it.
+
+```sh
+nbtctl serial status    # how Bluetooth serial stands: one "name value" line each, counts as counts.dials and so on
+nbtctl serial dial      # "dialling N phones": the agent's log says what came of each
+```
+
+**The problem file.** The agent's log is on the RAM disk and is gone after a power down. What went wrong with
+Bluetooth serial is also put, a short line each, into `serial-problems.log` in the agent's state folder
+(`/var/opt/nbtapp`), which is on flash: a registration that switching Bluetooth off and on had dropped and the check
+restored, the car's Bluetooth service that never attached, the car refusing a phone's link, a dial that went wrong
+(an answer other than 0, 5 and 14, no answer, something that is not the app), the car asked to end a link left
+behind, and that link not ended, and
+`serial.reset`. Each line has the time, the agent's version and build, and what happened, never a phone's address
+or name. Only the first problem of each kind in a run of the agent is written, and 16 lines a run at most; the
+rest are counted, and `nbtctl serial status` shows both counts (`problems.recorded`, `problems.counted`). When a
+line would take the file over 32 KB, its older half goes in one rewrite. A run with no problem does not create the
+file, open it or touch it.
 
 **Serial services of other programs.** The car's Bluetooth stack keeps a registration until someone removes it or
 the stack restarts. A program that registers a serial service of its own and ends without removing it leaves it
@@ -724,19 +819,21 @@ things keep them apart, both in the agent:
 The log has, for every link, how long after the open its first message came, how many bytes an earlier link had
 left on it, whether it was the agent's or was let go, and why, whether the node was still there after
 the close and when it went, how much was dropped from a node that was read to its end, and each time the gate
-starts and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, and a
-third the registration check; all three go with Bluetooth serial only:
+starts and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, a
+third the registration check, and two the car's dialling; all five go with Bluetooth serial only:
 
 | Option | What it changes |
 |---|---|
 | `--decide <ms>` | How long the magic bytes are waited for, 1 to 10000, in place of the protocol's 500 ms. A phone app goes by the protocol's time, so this is for measuring, not for a car that is in use |
 | `--decide-hold` | A link that is let go keeps its node open, unread, until the link ends, in place of having it closed or read to its end. For a car on which a link does not outlive the close of its node: there the other program would lose every link the agent lets go. The agent reads and writes nothing on a node it keeps, and the gate's hold is off by then, so the other program can open the node beside it |
 | `--register-check <s>` | Every how many seconds the registration is checked while all is quiet, 0 to 3600, in place of 30; 0 never checks it |
+| `--dial on\|off` | Whether the car dials a phone of the agent's (above); on by default. With off, the agent takes only the links phones open, as before |
+| `--dial-poll <f>,<l>,<t>` | The dial's polls: every f seconds (1 to 3600) for l seconds (0 to 86400) after a phone connects or a link ends, then every t seconds (1 to 3600), in place of 10,120,30 |
 
-When Bluetooth serial has started, five lines in the log say what the agent goes by: the time and what becomes
+When Bluetooth serial has started, six lines in the log say what the agent goes by: the time and what becomes
 of a link that is let go, what becomes of a link the agent ends, what it does about a registration that is not
-taken or is lost, how it checks the registration, and the programs the gate holds off as they are declared at that
-moment (the list is taken anew each time the hold goes on):
+taken or is lost, how it checks the registration, the programs the gate holds off as they are declared at that
+moment (the list is taken anew each time the hold goes on), and how the car dials a phone:
 
 ```
 bluetooth: a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any whole frames left over from an earlier link. Any other is let go: its node is closed for the program it belongs to if a program declared for a serial service is running, the gate has seen another program open the node, or a program of software put on by hand is running, and otherwise read until the link ends or one of those signs comes
@@ -744,6 +841,7 @@ bluetooth: a link the agent ends keeps its node, read and with what comes droppe
 bluetooth: a serial service that the car's Bluetooth service does not take, or that is not registered for 20 s, is given up: the gate is taken away, and both are set up again 30 s later, for as long as it takes
 bluetooth: while the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, the registration is checked every 30 s by registering it again: switching Bluetooth off and on drops it, and the car says nothing
 bluetooth: while a link is being decided on or is the agent's, the gate also refuses opens by radiod
+bluetooth: the car dials a phone of the agent's that is connected to it and paired with it, on its instance 'nbtapp' (/dev/nbtapp): polls every 10 s for 120 s after such a phone connects or a link of the agent's ends, then every 30 s; at once when the phone asks for a link and no link of the agent's comes in 1000 ms; every phone there every 5 s while the pairing window is open. The app's magic bytes are waited for 3000 ms; a dial with no answer is given up after 95 s, and one answered with an error not understood is tried again after 15 s; a phone on whose UUID something else answers is left alone by polls for 30 s, twice as long each time up to 300 s. A dialled link that the agent ends has 5000 ms to be ended by the phone before the car is asked to, and the car's answer is waited for 3000 ms
 ```
 
 It ignores SIGHUP, so it goes on when the SSH session ends; `kill` with its process id stops it. Its log is its
@@ -1031,8 +1129,11 @@ nothing there:
   the one in its own folder, and writes the starter only when they differ, which is once after an update that
   brought another one. While it runs it writes when a job
   runs: what it fetches, what it installs or removes, and the job's record. A phone that connects, says hello,
-  asks what is installed and has the checks run causes no write. A check's fix writes what it moves and removes,
-  and its lines in the install log.
+  asks what is installed and has the checks run causes no write; one that pairs, or does `auth` on a serial link
+  from a Bluetooth address the agent did not have for it, has that address written to `phones.json`. With
+  Bluetooth serial, a problem writes a line to `serial-problems.log` ("The problem file", above), the first of
+  each kind in a run, 16 at most; a run with none does not touch that file. A check's fix writes what it moves and
+  removes, and its lines in the install log.
 - **A version of the agent on trial** writes none of its state until a phone has confirmed it: the job's
   record, the journal and the install log stay as the version before left them, for that version to read if it
   comes back. The confirmation then writes `current`, the package's record and the job's.

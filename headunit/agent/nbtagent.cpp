@@ -6,8 +6,8 @@
 //   nbtagent --root DIR [--socket PATH]      on a folder that stands in for the head unit
 //   nbtagent                                 on the head unit itself: in the build for the head unit only
 //   (host build also: [--test-key FILE]... [--debug-tcp [ADDRESS:]PORT])
-//   (head unit's build also: [--bluetooth] [--no-bluetooth] [--decide MS] [--decide-hold] [--register-check S], and
-//    `nbtagent --look PATH` for its own use)
+//   (head unit's build also: [--bluetooth] [--no-bluetooth] [--decide MS] [--decide-hold] [--register-check S]
+//    [--dial on|off] [--dial-poll F,L,T], and `nbtagent --look PATH` for its own use)
 //
 // With --root, everything it touches is inside DIR, laid out as host_platform.hpp says: installed records,
 // staging, ${app}, ${data}, ${plugins}, ${var_plugins}, and absolute destinations under DIR/system. It remounts
@@ -81,7 +81,10 @@
 // in place of closing it for another program or reading it to its end. The agent's first lines in the log say which of the two it goes by, and which programs
 // the gate holds off a link meanwhile. Switching Bluetooth off and on in iDrive drops the registration, and the car
 // says nothing of it, so the agent checks it by registering it again while all is quiet: every 30 seconds, or as
-// often as --register-check S says (0: never).
+// often as --register-check S says (0: never). The car also dials a phone of the agent's that is connected to it and
+// paired with it (dial_rules.hpp), on its own node that no other program's link uses: --dial off turns that off, and
+// the agent then takes only the links phones open, as before; --dial-poll F,L,T sets how often it polls, every F
+// seconds for L seconds after a phone connects or a link ends, then every T seconds.
 // `nbtagent --look PATH` is how the gate is checked, by this program run again: one stat() of PATH, answered by
 // the exit code.
 //
@@ -103,6 +106,7 @@
 
 #include "agent.hpp"
 #include "agent_home.hpp"
+#include "dial_config.hpp"
 #include "embedded_keys.hpp"
 #include "exit_status.hpp"
 #include "fsutil.hpp"
@@ -139,9 +143,10 @@ static int usage() {
     fprintf(stderr,
 #ifdef NBT_HEAD_UNIT
             "usage: nbtagent [--no-bluetooth] [--decide MS] [--decide-hold] [--register-check S]\n"
-            "                                             work on this head unit\n"
+            "                [--dial on|off] [--dial-poll F,L,T]     work on this head unit\n"
             "       nbtagent --root DIR [--socket PATH] [--bluetooth [--decide MS] [--decide-hold]\n"
-            "                [--register-check S]]           work on a folder that stands in for one\n"
+            "                [--register-check S] [--dial on|off] [--dial-poll F,L,T]]\n"
+            "                                             work on a folder that stands in for one\n"
             "  (no --root)     state in /var/opt/nbtapp, the socket at %s; the system\n"
             "                  partition is remounted for a write and put back, the HMI restarted\n"
             "  --bluetooth     also take phone apps' links over Bluetooth serial: the default without\n"
@@ -157,6 +162,11 @@ static int usage() {
             "                  with Bluetooth serial: every how many seconds the registration, which\n"
             "                  switching Bluetooth off and on drops, is checked (0 to %u; 0: never;\n"
             "                  default %u)\n"
+            "  --dial on|off   with Bluetooth serial: whether the car dials a phone of the agent's that is\n"
+            "                  connected to it and paired with it (default on)\n"
+            "  --dial-poll F,L,T\n"
+            "                  with the dial: poll every F seconds for L seconds after a phone connects or a\n"
+            "                  link ends, then every T seconds (default %u,%u,%u)\n"
 #else
             "usage: nbtagent --root DIR [--socket PATH]"
 #ifdef NBT_TEST_KEYS
@@ -181,7 +191,8 @@ static int usage() {
 #ifdef NBT_HEAD_UNIT
             ,
             kHeadUnitSocket, kSerialDecideMostMs, (unsigned)kSerialDecideMs, kSerialCheckMostS,
-            SerialConfig().checkMs / 1000
+            SerialConfig().checkMs / 1000, DialConfig().pollFirstMs / 1000, DialConfig().pollFirstForMs / 1000,
+            DialConfig().pollLaterMs / 1000
 #endif
             );
     return kExitUsage;
@@ -215,10 +226,14 @@ struct Options {
     unsigned decideMs;             // --decide; 0: not given, so the protocol's time. Only the head unit's build
     bool decideHold;               // --decide-hold. Only the head unit's build
     int checkS;                    // --register-check; below 0: not given. Only the head unit's build
+    int dial;                      // --dial: 1 on, 0 off, below 0: not given. Only the head unit's build
+    bool dialPoll;                 // --dial-poll was given, with these values
+    DialConfig poll;
     std::string self;              // how this program was started, to start it again for the gate's check
 
     Options()
-        : debugTcpPort(-1), debugTcpAddress("127.0.0.1"), bluetooth(-1), decideMs(0), decideHold(false), checkS(-1) {}
+        : debugTcpPort(-1), debugTcpAddress("127.0.0.1"), bluetooth(-1), decideMs(0), decideHold(false), checkS(-1),
+          dial(-1), dialPoll(false) {}
 };
 
 #ifdef NBT_HEAD_UNIT
@@ -267,11 +282,14 @@ struct Bluetooth {
     SerialListener listener;
     SerialServices services;   // what other programs register, for the removal of what one leaves behind
     SystemLogLook look;
+    ProblemLog problems;       // serial-problems.log in the state folder, which outlasts a power down
 
     Bluetooth(const std::string& self, const Platform* platform, const Store* store, const SerialConfig& config)
-        : gate(self, &log), listener(&gap, &gate, &log, config), services(platform, store, &log) {
+        : gate(self, &log), listener(&gap, &gate, &log, config), services(platform, store, &log),
+          problems(platform->stateDir() + "/serial-problems.log", std::string(kAgentVersion) + " (build " NBT_APP_VERSION ")") {
         gap.setLog(&serviceClientLine, 0);
         listener.setServerLook(&look);
+        listener.setProblemLog(&problems);
     }
 };
 
@@ -281,6 +299,12 @@ static SerialConfig serialConfigOf(const Options& options) {
     if (options.decideMs != 0) config.decideMs = options.decideMs;
     config.letGoKeepsNode = options.decideHold;
     if (options.checkS >= 0) config.checkMs = (unsigned)options.checkS * 1000;
+    if (options.dial >= 0) config.dial.on = options.dial == 1;
+    if (options.dialPoll) {
+        config.dial.pollFirstMs = options.poll.pollFirstMs;
+        config.dial.pollFirstForMs = options.poll.pollFirstForMs;
+        config.dial.pollLaterMs = options.poll.pollLaterMs;
+    }
     return config;
 }
 
@@ -376,9 +400,11 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
         }
         bluetooth->services.setRemover(&bluetooth->listener);
         bluetooth->listener.setServices(&bluetooth->services);
+        bluetooth->listener.setPhoneAddresses(agent.phoneAddresses());
         if (bluetooth->listener.start(&why)) {
             agent.addListener(&bluetooth->listener);
             agent.setSerialReset(&bluetooth->listener);
+            agent.setSerialDial(&bluetooth->listener);
             agent.engine().setStepObserver(&bluetooth->services);
             logLine(stderr, std::string("Bluetooth serial: service '") + kSerialServiceName + "', UUID " + kSerialServiceUuid +
                                 ". While this agent runs, the car maker's phone apps do not work over Bluetooth.");
@@ -388,6 +414,7 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
             logLine(stderr, "bluetooth: " + describeSerialRetry(config));
             logLine(stderr, "bluetooth: " + describeSerialCheck(config));
             logLine(stderr, "bluetooth: " + describeSerialHold(bluetooth->services.programs()));
+            logLine(stderr, "bluetooth: " + describeDial(config.dial));
             // What the head unit says of its Bluetooth, on a thread of its own once the registration has gone out.
             report = new SerialReport(platform, &agent.engine().store(), &bluetooth->log, &bluetooth->listener);
             report->start();
@@ -435,6 +462,7 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
         waitForPhones(wait);
         // Takes the service's registration and the gate away again.
         agent.setSerialReset(0);
+        agent.setSerialDial(0);
         agent.engine().setStepObserver(0);
         bluetooth->services.setRemover(0);
         bluetooth->listener.stop();
@@ -557,6 +585,20 @@ int main(int argc, char** argv) {
             }
             options.checkS = (int)s;
             ++i;
+        } else if (arg == "--dial" && value != 0) {
+            if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+                fprintf(stderr, "nbtagent: --dial takes on or off\n");
+                return kExitUsage;
+            }
+            options.dial = strcmp(value, "on") == 0 ? 1 : 0;
+            ++i;
+        } else if (arg == "--dial-poll" && value != 0) {
+            if (!parseDialPoll(value, &options.poll)) {
+                fprintf(stderr, "nbtagent: --dial-poll takes F,L,T: seconds from 1 to 3600, 0 to 86400 and 1 to 3600\n");
+                return kExitUsage;
+            }
+            options.dialPoll = true;
+            ++i;
 #endif
 #ifdef NBT_TEST_KEYS
         } else if (arg == "--test-key" && value != 0) {
@@ -593,9 +635,14 @@ int main(int argc, char** argv) {
     // On the head unit the socket's place is fixed: see the top of this file.
     if (options.root.empty() && !options.socketPath.empty()) return usage();
     if (options.bluetooth < 0) options.bluetooth = options.root.empty() ? 1 : 0;
-    if (options.bluetooth == 0 && (options.decideMs != 0 || options.decideHold || options.checkS >= 0)) {
-        fprintf(stderr, "nbtagent: --decide, --decide-hold and --register-check are about Bluetooth serial, which is off%s\n",
-                options.root.empty() ? "" : ": with --root it takes --bluetooth");
+    if (options.bluetooth == 0 &&
+        (options.decideMs != 0 || options.decideHold || options.checkS >= 0 || options.dial >= 0 || options.dialPoll)) {
+        fprintf(stderr, "nbtagent: --decide, --decide-hold, --register-check, --dial and --dial-poll are about Bluetooth "
+                        "serial, which is off%s\n", options.root.empty() ? "" : ": with --root it takes --bluetooth");
+        return kExitUsage;
+    }
+    if (options.dial == 0 && options.dialPoll) {
+        fprintf(stderr, "nbtagent: --dial-poll is about the dial, which --dial off turns off\n");
         return kExitUsage;
     }
 #else

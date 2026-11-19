@@ -18,7 +18,8 @@
 # A line that starts with # shows the next frame's payload if it is a message. The phone's lines are examples
 # of what the agent accepts; another client may order the members of its messages differently. The agent's
 # lines are what this agent sends when it is in the same state: a head unit with nothing installed, the
-# test key as its only package key, 500,000,000 bytes free everywhere, the head-unit id, plan ids, pairing
+# test key as its only package key, 500,000,000 bytes free everywhere, no Bluetooth serial listener (so
+# the member serial of info.get is {"listener":false}), the head-unit id, plan ids, pairing
 # code, pairing key and nonce that the test's counter gives, and a clock that stands still, so
 # job.progress comes only when something changes and no ping is due. Before checks.run the test has the
 # system partition stand as writable, as somebody's hand would leave it, so that one check finds a
@@ -70,8 +71,8 @@ magic 4e42544c
 < 01000000140000007b226964223a392c22726573756c74223a7b7d7d8531d96c
 # {"id":10,"method":"info.get","params":{}}
 > 01000000290000007b226964223a31302c226d6574686f64223a22696e666f2e676574222c22706172616d73223a7b7d7d47a2ae7a
-# {"id":10,"result":{"agentVersion":"1.0.0","headUnitId":"000102030405060708090a0b0c0d0e0f","manifestVersion":1,"free":{"app":500000000,"data":500000000,"plugins":500000000,"staging":500000000},"restartNeeded":"none"}}
-< 01000000d80000007b226964223a31302c22726573756c74223a7b226167656e7456657273696f6e223a22312e302e30222c2268656164556e69744964223a223030303130323033303430353036303730383039306130623063306430653066222c226d616e696665737456657273696f6e223a312c2266726565223a7b22617070223a3530303030303030302c2264617461223a3530303030303030302c22706c7567696e73223a3530303030303030302c2273746167696e67223a3530303030303030307d2c22726573746172744e6565646564223a226e6f6e65227d7d21133b20
+# {"id":10,"result":{"agentVersion":"1.0.0","headUnitId":"000102030405060708090a0b0c0d0e0f","manifestVersion":1,"free":{"app":500000000,"data":500000000,"plugins":500000000,"staging":500000000},"restartNeeded":"none","serial":{"listener":false}}}
+< 01000000f40000007b226964223a31302c22726573756c74223a7b226167656e7456657273696f6e223a22312e302e30222c2268656164556e69744964223a223030303130323033303430353036303730383039306130623063306430653066222c226d616e696665737456657273696f6e223a312c2266726565223a7b22617070223a3530303030303030302c2264617461223a3530303030303030302c22706c7567696e73223a3530303030303030302c2273746167696e67223a3530303030303030307d2c22726573746172744e6565646564223a226e6f6e65222c2273657269616c223a7b226c697374656e6572223a66616c73657d7d7da95c7cc0
 # {"id":11,"method":"packages.list","params":{}}
 > 010000002e0000007b226964223a31312c226d6574686f64223a227061636b616765732e6c697374222c22706172616d73223a7b7d7d79cd13f1
 # {"id":11,"result":{"packages":[],"more":false}}

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "test_util.hpp"
@@ -117,6 +118,11 @@ public:
         phone.push_back(e);
     }
     virtual void sppRefusedPhone(const PhoneInList& phone) { refused.push_back(phone); }
+    virtual void sppConnectReply(const ServiceConnectReply& reply) { connects.push_back(reply); }
+    virtual void sppDisconnectReply(const ServiceDisconnectReply& reply) { disconnects.push_back(reply); }
+    virtual void sppPairing(uint32_t informId, const std::string& address) {
+        pairings.push_back(std::make_pair(informId, address));
+    }
     virtual void sppOtherRemoved(const std::string& name, uint32_t error) {
         char b[32];
         snprintf(b, sizeof(b), "=%d", error == kNoError ? -1 : (int)error);
@@ -150,6 +156,9 @@ public:
     std::vector<SppService::State> states;
     std::vector<PhoneEvent> phone;
     std::vector<PhoneInList> refused;
+    std::vector<ServiceConnectReply> connects;
+    std::vector<ServiceDisconnectReply> disconnects;
+    std::vector<std::pair<uint32_t, std::string> > pairings;
     std::string others;
 };
 
@@ -176,6 +185,17 @@ static void isRegister(const std::vector<uint8_t>& p, uint32_t type) {
     CHECK(r.str() == kName);
     CHECK(r.str() == kUuid && r.str() == kUuid);   // the service's UUID, and the same one to connect to
     CHECK(r.u32() == type && r.ok() && r.left() == 0);
+}
+
+// A ServiceDisconnect reply: address, service, error, reason.
+static std::vector<uint8_t> disconnectReply(const char* address, const char* service, uint32_t error,
+                                            uint32_t reason = 0) {
+    std::vector<uint8_t> p;
+    putString(p, address);
+    putString(p, service);
+    putU32(p, error);
+    putU32(p, reason);
+    return p;
 }
 
 static void isDeregister(const std::vector<uint8_t>& p) {
@@ -794,8 +814,14 @@ int main() {
         CHECK(r.gap.took(kReqServiceDisconnect) == d);
         CHECK(r.seen.said("ServiceDisconnect device 'BtCtrl', instance 'ExtBox1', service 'SPP', for the phone of the "
                           "last request for a link"));
+        // One at a time: the next waits for the answer to this one.
+        bool waits = false;
+        CHECK(!r.spp.disconnectPhone("Dev2", "Inst2", "Other", &waits) && waits && r.gap.sent.empty());
+        std::vector<uint8_t> dr = disconnectReply(kPhoneAddress, "SPP", 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &dr[0], (uint32_t)dr.size());
+        CHECK(r.seen.said("ServiceDisconnect reply: 0 OK, reason 0"));
         // Other values, to try them without a new build.
-        CHECK(r.spp.disconnectPhone("Dev2", "Inst2", "Other"));
+        CHECK(r.spp.disconnectPhone("Dev2", "Inst2", "Other", &waits) && !waits);
         CHECK(r.gap.took(kReqServiceDisconnect) == buildServiceDisconnect("Dev2", "Inst2", kPhoneAddress, "Other"));
         // What comes back that this class does not know: its id, its type and its first value, never its strings.
         std::vector<uint8_t> answer;
@@ -1296,6 +1322,255 @@ int main() {
         // With the server gone, nothing is asked.
         r.gap.detach();
         CHECK(!r.spp.askAboutRefused());
+    }
+
+    // 22. The car dials: ServiceConnect, and its answer. A reply that names another service or another phone is
+    //     another client's, even while ours waits: ours stays out, and its own answer is still taken.
+    {
+        struct Reply {
+            static std::vector<uint8_t> of(const char* address, const char* service, uint32_t error) {
+                std::vector<uint8_t> p;
+                putString(p, address);
+                putString(p, service);
+                putU32(p, error);
+                return p;
+            }
+        };
+        Registered r;
+        CHECK(r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName));
+        CHECK(r.gap.took(kReqServiceConnect) == buildServiceConnect("BtCtrl", "testinst", "00:11:22:33:44:55", kName));
+        CHECK(!r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName) && r.gap.sent.empty());
+        size_t before = r.seen.lines.size();
+        // Another service, then another phone: not passed on, and the dial is still out.
+        std::vector<uint8_t> p = Reply::of("00:11:22:33:44:55", "Other_Service", 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &p[0], (uint32_t)p.size());
+        p = Reply::of("66:77:88:99:AA:BB", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.connects.empty() && r.spp.heard().othersConnectReplies == 2);
+        CHECK(!r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName) && r.gap.sent.empty());
+        CHECK(r.seen.lines.size() == before + 2 &&
+              r.seen.lines[before] == "a ServiceConnect reply for another client came while the agent's dial waited for "
+                                      "its answer, and was left: the dial waits on");
+        // Ours, with the address in another form: passed on, and the dial is answered.
+        p = Reply::of("001122334455", kName, 5);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.connects.size() == 1 && r.seen.connects[0].ok && r.seen.connects[0].error == 5 &&
+              r.seen.connects[0].service == kName);
+        // With no dial out, a reply is another client's, as before: ignored, and not logged.
+        before = r.seen.lines.size();
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &p[0], (uint32_t)p.size());
+        p = Reply::of("66:77:88:99:AA:BB", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.connects.size() == 1 && r.seen.lines.size() == before && r.spp.heard().othersConnectReplies == 2);
+        // Another client's that keep coming: the first few are said, then they are only counted.
+        CHECK(r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceConnect);
+        for (int i = 0; i < 10; ++i)
+            r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.connects.size() == 1 && r.spp.heard().othersConnectReplies == 12);
+        size_t said = 0;
+        for (size_t i = 0; i < r.seen.lines.size(); ++i)
+            said += r.seen.lines[i].find("for another client") != std::string::npos;
+        CHECK(said == 4 && r.seen.said("and was left: the dial waits on. Further ones are counted and not logged"));
+        // One that cannot be read is the answer, as before: passed on with what was asked for, and kNoError.
+        p = Reply::of("00:11:22:33:44:55", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &p[0], (uint32_t)p.size() - 2);
+        CHECK(r.seen.connects.size() == 2 && !r.seen.connects[1].ok && r.seen.connects[1].error == kNoError &&
+              r.seen.connects[1].address == "00:11:22:33:44:55" && r.seen.connects[1].service == kName);
+        CHECK(r.seen.said("ServiceConnect's reply from the Bluetooth server could not be read"));
+        CHECK(r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceConnect);
+        // A rejection is the answer, as before.
+        r.gap.reject(kTypeRejectedA, kReqServiceConnect);
+        CHECK(r.seen.connects.size() == 3 && !r.seen.connects[2].ok && r.seen.connects[2].error == kNoError &&
+              r.seen.connects[2].address == "00:11:22:33:44:55");
+        CHECK(r.seen.said("the Bluetooth server rejected ServiceConnect (type 0x202)"));
+        CHECK(r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName));
+        CHECK(!r.seen.said("00:11:22") && !r.seen.said("66:77:88") && !r.seen.said("001122"));
+    }
+
+    // 23. The pairing informs: asked for with setPairingInforms(), the two that stop dials only. PairingComplete,
+    //     a pairing that worked, is not asked for, and one that comes all the same is neither told nor logged.
+    {
+        FakeGap gap;
+        Seen seen;
+        SppService spp(&gap, &seen);
+        spp.configure(kName, kUuid, 0);
+        spp.setPairingInforms(true);
+        CHECK(spp.start());
+        gap.attach();
+        CHECK(gap.informs.size() == kInforms + 2 && gap.informs[kInforms] == kInfPairingError &&
+              gap.informs[kInforms + 1] == kInfSimplePairingConfirmationRequired);
+        gap.took(kReqSppUuidRegister);
+        gap.reply(kRspSppUuidRegister, 0);
+        std::vector<uint8_t> p;
+        putString(p, "00:11:22:33:44:55");
+        putString(p, kPhoneName);
+        size_t before = seen.lines.size();
+        gap.events->gapMessage(0x400, kInfPairingComplete, &p[0], (uint32_t)p.size());
+        CHECK(seen.pairings.empty());
+        gap.events->gapMessage(0x400, kInfPairingError, &p[0], (uint32_t)p.size());
+        gap.events->gapMessage(0x400, kInfSimplePairingConfirmationRequired, &p[0], (uint32_t)p.size());
+        gap.events->gapMessage(0x400, kInfPairingError, 0, 0);
+        CHECK(seen.pairings.size() == 3 && seen.pairings[0].first == kInfPairingError &&
+              seen.pairings[0].second == "00:11:22:33:44:55");
+        CHECK(seen.pairings[1].first == kInfSimplePairingConfirmationRequired && seen.pairings[2].second.empty());
+        // Not as an unknown message after a ServiceDisconnect either, whatever its type.
+        gap.inform(kInfServiceRequest, "SPP");
+        CHECK(spp.disconnectPhone("", "", ""));
+        gap.took(kReqServiceDisconnect);
+        gap.events->gapMessage(kTypeResponse, kInfPairingComplete, &p[0], (uint32_t)p.size());
+        gap.events->gapMessage(0x400, kInfPairingComplete, &p[0], (uint32_t)p.size());
+        CHECK(seen.pairings.size() == 3 && !seen.said("does not know"));
+        CHECK(!seen.said(kPhoneName) && !seen.said("00:11:22"));
+        CHECK(seen.lines.size() == before + 1);   // the ServiceDisconnect's own line
+    }
+    {   // without setPairingInforms(): none is asked for
+        Registered r;
+        CHECK(r.gap.informs.size() == kInforms);
+    }
+
+    // 24. ServiceDisconnect's answer. One at a time, of either kind; a reply that names another phone, or for
+    //     disconnectService() another service, is another client's, even while ours waits: ours stays out, and its
+    //     own answer is still taken. One with no answer in its time is given up when the next is asked for.
+    {   // disconnectService()'s
+        Registered r;
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        CHECK(r.gap.took(kReqServiceDisconnect) == buildServiceDisconnect("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        CHECK(!r.spp.disconnectService("BtCtrl", "nbtapp", "66:77:88:99:AA:BB", kName) && r.gap.sent.empty());
+        size_t before = r.seen.lines.size();
+        // Another phone, then another service: not passed on, not logged as ours, and ours is still out.
+        std::vector<uint8_t> p = disconnectReply("66:77:88:99:AA:BB", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        p = disconnectReply("00:11:22:33:44:55", "Other_Service", 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.empty() && r.spp.heard().othersDisconnectReplies == 2);
+        CHECK(r.seen.lines.size() == before + 2 &&
+              r.seen.lines[before] == "a ServiceDisconnect reply for another client came while the agent's "
+                                      "ServiceDisconnect waited for its answer, and was left: the agent's waits on");
+        CHECK(!r.seen.said("ServiceDisconnect reply:"));
+        CHECK(!r.spp.disconnectService("BtCtrl", "nbtapp", "66:77:88:99:AA:BB", kName) && r.gap.sent.empty());
+        // Ours, with the address in another form: passed on and logged, and the next may go.
+        p = disconnectReply("001122334455", kName, 5, 6);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.size() == 1 && r.seen.disconnects[0].ok && r.seen.disconnects[0].error == 5 &&
+              r.seen.disconnects[0].service == kName);
+        CHECK(r.seen.said("ServiceDisconnect reply: 5 DEFAULT, reason 6"));
+        // With none out, a reply is another client's, as before: ignored, and not logged.
+        before = r.seen.lines.size();
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        p = disconnectReply("66:77:88:99:AA:BB", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.size() == 1 && r.seen.lines.size() == before &&
+              r.spp.heard().othersDisconnectReplies == 2);
+        // Another client's that keep coming: the first few are said, then they are only counted.
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceDisconnect);
+        for (int i = 0; i < 10; ++i)
+            r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.size() == 1 && r.spp.heard().othersDisconnectReplies == 12);
+        size_t said = 0;
+        for (size_t i = 0; i < r.seen.lines.size(); ++i)
+            said += r.seen.lines[i].find("for another client") != std::string::npos;
+        CHECK(said == 4 && r.seen.said("and was left: the agent's waits on. Further ones are counted and not logged"));
+        // One that cannot be read is the answer, as before: passed on with what was asked for, and kNoError.
+        p = disconnectReply("00:11:22:33:44:55", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size() - 2);
+        CHECK(r.seen.disconnects.size() == 2 && !r.seen.disconnects[1].ok &&
+              r.seen.disconnects[1].error == kNoError && r.seen.disconnects[1].address == "00:11:22:33:44:55" &&
+              r.seen.disconnects[1].service == kName);
+        CHECK(r.seen.said("ServiceDisconnect's reply from the Bluetooth server could not be read"));
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceDisconnect);
+        // A rejection is the answer, as before.
+        r.gap.reject(kTypeRejectedA, kReqServiceDisconnect);
+        CHECK(r.seen.disconnects.size() == 3 && !r.seen.disconnects[2].ok &&
+              r.seen.disconnects[2].error == kNoError && r.seen.disconnects[2].address == "00:11:22:33:44:55");
+        CHECK(r.seen.said("the Bluetooth server rejected ServiceDisconnect (type 0x202)"));
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        CHECK(!r.seen.said("00:11:22") && !r.seen.said("66:77:88") && !r.seen.said("001122"));
+    }
+    {   // disconnectPhone()'s: another phone's reply is not its answer; the service is not compared
+        Registered r;
+        r.gap.inform(kInfServiceRequest, "SPP");
+        CHECK(r.spp.disconnectPhone("", "", ""));
+        r.gap.took(kReqServiceDisconnect);
+        std::vector<uint8_t> p = disconnectReply("66:77:88:99:AA:BB", "SPP", 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(!r.seen.said("ServiceDisconnect reply:") && r.seen.said("a ServiceDisconnect reply for another client"));
+        CHECK(r.spp.heard().othersDisconnectReplies == 1);
+        bool waits = false;
+        CHECK(!r.spp.disconnectPhone("", "", "", &waits) && waits && r.gap.sent.empty());
+        p = disconnectReply("AA:BB:CC:DD:EE:FF", "Another_Service", 10, 3);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.said("ServiceDisconnect reply: 10 ") && r.seen.said(", reason 3"));
+        CHECK(r.seen.disconnects.empty());   // never told: only disconnectService()'s is
+        CHECK(r.spp.disconnectPhone("", "", "", &waits) && !waits);
+        CHECK(!r.seen.said(kPhoneAddress) && !r.seen.said("AA:BB:CC") && !r.seen.said("66:77:88"));
+    }
+    {   // the two kinds wait for each other, and neither takes the other's answer
+        Registered r;
+        r.gap.inform(kInfServiceRequest, "SPP");
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceDisconnect);
+        size_t before = r.seen.lines.size();
+        bool waits = false;
+        CHECK(!r.spp.disconnectPhone("", "", "", &waits) && waits && r.gap.sent.empty());
+        CHECK(r.seen.lines.size() == before);   // the caller says what it does
+        std::vector<uint8_t> p = disconnectReply("00:11:22:33:44:55", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.size() == 1 && r.seen.disconnects[0].error == 0);
+        // And the other way round.
+        CHECK(r.spp.disconnectPhone("", "", "", &waits) && !waits);
+        r.gap.took(kReqServiceDisconnect);
+        CHECK(!r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName) && r.gap.sent.empty());
+        p = disconnectReply(kPhoneAddress, "SPP", 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.size() == 1);
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceDisconnect);
+        // The server goes: no answer comes from it, and none waits.
+        r.gap.detach();
+        r.gap.attach();
+        r.gap.took(kReqSppUuidRegister);
+        r.gap.reply(kRspSppUuidRegister, 0);
+        CHECK(r.spp.disconnectPhone("", "", ""));
+    }
+    {   // no answer: given up when the next is asked for after its time; a late answer for another phone is not
+        // taken for the next one's
+        Registered r;
+        r.spp.setDisconnectReplyTime(0.1);
+        r.gap.inform(kInfServiceRequest, "SPP");
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceDisconnect);
+        bool waits = false;
+        CHECK(!r.spp.disconnectPhone("", "", "", &waits) && waits);
+        usleep(150000);
+        CHECK(r.spp.disconnectPhone("", "", "", &waits) && !waits);
+        r.gap.took(kReqServiceDisconnect);
+        CHECK(!r.seen.said("given up"));   // the dial's own wait says so of disconnectService()'s
+        std::vector<uint8_t> p = disconnectReply("00:11:22:33:44:55", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.empty() && !r.seen.said("ServiceDisconnect reply:") &&
+              r.spp.heard().othersDisconnectReplies == 1);
+        CHECK(!r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName) && r.gap.sent.empty());
+        // disconnectPhone()'s with no answer: given up the same way, and said, since nothing else says it.
+        usleep(150000);
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceDisconnect);
+        CHECK(r.seen.said("ServiceDisconnect had no reply in 0.1 s, and is given up"));
+        p = disconnectReply(kPhoneAddress, "SPP", 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.empty() && r.spp.heard().othersDisconnectReplies == 2);
+        // The answer of the one out is taken.
+        p = disconnectReply("00:11:22:33:44:55", kName, 0);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceDisconnect, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.disconnects.size() == 1);
+        // Before its time, nothing is given up.
+        r.spp.setDisconnectReplyTime(30);
+        CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceDisconnect);
+        CHECK(!r.spp.disconnectPhone("", "", "", &waits) && waits && r.gap.sent.empty());
     }
 
     // 16. The real client is the head unit's: anywhere else it does not open, and nothing can be sent through it.

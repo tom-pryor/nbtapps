@@ -70,6 +70,16 @@ const uint32_t kInfDeviceListChanged = 0x80000001;   // the device lists (Device
 const uint32_t kInfServiceDisconnected = 0x80000007; // device, instance, address, service, u32 reason (1 remote, 0 local)
 const uint32_t kInfServiceListChanged = 0x80000008;  // address, services[], states u32[], profiles[], versions u32[],
                                                      // u32 reason
+// Informs about a pairing of the car's with a phone. What follows the address is not settled, and the address may
+// not be first either: read leniently (pairingInformAddress()). A pairing that failed or is under way stops the
+// phone's dials (dial_rules.hpp); one that worked does not, so PairingComplete is not asked for.
+const uint32_t kInfPairingComplete = 0x80000004;                 // address, ...
+const uint32_t kInfPairingError = 0x80000005;                    // address, u32 ...
+const uint32_t kInfSimplePairingConfirmationRequired = 0x8000000c;   // address, name, the number shown ...
+// The pairing informs that are asked for and told (sppPairing()): the ones that stop a phone's dials.
+inline bool isPairingInform(uint32_t id) {
+    return id == kInfPairingError || id == kInfSimplePairingConfirmationRequired;
+}
 // A list in a payload is a u32 count, then the elements.
 
 // The ids of the server's replies: request N's is 0x80000000 + N + 0x16 for N up to 0x11, + 0x15 for 0x13 to 0x3c
@@ -413,6 +423,28 @@ inline DeviceList parseDeviceList(uint32_t id, const uint8_t* p, uint32_t n) {
     return l;
 }
 
+// Whether `s` is a Bluetooth address: 00:11:22:33:44:55 in either case, or its twelve digits alone.
+inline bool isBtAddress(const std::string& s) {
+    if (s.size() == 12) {
+        for (size_t i = 0; i < s.size(); ++i)
+            if (!isHex(s[i])) return false;
+        return true;
+    }
+    if (s.size() != 17) return false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (i % 3 == 2 ? s[i] != ':' : !isHex(s[i])) return false;
+    }
+    return true;
+}
+
+// The phone a pairing inform is about, if its payload begins with a string that is a Bluetooth address; empty if
+// it does not.
+inline std::string pairingInformAddress(const uint8_t* p, uint32_t n) {
+    Reader r(p, n);
+    std::string s = r.str();
+    return r.ok() && isBtAddress(s) ? s : std::string();
+}
+
 // Two addresses are the same phone's whatever their form: the hex digits are compared, upper-cased.
 inline std::string addressKey(const std::string& address) {
     std::string k;
@@ -591,6 +623,7 @@ private:
 // The server's requests for a link do not say which serial node the link gets, and name the service the phone
 // asked for. Which link is whose is for the caller to work out.
 const double kOtherRemovalReplyS = 5.0;   // see SppService::setOtherReplyTime()
+const double kDisconnectReplyS = 3.0;     // see SppService::setDisconnectReplyTime()
 
 class SppService : private GapClient::Events {
 public:
@@ -634,6 +667,16 @@ public:
         // A whole device list has come, the answer to DeviceListGet or the inform DeviceListChanged: every phone the
         // car knows, with its address, connection and security. For the caller to keep, and never to log.
         virtual void sppDevices(const std::vector<BtDevice>& /*devices*/) {}
+        // The answer to connectService(), with what it named; for a rejection, or a send that failed, error is
+        // kNoError and the address and service are the ones asked for.
+        virtual void sppConnectReply(const ServiceConnectReply& /*reply*/) {}
+        // The answer to disconnectService(), the same way.
+        virtual void sppDisconnectReply(const ServiceDisconnectReply& /*reply*/) {}
+        // The inform ServiceDisconnected: a link of the car's ended.
+        virtual void sppLinkEnded(const ServiceDisconnected& /*ended*/) {}
+        // A pairing inform that stops dials, PairingError or SimplePairingConfirmationRequired
+        // (setPairingInforms()), and the address it begins with, or empty. PairingComplete is never told.
+        virtual void sppPairing(uint32_t /*informId*/, const std::string& /*address*/) {}
     };
 
     // Both outlive this object.
@@ -674,12 +717,43 @@ public:
     // that the server told (kInfServiceRequest), whatever service it was for. `device`, `instance` and `service`
     // may be given; empty is kDisconnectDevice, kDisconnectInstance and the service named in that request. The
     // phone's address goes into the request and nowhere else. False, with nothing sent, if the server is not
-    // attached or no phone has asked for a link since this object was made. Its reply (kRspServiceDisconnect) is
-    // logged with its error code and reason, and a reply or a rejection that comes after it and that this object
-    // does not know with its id, its type and its first 32-bit value. From any thread.
-    bool disconnectPhone(const std::string& device, const std::string& instance, const std::string& service);
+    // attached or no phone has asked for a link since this object was made, or while a ServiceDisconnect waits
+    // for its answer (disconnectService()'s or one of its own): then `*waits`, if given, is true, and the caller
+    // asks again later. Its reply (kRspServiceDisconnect) is logged with its error code and reason, and a reply or a
+    // rejection that comes after it and that this object does not know with its id, its type and its first 32-bit
+    // value. A reply read whole that names another phone is another client's, as for disconnectService(); the
+    // service is not compared, since which one the car wants here is not settled. From any thread.
+    bool disconnectPhone(const std::string& device, const std::string& instance, const std::string& service,
+                         bool* waits = 0);
     // Whether a phone has asked for a link since this object was made: disconnectPhone() has someone to name.
     bool knowsPhone();
+    // ServiceConnect: the car opens a link to `service` on the phone at `address` (the colon form), on its instance
+    // `instance` of `device`. One at a time: false, with nothing sent, while one waits for its answer, or if the
+    // server is not attached or did not take the request. The answer goes to sppConnectReply(). A reply that is
+    // read whole and names another service or another phone is another client's: it is not the answer, which is
+    // still waited for. Nothing is logged but the first few of those: the caller says what it does. From any
+    // thread.
+    bool connectService(const std::string& device, const std::string& instance, const std::string& address,
+                        const std::string& service);
+    // ServiceDisconnect with all four values given: the answer goes to sppDisconnectReply() as well as to the log.
+    // False, with nothing sent, while a ServiceDisconnect waits for its answer (this one's or disconnectPhone()'s),
+    // or as connectService(). A reply that is read whole and names another phone or another service (the car's
+    // reply repeats the service it was sent) is another client's: it is not the answer, which is still waited for,
+    // and it is neither told nor logged as ours; the first few of them are logged as such, and the rest counted.
+    // `quiet`: neither the request nor its reply is logged here, for a caller that only counts what it repeats.
+    //
+    // One ServiceDisconnect at a time, of either kind: the replies say nothing else of which request they answer.
+    // One that has had no answer for the time setDisconnectReplyTime() sets is given up when the next is asked for,
+    // so that a car that never answers cannot hold up every later one; a late answer to it is then another
+    // client's, unless it names the same phone as the one out by then, from which it cannot be told apart and is
+    // taken as that one's answer.
+    bool disconnectService(const std::string& device, const std::string& instance, const std::string& address,
+                           const std::string& service, bool quiet = false);
+    // How long a ServiceDisconnect waits for its answer before the next may go out: kDisconnectReplyS unless the
+    // caller sets it. The listener sets the time its dial waits for one (DialConfig::disconnectWaitMs).
+    void setDisconnectReplyTime(double seconds) { disconnectReplyS_ = seconds; }
+    // Before start(): the pairing informs that stop dials are asked for too (sppPairing()).
+    void setPairingInforms(bool on) { pairingInforms_ = on; }
     bool attached() const { return gap_->attached(); }
     // The server's name and the version of its interface that is asked for, for the log.
     std::string server() const { return gap_->describe(); }
@@ -701,7 +775,11 @@ public:
         unsigned deviceListChanges;        // DeviceListChanged informs
         unsigned linksEnded;               // ServiceDisconnected informs
         unsigned serviceListChanges;       // ServiceListChanged informs
-        Heard() : devicesKnown(false), deviceListChanges(0), linksEnded(0), serviceListChanges(0) {}
+        std::vector<std::string> version;  // the stack's version strings, from VersionGet, as the log shows them
+        unsigned othersConnectReplies;     // ServiceConnect replies for another client that came while ours waited
+        unsigned othersDisconnectReplies;  // the same for ServiceDisconnect
+        Heard() : devicesKnown(false), deviceListChanges(0), linksEnded(0), serviceListChanges(0),
+                  othersConnectReplies(0), othersDisconnectReplies(0) {}
     };
     Heard heard();
 
@@ -762,6 +840,7 @@ private:
     bool sendDeregister(const char* why);
     void sendNextOther();
     void noteUnknown(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len);
+    bool takeDisconnect(const std::string& address, const std::string& service, bool told, bool quiet = false);
 
     GapClient* gap_;
     Events* events_;
@@ -782,6 +861,14 @@ private:
     uint32_t removeError_;                    // see removeError()
     uint32_t clearError_;                     // the answer to kClearSent's removal
     bool disconnectOut_;                      // a ServiceDisconnect of ours waits for its reply
+    bool disconnectTold_;                     // and its answer goes to sppDisconnectReply(): disconnectService()'s
+    bool disconnectQuiet_;                    // and its reply is not logged (disconnectService()'s `quiet`)
+    std::string disconnectAddress_, disconnectService_;   // what it named; in memory only
+    double disconnectSentAt_;
+    double disconnectReplyS_;                 // see setDisconnectReplyTime()
+    bool connectOut_;                         // a ServiceConnect of ours waits for its reply
+    std::string connectAddress_, connectService_;
+    bool pairingInforms_;
     std::string refusedAddress_;              // the phone of the last refusal; in memory only
     bool refusalAsked_;                       // askAboutRefused() waits for the device list
     bool versionAsked_;                       // a VersionGet of ours waits for its reply

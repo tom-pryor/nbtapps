@@ -10,7 +10,24 @@ using namespace nbt::btspp;
 
 namespace nbt {
 
-DialRules::DialRules(const DialConfig& config) : config_(config), state_(kIdle), stale_(false), roundWhy_(kForced) {}
+DialRules::DialRules(const DialConfig& config)
+    : config_(config), nextPollAt_(0), fastUntil_(0), signalAt_(0), pairingWasOpen_(false), nextPairingAt_(0),
+      state_(kIdle), stale_(false), okAt_(0), roundWhy_(kForced) {}
+
+void DialRules::fastPolls(int64_t now) {
+    fastUntil_ = now + config_.pollFirstForMs;
+    nextPollAt_ = now + config_.pollFirstMs;
+}
+
+void DialRules::phoneAsked(const std::string& address, int64_t now) {
+    if (addressKey(address).empty()) return;
+    signal_ = address;
+    signalAt_ = now;
+}
+
+void DialRules::linkCame() { signal_.clear(); }
+
+void DialRules::linkEnded(int64_t now) { fastPolls(now); }
 
 DialRules::PhoneState& DialRules::phone(const std::string& address) { return phones_[addressKey(address)]; }
 
@@ -32,6 +49,10 @@ void DialRules::devices(const std::vector<BtDevice>& devices, int64_t now, std::
             s.backOffUntil = 0;
             s.waitChange = false;
         }
+        // A phone that has just connected to the car: polls come at the first rate. One that was there already when
+        // the first list came is polled at the first chance anyway.
+        if (c.connectionChanged && !c.added && c.connection >= kConnConnected && c.connectionBefore < kConnConnected)
+            fastPolls(now);
         if (c.removed) continue;
         if (c.security == kSecurityKeyMissing && !s.trouble) {
             s.trouble = true;
@@ -86,6 +107,12 @@ unsigned DialRules::force() {
     return (unsigned)round_.size();
 }
 
+void DialRules::afresh() {
+    round_.clear();
+    roundWhy_ = kAfresh;
+    for (size_t i = 0; i < presence_.phones().size(); ++i) round_.push_back(presence_.phones()[i].address);
+}
+
 void DialRules::start(const Presence::Phone& p, Why why, int64_t now, Dial* out) {
     std::string colon;
     current_ = Dial();
@@ -94,6 +121,8 @@ void DialRules::start(const Presence::Phone& p, Why why, int64_t now, Dial* out)
     current_.why = why;
     current_.at = now;
     state_ = kDialling;
+    // A dial of the phone, for whatever reason, is the retry that may have been due.
+    phone(p.address).retryAt = 0;
     *out = current_;
 }
 
@@ -112,8 +141,23 @@ bool DialRules::takeFromRound(int64_t now, const Facts& facts, Dial* out) {
     return false;
 }
 
+// A phone that asked for a link, and has none of the agent's after its time: once.
+bool DialRules::signalDue(int64_t now, const Facts& facts, Dial* out) {
+    if (signal_.empty() || now - signalAt_ < (int64_t)config_.signalWaitMs) return false;
+    std::string asked = signal_;
+    signal_.clear();
+    const Presence::Phone* p = presence_.find(asked);
+    if (p == 0 || !eligible(*p, facts)) return false;
+    start(*p, kSignal, now, out);
+    return true;
+}
+
 bool DialRules::next(int64_t now, const Facts& facts, Dial* out) {
+    // A link of the agent's has come, or may be coming: what is left of a round is not wanted any more.
+    if (facts.linkOfOurs || facts.requestPending) round_.clear();
     if (state_ != kIdle || !facts.registered || facts.linkOfOurs || !presence_.known()) return false;
+    // While a phone's request is pending, only the dial that request brings: the rest wait for what comes of it.
+    if (facts.requestPending) return signalDue(now, facts, out);
     if (stale_) {
         // A link that was left behind has just been ended: its phone at once, once.
         stale_ = false;
@@ -123,7 +167,41 @@ bool DialRules::next(int64_t now, const Facts& facts, Dial* out) {
             return true;
         }
     }
-    return takeFromRound(now, facts, out);
+    if (takeFromRound(now, facts, out)) return true;
+
+    if (signalDue(now, facts, out)) return true;
+    // The pairing window: every phone there, in turn.
+    if (facts.pairingOpen && (!pairingWasOpen_ || now >= nextPairingAt_)) {
+        nextPairingAt_ = now + config_.pairingRoundMs;
+        round_.clear();
+        roundWhy_ = kPairing;
+        for (size_t i = 0; i < presence_.phones().size(); ++i) round_.push_back(presence_.phones()[i].address);
+        pairingWasOpen_ = true;
+        if (takeFromRound(now, facts, out)) return true;
+    }
+    if (!facts.pairingOpen) pairingWasOpen_ = false;
+    // A retry that is due.
+    for (size_t i = 0; i < presence_.phones().size(); ++i) {
+        const Presence::Phone& p = presence_.phones()[i];
+        std::map<std::string, PhoneState>::iterator it = phones_.find(addressKey(p.address));
+        if (it == phones_.end() || it->second.retryAt == 0 || now < it->second.retryAt) continue;
+        it->second.retryAt = 0;
+        if (!eligible(p, facts) || it->second.waitChange || now < it->second.backOffUntil) continue;
+        start(p, kRetry, now, out);
+        return true;
+    }
+    // A poll: each phone of the agent's that is eligible and not held back.
+    if (now >= nextPollAt_) {
+        nextPollAt_ = now + (now < fastUntil_ ? config_.pollFirstMs : config_.pollLaterMs);
+        round_.clear();
+        roundWhy_ = kPoll;
+        for (size_t i = 0; i < presence_.phones().size(); ++i) {
+            const Presence::Phone& p = presence_.phones()[i];
+            if (eligible(p, facts) && !heldBack(p.address, now)) round_.push_back(p.address);
+        }
+        if (takeFromRound(now, facts, out)) return true;
+    }
+    return false;
 }
 
 DialRules::Reply DialRules::reply(const std::string& address, const std::string& service, const std::string& ourService,
@@ -131,6 +209,7 @@ DialRules::Reply DialRules::reply(const std::string& address, const std::string&
     if (state_ != kDialling || service != ourService || addressKey(address) != addressKey(current_.address)) return kNotThis;
     if (error == 0) {
         state_ = kUp;
+        okAt_ = now;
         return kOpenNode;
     }
     state_ = kIdle;
@@ -158,7 +237,20 @@ void DialRules::notThere(int64_t now) {
 
 void DialRules::stale() { state_ = kEnding; stale_ = true; }
 
+void DialRules::notEnded(int64_t now) {
+    // Dialled again at once, it would find the same link, and the car would be asked in vain once more.
+    stale_ = false;
+    backOff(current_.address, now);
+    state_ = kIdle;
+}
+
+bool DialRules::overtakes(int64_t now) const {
+    return state_ == kDialling || (okAt_ != 0 && now >= okAt_ && now - okAt_ < (int64_t)config_.overtakeMs);
+}
+
 void DialRules::linkUp(int64_t) {
+    round_.clear();
+    signal_.clear();
     PhoneState& s = phone(current_.address);
     s.backOffMs = 0;
     s.backOffUntil = 0;

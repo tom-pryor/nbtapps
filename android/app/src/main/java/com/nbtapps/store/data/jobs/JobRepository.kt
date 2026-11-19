@@ -248,6 +248,10 @@ fun interface JobKeeper {
  *    `job.status`, which is how it learns that the new version runs. An agent from before there was the event
  *    says nothing, so a job that reaches `restarting` is taken for the same.
  *  - `forgotten`: the phone's pairing was ended on the car. Its key is dropped, and the next connect pairs anew.
+ *  - `other-link`: of a Bluetooth serial link the phone opened and one the car dialled, the agent kept the other.
+ *    The app uses one link at a time and closes any other before its `hello`, so where the one that stays is the
+ *    app's, the app has moved on to it already and the end of this one shows nothing ([pump]). Otherwise the app
+ *    holds no link the agent kept, and this one is shown as failed, as below.
  *  - anything else: the link is shown as failed, with the reason in the app's words ([AgentText.closing]).
  *
  * What the head unit holds is read when the link is made, and again whenever a job has ended, since a job is what
@@ -1343,6 +1347,7 @@ class JobRepository(
         val reason = current.ended.await()
         val told = current.closing
         connectLock.withLock {
+            // The app has moved on to another link: the end of this one, `other-link` too, is nothing to show.
             if (session !== current) return@withLock
             session = null
             if (resetting === current) {

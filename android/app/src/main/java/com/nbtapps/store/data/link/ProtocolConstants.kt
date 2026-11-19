@@ -96,6 +96,14 @@ object ProtocolConstants {
     const val CAPABILITY_SERIAL_RESET = "serial-reset"
 
     /**
+     * A capability: the agent has the car dial a phone of its own. When the phone is connected to the car and paired
+     * with it, the car opens a serial link to the agent's service UUID on the phone, which this app takes if it
+     * listens there. The link is the agent's as one the phone opened is: it opens with the phone's magic bytes, and
+     * `hello` follows. Only an agent whose Bluetooth serial listener dials lists it.
+     */
+    const val CAPABILITY_SERIAL_DIAL = "serial-dial"
+
+    /**
      * A capability: the agent has `settings.get` and `settings.set`, which give and change the settings an installed
      * package's manifest names in `settings`. One that does not list it answers them with `unsupported`.
      */

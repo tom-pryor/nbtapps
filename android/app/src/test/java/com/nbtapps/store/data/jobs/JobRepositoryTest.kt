@@ -784,7 +784,8 @@ class JobRepositoryTest {
 
     @Test
     fun `an agent that says why it ends the link has the link ended by the phone, and the reason is shown`() = test {
-        for (reason in listOf(LinkClosing.STOPPING, LinkClosing.SILENT, LinkClosing.REPLACED, "moving-house")) {
+        val reasons = listOf(LinkClosing.STOPPING, LinkClosing.SILENT, LinkClosing.REPLACED, LinkClosing.RESET, LinkClosing.OTHER_LINK, "moving-house")
+        for (reason in reasons) {
             assertTrue(jobs.connect("car").isSuccess)
             val agent = connector.agent
             val asked = agent.requests.size
@@ -800,7 +801,9 @@ class JobRepositoryTest {
         }
         // None of these is followed by a connect of the app's own.
         delay(300)
-        assertEquals(4, connector.agents.size)
+        assertEquals(reasons.size, connector.agents.size)
+        // Each has words of its own.
+        assertEquals(reasons.size, reasons.map(AgentText::closing).toSet().size)
         assertTrue(jobs.connection.value is ConnectionState.Failed)
     }
 

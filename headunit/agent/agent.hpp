@@ -97,6 +97,13 @@
 //   forgotten    the phone's pairing was ended on the head unit: its key is worth nothing now
 //   replaced     a newer link from the same phone has taken this one's place
 //   silent       the phone did not answer the agent's pings, or a blob.fetch
+//   reset        serial.reset ended the link: a link the car dialled, which the car then ends if the phone does not
+//   other-link   a Bluetooth serial link of the other kind, the one the phone opened or the one the car dialled, did
+//                `hello` first, and the agent keeps that one
+//
+// Bluetooth serial has two kinds of link: the one a phone opens, and the one the car dials (serial_link.hpp). Should
+// one of each come up, the first to finish `hello` stays, and the other is ended once its own `hello` is answered,
+// with link.closing and the reason "other-link". Two links of the same kind are left to each other, as before.
 //
 // A link that ends for what the phone did wrong (a broken frame, a failed `auth`, no protocol version in common)
 // gets no event: where there is an answer, the error in it says why, and the phone that gets it closes its side.
@@ -152,7 +159,30 @@
 // "sent": a serial node is open, and the request goes to the car shortly after the answer, so that a caller on that
 // very link has its answer first. "armed": none is, and the next serial link whose node opens within forMs is ended
 // at the open, once. The three strings, 1 to 32 printable characters each, put other values into the request in
-// place of the agent's own, so that they can be tried without a new build.
+// place of the agent's own, so that they can be tried without a new build. A link the car dialled (serial_link.hpp)
+// is ended as the agent ends a link, with link.closing and the reason "reset", after the answer, which is "sent";
+// the car is asked to end it if the phone has not in a few seconds. The three strings play no part in that.
+//
+// serial.status, and the member `serial` of info.get: how Bluetooth serial stands, in counts and names, never a
+// phone's address or name. With no Bluetooth serial listener it is { "listener": false } in info.get, and
+// serial.status is `unsupported`. Otherwise:
+//
+//   { "listener": true, "registered": true, "checkedMsAgo": 12000, "stack": [ "...", ... ],
+//     "phonesPresent": 1, "phonesEligible": 1, "dial": "on", "dialState": "idle", "lastResult": "DEFAULT",
+//     "link": "none", "counts": { "dials", "answeredOk", "notListening", "notInReach", "busy", "otherAnswers",
+//     "noAnswer", "notTheApp", "leftBehind", "checks", "checksRestored", "refusals" },
+//     "problems": { "recorded", "counted" } }
+//
+// checkedMsAgo is absent before the service has first been registered. dial is on or off (nbtagent --dial);
+// dialState is idle, dialling, up or ending; lastResult is the last dial's answer by the Bluetooth stack's own name
+// (OK, BUSY, DEFAULT, PAGE_TIMEOUT, ...), or rejected, no answer, not the app, or none; link is the agent's serial
+// links that are up: none, phone-opened, dialled or both. problems: the lines written to the problem file in this
+// run, and the problems only counted (serial_link.hpp).
+//
+// serial.dial, on the local socket only: a round of dials now, to each phone connected to the car and paired with
+// it; for trials (nbtctl serial dial). { "phones": N }, or `unsupported` without a listener that dials, `busy`
+// while a link of the agent's is up or a dial is out, `not-found` with no such phone, `io-error` when the car's
+// Bluetooth service cannot be asked.
 //
 // The settings (settings.hpp). A package's settings are the options of a known type its installed manifest names,
 // in the manifest's order; their values are lines of its settings file, which the agent reads for every request and
@@ -194,6 +224,7 @@
 #include "phones.hpp"
 #include "planner.hpp"
 #include "platform.hpp"
+#include "serial_dial.hpp"
 #include "serial_reset.hpp"
 #include "sha256.hpp"
 
@@ -241,6 +272,8 @@ const char* const kClosingStopping = "stopping";
 const char* const kClosingForgotten = "forgotten";
 const char* const kClosingReplaced = "replaced";
 const char* const kClosingSilent = "silent";
+const char* const kClosingReset = "reset";
+const char* const kClosingOtherLink = "other-link";
 
 // One line of the agent's log: the time of day, "nbtagent: " and the line, with anything in it that could start a
 // line of its own, or steer a terminal, replaced. Nothing if `to` is 0.
@@ -274,6 +307,9 @@ public:
     void addListener(Listener* listener);
     // What serial.reset asks; 0, which is how it starts, for an agent without Bluetooth serial. Not owned.
     void setSerialReset(SerialReset* reset) { serialReset_ = reset; }
+    // What the car dialling a phone is told of (serial_dial.hpp): the pairing window. 0, which is how it starts, for
+    // an agent without it. Not owned.
+    void setSerialDial(SerialDial* dial) { serialDial_ = dial; }
     // A link on which a controller has connected: takes it over. The controller dialled, so it speaks first.
     void adopt(Link* link);
 
@@ -355,6 +391,7 @@ private:
         unsigned number;       // for the log
         bool greeted;          // `hello` is done
         bool serial;           // a Bluetooth serial link: the smaller frame, and the keep-alive
+        bool dialled;          // a serial link the car dialled, rather than the phone
         bool local;            // the local socket: no `auth`, and the one link the pairing window is opened on
         bool trusted;          // may use every method: a local link once `hello` is done, another once `auth` is
         bool challenged;       // the first call of `auth` is answered, and the second is due
@@ -374,7 +411,7 @@ private:
         uint16_t nextStream;   // the number the next files stream gets
 
         Session()
-            : peer(0), number(0), greeted(false), serial(false), local(false), trusted(false), challenged(false),
+            : peer(0), number(0), greeted(false), serial(false), dialled(false), local(false), trusted(false), challenged(false),
               openedMs(0), heardMs(0), pingedMs(0), pings(0), ending(false), endingMs(0), outgoing(0), nextStream(1) {}
     };
     // The pairing window.
@@ -485,6 +522,10 @@ private:
     CheckContext checkContext();
     // See the top of this file.
     void serialReset(Session* s, int64_t id, const json::Value& params);
+    // serial.status, serial.dial and the `serial` member of info.get: see the top of this file.
+    void serialStatus(Session* s, int64_t id);
+    void serialDialNow(Session* s, int64_t id);
+    void writeSerial(json::Writer& w);
     // The settings of an installed package: see the top of this file, and settings.hpp.
     void settingsGet(Session* s, int64_t id, const json::Value& params);
     void settingsSet(Session* s, int64_t id, const json::Value& params);
@@ -524,6 +565,7 @@ private:
     Pairing pairing_;
     std::vector<Listener*> listeners_;
     SerialReset* serialReset_;
+    SerialDial* serialDial_;
     std::vector<Session*> sessions_;
     unsigned nextSession_;
 

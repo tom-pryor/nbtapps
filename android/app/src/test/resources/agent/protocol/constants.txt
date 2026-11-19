@@ -79,6 +79,11 @@ capability.checks checks
 # the open of the next one. Only an agent that takes Bluetooth serial links lists it; one that does not list it
 # answers serial.reset with `unsupported`.
 capability.serialReset serial-reset
+# An agent that lists this one has the car dial a phone of its own: when the phone is connected to the car and
+# paired with it, the car opens a serial link to the agent's service UUID on the phone, which the phone's app takes
+# if it listens there. The link is the agent's as one the phone opened is: it opens with the phone's magic bytes,
+# and `hello` follows. Only an agent whose Bluetooth serial listener dials lists it.
+capability.serialDial serial-dial
 # An agent that lists this one has settings.get and settings.set, which give and change the settings an installed
 # package's manifest names in `settings` (spec/manifest.schema.json). One that does not list it answers them with
 # `unsupported`.

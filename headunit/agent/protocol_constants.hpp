@@ -46,6 +46,10 @@ const char* const kCapabilityChecks = "checks";
 // A capability: this agent has serial.reset, which has the car end the phone's Bluetooth serial link
 // (serial_reset.hpp). Only an agent with a Bluetooth serial listener lists it.
 const char* const kCapabilitySerialReset = "serial-reset";
+// A capability: the car dials a phone of this agent's that is connected to it and paired with it, on the agent's
+// UUID, and the agent takes that link as it takes one the phone opens. Only an agent whose Bluetooth serial listener
+// has the dial on (nbtagent --dial) lists it.
+const char* const kCapabilitySerialDial = "serial-dial";
 // A capability: this agent has settings.get and settings.set, for the settings a package's manifest names
 // (settings.hpp).
 const char* const kCapabilitySettings = "settings";

@@ -36,6 +36,8 @@
 //                                          --list, every folder each one would move and every path it would remove
 //   checks  fix ID                         runs that check, and its fix on what it found
 //   serial  reset                          has the car end the phone's Bluetooth serial link (serial.reset)
+//   serial  status                         how Bluetooth serial stands (serial.status)
+//   serial  dial                           has the car dial the phones connected to it now, for trials (serial.dial)
 //   settings ID                            the settings of an installed package, and how each stands in its file
 //   set     ID KEY VALUE                   one setting changed: VALUE as the option's type takes it
 //   unset   ID KEY                         one setting's line taken out of the file, so that the package's own
@@ -71,6 +73,10 @@
 // up, that the next one within 60 seconds is ended at its open, and that Connect is to be tapped in the phone app
 // now. `nbtctl call serial.reset '{"device":"...","instance":"...","service":"..."}'` gives other values for the
 // request.
+//
+// `serial status` prints a line for each member of serial.status's answer, "name value", with a member of an
+// object as "object.name", and an array's items with ", " between them: "registered true", "dial on",
+// "counts.dials 3". `serial dial` prints "dialling N phones", and the agent's log says what came of it.
 //
 // `pair` prints "code NNNNNN" as its first line, then one line when the window has closed: "paired", or
 // "not paired: " and the reason (wrong-code, expired, replaced). Its exit status is 0 only for "paired".
@@ -613,6 +619,8 @@ int usage() {
             "  checks  [--list]         what was put onto the head unit by hand\n"
             "  checks  fix ID           that check's fix, on the list it finds\n"
             "  serial  reset            have the car end the phone's Bluetooth serial link\n"
+            "  serial  status           how Bluetooth serial stands\n"
+            "  serial  dial             have the car dial the phones connected to it now\n"
             "  settings ID              the settings of an installed package\n"
             "  set     ID KEY VALUE     change one of them\n"
             "  unset   ID KEY           take one out of its file: the package's default holds\n"
@@ -626,6 +634,35 @@ int usage() {
 #endif
             );
     return 2;
+}
+
+// Each member of an object as a line "name value", a member of an object within it as "object.name value", and an
+// array's items with ", " between them.
+void printMembers(json::Value object, const std::string& prefix) {
+    for (size_t i = 0; i < object.size(); ++i) {
+        json::Value v = object.at(i);
+        std::string name = prefix + object.key(i);
+        if (v.isObject()) {
+            printMembers(v, name + ".");
+            continue;
+        }
+        std::string shown;
+        if (v.isArray()) {
+            for (size_t k = 0; k < v.size(); ++k) {
+                json::Value item = v.at(k);
+                shown += (k ? ", " : "") + (item.isString() ? item.string() : std::string("?"));
+            }
+        } else if (v.isString()) {
+            shown = v.string();
+        } else if (v.isInteger()) {
+            char n[32];
+            snprintf(n, sizeof n, "%lld", (long long)v.integer());
+            shown = n;
+        } else if (v.isBool()) {
+            shown = v.boolean() ? "true" : "false";
+        }
+        printf("%s %s\n", name.c_str(), shown.c_str());
+    }
 }
 
 int refused(const char* what, const Reply& reply) {
@@ -1130,6 +1167,21 @@ int main(int argc, char** argv) {
         return text(r, "state") == "ok" ? 0 : 1;
     }
 
+    if (command == "serial" && args.size() == 1 && args[0] == "status") {
+        if (!c.call("serial.status", "{}", &reply)) return 3;
+        if (!reply.ok) return refused("serial.status", reply);
+        doc.parse(reply.text, 0);
+        printMembers(doc.root(), "");
+        return 0;
+    }
+    if (command == "serial" && args.size() == 1 && args[0] == "dial") {
+        if (!c.call("serial.dial", "{}", &reply)) return 3;
+        if (!reply.ok) return refused("serial.dial", reply);
+        doc.parse(reply.text, 0);
+        long long phones = integer(doc.root(), "phones");
+        printf("dialling %lld phone%s\nThe agent's log says what came of it.\n", phones, phones == 1 ? "" : "s");
+        return 0;
+    }
     if (command == "serial") {
         if (args.size() != 1 || args[0] != "reset") return usage();
         if (!c.call("serial.reset", "{}", &reply)) return 3;

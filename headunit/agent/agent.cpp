@@ -110,7 +110,8 @@ void SystemRandom::bytes(uint8_t* out, size_t len) {
 Agent::Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std::string& agentVersion, Clock* clock,
              RandomSource* random)
     : platform_(platform), keys_(keys), agentVersion_(agentVersion), clock_(clock), random_(random),
-      engine_(platform, keys, agentVersion), planner_(&engine_), job_(&engine_, this), serialReset_(0), nextSession_(1), building_(0),
+      engine_(platform, keys, agentVersion), planner_(&engine_), job_(&engine_, this), serialReset_(0), serialDial_(0),
+      nextSession_(1), building_(0),
       havePlan_(false), jobOwner_(0), jobAccounted_(true), inStep_(false), restartDeadlineMs_(0), onTrial_(false),
       handOverDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), log_(stderr) {}
 
@@ -413,10 +414,11 @@ void Agent::adopt(Link* link) {
     s->peer = new Peer(link, false, this);
     s->peer->user = s;
     s->serial = strcmp(s->peer->linkKind(), "serial") == 0;
+    s->dialled = s->serial && s->peer->linkDialledByCar();
     s->local = strcmp(s->peer->linkKind(), "local") == 0;
     s->openedMs = s->heardMs = s->pingedMs = clock_->nowMs();
     sessions_.push_back(s);
-    note(linkName(s->number) + " opened (" + s->peer->linkKind() + ")");
+    note(linkName(s->number) + " opened (" + s->peer->linkKind() + (s->dialled ? ", dialled by the car" : "") + ")");
 }
 
 // ---- the loop -----------------------------------------------------------------------------------------------------
@@ -993,6 +995,16 @@ void Agent::serialReset(Session* s, int64_t id, const json::Value& params) {
         refuse(s, id, "io-error", why);
         return;
     }
+    if (outcome == SerialReset::kResetDialled) {
+        note(linkName(s->number) + ": serial.reset: the link the car dialled is ended");
+        answer(s, id, "{\"state\":\"sent\"}");
+        for (size_t i = 0; i < sessions_.size(); ++i) {
+            Session* dialled = sessions_[i];
+            if (dialled->peer->open() && dialled->peer->linkDialledByCar())
+                endLink(dialled, kClosingReset, "serial.reset ended the link the car dialled");
+        }
+        return;
+    }
     std::string given;
     for (int i = 0; i < 3; ++i) {
         if (!values[i].empty()) given += std::string(given.empty() ? " (" : ", ") + kNames[i] + " '" + values[i] + "'";
@@ -1096,6 +1108,8 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "checks.run") checksRun(s, id, params);
     else if (method == "checks.fix") checksFix(s, id, params);
     else if (method == "serial.reset") serialReset(s, id, params);
+    else if (method == "serial.status") serialStatus(s, id);
+    else if (method == "serial.dial") serialDialNow(s, id);
     else if (method == "settings.get") settingsGet(s, id, params);
     else if (method == "settings.set") settingsSet(s, id, params);
     else refuse(s, id, "unsupported", "this agent has no method " + sanitizeUtf8(method.substr(0, 64), 0));
@@ -1163,6 +1177,7 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart);
     w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks).string(kCapabilitySettings);
     if (serialReset_ != 0) w.string(kCapabilitySerialReset);
+    if (serialDial_ != 0 && serialDial_->dialOn()) w.string(kCapabilitySerialDial);
     w.endArray().endObject();
     // What `auth` signs: the two payloads as they travel. The reply's is what respond() sends for this result.
     const std::string& asked = peer->incoming();
@@ -1176,6 +1191,20 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
         // Who may open the local socket is the head unit's own business: nothing more is asked.
         s->trusted = true;
         replaceOlderLinks(s);
+    }
+    // A serial link of the other kind did `hello` first: that one stays.
+    if (s->serial) {
+        for (size_t i = 0; i < sessions_.size(); ++i) {
+            Session* other = sessions_[i];
+            if (other == s || !other->serial || other->dialled == s->dialled || !other->greeted || other->ending ||
+                !other->peer->open())
+                continue;
+            note(linkName(s->number) + ": " + linkName(other->number) + ", " +
+                 (other->dialled ? "which the car dialled" : "which the phone opened") + ", did hello first: it stays");
+            endLink(s, kClosingOtherLink, std::string("a link ") + (other->dialled ? "the car dialled" : "the phone opened") +
+                                              " did hello first");
+            break;
+        }
     }
 }
 
@@ -1297,6 +1326,7 @@ void Agent::closePairing(const char* reason) {
     pairing_.opener = 0;
     pairing_.code.clear();
     pairing_.wrong = 0;
+    if (serialDial_ != 0) serialDial_->pairingWindow(false);
     note(std::string("the pairing window closed") + (reason != 0 ? std::string(": ") + reason : std::string()));
     if (reason != 0 && opener != 0 && opener->peer->open()) {
         json::Writer w;
@@ -1344,6 +1374,7 @@ void Agent::pairingOpen(Session* s, int64_t id) {
     pairing_.code = code;
     pairing_.wrong = 0;
     pairing_.untilMs = now + kPairingWindowSeconds * 1000;
+    if (serialDial_ != 0) serialDial_->pairingWindow(true);
     note(linkName(s->number) + ": the pairing window is open for " + number((uint64_t)kPairingWindowSeconds) + " s");
     json::Writer w;
     w.beginObject().key("code").string(pairing_.code).key("expiresIn").integer(kPairingWindowSeconds).endObject();
@@ -1510,7 +1541,70 @@ void Agent::infoGet(Session* s, int64_t id) {
         if (free > (uint64_t)json::kMaxInteger) free = (uint64_t)json::kMaxInteger;
         w.key(places[i].name).integer((int64_t)free);
     }
-    w.endObject().key("restartNeeded").string(restartNeeded()).endObject();
+    w.endObject().key("restartNeeded").string(restartNeeded()).key("serial");
+    writeSerial(w);
+    w.endObject();
+    answer(s, id, w.text());
+}
+
+// ---- serial.status, serial.dial -----------------------------------------------------------------------------------
+
+void Agent::writeSerial(json::Writer& w) {
+    w.beginObject();
+    if (serialDial_ == 0) {
+        w.key("listener").boolean(false).endObject();
+        return;
+    }
+    SerialStatus st = serialDial_->serialStatus();
+    w.key("listener").boolean(true).key("registered").boolean(st.registered);
+    if (st.checkedMsAgo >= 0) w.key("checkedMsAgo").integer(st.checkedMsAgo);
+    w.key("stack").beginArray();
+    for (size_t i = 0; i < st.stack.size(); ++i) w.string(sanitizeUtf8(st.stack[i].substr(0, 64), 0));
+    w.endArray();
+    w.key("phonesPresent").integer(st.phonesPresent).key("phonesEligible").integer(st.phonesEligible);
+    w.key("dial").string(st.dialOn ? "on" : "off").key("dialState").string(st.dialState);
+    w.key("lastResult").string(st.lastResult).key("link").string(st.link);
+    w.key("counts").beginObject();
+    w.key("dials").integer(st.dials).key("answeredOk").integer(st.answeredOk).key("notListening").integer(st.notListening);
+    w.key("notInReach").integer(st.notInReach).key("busy").integer(st.busy).key("otherAnswers").integer(st.otherAnswers);
+    w.key("noAnswer").integer(st.noAnswer).key("notTheApp").integer(st.notTheApp).key("leftBehind").integer(st.leftBehind);
+    w.key("checks").integer(st.checks).key("checksRestored").integer(st.checksRestored).key("refusals").integer(st.refusals);
+    w.endObject();
+    w.key("problems").beginObject().key("recorded").integer(st.problemsRecorded);
+    w.key("counted").integer(st.problemsCounted).endObject();
+    w.endObject();
+}
+
+void Agent::serialStatus(Session* s, int64_t id) {
+    if (serialDial_ == 0) {
+        refuse(s, id, "unsupported", "this agent has no Bluetooth serial listener");
+        return;
+    }
+    json::Writer w;
+    writeSerial(w);
+    answer(s, id, w.text());
+}
+
+void Agent::serialDialNow(Session* s, int64_t id) {
+    if (!s->local) {
+        refuse(s, id, "forbidden", "a dial is asked for on the head unit itself");
+        return;
+    }
+    if (serialDial_ == 0 || !serialDial_->dialOn()) {
+        refuse(s, id, "unsupported", serialDial_ == 0 ? "this agent has no Bluetooth serial listener"
+                                                       : "the car does not dial phones in this run (--dial off)");
+        return;
+    }
+    std::string why;
+    const char* code = "internal";
+    unsigned phones = serialDial_->dialNow(&why, &code);
+    if (phones == 0) {
+        refuse(s, id, code, why);
+        return;
+    }
+    note(linkName(s->number) + ": serial.dial: a dial of " + countOf(phones, "phone") + " is asked for");
+    json::Writer w;
+    w.beginObject().key("phones").integer(phones).endObject();
     answer(s, id, w.text());
 }
 

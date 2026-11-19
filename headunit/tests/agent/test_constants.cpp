@@ -70,6 +70,7 @@ int main(int argc, char** argv) {
     code["capability.files"] = kCapabilityFiles;
     code["capability.checks"] = kCapabilityChecks;
     code["capability.serialReset"] = kCapabilitySerialReset;
+    code["capability.serialDial"] = kCapabilitySerialDial;
     code["capability.settings"] = kCapabilitySettings;
     code["settings.maxValueBytes"] = num((long long)kSettingsMaxValueBytes);
 

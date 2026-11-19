@@ -61,6 +61,7 @@ public:
     const char* linkKind() const { return link_->kind(); }
     // Link::phoneAddress().
     std::string linkPhoneAddress() const { return link_->phoneAddress(); }
+    bool linkDialledByCar() const { return link_->dialledByCar(); }
     bool open() const { return open_; }
     // Why the link ended; empty while it is open.
     const std::string& closeReason() const { return reason_; }

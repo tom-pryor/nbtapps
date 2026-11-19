@@ -39,6 +39,8 @@ public:
     // The Bluetooth address of the phone at the other end, where the link knows it: a serial link only
     // (serial_link.hpp). Empty otherwise. It goes into the record of paired phones and nowhere else.
     virtual std::string phoneAddress() const { return std::string(); }
+    // Whether the car dialled this link, on its own node (serial_link.hpp), rather than the phone. False by default.
+    virtual bool dialledByCar() const { return false; }
 };
 
 // Where controllers connect to the agent.

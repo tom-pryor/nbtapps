@@ -6,6 +6,8 @@
 // What the agent's method serial.reset asks of the Bluetooth serial listener (serial_link.hpp): that the car end
 // the phone's serial link. Closing a link's node does not end the link; the car's Bluetooth service has a request
 // that does, ServiceDisconnect (spp_service.hpp), and this is how the agent's thread asks the listener to send it.
+// A link the car dialled is ended the way the agent ends such a link: the agent tells the phone with link.closing
+// and closes its end, and the listener has the car end the link if the phone has not.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdint.h>
@@ -19,7 +21,9 @@ public:
     enum Outcome {
         kResetSent,     // a serial node is open: the request goes to the car shortly
         kResetArmed,    // none is: the next serial link is ended at the open of its node, within *forMs
-        kResetFailed    // the car's Bluetooth service cannot be asked; *why says why
+        kResetFailed,   // the car's Bluetooth service cannot be asked; *why says why
+        kResetDialled   // a link the car dialled is up: the agent ends it as it ends a link, with link.closing, and the
+                        // car is asked to end it if the phone has not within the time (dial_config.hpp)
     };
     virtual ~SerialReset() {}
     // From the agent's thread. It answers at once and does nothing itself: the listener's thread sends the request,

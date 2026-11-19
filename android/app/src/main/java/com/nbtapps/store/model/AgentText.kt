@@ -143,6 +143,8 @@ object AgentText {
         LinkClosing.FORGOTTEN -> "The head unit no longer knows this phone. Pair it again."
         LinkClosing.REPLACED -> "The head unit took a newer link from this phone"
         LinkClosing.SILENT -> "The head unit stopped hearing this phone. Connect again."
+        LinkClosing.RESET -> "The Bluetooth link was reset on the head unit"
+        LinkClosing.OTHER_LINK -> "The head unit kept another Bluetooth link from this phone in this one's place"
         else -> "The head unit's agent closed the link"
     }
 

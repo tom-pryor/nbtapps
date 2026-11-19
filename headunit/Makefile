@@ -133,6 +133,7 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 #   serial_report  the start-up report: what the head unit says of its Bluetooth when the agent starts
 #   presence     which of the car's phones are there, from its device list: what the car dialling a phone goes by
 #   dial_rules   when the car dials a phone of the agent's, and what comes of each answer
+#   problem_log  the problem file of Bluetooth serial, on flash: the first problem of each kind in a run
 #   phones       the paired phones and their pairing keys, on disk
 #   agent_home   the agent's own folder: its versions, and the files that say which one the launcher starts
 #   log_files    the files a controller may pull: the logs a package's manifest names, and the agent's own
@@ -153,7 +154,7 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/spp_service.cpp agent/spp_gate.cpp agent/node_reader.cpp agent/serial_link.cpp agent/programs.cpp \
                agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp agent/checks.cpp \
                agent/settings_file.cpp agent/settings.cpp agent/serial_report.cpp agent/presence.cpp \
-               agent/dial_rules.cpp
+               agent/dial_rules.cpp agent/problem_log.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 # src/*.hpp: test_plugin runs the plugin's screens about phones, which are headers, against an agent, and
@@ -247,6 +248,7 @@ run-agent-test_log_cap: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_log_files: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_settings: TEST_ARGS = spec/settings.vectors $(BENCH_WORK)
 run-agent-test_phones: TEST_ARGS = $(BENCH_WORK)
+run-agent-test_problem_log: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_plugin: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_agent_home: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_agent_start: TEST_ARGS = $(BENCH_WORK)
