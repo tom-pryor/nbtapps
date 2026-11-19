@@ -189,12 +189,15 @@ abstract class AppModule {
             @ApplicationContext context: Context,
             foreground: AppForeground,
             clock: ElapsedClock,
+            bluetooth: PhoneBluetooth,
         ): JobRepository = JobRepository(
             headUnits, connector, identity, keys, store, keeper, scope,
             // A link's silence counts the time the phone slept and the time the process was frozen.
             clock = clock::millis,
             shareDir = File(context.cacheDir, "share"),
             foreground = foreground,
+            // Read now, which also begins following Bluetooth being switched on and off.
+            bluetoothOn = bluetooth.also { it.refreshConnected() }.on,
         )
 
         /** Setting a head unit up to start the agent with the car, which goes on when the pairing screen is left. */

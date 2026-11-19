@@ -13,15 +13,18 @@ import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** What the connector needs of the phone's Bluetooth, kept apart from it so that the rest runs in a unit test. */
 interface SerialRadio {
@@ -33,7 +36,33 @@ interface SerialRadio {
 
     /** A socket to the service [uuid] on the paired device at [address], not yet connected. */
     fun socket(address: String, uuid: UUID): SerialSocket
+
+    /**
+     * Listens on this phone for serial links to the service [uuid], registered under [name], which a paired device
+     * opens: the secure kind, as [socket]'s, so only a device paired with the phone gets through. See [SerialListener].
+     *
+     * @throws IOException if the phone cannot listen now: Bluetooth is off, the permission is not granted, or the
+     *   phone refuses. A radio that cannot listen at all always throws.
+     */
+    fun listen(name: String, uuid: UUID): SerialServer = throw IOException("This phone can't listen for the car")
 }
+
+/** Listening for serial links to one service on the phone: see [SerialRadio.listen]. */
+interface SerialServer : Closeable {
+    /**
+     * Blocks until a device opens a link to the service, and returns it, up.
+     *
+     * @throws IOException once [close] has been called, or when listening fails, as it does when Bluetooth is
+     *   switched off.
+     */
+    fun accept(): AcceptedSocket
+
+    /** Stops listening, and ends an [accept] under way. Safe to call twice, and from any thread. */
+    override fun close()
+}
+
+/** A link a device opened to the phone: its socket, which is up, and the device's Bluetooth [address]. */
+class AcceptedSocket(val socket: SerialSocket, val address: String)
 
 /** One RFCOMM socket. */
 interface SerialSocket : Closeable {
@@ -52,6 +81,26 @@ interface SerialSocket : Closeable {
 }
 
 /**
+ * How long a Bluetooth serial connect is tried for, and how: see [BluetoothSerialLinkConnector]. Times in
+ * milliseconds; a test shortens them.
+ */
+class SerialConnectTimes(
+    /** How long a connect is tried, to a head unit whose agent is not known to dial: longer than another app holds the car's link unanswered. */
+    val windowMillis: Long = 20_000,
+    /**
+     * How long, to one whose agent is known to dial ([com.nbtapps.store.model.HeadUnit.serialDial]): long enough for
+     * the car's own dial to come, which a refused dial of the phone's brings within seconds, and a poll within half a
+     * minute.
+     */
+    val dialWindowMillis: Long = 40_000,
+    /** The most one try of the phone's is given: a connect that hears nothing blocks for about a minute. */
+    val tryMillis: Long = 15_000,
+    /** The pause after the first try that failed; each after it is twice the one before, up to [maxPauseMillis]. */
+    val pauseMillis: Long = 700,
+    val maxPauseMillis: Long = 5_000,
+)
+
+/**
  * Bluetooth serial (RFCOMM) to the agent's own service on the car. The phone dials, so it speaks first; the
  * agent writes nothing until a valid `hello` has come, because every serial link a phone opens to the car lands
  * on the same node there, another app's included.
@@ -67,8 +116,12 @@ interface SerialSocket : Closeable {
  * writes is left in the car's Bluetooth for the next link.
  *
  * The car takes one serial link from a phone at a time. While another app on the phone holds it, a connect
- * fails at once, so a failed connect is tried again for [windowMillis]. During a wireless Android Auto session
- * that link is held throughout, and serial is not to be had.
+ * fails at once, so a failed connect is tried again for a while ([SerialConnectTimes]). During a wireless Android
+ * Auto session that link is held throughout. An agent that lists [ProtocolConstants.CAPABILITY_SERIAL_DIAL] gets
+ * round that: the car opens a link of its own to the phone, which a refused dial of the phone's brings about within
+ * seconds. So while the phone dials, it also listens for that link ([SerialListener], the app's one listener), and
+ * the first link that is up, with the magic bytes written, is the one returned. The other is given up, or closed at
+ * once if it came up too, before anything else is written on it.
  *
  * The socket is the authenticated, encrypted kind, so the link is to the car the phone is paired with, and
  * nobody listens in. That does not say who opened it: any app on a paired phone can. The agent therefore asks
@@ -77,23 +130,69 @@ interface SerialSocket : Closeable {
  */
 class BluetoothSerialLinkConnector(
     private val radio: SerialRadio,
-    private val windowMillis: Long = CONNECT_WINDOW_MILLIS,
-    private val pauseMillis: Long = CONNECT_PAUSE_MILLIS,
-    /** The clock [windowMillis] is measured on: `SystemClock.elapsedRealtime` in the app, which goes on while the phone sleeps. */
+    private val times: SerialConnectTimes = SerialConnectTimes(),
+    /** The clock the times are measured on: `SystemClock.elapsedRealtime` in the app, which goes on while the phone sleeps. */
     private val now: () -> Long = ::monotonicMillis,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** The app's one listener, which [accept] waits on too. */
+    private val listener: SerialListener = SerialListener(radio, io),
 ) : LinkConnector {
 
     override fun supports(endpoint: Endpoint): Boolean = endpoint is SerialEndpoint
 
-    override suspend fun connect(endpoint: Endpoint): Link {
+    override suspend fun connect(endpoint: Endpoint): Link = connect(endpoint, dials = false)
+
+    /**
+     * Dials [endpoint] and listens for its car at once, for [SerialConnectTimes.dialWindowMillis] where the agent
+     * [dials] and [SerialConnectTimes.windowMillis] where it is not known to. Listening that cannot be had leaves the
+     * dial to go on alone. A caller that is cancelled leaves nothing open.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link {
         val serial = endpoint as? SerialEndpoint ?: throw IOException("Not a Bluetooth serial endpoint")
         radio.unavailable(serial.address)?.let { throw IOException(it) }
-        try {
-            return SerialLink(connectWithRetry(windowMillis, pauseMillis, now) { dial(serial.address) })
-        } catch (e: ConnectFailedException) {
-            throw IOException(gaveUp(serial, e), e)
+        val window = if (dials) times.dialWindowMillis else times.windowMillis
+        // The first link that is up. A second one finds it taken, and is closed with nothing more written on it.
+        val won = CompletableDeferred<Link>()
+        fun offer(link: Link) {
+            if (!won.complete(link)) link.close()
         }
+        return coroutineScope {
+            val listening = launch {
+                try {
+                    offer(listener.accept(listOf(serial.address), first = true).link)
+                } catch (e: IOException) {
+                    // The phone cannot listen now: the dial goes on alone.
+                }
+            }
+            val dialling = launch {
+                try {
+                    offer(SerialLink(connectWithRetry(window, times.pauseMillis, now, times.maxPauseMillis) { dial(serial.address) }))
+                } catch (e: ConnectFailedException) {
+                    won.completeExceptionally(IOException(gaveUp(serial, e), e))
+                }
+            }
+            try {
+                won.await()
+            } catch (e: CancellationException) {
+                // A link that came up just as the caller gave up is nobody's, and must not hold the car's link.
+                if (!won.completeExceptionally(e) && won.getCompletionExceptionOrNull() == null) won.getCompleted().close()
+                throw e
+            } finally {
+                listening.cancel()
+                dialling.cancel()
+            }
+        }
+    }
+
+    override fun accepts(endpoint: Endpoint): Boolean = endpoint is SerialEndpoint
+
+    /** Through the app's one listener, which a [connect] under way shares, and is given a link first on. */
+    override suspend fun accept(endpoints: Collection<Endpoint>): IncomingLink {
+        val serial = endpoints.filterIsInstance<SerialEndpoint>()
+        if (serial.isEmpty()) return super.accept(endpoints)
+        val accepted = listener.accept(serial.map { it.address })
+        return IncomingLink(serial.first { it.address.equals(accepted.address, ignoreCase = true) }, accepted.link)
     }
 
     /**
@@ -105,11 +204,19 @@ class BluetoothSerialLinkConnector(
             "on the head unit, the car may be out of range, or a wireless Android Auto session may be holding the " +
             "car's one serial link to this phone." + failure.cause?.message?.let { " Last failure: $it" }.orEmpty()
 
-    /** One try. A connect blocks for seconds and hears of nothing but its socket closing, so a caller that is cancelled closes it. */
+    /**
+     * One try, given [SerialConnectTimes.tryMillis]. A connect blocks for seconds and hears of nothing but its socket
+     * closing, so a try that runs out of time, and one whose caller is cancelled, closes it.
+     */
     private suspend fun dial(address: String): SerialSocket {
         var made: SerialSocket? = null
         try {
-            return withContext(io) { radio.socket(address, SERVICE_UUID).also { made = it }.also { bringUp(it) } }
+            val socket = withContext(io) { radio.socket(address, SERVICE_UUID).also { made = it } }
+            withTimeoutOrNull(times.tryMillis) { withContext(io) { bringUp(socket) } } ?: run {
+                socket.closeQuietly()
+                throw IOException("The car didn't answer within ${times.tryMillis / 1000} s")
+            }
+            return socket
         } catch (e: CancellationException) {
             // Cancelled, perhaps at the very moment the link came up: nobody is handed the socket, so it must not
             // stay open and hold the car's one serial link.
@@ -150,29 +257,26 @@ class BluetoothSerialLinkConnector(
         }
     }
 
-    private class SerialLink(private val socket: SerialSocket) : Link {
-        override val kind = Link.SERIAL
-        override val input: InputStream = socket.input
-        override val output: OutputStream = socket.output
-        override val magicSent = true
-
-        /** Closing the socket also fails a read that is blocked on it. */
-        override fun close() = socket.closeQuietly()
-    }
-
     companion object {
-        private fun SerialSocket.closeQuietly() {
-            try {
-                close()
-            } catch (e: IOException) {
-                // It is gone either way.
-            }
-        }
-
         val SERVICE_UUID: UUID = UUID.fromString(ProtocolConstants.SERIAL_SERVICE_UUID)
+    }
+}
 
-        /** How long a connect is tried again: longer than another app holds the car's link unanswered. */
-        const val CONNECT_WINDOW_MILLIS = 20_000L
-        const val CONNECT_PAUSE_MILLIS = 700L
+/** A serial link over [socket], whose magic bytes have gone out: one the phone dialled or one it accepted. */
+internal class SerialLink(private val socket: SerialSocket) : Link {
+    override val kind = Link.SERIAL
+    override val input: InputStream = socket.input
+    override val output: OutputStream = socket.output
+    override val magicSent = true
+
+    /** Closing the socket also fails a read that is blocked on it. */
+    override fun close() = socket.closeQuietly()
+}
+
+internal fun Closeable.closeQuietly() {
+    try {
+        close()
+    } catch (e: IOException) {
+        // It is gone either way.
     }
 }

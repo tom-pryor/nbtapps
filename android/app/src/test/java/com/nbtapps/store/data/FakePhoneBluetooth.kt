@@ -23,6 +23,11 @@ class FakePhoneBluetooth(
 
     override val connected: StateFlow<Set<String>> = connectedNow.asStateFlow()
 
+    private val onNow = MutableStateFlow(access == BluetoothAccess.ON)
+
+    /** As the real one: what [access] was at the last [refreshConnected], which a test calls after changing it. */
+    override val on: StateFlow<Boolean> = onNow.asStateFlow()
+
     /** How many times [connected] was read again. */
     @Volatile var refreshes = 0
         private set
@@ -30,6 +35,7 @@ class FakePhoneBluetooth(
     /** As the real one: empty unless Bluetooth is on and allowed, and only paired devices, in upper case. */
     override fun refreshConnected() {
         refreshes++
+        onNow.value = access == BluetoothAccess.ON
         connectedNow.value = connectedAmong(pairedDevices(), links)
     }
 }

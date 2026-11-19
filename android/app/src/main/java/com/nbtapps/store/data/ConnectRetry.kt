@@ -6,8 +6,10 @@ import java.io.IOException
 import kotlinx.coroutines.delay
 
 /**
- * Runs [connect] until it succeeds, pausing [pauseMillis] after a failure, for as long as a new
- * try can still start within [windowMillis] of the first one.
+ * Runs [connect] until it succeeds, pausing after a failure, for as long as a new try can still start within
+ * [windowMillis] of the first one. The first pause is [pauseMillis], and each after it twice the one before, up to
+ * [maxPauseMillis]: a car that refuses at once is not asked dozens of times. With the two the same, as by default,
+ * every pause is alike.
  *
  * A car takes one Bluetooth serial link from a phone at a time. While another app on the phone has
  * that link, or is just opening it, a connect fails at once; a few seconds later the same connect
@@ -21,20 +23,23 @@ suspend fun <T> connectWithRetry(
     windowMillis: Long,
     pauseMillis: Long,
     now: () -> Long,
+    maxPauseMillis: Long = pauseMillis,
     connect: suspend (attempt: Int) -> T,
 ): T {
     val start = now()
     var attempt = 0
+    var pause = pauseMillis
     while (true) {
         attempt++
         try {
             return connect(attempt)
         } catch (e: IOException) {
-            if (now() - start + pauseMillis >= windowMillis) {
+            if (now() - start + pause >= windowMillis) {
                 throw ConnectFailedException(attempt, (now() - start + 500) / 1000, e)
             }
         }
-        delay(pauseMillis)
+        delay(pause)
+        pause = minOf(pause * 2, maxOf(maxPauseMillis, pauseMillis))
     }
 }
 

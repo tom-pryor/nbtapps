@@ -58,6 +58,12 @@ interface PhoneBluetooth {
 
     /** Reads [connected] again now. The first call also begins following the connections. */
     fun refreshConnected()
+
+    /**
+     * Whether Bluetooth is on and the app may use it ([access] is [BluetoothAccess.ON]), as [refreshConnected] last
+     * found: so from its first call it follows Bluetooth being switched on and off, while the app's process runs.
+     */
+    val on: StateFlow<Boolean>
 }
 
 /**
@@ -130,6 +136,10 @@ class AndroidPhoneBluetooth @Inject constructor(
 
     override val connected: StateFlow<Set<String>> = connectedNow.asStateFlow()
 
+    private val onNow = MutableStateFlow(access() == BluetoothAccess.ON)
+
+    override val on: StateFlow<Boolean> = onNow.asStateFlow()
+
     private val lock = Any()
 
     /** The profiles' proxies the system has handed over, by profile. They are asked for only once needed. */
@@ -166,7 +176,8 @@ class AndroidPhoneBluetooth @Inject constructor(
 
     override fun refreshConnected() {
         follow()
-        if (access() != BluetoothAccess.ON) {
+        onNow.value = access() == BluetoothAccess.ON
+        if (!onNow.value) {
             connectedNow.value = emptySet()
             return
         }

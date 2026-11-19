@@ -11,6 +11,7 @@ import com.nbtapps.store.data.link.AgentClient
 import com.nbtapps.store.data.link.AgentProofException
 import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.Blob
+import com.nbtapps.store.data.link.IncomingLink
 import com.nbtapps.store.data.link.JobEvent
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkClosedException
@@ -74,7 +75,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -264,6 +267,13 @@ fun interface JobKeeper {
  * this side and the head unit remembered; when it comes back, the app connects to that head unit again by itself.
  * A job that needs the phone, a pull of logs, and a call that waits for the agent's answer ([usingLink]) keep the
  * link for as long as they last: see [watchForeground].
+ *
+ * An agent that dials has the car open a link to the phone by itself ([ProtocolConstants.CAPABILITY_SERIAL_DIAL]).
+ * The app takes such a link whenever it would want one and has none: while it is in front of the user or something
+ * keeps it busy, with Bluetooth on, no link and no connect under way, and the user has not disconnected since they
+ * last connected or the app last came to the foreground. A link the car opens then is taken as a connect of the app's
+ * own is, quietly: see [watchIncoming]. A connect under way listens for the car by itself, through the same listener
+ * ([LinkConnector.connect]).
  */
 class JobRepository(
     private val headUnits: HeadUnitRepository,
@@ -291,6 +301,8 @@ class JobRepository(
     private val foreground: AppForeground = AlwaysInForeground,
     /** How long [resetSerial] waits for the car to end the link, in milliseconds; a test shortens it. */
     private val resetWaitMs: Long = 5_000,
+    /** Whether the phone's Bluetooth is on and the app may use it: [com.nbtapps.store.data.PhoneBluetooth.on]. */
+    private val bluetoothOn: StateFlow<Boolean> = MutableStateFlow(true),
 ) {
     private val connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val jobState = MutableStateFlow<JobView?>(null)
@@ -356,6 +368,14 @@ class JobRepository(
     private val inUse = MutableStateFlow(Uses(0, 0))
 
     /**
+     * Whether something uses the link: see [watchForeground]. Every change is a value, as [inUse] counts the ends of
+     * the calls that wait.
+     */
+    private val busyNow = combine(jobState, logPullState, inUse) { job, pull, using ->
+        job?.needsPhone == true || pull is LogPullState.Pulling || using.now > 0
+    }
+
+    /**
      * The head unit whose link was ended when the app left the foreground, which the app connects to again when it
      * comes back: see [leave] and [comeBack]. Null when there is none.
      */
@@ -373,8 +393,18 @@ class JobRepository(
     @Volatile
     private var resetting: AgentSession? = null
 
+    /**
+     * The user disconnected: the app takes no link the car opens until they connect, or the app comes back to the
+     * foreground. Otherwise the car would have it connected again within half a minute.
+     */
+    private val heldBack = MutableStateFlow(false)
+
+    /** How many [attempt]s run. One listens for the car by itself, so the app does not listen beside it. */
+    private val attempting = MutableStateFlow(0)
+
     init {
         scope.launch { watchForeground() }
+        scope.launch { watchIncoming() }
     }
 
     /**
@@ -391,6 +421,7 @@ class JobRepository(
      * foreground ([leave]), which fails the connect instead of cancelling its caller.
      */
     suspend fun connect(headUnitId: String): Result<Unit> {
+        heldBack.value = false
         // What the user asks for takes the place of what the app was waiting to do by itself.
         remembered = null
         returning?.cancel()
@@ -429,7 +460,23 @@ class JobRepository(
      * restarted or on coming back to the foreground: a failure is the caller's to publish, and the state stays
      * [ConnectionState.Connecting].
      */
-    private suspend fun attempt(headUnitId: String, quiet: Boolean): Result<Unit> {
+    private suspend fun attempt(headUnitId: String, quiet: Boolean, incoming: IncomingLink? = null): Result<Unit> {
+        attempting.update { it + 1 }
+        // A link the car opened, until it is the first link greeted. One that is never used is closed.
+        var spare: Link? = incoming?.link
+        try {
+            return attemptOver(headUnitId, quiet, incoming?.endpoint) { spare.also { spare = null } }
+        } finally {
+            spare?.close()
+            attempting.update { it - 1 }
+        }
+    }
+
+    /**
+     * What [attempt] does. Where [only] is given, that endpoint alone is tried, and its first link is the one
+     * [given] gives, if any: a link the car opened.
+     */
+    private suspend fun attemptOver(headUnitId: String, quiet: Boolean, only: Endpoint?, given: () -> Link?): Result<Unit> {
         drop("The app connected again")
         val unit = headUnits.headUnit(headUnitId).first()
             ?: return Result.failure(IOException("That head unit is no longer saved"))
@@ -437,10 +484,11 @@ class JobRepository(
         val failures = ArrayList<Pair<Endpoint, String>>()
         var opened: AgentSession? = null
         try {
-            for (endpoint in unit.endpoints.filter(connector::supports).inConnectOrder()) {
+            val endpoints = if (only != null) listOf(only) else unit.endpoints.filter(connector::supports).inConnectOrder()
+            for (endpoint in endpoints) {
                 opened = null
                 val reason = try {
-                    val paired = dial(unit, endpoint) { opened = it }
+                    val paired = dial(unit, endpoint, given()) { opened = it }
                     return if (paired) Result.success(Unit) else Result.failure(PairingNeeded())
                 } catch (e: RemoteException) {
                     AgentText.request(e.code)
@@ -480,12 +528,87 @@ class JobRepository(
         var shownBefore = false
         // Every change is looked at, not only a change of the two answers: a leave that found the link busy after all,
         // once it held the lock, is tried again on the next change, which the end of that use is.
-        combine(foreground.inForeground, jobState, logPullState, inUse) { shown, job, pull, using ->
-            shown to (job?.needsPhone == true || pull is LogPullState.Pulling || using.now > 0)
-        }.collect { (shown, busy) ->
-            if (shown && !shownBefore) comeBack()
+        combine(foreground.inForeground, busyNow) { shown, busy -> shown to busy }.collect { (shown, busy) ->
+            if (shown && !shownBefore) {
+                // Coming back undoes a disconnect of the user's, as far as the car's links go: see [heldBack].
+                heldBack.value = false
+                comeBack()
+            }
             if (!shown && !busy) leave()
             shownBefore = shown
+        }
+    }
+
+    /**
+     * Listens for a link the car opens to the phone, for as long as the repository lives, whenever the app would want
+     * a link and has none: it is in front of the user or busy, Bluetooth is on, the user has not disconnected
+     * ([heldBack]), there is neither a link nor an [attempt], and a saved head unit has an endpoint the connector can
+     * take a link from. Each link is taken by [take], one at a time; listening that cannot be had waits for a change
+     * of any of these, as Bluetooth being switched on again.
+     *
+     * The app's own wait to connect again after the agent restarted ([rejoin]) is no attempt, so the car's link can
+     * come first and is then the one the job is followed over.
+     */
+    private suspend fun watchIncoming() {
+        val wanted = combine(foreground.inForeground, busyNow, heldBack, bluetoothOn) { shown, busy, held, on -> (shown || busy) && !held && on }
+        val free = combine(connectionState, attempting) { state, attempts ->
+            attempts == 0 && state !is ConnectionState.Connected && state !is ConnectionState.NeedsPairing
+        }
+        combine(wanted, free, headUnits.headUnits) { want, isFree, units ->
+            if (want && isFree) units.flatMap { it.endpoints }.filter(connector::accepts).distinct() else emptyList()
+        }.distinctUntilChanged().collectLatest { endpoints ->
+            if (endpoints.isEmpty()) return@collectLatest
+            while (true) {
+                val incoming = try {
+                    connector.accept(endpoints)
+                } catch (e: IOException) {
+                    // Bluetooth went off, or the phone will not listen: until something changes.
+                    return@collectLatest
+                }
+                // On the app's scope: what it does changes what is followed here, which would cancel it. Leaving the
+                // app gives it up, as it does a connect.
+                val work = scope.launch(start = CoroutineStart.LAZY) { take(incoming) }
+                dialling += work
+                work.invokeOnCompletion { dialling -= work }
+                work.start()
+                work.join()
+            }
+        }
+    }
+
+    /**
+     * Takes a link the car opened as a connect of the app's own to the head unit whose endpoint it came from: `hello`,
+     * `auth`, and the state that follows, or the wait to be paired. Where the app no longer wants it, as when a link
+     * came meanwhile or the user disconnected, it is closed. A failure is quiet: the state is left as it was before, and
+     * listening goes on. One that succeeds while the app waited to connect again after the agent restarted is the
+     * reconnect, and the wait ends.
+     */
+    private suspend fun take(incoming: IncomingLink) {
+        var spare: Link? = incoming.link
+        try {
+            connectLock.withLock {
+                val unit = headUnits.headUnits.first().firstOrNull { incoming.endpoint in it.endpoints } ?: return@withLock
+                val wanted = !heldBack.value && (foreground.inForeground.value || busy())
+                if (!wanted || session != null || unpaired != null) return@withLock
+                val before = connectionState.value
+                val link = spare.also { spare = null }
+                val result = attempt(unit.id, quiet = true, IncomingLink(incoming.endpoint, requireNotNull(link)))
+                when {
+                    result.isSuccess -> {
+                        remembered = null
+                        // The job is followed over this link already.
+                        rejoining.getAndSet(null)?.cancel()
+                    }
+                    result.exceptionOrNull() is PairingNeeded -> {
+                        remembered = null
+                        rejoining.getAndSet(null)?.cancel()
+                        lost(unit.id)
+                    }
+                    connectionState.value == ConnectionState.Connecting(unit.id) -> connectionState.value = before
+                }
+            }
+        } finally {
+            spare?.close()
         }
     }
 
@@ -661,6 +784,7 @@ class JobRepository(
      * does not connect again by itself when it comes back to the foreground.
      */
     suspend fun disconnect() {
+        heldBack.value = true
         remembered = null
         returning?.cancel()
         stopRejoining()
@@ -1134,19 +1258,21 @@ class JobRepository(
     }
 
     /**
-     * Opens a link to [endpoint] and says `hello` on it. [holding] is told of each session while it is open and
-     * not yet the caller's, and of null once it has been closed again.
+     * Opens a link to [endpoint] and says `hello` on it, or on [first], a link the car opened, where given: a link
+     * opened after that is the phone's own. [holding] is told of each session while it is open and not yet the
+     * caller's, and of null once it has been closed again.
      *
      * A Bluetooth serial link that comes up is not yet a link to the agent: the car gives it to whichever program
      * there reads it first, and the agent lets go a link it took too late to see how it opened. Such a link ends
      * before `hello` is answered, or stays silent. It is closed and another is opened, [Greeting.serialTries]
      * times in all. An answer of any kind, a refusal too, is the agent's and is not tried again.
      */
-    private suspend fun greet(endpoint: Endpoint, holding: (AgentSession?) -> Unit): Pair<AgentSession, Hello> {
+    private suspend fun greet(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit): Pair<AgentSession, Hello> {
         var attempt = 0
         while (true) {
             attempt++
-            val next = AgentSession(connector.connect(endpoint), scope, now = clock).also(holding)
+            val link = first.takeIf { attempt == 1 } ?: connector.connect(endpoint, unit.serialDial)
+            val next = AgentSession(link, scope, now = clock).also(holding)
             val last = next.kind != Link.SERIAL || attempt >= greeting.serialTries
             val failure = try {
                 val hello = withTimeoutOrNull(if (last) greeting.timeoutMs else greeting.retryTimeoutMs) {
@@ -1167,16 +1293,17 @@ class JobRepository(
 
     /**
      * Opens a link to [unit] over [endpoint] and takes it as far as it goes: connected, which is true, or
-     * waiting for the phone to be paired, which is false. [holding] is as for [greet].
+     * waiting for the phone to be paired, which is false. [first] and [holding] are as for [greet].
      *
      * A key the agent no longer takes is of no use again: the agent forgot its phones, or holds another key for
      * this one. It is dropped, and since the agent ends a link on which `auth` failed, a new link is opened, on
      * which the phone has no key and is paired anew.
      */
-    private suspend fun dial(unit: HeadUnit, endpoint: Endpoint, holding: (AgentSession?) -> Unit): Boolean {
+    private suspend fun dial(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit): Boolean {
         var stale = false
+        var given = first
         while (true) {
-            val (next, hello) = greet(endpoint, holding)
+            val (next, hello) = greet(unit, endpoint, given.also { given = null }, holding)
             try {
                 return open(unit, endpoint, next, hello, stale)
             } catch (e: StaleKey) {
@@ -1196,6 +1323,9 @@ class JobRepository(
         if (unit.headUnitId != null && unit.headUnitId != hello.headUnitId) {
             throw ProtocolException("This isn't the head unit saved as ${unit.name}. Add it as a new one.")
         }
+        // Kept from every `hello`, for how long the next connect waits: see [HeadUnit.serialDial].
+        val dials = ProtocolConstants.CAPABILITY_SERIAL_DIAL in hello.capabilities
+        if (unit.serialDial != dials) headUnits.update(unit.id) { it.copy(serialDial = dials) }
         val agentId = requireNotNull(hello.headUnitId)
         if (keys.has(agentId)) prove(next, agentId)
         // The first thing asked also tells whether the agent takes this phone as it is.

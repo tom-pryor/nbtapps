@@ -27,6 +27,12 @@ data class HeadUnit(
      * hand. Null until they have been answered: before the first link to an agent that has them.
      */
     val checks: HeadUnitChecks? = null,
+    /**
+     * The agent listed the capability `serial-dial` in its last `hello`: it has the car open a Bluetooth serial link
+     * to the phone by itself, so a connect is given longer. False until a `hello` says so, and for a head unit saved
+     * before there was this.
+     */
+    val serialDial: Boolean = false,
 )
 
 /** What the agent's checks found on a head unit: see [HeadUnit.checks]. */

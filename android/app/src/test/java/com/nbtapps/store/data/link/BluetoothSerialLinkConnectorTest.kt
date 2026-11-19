@@ -6,6 +6,7 @@ import com.nbtapps.store.data.jobs.FakeAgent
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.withTestTimeout
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -14,6 +15,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -21,6 +23,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -37,79 +40,71 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
-/** The serial connector against a stand-in for the phone's Bluetooth. */
+/**
+ * The serial connector against a stand-in for the phone's Bluetooth ([FakeRadio]). The tests of the times run on the
+ * test's own clock; those of the phone's dial and the car's link racing each other run on real threads, as the
+ * listener's accept blocks one, and wait for what they need to see without sleeping.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
 class BluetoothSerialLinkConnectorTest {
 
     private val car = SerialEndpoint("00:11:22:33:44:55", "BMW 12345")
+    private val stranger = "66:77:88:99:AA:BB"
 
-    private class FakeSocket(
-        private val failure: String?,
-        private val blocks: Boolean = false,
-        /** When set, the link comes up and then takes no bytes. */
-        private val writeFailure: String? = null,
-    ) : SerialSocket {
-        val closes = AtomicInteger()
-        val connecting = CountDownLatch(1)
-        private val closed = CountDownLatch(1)
+    /**
+     * A connector on the test's own clock: a pause between tries takes no real time. Its dial's blocking calls run on
+     * [io]; its listener blocks a thread of its own, which takes no time on the test's clock.
+     */
+    private fun TestScope.connector(
+        radio: SerialRadio,
+        io: CoroutineDispatcher = StandardTestDispatcher(testScheduler),
+        times: SerialConnectTimes = SerialConnectTimes(),
+        listenIo: CoroutineDispatcher = Dispatchers.IO,
+    ) = BluetoothSerialLinkConnector(radio, times, now = { currentTime }, io = io, listener = SerialListener(radio, listenIo))
 
-        @Volatile
-        var closeFailure: String? = null
-
-        override val input = ByteArrayInputStream(byteArrayOf(1, 2, 3))
-        override val output = object : ByteArrayOutputStream() {
-            override fun write(bytes: ByteArray, offset: Int, length: Int) {
-                writeFailure?.let { throw IOException(it) }
-                super.write(bytes, offset, length)
-            }
-        }
-
-        override fun connect() {
-            connecting.countDown()
-            // Like the real one, a connect under way ends only when the socket is closed.
-            if (blocks) {
-                closed.await()
-                throw IOException("socket closed")
-            }
-            failure?.let { throw IOException(it) }
-        }
-
-        override fun close() {
-            closes.incrementAndGet()
-            closed.countDown()
-            closeFailure?.let { throw IOException(it) }
-        }
-    }
-
-    private class FakeRadio(private val socketFor: (attempt: Int) -> FakeSocket) : SerialRadio {
-        @Volatile
-        var unavailable: String? = null
-        val asked = CopyOnWriteArrayList<Pair<String, UUID>>()
-        val sockets = CopyOnWriteArrayList<FakeSocket>()
-
-        override fun unavailable(address: String): String? = unavailable
-
-        override fun socket(address: String, uuid: UUID): SerialSocket {
-            asked += address to uuid
-            return socketFor(sockets.size + 1).also { sockets += it }
-        }
-    }
-
-    /** A connector on the test's own clock: a pause between tries takes no real time. */
-    private fun TestScope.connector(radio: FakeRadio) =
-        BluetoothSerialLinkConnector(radio, now = { currentTime }, io = StandardTestDispatcher(testScheduler))
-
-    private suspend fun failureOf(connector: LinkConnector, endpoint: Endpoint): String = try {
-        connector.connect(endpoint)
+    private suspend fun failureOf(connector: LinkConnector, endpoint: Endpoint, dials: Boolean = false): String = try {
+        connector.connect(endpoint, dials)
         fail("the connect went through")
         ""
     } catch (e: IOException) {
         e.message.orEmpty()
     }
 
+    /** A test on real threads, for at most a minute. */
+    private fun live(block: suspend CoroutineScope.() -> Unit) = runBlocking(Dispatchers.Default) { withTestTimeout(60_000, block) }
+
+    private suspend fun until(what: String, condition: () -> Boolean) {
+        withTimeoutOrNull(10_000) { while (!condition()) delay(5) } ?: throw AssertionError("never came: $what")
+    }
+
+    /**
+     * A socket whose connect waits for [connectGate] and whose first write waits for [writeGate], each where given:
+     * a link that comes up when the test says so.
+     */
+    private class GatedSocket(private val connectGate: CountDownLatch? = null, private val writeGate: CountDownLatch? = null) : SerialSocket {
+        val closes = AtomicInteger()
+        val writing = CountDownLatch(1)
+        override val input = ByteArrayInputStream(ByteArray(0))
+        override val output = object : ByteArrayOutputStream() {
+            override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                writing.countDown()
+                writeGate?.await(10, TimeUnit.SECONDS)
+                super.write(bytes, offset, length)
+            }
+        }
+
+        override fun connect() {
+            connectGate?.await(10, TimeUnit.SECONDS)
+        }
+
+        override fun close() {
+            closes.incrementAndGet()
+        }
+    }
+
     @Test
     fun `reaches Bluetooth serial endpoints only`() = runTest {
-        val connector = connector(FakeRadio { FakeSocket(null) })
+        val connector = connector(FakeRadio())
         assertTrue(connector.supports(car))
         assertFalse(connector.supports(TcpEndpoint("192.168.0.1", 7144)))
         assertTrue(failureOf(connector, TcpEndpoint("192.168.0.1", 7144)).isNotEmpty())
@@ -117,11 +112,11 @@ class BluetoothSerialLinkConnectorTest {
 
     @Test
     fun `dials the agent's service on the endpoint's device, and the link is a serial one over that socket`() = runTest {
-        val radio = FakeRadio { FakeSocket(null) }
+        val radio = FakeRadio()
         val link = connector(radio).connect(car)
 
         assertEquals(listOf("00:11:22:33:44:55" to UUID.fromString("58876f35-7f3f-4592-b65d-9912589a4f51")), radio.asked)
-        val socket = radio.sockets.single()
+        val socket = radio.fakeSockets.single()
         assertEquals(Link.SERIAL, link.kind)
         assertSame(socket.input, link.input)
         assertSame(socket.output, link.output)
@@ -134,24 +129,24 @@ class BluetoothSerialLinkConnectorTest {
 
     @Test
     fun `the magic bytes go out with the connect, and the link says that they have`() = runTest {
-        val radio = FakeRadio { FakeSocket(null) }
+        val radio = FakeRadio()
         val link = connector(radio).connect(car)
 
         // Nothing has been asked of the link yet: the agent sees how it opens without waiting for a first frame.
-        assertArrayEquals(FrameCodec.MAGIC, radio.sockets.single().output.toByteArray())
+        assertArrayEquals(FrameCodec.MAGIC, radio.fakeSockets.single().written)
         assertTrue(link.magicSent)
         assertFalse(MemoryLink.pair(kind = Link.SERIAL).first.magicSent)
     }
 
     @Test
     fun `a link that comes up and cannot take the magic bytes is a try that failed`() = runTest {
-        val radio = FakeRadio { attempt -> FakeSocket(null, writeFailure = if (attempt < 3) "Broken pipe" else null) }
+        val radio = FakeRadio { attempt -> FakeSocket(writeFailure = if (attempt < 3) "Broken pipe" else null) }
         val link = connector(radio).connect(car)
 
         assertEquals(3, radio.sockets.size)
-        assertEquals(listOf(1, 1, 0), radio.sockets.map { it.closes.get() })
+        assertEquals(listOf(1, 1, 0), radio.fakeSockets.map { it.closes.get() })
         assertSame(radio.sockets.last().output, link.output)
-        assertArrayEquals(FrameCodec.MAGIC, radio.sockets.last().output.toByteArray())
+        assertArrayEquals(FrameCodec.MAGIC, radio.fakeSockets.last().written)
     }
 
     @Test
@@ -184,11 +179,12 @@ class BluetoothSerialLinkConnectorTest {
     }
 
     @Test
-    fun `Bluetooth that cannot be used fails at once with the reason, and nothing is dialled`() = runTest {
-        val radio = FakeRadio { FakeSocket(null) }
+    fun `Bluetooth that cannot be used fails at once with the reason, and nothing is dialled or listened on`() = runTest {
+        val radio = FakeRadio()
         radio.unavailable = "Bluetooth is off"
         assertEquals("Bluetooth is off", failureOf(connector(radio), car))
         assertTrue(radio.sockets.isEmpty())
+        assertTrue(radio.listens.isEmpty())
         assertEquals(0, currentTime)
     }
 
@@ -199,9 +195,22 @@ class BluetoothSerialLinkConnectorTest {
         val link = connector(radio).connect(car)
 
         assertEquals(4, radio.sockets.size)
-        assertEquals(listOf(1, 1, 1, 0), radio.sockets.map { it.closes.get() })
-        assertEquals(3 * BluetoothSerialLinkConnector.CONNECT_PAUSE_MILLIS, currentTime)
+        assertEquals(listOf(1, 1, 1, 0), radio.fakeSockets.map { it.closes.get() })
+        // Pauses of 0.7 s, 1.4 s and 2.8 s.
+        assertEquals(4_900, currentTime)
         assertSame(radio.sockets.last().input, link.input)
+    }
+
+    @Test
+    fun `the pause between tries starts at 700 ms and doubles up to 5 s`() = runTest {
+        val starts = CopyOnWriteArrayList<Long>()
+        val radio = FakeRadio {
+            starts += currentTime
+            FakeSocket("read failed, socket might closed or timeout, read ret: -1")
+        }
+        failureOf(connector(radio), car)
+
+        assertEquals(listOf(0L, 700, 2_100, 4_900, 9_900, 14_900, 19_900), starts)
     }
 
     @Test
@@ -209,15 +218,42 @@ class BluetoothSerialLinkConnectorTest {
         val radio = FakeRadio { FakeSocket("read failed, socket might closed or timeout, read ret: -1") }
         val message = failureOf(connector(radio), car)
 
-        // Tries every 700 ms while one can still start inside the 20 s.
-        assertEquals(29, radio.sockets.size)
-        assertTrue(radio.sockets.all { it.closes.get() == 1 })
+        // A try can start until 20 s are up.
+        assertEquals(7, radio.sockets.size)
+        assertTrue(radio.fakeSockets.all { it.closes.get() == 1 })
         assertEquals(
-            "No Bluetooth serial link to BMW 12345 came up (29 tries over 20 s). The agent may not be running on the " +
+            "No Bluetooth serial link to BMW 12345 came up (7 tries over 20 s). The agent may not be running on the " +
                 "head unit, the car may be out of range, or a wireless Android Auto session may be holding the car's " +
                 "one serial link to this phone. Last failure: read failed, socket might closed or timeout, read ret: -1",
             message,
         )
+    }
+
+    @Test
+    fun `a head unit whose agent dials is tried for 40 seconds, one not known to for 20`() = runTest {
+        val notKnown = FakeRadio { FakeSocket("refused") }
+        assertTrue(failureOf(connector(notKnown), car, dials = false).contains("(7 tries over 20 s)"))
+        assertEquals(19_900, currentTime)
+
+        val began = currentTime
+        val dials = FakeRadio { FakeSocket("refused") }
+        assertTrue(failureOf(connector(dials), car, dials = true).contains("(11 tries over 40 s)"))
+        assertEquals(39_900, currentTime - began)
+    }
+
+    @Test
+    fun `a try that hears nothing is given 15 seconds, and its socket is closed`() = runTest {
+        // The car never answers: each connect blocks until its socket is closed, on a thread of its own.
+        val radio = FakeRadio { FakeSocket(blocks = true) }
+        radio.listenFailure = "Bluetooth is off"
+        val message = failureOf(connector(radio, io = Dispatchers.IO), car)
+
+        // Tries at 0 and 15.7 s, each given up after 15 s: no third could start inside the 20 s.
+        assertEquals(2, radio.sockets.size)
+        assertTrue(radio.fakeSockets.all { it.closes.get() >= 1 })
+        assertEquals(30_700, currentTime)
+        assertTrue(message, message.contains("(2 tries over 31 s)"))
+        assertTrue(message, message.endsWith("Last failure: The car didn't answer within 15 s"))
     }
 
     @Test
@@ -226,7 +262,7 @@ class BluetoothSerialLinkConnectorTest {
             override fun unavailable(address: String): String? = null
             override fun socket(address: String, uuid: UUID): SerialSocket = throw IOException()
         }
-        val message = failureOf(BluetoothSerialLinkConnector(radio, windowMillis = 500, now = { currentTime }, io = StandardTestDispatcher(testScheduler)), car)
+        val message = failureOf(connector(radio, times = SerialConnectTimes(windowMillis = 500)), car)
 
         assertTrue(message, message.startsWith("No Bluetooth serial link to BMW 12345 came up (1 try). "))
         assertTrue(message, message.endsWith("serial link to this phone."))
@@ -249,7 +285,7 @@ class BluetoothSerialLinkConnectorTest {
             override fun unavailable(address: String): String? = null
             override fun socket(address: String, uuid: UUID): SerialSocket = socket
         }
-        val connector = BluetoothSerialLinkConnector(radio, now = { currentTime }, io = StandardTestDispatcher(testScheduler))
+        val connector = connector(radio)
         caller = launch { connector.connect(car) }
         caller.join()
 
@@ -259,17 +295,150 @@ class BluetoothSerialLinkConnectorTest {
 
     @Test
     fun `a link whose socket fails to close is closed all the same`() = runTest {
-        val radio = FakeRadio { FakeSocket(null) }
+        val radio = FakeRadio()
         val link = connector(radio).connect(car)
-        radio.sockets.single().closeFailure = "already gone"
+        radio.fakeSockets.single().closeFailure = "already gone"
         link.close()
-        assertEquals(1, radio.sockets.single().closes.get())
+        assertEquals(1, radio.fakeSockets.single().closes.get())
+    }
+
+    @Test
+    fun `listening that cannot start leaves the phone's dial to go on alone`() = runTest {
+        val radio = FakeRadio { attempt -> FakeSocket(if (attempt < 2) "refused" else null) }
+        radio.listenFailure = "The phone refused to listen"
+        // The listener on the test's clock too, as it blocks on nothing here: it has failed before the second try.
+        val link = connector(radio, listenIo = StandardTestDispatcher(testScheduler)).connect(car, dials = true)
+
+        assertSame(radio.sockets.last().output, link.output)
+        assertEquals(1, radio.listens.size)
+    }
+
+    // ---- the phone's dial and the car's link, on real threads ----------------------------------------------------
+
+    /** A connector with every time as in the app, on real threads, and its listener, to see that it is left closed. */
+    private class Live(radio: SerialRadio) {
+        val listener = SerialListener(radio)
+        val connector = BluetoothSerialLinkConnector(radio, listener = listener)
+    }
+
+    @Test
+    fun `a link the car opens is taken while the phone's dial hangs, and the dial is given up`() = live {
+        val radio = FakeRadio { FakeSocket(blocks = true) }
+        val live = Live(radio)
+        val connecting = async { live.connector.connect(car, dials = true) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+        assertTrue(radio.fakeSockets.single().connecting.await(10, TimeUnit.SECONDS))
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address)
+        val link = connecting.await()
+
+        assertSame(incoming.output, link.output)
+        assertTrue(link.magicSent)
+        assertArrayEquals(FrameCodec.MAGIC, incoming.written)
+        assertEquals(0, incoming.closes.get())
+        // Nothing else is left open: the phone's dial, and the listener.
+        assertEquals(1, radio.sockets.size)
+        assertTrue(radio.fakeSockets.single().closes.get() >= 1)
+        until("the listener closed") { live.listener.idle }
+        assertTrue(server.closes.get() >= 1)
+    }
+
+    @Test
+    fun `the phone's dial wins where it comes up first, and the listener is closed`() = live {
+        val radio = FakeRadio()
+        val live = Live(radio)
+        val link = live.connector.connect(car)
+
+        assertSame(radio.sockets.single().output, link.output)
+        until("the listener closed") { live.listener.idle }
+        assertTrue(radio.servers.all { it.closes.get() >= 1 })
+    }
+
+    @Test
+    fun `a link the car opens just after the phone's came up is closed, with nothing written after the magic bytes`() = live {
+        val dialGate = CountDownLatch(1)
+        val dialled = GatedSocket(connectGate = dialGate)
+        val radio = FakeRadio { dialled }
+        val live = Live(radio)
+        val connecting = async { live.connector.connect(car) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+
+        // The car's link is up and its magic bytes are on their way; then the phone's dial comes up and is handed over.
+        val returned = CountDownLatch(1)
+        val incoming = GatedSocket(writeGate = returned)
+        server.dialIn(incoming, car.address)
+        assertTrue(incoming.writing.await(10, TimeUnit.SECONDS))
+        dialGate.countDown()
+        val link = connecting.await()
+        returned.countDown()
+
+        assertSame(dialled.output, link.output)
+        until("the car's link closed") { incoming.closes.get() == 1 }
+        assertArrayEquals(FrameCodec.MAGIC, incoming.output.toByteArray())
+        assertEquals(0, dialled.closes.get())
+        until("the listener closed") { live.listener.idle }
+    }
+
+    @Test
+    fun `a connect that is cancelled leaves neither the dial nor the listener open`() = live {
+        val radio = FakeRadio { FakeSocket(blocks = true) }
+        val live = Live(radio)
+        val connecting = async { live.connector.connect(car, dials = true) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+        assertTrue(radio.fakeSockets.single().connecting.await(10, TimeUnit.SECONDS))
+
+        connecting.cancel()
+        connecting.join()
+
+        assertTrue(radio.fakeSockets.single().closes.get() >= 1)
+        until("the listener closed") { live.listener.idle }
+        assertTrue(server.closes.get() >= 1)
+        assertEquals("no second try after the cancel", 1, radio.sockets.size)
+    }
+
+    @Test
+    fun `a link from another device is turned away, and the connect goes on listening for the car`() = live {
+        val radio = FakeRadio { FakeSocket(blocks = true) }
+        val live = Live(radio)
+        val connecting = async { live.connector.connect(car, dials = true) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+
+        val other = FakeSocket()
+        server.dialIn(other, stranger)
+        assertTrue(server.awaitAccepting())
+        assertEquals(1, other.closes.get())
+        assertEquals(0, other.written.size)
+        assertFalse(connecting.isCompleted)
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address.lowercase())
+        assertSame(incoming.output, connecting.await().output)
+    }
+
+    @Test
+    fun `a dial that cannot even start leaves listening to go on alone`() = live {
+        val radio = FakeRadio()
+        radio.socketFailure = "The Bluetooth address saved for this head unit isn't one"
+        val live = Live(radio)
+        val connecting = async { live.connector.connect(car, dials = true) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address)
+        assertSame(incoming.output, connecting.await().output)
+        until("the listener closed") { live.listener.idle }
     }
 
     @Test
     fun `a caller that is cancelled while a connect blocks gets out of it, and the socket is closed`() = runBlocking {
         // On real threads: the connect sits in a blocking call that only the socket's close ends.
-        val socket = FakeSocket(null, blocks = true)
+        val socket = FakeSocket(blocks = true)
         val radio = FakeRadio { socket }
         val callers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
@@ -292,8 +461,13 @@ class BluetoothSerialLinkConnectorTest {
 class LinkConnectorsTest {
 
     private class Named(val name: String, val reaches: (Endpoint) -> Boolean) : LinkConnector {
+        val dials = CopyOnWriteArrayList<Boolean>()
         override fun supports(endpoint: Endpoint) = reaches(endpoint)
         override suspend fun connect(endpoint: Endpoint): Link = MemoryLink.pair(kind = name).first
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link {
+            this.dials += dials
+            return connect(endpoint)
+        }
     }
 
     private val serial = SerialEndpoint("00:11:22:33:44:55", "BMW 12345")
@@ -305,6 +479,13 @@ class LinkConnectorsTest {
         assertTrue(both.supports(serial) && both.supports(tcp))
         assertEquals("serial", both.connect(serial).kind)
         assertEquals("tcp", both.connect(tcp).kind)
+    }
+
+    @Test
+    fun `whether the agent dials is handed on`() = runBlocking {
+        val serialOnly = Named("serial") { it is SerialEndpoint }
+        LinkConnectors(listOf(serialOnly)).connect(serial, dials = true)
+        assertEquals(listOf(true), serialOnly.dials)
     }
 
     @Test

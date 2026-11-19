@@ -219,6 +219,17 @@ class HeadUnitStoreTest {
     }
 
     @Test
+    fun `whether the agent dials is kept with the head unit, and one saved before reads as not known to`() = runTest {
+        file.writeText(
+            """[{"id":"one","name":"Car","endpoints":[{"type":"serial","address":"00:11:22:33:44:55","deviceName":"BMW 12345"}]}]""",
+        )
+        assertEquals(false, opened { it.headUnit("one").first() }?.serialDial)
+
+        opened { it.update("one") { unit -> unit.copy(serialDial = true) } }
+        assertEquals(true, opened { it.headUnit("one").first() }?.serialDial)
+    }
+
+    @Test
     fun `a file this version cannot read is set aside, not lost`() = runTest {
         file.writeText("""[{"id":"one","name":"Car","host":"192.168.0.1","port":22,"transport":"WIFI"}]""")
 

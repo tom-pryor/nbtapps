@@ -37,6 +37,22 @@ class ConnectRetryTest {
     }
 
     @Test
+    fun `each pause is twice the one before, up to the longest, and the window counts the pause to come`() = runTest {
+        val starts = mutableListOf<Long>()
+        try {
+            connectWithRetry<String>(12_000, 1_000, { currentTime }, maxPauseMillis = 3_000) {
+                starts += currentTime
+                throw IOException("refused")
+            }
+            fail("expected a failure")
+        } catch (e: ConnectFailedException) {
+            // Pauses of 1, 2, 3 and 3 s; a try at 12 s would be past the window.
+            assertEquals(listOf(0L, 1_000, 3_000, 6_000, 9_000), starts)
+            assertEquals("5 tries over 9 s", e.tries)
+        }
+    }
+
+    @Test
     fun `gives up when no further try fits in the window, and says how hard it tried`() = runTest {
         var tries = 0
         val last = IOException("read failed")

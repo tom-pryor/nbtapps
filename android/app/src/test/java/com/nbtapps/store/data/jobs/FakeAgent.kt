@@ -9,6 +9,7 @@ import com.nbtapps.store.data.json.StrictJson
 import com.nbtapps.store.data.link.Frame
 import com.nbtapps.store.data.link.FrameCodec
 import com.nbtapps.store.data.link.FrameReader
+import com.nbtapps.store.data.link.IncomingLink
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.MemoryLink
@@ -19,6 +20,7 @@ import com.nbtapps.store.model.TcpEndpoint
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.security.SecureRandom
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -27,6 +29,11 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.Deflater
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -644,7 +651,8 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
 
 /**
  * Gives the app a link to a new [FakeAgent] each time it connects. A test sets each one up in [onConnect]. It
- * reaches TCP endpoints, or with [serial] Bluetooth serial ones, over a link that says it is serial.
+ * reaches TCP endpoints, or with [serial] Bluetooth serial ones, over a link that says it is serial. With [serial]
+ * the car can open a link too, to an agent set up the same way, while the app listens: [dialIn].
  */
 class FakeConnector(
     private val headUnitId: String = "000102030405060708090a0b0c0d0e0f",
@@ -666,7 +674,85 @@ class FakeConnector(
 
     val agent: FakeAgent get() = agents.last()
 
+    /** Whether each connect was told that the head unit's agent dials, in order. */
+    val dials = CopyOnWriteArrayList<Boolean>()
+
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link {
+        this.dials += dials
+        return connect(endpoint)
+    }
+
     override fun supports(endpoint: Endpoint): Boolean = if (serial) endpoint is SerialEndpoint else endpoint is TcpEndpoint
+
+    /**
+     * A call of [accept] that waits: the endpoints it takes a link from, the link it is handed, and whether its caller
+     * took that link, which one that was cancelled just then did not.
+     */
+    private class Listener(val endpoints: Collection<Endpoint>) {
+        val handed = CompletableDeferred<IncomingLink>()
+        val taken = CompletableFuture<Boolean>()
+    }
+
+    /** The calls of [accept] that wait now. */
+    private val listeners = CopyOnWriteArrayList<Listener>()
+
+    /** How many calls of [accept] wait now: whether the app listens for the car. */
+    val listening = MutableStateFlow(0)
+
+    /** How many times [accept] has been called. */
+    val listens = AtomicInteger()
+
+    /** When set, listening cannot start, and says this. */
+    @Volatile
+    var listenFailure: String? = null
+
+    override fun accepts(endpoint: Endpoint): Boolean = serial && endpoint is SerialEndpoint
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    override suspend fun accept(endpoints: Collection<Endpoint>): IncomingLink {
+        listens.incrementAndGet()
+        listenFailure?.let { throw IOException(it) }
+        val waiter = Listener(endpoints)
+        listeners += waiter
+        listening.update { it + 1 }
+        try {
+            return waiter.handed.await().also { waiter.taken.complete(true) }
+        } catch (e: CancellationException) {
+            // As the app's listener: a link handed over just as the caller gave up is closed, not lost open.
+            if (!waiter.handed.completeExceptionally(e) && waiter.handed.getCompletionExceptionOrNull() == null) {
+                waiter.handed.getCompleted().link.close()
+            }
+            waiter.taken.complete(false)
+            throw e
+        } finally {
+            listeners -= waiter
+            listening.update { it - 1 }
+        }
+    }
+
+    /**
+     * The car at [address] opens a link to the phone, to a new agent set up by [onConnect], as one the phone dialled
+     * is. Null where the app does not listen for that car now, or gave up listening just then, which closes the link
+     * before anything is written on it. Waits for the app to take the link or close it.
+     */
+    fun dialIn(address: String): FakeAgent? {
+        for (waiter in listeners) {
+            val endpoint = waiter.endpoints.firstOrNull { it is SerialEndpoint && it.address.equals(address, ignoreCase = true) } ?: continue
+            val (phone, other) = MemoryLink.pair(kind = Link.SERIAL)
+            val agent = FakeAgent(other, headUnitId).also {
+                it.phones = phones
+                onConnect(it)
+            }
+            if (!waiter.handed.complete(IncomingLink(endpoint, phone))) {
+                phone.close()
+                continue
+            }
+            if (!waiter.taken.get(10, TimeUnit.SECONDS)) continue
+            agents += agent
+            return agent
+        }
+        return null
+    }
 
     override suspend fun connect(endpoint: Endpoint): Link {
         unreachable?.let { throw IOException(it) }

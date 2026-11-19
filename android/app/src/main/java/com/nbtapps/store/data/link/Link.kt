@@ -48,7 +48,29 @@ interface LinkConnector {
      * @throws IOException if the endpoint cannot be reached, or this build has no transport for it.
      */
     suspend fun connect(endpoint: Endpoint): Link
+
+    /**
+     * [connect], to a head unit whose agent [dials] or does not: one that has the car open the link to the phone, as
+     * its last `hello` said ([com.nbtapps.store.model.HeadUnit.serialDial]). Only Bluetooth serial makes anything of
+     * it: see [BluetoothSerialLinkConnector].
+     */
+    suspend fun connect(endpoint: Endpoint, dials: Boolean): Link = connect(endpoint)
+
+    /** Whether [accept] can bring a link that the head unit at [endpoint] opens to the phone. Only Bluetooth serial can. */
+    fun accepts(endpoint: Endpoint): Boolean = false
+
+    /**
+     * Waits for one of [endpoints] to open a link to the phone, as an agent that dials has the car do, and returns it
+     * with the endpoint it came from: a link like one [connect] opens, the phone's magic bytes written. A caller that
+     * is cancelled leaves nothing open.
+     *
+     * @throws IOException if the phone cannot listen now, or none of [endpoints] is one this connector [accepts].
+     */
+    suspend fun accept(endpoints: Collection<Endpoint>): IncomingLink = throw IOException("This version of the app can't take a link the head unit opens")
 }
+
+/** A link a head unit opened to the phone: see [LinkConnector.accept]. */
+class IncomingLink(val endpoint: Endpoint, val link: Link)
 
 /**
  * Whether this build reaches a head unit at a network address at all. Only the debug build does, and only the
@@ -61,9 +83,20 @@ val LinkConnector.reachesTcp: Boolean
 class LinkConnectors(private val connectors: List<LinkConnector>) : LinkConnector {
     override fun supports(endpoint: Endpoint): Boolean = connectors.any { it.supports(endpoint) }
 
-    override suspend fun connect(endpoint: Endpoint): Link =
-        (connectors.firstOrNull { it.supports(endpoint) } ?: throw IOException("This version of the app has no way to reach this head unit yet"))
-            .connect(endpoint)
+    override suspend fun connect(endpoint: Endpoint): Link = connectorFor(endpoint).connect(endpoint)
+
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link = connectorFor(endpoint).connect(endpoint, dials)
+
+    override fun accepts(endpoint: Endpoint): Boolean = connectors.any { it.accepts(endpoint) }
+
+    /** Through the first connector that accepts any of [endpoints], for those it accepts. */
+    override suspend fun accept(endpoints: Collection<Endpoint>): IncomingLink {
+        val taker = connectors.firstOrNull { connector -> endpoints.any(connector::accepts) } ?: return super.accept(endpoints)
+        return taker.accept(endpoints.filter(taker::accepts))
+    }
+
+    private fun connectorFor(endpoint: Endpoint): LinkConnector =
+        connectors.firstOrNull { it.supports(endpoint) } ?: throw IOException("This version of the app has no way to reach this head unit yet")
 }
 
 /** The link ended, or was never usable. The message is shown to the user. */
