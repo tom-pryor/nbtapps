@@ -11,6 +11,10 @@
 //                       row starts the launcher (agent_start.hpp, startByHand) and the screen asks again, once a
 //                       second, until an agent answers or kStartWaitTicks have gone by. The way to start an agent
 //                       on a head unit with no console, so that a phone can reach it.
+//   Stop the agent      Says what it does, and on a press of its second row asks the agent to stop (agent.stop), as
+//                       `nbtctl stop` does, and keeps its link until the agent has ended, kStopWaitTicks at most. The
+//                       agent leaves a mark that keeps the plugin from starting it with the head unit until the head
+//                       unit has powered down, or Start the agent starts it (agent_start.hpp).
 //
 //   Pair a phone        Shown: asks the agent for a pairing window (pairing.open) and shows its code. The user types
 //                       the code into the phone app, the agent hands that phone its key, and the screen says so.
@@ -25,7 +29,8 @@
 //
 // A screen opens a link to the agent when it has something to ask and closes it when it has its answer, so
 // with none of them on the screen the plugin has no link and runs no timer. Start the agent also runs the timer
-// while it waits for an agent it has started, and only while it is shown. tick() is the timer: the app calls it
+// while it waits for an agent it has started, and only while it is shown. Stop the agent keeps its link after the
+// answer until the agent has ended, and only while it is shown. tick() is the timer: the app calls it
 // every kScreenTickMs for as long as wantsTick() is true, and all of a screen's talk with the agent happens inside
 // it.
 // An agent that does not answer within kScreenAnswerTicks of them is taken for not running.
@@ -43,6 +48,7 @@ const unsigned kScreenTickMs = 200;
 const unsigned kScreenAnswerTicks = 25;   // 5 s
 const unsigned kStartProbeTicks = 5;      // 1 s: how often Start the agent asks again after a start
 const unsigned kStartWaitTicks = 150;     // 30 s: how long it asks before it says the start did not work
+const unsigned kStopWaitTicks = 150;      // 30 s: how long Stop the agent waits for the agent to end after its yes
 
 // ---- Pair a phone --------------------------------------------------------------------------------------------------
 
@@ -339,6 +345,117 @@ private:
     int64_t resetId_;      // the serial.reset that has no answer yet, or 0
     unsigned waited_;
     ResetStatus status_;
+};
+
+// ---- Stop the agent ------------------------------------------------------------------------------------------------
+
+enum StopStatus {
+    kStopAsk,           // the row that does it is waiting to be pressed
+    kStopWorking,       // the agent has been asked, and has not answered
+    kStopStopping,      // it answered: it is ending, and the link is kept until it has
+    kStopStopped,       // the agent has ended
+    kStopNoAgent,       // no agent is running, or it went before it answered
+    kStopBusy,          // the agent is running a job, or a restart is on its way, and was not stopped
+    kStopUnsupported,   // the agent has no agent.stop: one from before it
+    kStopFailed         // the agent answered with another error, or had not ended kStopWaitTicks after its answer
+};
+
+class StopView {
+public:
+    virtual ~StopView() {}
+    virtual void stopShow(StopStatus status) = 0;
+};
+
+// The agent answers agent.stop at once and ends once its answer is written out. It leaves the local socket's links
+// open until its process ends (agent/agent.hpp), so the screen keeps its link after the answer, and the end of the
+// link is what says that the agent has stopped. An agent that does not know the method answers it with
+// `unsupported`. What keeps the plugin from starting the stopped agent again is in agent_start.hpp.
+class StopScreen : public AgentLinkListener {
+public:
+    StopScreen(const std::string& socketPath, StopView* view)
+        : path_(socketPath), view_(view), link_(this), stopId_(0), waited_(0), status_(kStopAsk) {}
+
+    // The screen came up: it says what it does again, whatever the last time came to.
+    void shown() {
+        link_.close();
+        stopId_ = 0;
+        show(kStopAsk);
+    }
+
+    void hidden() {
+        // What was sent is not taken back: the agent stops, and nobody is told. A press that had no answer, or whose
+        // agent had not ended yet, is over, so the next showing starts over; the app starts no showing over while
+        // one waits.
+        link_.close();
+        stopId_ = 0;
+        if (status_ == kStopWorking || status_ == kStopStopping) status_ = kStopAsk;
+    }
+
+    // The row was pressed. Once per showing: a second press does nothing.
+    void pressed() {
+        if (status_ != kStopAsk) return;
+        waited_ = 0;
+        std::string why;
+        if (!link_.open(path_, &why)) {
+            show(kStopNoAgent);
+            return;
+        }
+        show(kStopWorking);
+        stopId_ = link_.request("agent.stop", "{}");
+    }
+
+    bool wantsTick() const { return link_.isOpen(); }
+
+    void tick() {
+        // The tick that brings the answer is not one of the kStopWaitTicks.
+        bool stopping = status_ == kStopStopping;
+        link_.poll();
+        if (!link_.isOpen()) return;
+        if (status_ == kStopWorking && stopId_ != 0 && ++waited_ > kScreenAnswerTicks) {
+            link_.close();
+            stopId_ = 0;
+            show(kStopNoAgent);
+        } else if (stopping && status_ == kStopStopping && ++waited_ >= kStopWaitTicks) {
+            // It said yes, and is still there.
+            link_.close();
+            show(kStopFailed);
+        }
+    }
+
+    StopStatus status() const { return status_; }
+
+    // AgentLinkListener
+    virtual void agentReply(int64_t id, const json::Value&, const std::string& code) {
+        if (id != stopId_) return;
+        stopId_ = 0;
+        if (code.empty()) {
+            // The link stays: its end is the agent's.
+            waited_ = 0;
+            show(kStopStopping);
+            return;
+        }
+        link_.close();
+        show(code == "busy" ? kStopBusy : code == "unsupported" ? kStopUnsupported : kStopFailed);
+    }
+    virtual void agentEvent(const std::string&, const json::Value&) {}
+    virtual void agentGone(const std::string&) {
+        stopId_ = 0;
+        if (status_ == kStopStopping) show(kStopStopped);
+        else if (status_ == kStopWorking) show(kStopNoAgent);
+    }
+
+private:
+    void show(StopStatus status) {
+        status_ = status;
+        view_->stopShow(status);
+    }
+
+    std::string path_;
+    StopView* view_;
+    AgentLink link_;
+    int64_t stopId_;       // the agent.stop that has no answer yet, or 0
+    unsigned waited_;      // ticks since it was sent, and then since it was answered
+    StopStatus status_;
 };
 
 // ---- Start the agent -----------------------------------------------------------------------------------------------

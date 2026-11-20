@@ -1,10 +1,11 @@
 # NBTApp
 
 A native iDrive app for BMW NBT Evo head units (iDrive 5/6, QNX Neutrino 6.5.0 SP1, ARMv7LE). For now it is
-small: an **NBTApp** entry in Media/Radio that opens a menu with five rows, **Start the agent**, **Pair a phone**,
-**Forget all phones**, **Reset Bluetooth link** and **About**. The first starts the install agent on a head unit
-with no console, the next two are the car's side of pairing a phone app with it (see
-[Packages and the agent](#packages-and-the-agent)), and the fourth has the car end the phone's Bluetooth serial
+small: an **NBTApp** entry in Media/Radio that opens a menu with six rows, **Start the agent**, **Stop the agent**,
+**Pair a phone**, **Forget all phones**, **Reset Bluetooth link** and **About**. The first starts the install agent
+on a head unit with no console, and the second stops it until the head unit has powered down (see "Stopping from
+the iDrive menu"); the next two are the car's side of pairing a phone app with it (see
+[Packages and the agent](#packages-and-the-agent)), and the fifth has the car end the phone's Bluetooth serial
 link, for a phone app that connects and gets nothing (see "How a link ends").
 
 It is an iDrive **PluginApp**, built on the **HU Framework**: the head unit's own framework for add-on apps such as
@@ -17,13 +18,13 @@ Nothing in HmiMain3D is patched.
 
 | Path | Purpose |
 |---|---|
-| `src/nbt_app.cpp` | The app (`pluginAppInfo` entry point). Fills the About text and drives the four screens that talk to the agent; the menu and its steps are XML |
-| `src/agent_start.hpp` | The start of the agent's launcher when the HMI starts, on a head unit that is asked to start the agent by itself, and the record that keeps an agent which brings the head unit down from being started for ever; and its start by hand from the Start the agent screen |
-| `src/phone_screens.hpp`, `src/agent_link.hpp` | What the Start the agent, Pair a phone, Forget all phones and Reset Bluetooth link screens ask of the agent, and when; and their link to it, the agent's local socket |
+| `src/nbt_app.cpp` | The app (`pluginAppInfo` entry point). Fills the About text and drives the five screens that talk to the agent; the menu and its steps are XML |
+| `src/agent_start.hpp` | The start of the agent's launcher when the HMI starts, on a head unit that is asked to start the agent by itself, and the record that keeps an agent which brings the head unit down from being started for ever, and the mark of a stop that keeps it from starting one that was stopped; and its start by hand from the Start the agent screen |
+| `src/phone_screens.hpp`, `src/agent_link.hpp` | What the Start the agent, Stop the agent, Pair a phone, Forget all phones and Reset Bluetooth link screens ask of the agent, and when; and their link to it, the agent's local socket |
 | `src/hu_framework.hpp` | Declarations of the HU Framework (it ships no headers) |
 | `src/version.hpp` | The plugin's version, which its package is released as |
 | `plugin/NbtApp.manifest` | Tells iDrive what to load |
-| `plugin/NbtApp.xml` | The UI: entry in Media/Radio after the Bluetooth audio row, menu (`hmiState` 10), Start the agent (`hmiState` 16), Pair a phone (`hmiState` 14), Forget all phones (`hmiState` 15), Reset Bluetooth link (`hmiState` 17), About page (`hmiState` 12), preview (`hmiState` 11) |
+| `plugin/NbtApp.xml` | The UI: entry in Media/Radio after the Bluetooth audio row, menu (`hmiState` 10), Start the agent (`hmiState` 16), Stop the agent (`hmiState` 18), Pair a phone (`hmiState` 14), Forget all phones (`hmiState` 15), Reset Bluetooth link (`hmiState` 17), About page (`hmiState` 12), preview (`hmiState` 11) |
 | `assets/` | Images: 63x54 row icon, 549x484 preview |
 | `stubs/*.syms` | Symbol names of the two HU Framework libraries. The build makes empty link stubs from them, so no head-unit binary is needed |
 | `tools/make_db.py` | The texts and image ids; packs the text and image DBs |
@@ -209,15 +210,15 @@ format and the protocol.
   to it now (`{"phones": N}`);
   `nbtctl serial status` and `nbtctl serial dial` send them. `agent/agent.hpp` has the members one by one.
 - `agent.stop`, on the local socket only, stops the agent for a person who asked for that: `nbtctl stop` sends
-  it. It takes no params, is refused with `forbidden` on any other link, so no
-  phone can stop the agent it talks to, and with `busy` while a job runs or a restart is on its way. An agent on
-  trial may be stopped, and its try then ends unconfirmed. The answer is `{}`, and once it is written out (two
-  seconds at most) the agent ends as it does for SIGTERM: the phones are told `link.closing` with the reason
-  `stopping`, Bluetooth serial is taken away, and the exit status is 0, so its launcher and the starter end too.
-  On its way out it leaves the empty file `agent.stopped` in its run folder on the RAM disk (`/tmp/nbtapp`, or
-  `DIR/run` with `--root`), which keeps the iDrive plugin (1.3.0 and later) from starting it with the head unit
-  until the head unit has powered down; the next agent that starts removes it, and says so.
-  A signal leaves no such file.
+  it, and so does the plugin's **Stop the agent** screen. It takes no params, is refused with `forbidden` on any
+  other link, so no phone can stop the agent it talks to, and with `busy` while a job runs or a restart is on its
+  way. An agent on trial may be stopped, and its try then ends unconfirmed. The answer is `{}`, and once it is
+  written out (two seconds at most) the agent ends as it does for SIGTERM: the phones are told `link.closing` with
+  the reason `stopping`, Bluetooth serial is taken away, and the exit status is 0, so its launcher and the starter
+  end too. On its way out it leaves the empty file `agent.stopped` in its run folder on the RAM disk
+  (`/tmp/nbtapp`, or `DIR/run` with `--root`), which keeps the iDrive plugin (1.3.0 and later) from starting it
+  with the head unit until the head unit has powered down ("Stopping from the iDrive menu", below); the next agent
+  that starts removes it, and says so. A signal leaves no such file.
 - The phone made a link, and the phone ends it. When the agent ends a link of its own accord it says so first,
   with the event `link.closing`, and closes its end once that is written out; nothing follows the event. Its
   `reason` is `stopping` (the agent's process ends), `restarting` (it ends for a newer version of itself, which
@@ -483,8 +484,9 @@ make plugin-release KEY=/path/to/package.key           # -> release/pkg/signed/,
   released is never built again with other content: raise the number.
 - **`requires.agent`** in `plugin/package/manifest.json.in` names the oldest agent the plugin runs with. It is
   1.1.0, the first agent whose update brings its launcher: the plugin starts that launcher's starter. The
-  **Reset Bluetooth link** screen needs an agent with `serial.reset` and does not raise it: with an older agent
-  the screen says that the agent cannot do this, and the rest of the plugin works as before. When it is raised,
+  **Reset Bluetooth link** screen needs an agent with `serial.reset`, and the **Stop the agent** screen one with
+  `agent.stop`, and neither raises it: with an older agent the screen says that the agent cannot do this ("The
+  agent cannot do this. Update it"), and the rest of the plugin works as before. When it is raised,
   and in which order the two packages are released, is under
   [Releasing the agent and the plugin](#releasing-the-agent-and-the-plugin).
 - **`make plugin-release`** refuses what `make agent-release` refuses of the agent's package: a library that was
@@ -984,8 +986,9 @@ bluetooth: the car dials a phone of the agent's that is connected to it and pair
 ```
 
 It ignores SIGHUP, so it goes on when the SSH session ends; `kill` with its process id stops it, and so does
-`nbtctl stop`, which also keeps the iDrive plugin from starting it again until the head unit powers down. Its log is its
-standard error and nothing else, so the file above grows in `/tmp`, which is memory, for as long as the agent runs.
+`nbtctl stop`, which also keeps the iDrive plugin from starting it again until the head unit powers down. Its log
+is its standard error and nothing else, so the file above grows in `/tmp`, which is memory, for as long as the
+agent runs.
 After a power down the programs are gone from `/tmp` and the agent has to be copied and started again.
 
 ### Kept on the head unit: the install script, the starter and a version's launcher
@@ -1036,6 +1039,12 @@ them: nothing on the head unit checks a first install's signature.
 | `autostart` | That it is there has the iDrive plugin start the starter when the HMI starts | The agent, when a phone or `nbtctl` asks (`autostart.set`); or by hand |
 | `autostart.boots` | A line for each such start that no agent has outlasted by five minutes | The plugin, before it starts the starter; the agent removes it |
 
+One more file of the start is not there but on the RAM disk, so that a power down takes it away:
+`/tmp/nbtapp/agent.stopped` (`DIR/run/agent.stopped` with `--root`). The agent leaves it, empty, when a controller
+stopped it with `agent.stop` (**Stop the agent**, or `nbtctl stop`), and it keeps the plugin from starting the
+starter when the HMI starts; the next agent that starts removes it. A signal leaves none ("Stopping from the
+iDrive menu", below).
+
 The install script writes over nothing and removes nothing. To put a version there that is there already (a new
 build with the same version), stop the agent, remove that version's folder by hand, and run the script again; it
 prints the command. It refuses while `trial` or `trial.started` is there.
@@ -1067,8 +1076,8 @@ same`, or, for a launcher that cannot be run at all, `... could not be run (stat
 
 To stop the agent, stop the agent (`slay nbtagent`, or `nbtctl stop`): its launcher and the starter follow. An
 agent on trial that is stopped ends its try: the starter finds `trial.started` at its next start and runs the
-version in `current`, which undoes the update. A starter or a launcher that is killed
-leaves the agent running with nothing to start it again.
+version in `current`, which undoes the update. A starter or a launcher that is killed leaves the agent running
+with nothing to start it again.
 
 There is one starter to a head unit. A starter keeps its process id in `/tmp/nbtapp/log/launcher.pid` for as
 long as it runs. A second one finds that file and the process it names running, says so, and ends with status 3
@@ -1139,6 +1148,8 @@ to the log (`sloginfo | grep NbtApp`, the lines that begin `agent:`). It starts 
 - there is no launcher in the agent's folder;
 - a launcher is running: the HMI starts more than once while a head unit is on (the agent restarts it after it
   has installed a plugin), and the launcher of the first time is left as it is;
+- `/tmp/nbtapp/agent.stopped` is there: the agent was stopped from the menu or with `nbtctl stop` since the head
+  unit powered up ("Stopping from the iDrive menu", below). Nothing goes on record for that;
 - three starts with the head unit are on record that no agent outlasted by five minutes.
 
 That record is `autostart.boots`. The agent puts a gate in front of the car's Bluetooth serial node; one that
@@ -1170,6 +1181,31 @@ It starts nothing where there is no launcher in the agent's folder (the screen s
 installed**), or where a launcher is running (the screen waits for its agent). With `/var/opt/nbtapp/disable`
 there the plugin has no menu at all. Each press that starts something is one line in the log: `agent: started the
 launcher by hand (process ...)`.
+
+#### Stopping from the iDrive menu
+
+**NBTApp**, then **Stop the agent**. The first row says what it does, **Off until the head unit restarts**, and
+the second, **Stop it now**, asks the agent to stop (`agent.stop` over its local socket, as `nbtctl stop` sends it).
+The agent answers at once and ends as it does for `slay nbtagent`: the phones are told that it is stopping,
+Bluetooth serial is taken away, and its launcher and the starter end with it. The screen reads **Stopping the
+agent...** and keeps its link to the agent until the agent has gone, then **The agent is stopped**; if the agent
+has not gone 30 seconds after its answer, **The agent did not stop**. While a job runs or a restart is on its way
+the agent refuses (**A job is running. Try again later**); an agent from before `agent.stop` answers that it has
+no such method (**The agent cannot do this. Update it**); with no agent running the screen says **The agent is not
+running**. One press per showing; the page starts over when it is shown again. It needs no SSH.
+
+An agent stopped this way leaves the empty file `/tmp/nbtapp/agent.stopped` on the RAM disk. While it is there the
+plugin does not start the starter when the HMI starts, whatever `autostart` says, and says why in its log
+(`agent: NOT started: the agent was stopped from the menu or with nbtctl ...`). What starts the agent again:
+
+- the head unit powering down, which empties the RAM disk: at the next start of the head unit the plugin starts
+  the agent as before, where `autostart` asks for it;
+- **Start the agent** in the menu, which does not look at the file, or the starter started by hand at a console.
+  The agent that starts removes the file, and its log says so.
+
+`slay nbtagent`, or any other signal, leaves no file, and the plugin goes on as before. A version of the agent on
+trial may be stopped too: its try ends unconfirmed, and the next start runs the version before it, which undoes
+the update ("The agent updates itself", below).
 
 #### The agent updates itself
 
@@ -1389,10 +1425,11 @@ plugin to be installed, to start, or to do what the version before it did. What 
 plugins that are out:
 
 - the messages a plugin sends on the local socket, which are `hello` with the role `plugin`, `pairing.open`,
-  `pairing.close`, `phones.forget` and `serial.reset`, and what they answer;
+  `pairing.close`, `phones.forget`, `serial.reset` and `agent.stop`, and what they answer;
 - the files a plugin goes by when it starts the agent: `launcher`, `autostart` and `autostart.boots` in
-  `/var/opt/nbtapp/agent`, `/tmp/nbtapp/log/launcher.pid`, and `/var/opt/nbtapp/disable`. A plugin starts
-  `launcher` with `/bin/ksh` and `NBT_LAUNCH_DELAY`, so a starter of any version takes both.
+  `/var/opt/nbtapp/agent`, `/tmp/nbtapp/log/launcher.pid`, `/tmp/nbtapp/agent.stopped`, and
+  `/var/opt/nbtapp/disable`. A plugin starts `launcher` with `/bin/ksh` and `NBT_LAUNCH_DELAY`, so a starter of
+  any version takes both.
 
 **2. The requirement is the plugin's.** A plugin that uses anything an older agent lacks names the first agent
 that has it in `requires.agent` (`plugin/package/manifest.json.in`). An agent below that refuses the package with

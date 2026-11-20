@@ -34,19 +34,20 @@ TEXTS = {1: "NBTApp",   # entry row in Media/Radio, menu title (textIdModel 3)
          5: "Forget all phones",     # menu row and page title (textIdModel 39)
          6: "Start the agent",       # menu row and page title (textIdModel 45)
          7: "Reset Bluetooth link",  # menu row and page title (textIdModel 48)
+         8: "Stop the agent",        # menu row and page title (textIdModel 51)
          # Pair a phone, first row (textIdModel 40): src/nbt_app.cpp points it at one of these.
          10: "Asking the agent...",
          11: "Type this code into the phone app",
          12: "Phone paired",
          13: "3 wrong codes. Wait 30 seconds",
          14: "Code ran out. Open this again",
-         15: "The agent is not running",         # on the Forget all phones, Start the agent and Reset Bluetooth
-                                                 # link pages too
+         15: "The agent is not running",         # on the Forget all phones, Start the agent, Reset Bluetooth
+                                                 # link and Stop the agent pages too
          16: "Too soon. Wait 30 seconds",
          17: "Pairing did not work",
          20: "---",                              # a code's half while there is none (textIdModels 41, 42),
-                                                 # and a row of Start the agent or Reset Bluetooth link that does
-                                                 # nothing (47, 50)
+                                                 # and a row of Start the agent, Reset Bluetooth link or Stop the
+                                                 # agent that does nothing (47, 50, 53)
          # Forget all phones: the first row (textIdModel 43), and what the second reads (textIdModel 44).
          30: "Every phone must pair again",
          31: "Forget them now",
@@ -68,9 +69,15 @@ TEXTS = {1: "NBTApp",   # entry row in Media/Radio, menu title (textIdModel 3)
          62: "Resetting...",
          63: "Now tap Connect in the phone app",
          64: "Ending it. Connect again in the app",
-         65: "A job is running. Try again later",
-         66: "The agent cannot do this. Update it",
-         67: "The reset did not work"}
+         65: "A job is running. Try again later",      # on the Stop the agent page too
+         66: "The agent cannot do this. Update it",    # on the Stop the agent page too
+         67: "The reset did not work",
+         # Stop the agent (src/nbt_app.cpp kStop*Text): the first row (textIdModel 52), and the second (53)
+         70: "Off until the head unit restarts",
+         71: "Stop it now",
+         72: "Stopping the agent...",
+         73: "The agent is stopped",
+         74: "The agent did not stop"}
 
 # The halves of a pairing code: text CODE_FIRST + n is the three digits of n, "000" to "999". The HMI shows texts
 # of this file only, so every half a code can have is one (src/nbt_app.cpp kCodeFirstText).

@@ -20,6 +20,8 @@
 //     the time it waits before its first start included. The HMI starts more than once while a head unit is on
 //     (the agent restarts it after it has installed a plugin), and each time the plugin finds the launcher of
 //     the first time and leaves it alone;
+//   - the agent was not stopped since the head unit powered up: no file agent.stopped is on the RAM disk. See
+//     below;
 //   - fewer than kMostStarts starts with the head unit are on record. See below;
 //   - this start can be put on record.
 //
@@ -37,11 +39,20 @@
 // That is one small file written to flash for each start with the head unit, and removed five minutes later. A
 // head unit with no `autostart` file is written to by none of this.
 //
+// The stop. The plugin's menu has a row that stops the agent (src/phone_screens.hpp, StopScreen), as `nbtctl stop`
+// does: both ask the agent for agent.stop, and the agent ends with its launcher and leaves the mark agent.stopped
+// in its run folder on the RAM disk (agent/agent_home.hpp). When the HMI starts again while the head unit is on,
+// the plugin would start the launcher once more; the mark keeps it from that. It goes when the head unit powers
+// down, which empties the RAM disk, or when an agent starts, which removes it: Start the agent in the menu, or the
+// launcher started by hand. A start with the head unit that the mark keeps off is not made, so nothing goes on
+// record for it. An agent stopped with a signal leaves no mark, and the plugin goes on as before.
+//
 // The start by hand. The plugin's menu has a row that starts the agent (src/phone_screens.hpp, StartScreen): the
 // way to the first start of an agent on a head unit with no console, after which a phone can switch `autostart`
 // on. It asks for the launcher and for no launcher that is running, and for nothing else:
 //
 //   - not for `autostart`: a person asks, there and then;
+//   - not for agent.stopped: a person who stopped the agent may start it again, and that agent removes the mark;
 //   - not for the record of starts, which it neither reads nor writes. The record keeps a head unit from starting
 //     a bad agent at every start with nobody there; a start by hand is one start with somebody there, and the
 //     next start of the head unit still finds what the record says. An agent started by hand that runs for five
@@ -142,8 +153,11 @@ struct Paths {
     std::string home;    // the agent's folder, where hu_install.sh puts the starter as `launcher`
     std::string lock;    // where a running starter keeps its process id (nbtstart.sh)
     std::string shell;   // what runs the launcher
+    std::string stopped; // the mark an agent that a controller stopped leaves in its run folder (agent_home.hpp)
 
-    Paths() : home("/var/opt/nbtapp/agent"), lock("/tmp/nbtapp/log/launcher.pid"), shell("/bin/ksh") {}
+    Paths()
+        : home("/var/opt/nbtapp/agent"), lock("/tmp/nbtapp/log/launcher.pid"), shell("/bin/ksh"),
+          stopped(std::string("/tmp/nbtapp/") + kStoppedMark) {}
 };
 
 // What a shell on a head unit has, and the launcher's wait: kDelayS with the head unit, 0 by hand.
@@ -273,6 +287,8 @@ enum Decision {
     kNotAsked,        // no autostart file (with the head unit only)
     kNoLauncher,      // no launcher in the agent's folder
     kRunning,         // a launcher is running
+    kStoppedByHand,   // the agent was stopped from the menu or with nbtctl since the head unit powered up (with the
+                      // head unit only)
     kTooManyStarts,   // the record holds kMostStarts starts (with the head unit only)
     kNotCounted,      // this start could not be put on record (with the head unit only)
     kNotStarted       // the launcher could not be started
@@ -318,6 +334,11 @@ inline Outcome startWithHeadUnit(const Paths& paths, int64_t now, const std::vec
     if (!isFile(launcher)) return outcome(kNoLauncher, launcher + " is not there: nothing to start");
     const std::string running = runningLauncher(paths);
     if (!running.empty()) return outcome(kRunning, running);
+    if (isFile(paths.stopped)) {
+        return outcome(kStoppedByHand,
+                       "NOT started: the agent was stopped from the menu or with nbtctl, says " + paths.stopped +
+                           ". Start the agent in the menu starts it again, and so does the head unit once it has powered down");
+    }
 
     std::vector<int64_t> starts = counted(parseStarts(readSmall(record)), now);
     if (!allowed(starts.size())) {

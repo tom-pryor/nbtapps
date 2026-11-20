@@ -171,7 +171,7 @@ on the **Head units** page, and its own page connects and pairs as the set-up do
 ## 6. The iDrive plugin, and starting with the car
 
 The plugin is the **NBTApp** entry in iDrive's Media/Radio menu. It starts the agent with the car, and gives
-the car's screen **Start the agent** and **Pair a phone**.
+the car's screen **Start the agent**, **Stop the agent** and **Pair a phone**.
 
 With **Enable autostart** ticked, the app sets this up by itself once the phone is paired. The set-up's last
 page, **Start with the car**, lists the stages and ticks each one off:
@@ -300,6 +300,7 @@ From now on:
 | The agent no longer starts with the car | After three starts in a row in which the agent did not keep running for five minutes, the plugin stops trying. The card in the app says so; tap **Have the car try again**. Over SSH: `rm /var/opt/nbtapp/agent/autostart.boots` |
 | The phone connects but nothing arrives | Bytes left over from an earlier link can hold up the next ones. On the car's screen open **NBTApp**, **Reset Bluetooth link** and press **Reset now**, then tap **Connect** in the phone app; this needs no SSH. If the screen says the agent cannot do this, the agent is too old for any of these ways: restart the head unit, and update the agent from the app. Over SSH, `nbtctl serial reset` does the same, and the agent's log says what came of it. Whenever the app does reach the agent, **Reset Bluetooth link** under **Troubleshooting** on the head unit's page in the app does the same, and connects again by itself. If links still carry nothing, restart the head unit |
 | **Pair a phone** on the car's screen shows no code | Get one over SSH: `nbtctl pair`, as in step 5 |
+| Another app's connection to the car works only while the agent is stopped | On the car's screen open **NBTApp**, **Stop the agent** and press **Stop it now**. The agent stays stopped until the head unit restarts, or until **Start the agent** starts it; over SSH, `nbtctl stop` does the same. If the screen says the agent cannot do this, update the agent from the app. Please send a report that names the other app, with the agent's log, `/tmp/nbtapp/log/agent.log` |
 
 The agent's log is `/tmp/nbtapp/log/agent.log`, with the two starts before it as `agent.log.1` and
 `agent.log.2`. A restart of the head unit empties them. The plugin logs to the system log:

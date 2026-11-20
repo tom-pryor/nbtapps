@@ -107,6 +107,9 @@ int main(int argc, char** argv) {
     CHECK(has(installText, std::string("cp \"$SRC/") + kAgentStarter + "\" \"$AGENT_HOME/launcher.new\""));
     CHECK(car.lock == "/tmp/nbtapp/log/launcher.pid" && has(starterText, "LOG_DIR=${NBT_TEST_LAUNCH_RUN:-/tmp/nbtapp/log}") &&
           has(starterText, "LOCK=$LOG_DIR/launcher.pid"));
+    // The mark of an agent that a controller stopped is where the agent leaves it: in the RAM disk's folder that
+    // holds the launcher's log folder (test_hu_platform.cpp holds it against the head unit's run folder).
+    CHECK(car.stopped == "/tmp/nbtapp/" + std::string(kStoppedMark) && car.lock.compare(0, 12, "/tmp/nbtapp/") == 0);
     CHECK(car.shell == "/bin/ksh" && starterText.compare(0, 11, "#!/bin/ksh\n") == 0 && launcherText.compare(0, 11, "#!/bin/ksh\n") == 0);
     // The starter has the same shell run a version's launcher, by the name the starter looks for in a version's folder.
     CHECK(has(starterText, "SH=${NBT_TEST_LAUNCH_SH:-" + car.shell + "}") &&
@@ -125,6 +128,7 @@ int main(int argc, char** argv) {
     paths.home = work + "/home";
     paths.lock = work + "/ram/log/launcher.pid";
     paths.shell = "/bin/sh";
+    paths.stopped = work + "/ram/agent.stopped";
     std::vector<std::string> vars;
     vars.push_back("PATH=/usr/bin:/bin");
     vars.push_back("NBT_TEST_LAUNCH_RUN=" + work + "/ram/log");
@@ -143,6 +147,11 @@ int main(int argc, char** argv) {
     put(paths.home + "/1.0.0/nbtlaunch.sh", launcherText, 0755);
     o = startWithHeadUnit(paths, now, vars);
     CHECK(o.decision == kNotAsked && fs::kindOf(record) == fs::kNone);
+    // Nor with the mark of a stop there: with no autostart file, that is what the log says.
+    put(paths.stopped, "");
+    o = startWithHeadUnit(paths, now, vars);
+    CHECK_IN(o.line, o.decision == kNotAsked && fs::kindOf(record) == fs::kNone);
+    CHECK(unlink(paths.stopped.c_str()) == 0);
 
     // Asked, and no launcher.
     put(wanted, "on\n");
@@ -151,6 +160,14 @@ int main(int argc, char** argv) {
 
     // Asked, and a launcher: it is started, and the start is on record before that.
     put(paths.home + "/launcher", starterText, 0755);
+    // The agent was stopped from the menu or with nbtctl since the head unit powered up: nothing is started, and
+    // nothing goes on record.
+    put(paths.stopped, "");
+    o = startWithHeadUnit(paths, now, vars);
+    CHECK_IN(o.line, o.decision == kStoppedByHand && o.pid < 0 && has(o.line, "stopped from the menu or with nbtctl") &&
+                         has(o.line, paths.stopped) && has(o.line, "Start the agent in the menu"));
+    CHECK(fs::kindOf(record) == fs::kNone && fs::kindOf(started) == fs::kNone && fs::kindOf(paths.lock) == fs::kNone);
+    CHECK(unlink(paths.stopped.c_str()) == 0);
     o = startWithHeadUnit(paths, now, vars);
     CHECK_IN(o.line, o.decision == kStarted && o.pid > 0 && has(o.line, "as start 1 of the 3"));
     CHECK(testutil::readFile(record) == "1790000000\n");
@@ -239,6 +256,8 @@ int main(int argc, char** argv) {
     CHECK_IN(o.line, o.decision == kNotStarted && o.pid < 0 && has(o.line, "NOT started by hand: cannot start "));
     std::vector<std::string> handVars = vars;
     handVars.back() = "NBT_LAUNCH_DELAY=0";
+    // The mark of a stop does not keep a start by hand off: the agent that starts removes it.
+    put(paths.stopped, "");
     o = startByHand(paths, handVars);
     CHECK_IN(o.line, o.decision == kStarted && o.pid > 0 && has(o.line, "started the launcher by hand (process "));
     // While its agent runs, a second press finds the launcher and leaves it alone.
@@ -252,6 +271,7 @@ int main(int argc, char** argv) {
     CHECK_IN(sawByHand, sawByHand == "delay=0\npath=/usr/bin:/bin\nleak=\nargs=0\nstdin=none\n");
     CHECK(!has(testutil::readFile(work + "/ram/log/agent.log"), "waited"));
     CHECK(testutil::readFile(record) == "1790000000\n1790000020\n1790000030\n" && fs::kindOf(wanted) == fs::kNone);
+    CHECK(unlink(paths.stopped.c_str()) == 0);
 
     CHECK_IN(why, fs::removeTree(work, &why));
     printf("test_agent_start: ok\n");

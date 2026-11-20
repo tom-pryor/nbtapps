@@ -13,6 +13,9 @@
 //                       agent's launcher (agent_start.hpp, startByHand), and the screen says when the agent is
 //                       there. How a head unit with no console gets its first agent, which a phone can then have
 //                       started with the head unit.
+//   Stop the agent      hmiState 18. Its second row asks the agent to stop, and the first row says how that went. The
+//                       agent leaves a mark that keeps this plugin from starting it again with the head unit until
+//                       the head unit has powered down, or Start the agent starts it.
 //   Pair a phone        hmiState 14. While it is shown the agent has a pairing window open, and the screen shows the
 //                       window's code: six digits, as two texts of three. The user types the code into the phone
 //                       app, and the screen says how that went.
@@ -33,7 +36,8 @@
 //
 // create() also starts the agent's launcher, on a head unit that is to start the agent by itself: when, with
 // what, and what keeps it from doing so is in agent_start.hpp. It is one line in the log each time the HMI
-// starts, and a start from the Start the agent screen is one line more.
+// starts, and a start from the Start the agent screen is one line more. After a stop from the Stop the agent screen
+// (or `nbtctl stop`), that line says that nothing was started, and why.
 //
 // The app asks the HMI to tell it when one of its states is shown and left (addHandler with type 11, visible) and
 // when it has the focus (type 1), and each one that comes is a line in the log. A state that is never reported as
@@ -143,6 +147,21 @@ const unsigned kResetBusyText = 65;
 const unsigned kResetUnsupportedText = 66;
 const unsigned kResetFailedText = 67;
 
+// Stop the agent (hmiState 18): the first row says what it does and then how it went, and the second does it
+// (raAction 34) and reads "---" once it has been pressed. Busy and an agent from before agent.stop read as on Reset
+// Bluetooth link.
+const unsigned kStopState = 18;
+const unsigned kStopAction = 34;
+const unsigned kStopStatusModel = 52;
+const unsigned kStopRowModel = 53;
+const unsigned kStopAskText = 70;
+const unsigned kStopNowText = 71;
+const unsigned kStopStoppingText = 72;
+const unsigned kStopStoppedText = 73;
+const unsigned kStopFailedText = 74;
+const unsigned kStopBusyText = 65;
+const unsigned kStopUnsupportedText = 66;
+
 // The types of a state's notifications (hu_framework.hpp, addHandler).
 const unsigned kNotifyFocus = 1;
 const unsigned kNotifyVisible = 11;
@@ -211,11 +230,13 @@ public:
 };
 
 // ---- the screens ---------------------------------------------------------------------------------------------------
-class Screens : public nbt::PairView, public nbt::ForgetView, public nbt::StartView, public nbt::ResetView {
+class Screens : public nbt::PairView, public nbt::ForgetView, public nbt::StartView, public nbt::ResetView,
+                public nbt::StopView {
 public:
     explicit Screens(bmw::PluginApp* app)
         : app_(app), pair_(nbt::kHeadUnitSocket, this), forget_(nbt::kHeadUnitSocket, this),
-          start_(nbt::kHeadUnitSocket, this, &starter_), reset_(nbt::kHeadUnitSocket, this) {}
+          start_(nbt::kHeadUnitSocket, this, &starter_), reset_(nbt::kHeadUnitSocket, this),
+          stop_(nbt::kHeadUnitSocket, this) {}
 
     // A state of ours is shown (or has the focus), or was left.
     void pairShown() {
@@ -237,12 +258,18 @@ public:
         if (reset_.status() != nbt::kResetWorking) reset_.shown();
     }
     void resetHidden() { reset_.hidden(); }
+    void stopShown() {
+        // Told twice while it waits for the agent, it is one showing.
+        if (stop_.status() != nbt::kStopWorking && stop_.status() != nbt::kStopStopping) stop_.shown();
+    }
+    void stopHidden() { stop_.hidden(); }
     // The app is being taken down: no link to the agent outlasts it.
     void closeLinks() {
         pair_.hidden();
         forget_.hidden();
         start_.hidden();
         reset_.hidden();
+        stop_.hidden();
     }
     void forgetPressed() {
         forget_.confirmed();
@@ -256,12 +283,17 @@ public:
         reset_.pressed();
         arm();
     }
+    void stopPressed() {
+        stop_.pressed();
+        arm();
+    }
 
     void tick() {
         pair_.tick();
         forget_.tick();
         start_.tick();
         reset_.tick();
+        stop_.tick();
         arm();
     }
 
@@ -347,10 +379,34 @@ public:
         alog("reset bluetooth link: status %d, texts %u and %u", (int)status, text, row);
     }
 
+    // StopView
+    virtual void stopShow(nbt::StopStatus status) {
+        unsigned text = kStopFailedText, row = kNoCodeText;
+        switch (status) {
+            case nbt::kStopAsk:
+                text = kStopAskText;
+                row = kStopNowText;
+                break;
+            case nbt::kStopWorking:
+            case nbt::kStopStopping: text = kStopStoppingText; break;
+            case nbt::kStopStopped: text = kStopStoppedText; break;
+            case nbt::kStopNoAgent: text = kNoAgentText; break;
+            case nbt::kStopBusy: text = kStopBusyText; break;
+            case nbt::kStopUnsupported: text = kStopUnsupportedText; break;
+            case nbt::kStopFailed: text = kStopFailedText; break;
+        }
+        app_->updateModel(kStopStatusModel, bmw::TextID(text));
+        app_->updateModel(kStopRowModel, bmw::TextID(row));
+        alog("stop the agent: status %d, texts %u and %u", (int)status, text, row);
+    }
+
 private:
     // Keeps the timer running for as long as a screen has a link to the agent, and not a tick longer.
     void arm() {
-        if (g_tickQueued || !(pair_.wantsTick() || forget_.wantsTick() || start_.wantsTick() || reset_.wantsTick())) return;
+        if (g_tickQueued ||
+            !(pair_.wantsTick() || forget_.wantsTick() || start_.wantsTick() || reset_.wantsTick() || stop_.wantsTick())) {
+            return;
+        }
         g_tickQueued = true;
         app_->post(reinterpret_cast<bmw::Runnable*>(&g_tick), nbt::kScreenTickMs);
     }
@@ -361,6 +417,7 @@ private:
     HandStarter starter_;   // before start_, which is handed it
     nbt::StartScreen start_;
     nbt::ResetScreen reset_;
+    nbt::StopScreen stop_;
 };
 
 Screens* g_screens = NULL;
@@ -442,6 +499,20 @@ bool onResetPressed(void*, const bmw::Parcel&) {
     return true;
 }
 
+bool onStopVisible(void*, const bmw::Parcel& parcel) {
+    bool visible = readFlag(parcel);
+    alog("state %u: visible=%d", kStopState, (int)visible);
+    if (visible) NBT_GUARDED("stop shown", g_screens->stopShown());
+    else NBT_GUARDED("stop hidden", g_screens->stopHidden());
+    return true;
+}
+
+bool onStopPressed(void*, const bmw::Parcel&) {
+    alog("action %u: stop the agent", kStopAction);
+    NBT_GUARDED("stop pressed", g_screens->stopPressed());
+    return true;
+}
+
 // A delegate for one of the handlers above. Its object is the app, which no handler here reads: the framework
 // calls a delegate only when its object is set as well as its function (hu_framework.hpp, Delegate), so one with
 // no object is registered and never called. addHandler copies the two words, so the delegate need not outlast it.
@@ -461,9 +532,11 @@ bool appOnInit(bmw::PluginApp* self) {
     self->addHandler(kStartAction, handler(self, &onStartPressed));
     self->addHandler(kResetState, kNotifyVisible, handler(self, &onResetVisible));
     self->addHandler(kResetAction, handler(self, &onResetPressed));
-    alog("onInit: base onInit -> %d, About model %u <- text %u, handlers for states %u, %u, %u and %u and actions "
-         "%u, %u and %u", (int)ok, kAboutModel, kAboutText, kPairState, kForgetState, kStartState, kResetState,
-         kForgetAction, kStartAction, kResetAction);
+    self->addHandler(kStopState, kNotifyVisible, handler(self, &onStopVisible));
+    self->addHandler(kStopAction, handler(self, &onStopPressed));
+    alog("onInit: base onInit -> %d, About model %u <- text %u, handlers for states %u, %u, %u, %u and %u and actions "
+         "%u, %u, %u and %u", (int)ok, kAboutModel, kAboutText, kPairState, kForgetState, kStartState, kResetState,
+         kStopState, kForgetAction, kStartAction, kResetAction, kStopAction);
     return ok;
 }
 

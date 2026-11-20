@@ -322,13 +322,13 @@
       "id": "org.nbtapp.plugin",
       "version": "0.9.0",
       "name": "NBTApp iDrive plugin",
-      "sha256": "8662bbf173498b0248e32118db01ce2cae9243b8950a5244bcc9393ce0e57b2d",
-      "size": 3869,
-      "manifestSha256": "d10e416eda8280172803c63844bf2a9ebca0d0071236aaa43670553ca94978c4",
+      "sha256": "705142dd3ce4a9a3ce9cccf7133d559a1277ec106d71a90822a570c2a2829b05",
+      "size": 4005,
+      "manifestSha256": "2414e05a9b1aead6e1cdaa250ce5712ccd096a7a42b1ba2393331ad4e195eb35",
       "flags": [
         "needs-reboot"
       ],
-      "signature": "18591010db1126b2c8355006942130e7658ca9bfadca893ede6972b4fc539fd21dad2b59d012e0b4529a355d96eb57a194f5da771469cc6377f067e089707502",
+      "signature": "fdea461bcb27cf86e905c4bac33093668a8c216d1ee6cd5e401545430fab99dd0f66481394a1ca4df2c840c1d32bbc010ba24059eca1bd3006af3d19b7f66808",
       "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
       "file": "good/org.nbtapp.plugin-0.9.0.nbtpkg",
       "what": "made by tools/plugin_pkg.py of plugin/'s manifest and UI description, with stand-ins for the library and the DBs"
@@ -337,13 +337,13 @@
       "id": "org.nbtapp.plugin",
       "version": "1.0.0",
       "name": "NBTApp iDrive plugin",
-      "sha256": "df9136eabfa13d7a1f9370148ec45df8028e4d57fa5c9e0ae5c073d72568f200",
-      "size": 3866,
-      "manifestSha256": "828e8984439e45666653b655c8de59dee29afd8140e9e9c6e89d605492d5b73f",
+      "sha256": "681c156df0a8155b1f8df3d067f79dd2df53d99383e3d68644375d88a6123ee2",
+      "size": 3998,
+      "manifestSha256": "29fc878729d8141d1dea0d82f1af9231a6bd480f555febb9d6f2f50e6679d4e4",
       "flags": [
         "needs-reboot"
       ],
-      "signature": "3bb00e0db9902ce689b8fe90c9442198b320cbd39272af83ca4746351a097c07a24d4b64cf842f152e2d314784154ee9c15424b84bda145daf402eb60a66ca0b",
+      "signature": "21f7c49caf07274bf1b8dc00d9d525e91734519694ee008552e90b1bb626f2cd9968174caa2a55d34ec1e0110edfea0afe7347f7d7bbb75a19c7f29ba713d909",
       "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
       "file": "good/org.nbtapp.plugin-1.0.0.nbtpkg",
       "what": "made by tools/plugin_pkg.py of plugin/'s manifest and UI description, with stand-ins for the library and the DBs"
@@ -352,13 +352,13 @@
       "id": "org.nbtapp.plugin",
       "version": "1.1.0",
       "name": "NBTApp iDrive plugin",
-      "sha256": "0278160ac617a6c7512412bf17fa53efc2dcf40fbc076762e2c79b5dbb90989d",
-      "size": 3864,
-      "manifestSha256": "031d0281632fe30e9e22666c7cf5eadfd537b85bf604dca5e86189936c66c1e5",
+      "sha256": "72496178b40146df96fd227c7d8c21b6e8e409af2d086608da47789a91e876a2",
+      "size": 4001,
+      "manifestSha256": "6afeadb3e65149f70d24df75b9c2ef6f7b8b29ac20ece395ba4f78718122b9f2",
       "flags": [
         "needs-reboot"
       ],
-      "signature": "7da9a976741dabbd9664f31436e99ce3f32deab309919050978c4159cf8e72e3195a30affb2b724f83191c20baecb03ecbc85dff0b0c30596d4f0e9a41fe2307",
+      "signature": "0032b68f5287deb5bbbe97e12d0e1fe56583dc8c7cad01321428961fa13a3b0611f06f27d444a35ae1d891a57a22d8b4ef647d03bf3800ac0ac5755e6925a502",
       "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
       "file": "good/org.nbtapp.plugin-1.1.0.nbtpkg",
       "what": "made by tools/plugin_pkg.py of plugin/'s manifest and UI description, with stand-ins for the library and the DBs"
