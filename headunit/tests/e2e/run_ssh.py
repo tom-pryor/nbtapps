@@ -14,8 +14,9 @@ The relay, Dropbear and the shells run in the agent's container, which Docker li
 
   - before the switch: off, and an open refused off; on: an open is answered with the host key, and "pty" true
   - that key as the client's only known host, checked strictly: a login with the key the keys message names runs a
-    command and gives its exit status, and --skip-first's line is the same answer; another key is refused; another
-    known host key is refused by the client
+    command and gives its exit status, and --skip-first's line is the same answer; a login as root, as the app's,
+    runs as the container's user (tools/bench.py); another key is refused; another known host key is refused by the
+    client
   - a login on a pty (ssh -tt, its input kept open): a tty, its size, and the exit status of the shell
   - 1 MB with scp -O to the head unit's side and back, and with sftp put and get, each compared
   - the switch off with a session open: the client ends; then nothing runs in the agent's container but the agent,
@@ -347,6 +348,9 @@ def run():
         check(code == 7 and out == "hello from %s\n" % USER, "a login and a command: exit status %d" % code, out + err)
         check(answer_lines() and json.loads(answer_lines()[-1]) == answer,
               "--skip-first's line is the relay's answer, the same host key", "\n".join(answer_lines()))
+        # A login as root, as the app logs in to a head unit: the bench's root is the container's user, not real root.
+        code, out, err = client("ssh", *opts, "root@headunit", "echo $LOGNAME $(id -u); exit 5")
+        check(code == 5 and out == "root %d\n" % os.getuid(), "a login as root: exit status %d" % code, out + err)
         code, out, err = client("ssh", *ssh_options(wrong, known), target, "echo in")
         check(code == 255 and "in" not in out.split() and "Permission denied" in err,
               "a key that the keys message does not name: exit status %d" % code, out + err)
