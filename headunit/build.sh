@@ -8,6 +8,9 @@
 # usage: ./build.sh          # build + check
 #        ./build.sh agent    # the agent: its tests (in the bench container), then built for the head unit -> release/agent/,
 #                            # its own package -> release/pkg/ (not signed), and `make agent-check`
+#        ./build.sh ssh      # SSH: Dropbear and sftp-server for this machine and the relay's tests (make ssh-host,
+#                            # make ssh-test), then for the head unit: Dropbear and sftp-server (make ssh), the relay
+#                            # (make ssh-relay, with qcc) -> build/ssh/qnx/, and `make ssh-check`
 #        ./build.sh clean    # remove build/ and release/
 #
 # Environment:
@@ -26,10 +29,10 @@ if [ "${1:-}" = clean ]; then
     exec make clean
 fi
 target=lib
-if [ "${1:-}" = agent ]; then
+if [ "${1:-}" = agent ] || [ "${1:-}" = ssh ]; then
     target=$1
 elif [ $# -gt 0 ]; then
-    echo "usage: $0 [agent|clean]" >&2
+    echo "usage: $0 [agent|ssh|clean]" >&2
     exit 1
 fi
 
@@ -57,6 +60,12 @@ version=$(git describe --always --dirty 2>/dev/null || echo unknown)
 # which this is on the host; the SDP image's make below is 3.81 and is not asked for it.
 if [ "$target" = agent ]; then
     make -j"${AGENT_TEST_JOBS:-4}" --output-sync=target agent-test
+elif [ "$target" = ssh ]; then
+    make ssh-host
+    make ssh-test
+    # Dropbear's own build runs the image by itself, with the bare compiler, which needs no licence.
+    make ssh QNX_IMAGE="$image"
+    target=ssh-relay
 fi
 docker run --rm -u "$(id -u):$(id -g)" \
     -v "$(pwd)":/src \
@@ -69,4 +78,6 @@ if [ "$target" = lib ]; then
 elif [ "$target" = agent ]; then
     make agent-pkg
     make agent-check
+elif [ "$target" = ssh-relay ]; then
+    make ssh-check
 fi

@@ -49,9 +49,18 @@
 #                   head unit, stripped, built from those sources in the SDP image (QNX_IMAGE, qnx650-sdk when
 #                   unset) with the bare ntoarmv7-gcc, which needs no QNX licence   needs docker
 #   make ssh-host   build/ssh/host/: the same two programs for this machine, for tests   needs gcc, make (host)
-#   make ssh-check  the two builds looked at: the head unit's programs, which are not run, ask for libc.so.3 and
-#                   libsocket.so.3 only; this machine's key tool makes a host key and its server says it is
-#                   Dropbear on one connection   needs python3 + readelf (host)
+#   make ssh-relay  build/ssh/qnx/sshrelay: the relay (ssh/relay/), the SSH package's own program, for the head unit,
+#                   stripped   needs the SDP (qcc); ./build.sh ssh runs it in the image
+#   make ssh-relay-host  build/ssh/host/sshrelay: the relay for this machine, with its test hook   needs g++ (host)
+#   make ssh-test   the relay's tests on this machine (tests/ssh/): the key-line rule, the process list, the protocol,
+#                   the bridge, the ends, the pty driver, the limit and the state file with stand-ins for the server
+#                   and the driver, and with this machine's Dropbear (make
+#                   ssh-host first) and OpenSSH client, which are skipped, and said so, when there is no ssh
+#                   needs g++, python3 (host)
+#   make ssh-check  the builds looked at: the head unit's programs, which are not run, ask for libc.so.3 and
+#                   libsocket.so.3 only (and the relay for libcpp.so.4 too, and has no test hook); this machine's key
+#                   tool makes a host key and its server says it is Dropbear on one connection
+#                   needs python3 + readelf (host)
 #   make clean
 
 QCC ?= qcc
@@ -82,7 +91,7 @@ HDRS = $(wildcard src/*.hpp) $(wildcard agent/*.hpp)
 
 .PHONY: all lib pkg check agent agent-check agent-test agent-host agent-programs agent-e2e agent-launcher \
         agent-pkg agent-release test-agent-pkg plugin-pkg plugin-release test-plugin-pkg \
-        bench-image ssh-src ssh ssh-host ssh-check \
+        bench-image ssh-src ssh ssh-host ssh-check ssh-relay ssh-relay-host ssh-test \
         test-protocol test-pkg testdata icons clean FORCE
 .SECONDARY:
 
@@ -435,18 +444,65 @@ ssh-src:
 
 ssh: ssh-src
 	@docker image inspect $(QNX_IMAGE) >/dev/null 2>&1 || { echo "make ssh: Docker image '$(QNX_IMAGE)' not found (set QNX_IMAGE)" >&2; exit 1; }
-	rm -rf build/ssh/qnx
+	rm -rf build/ssh/qnx/obj
+	rm -f build/ssh/qnx/dropbearmulti build/ssh/qnx/sftp-server
 	docker run --rm -u "$$(id -u):$$(id -g)" -v "$(CURDIR)":/src -w /src $(QNX_IMAGE) \
 	    sh ssh/build-qnx.sh $(SSH_SRC)/dropbear $(SSH_SRC)/openssh $(SSH)/qnx
 	@echo [DONE] $(SSH)/qnx: dropbearmulti and sftp-server for the head unit. make ssh-check looks at them
 
 ssh-host: ssh-src
-	rm -rf build/ssh/host
+	rm -rf build/ssh/host/obj
+	rm -f build/ssh/host/dropbearmulti build/ssh/host/sftp-server
 	CC=$(HOST_CC) sh ssh/build-host.sh $(SSH_SRC)/dropbear $(SSH_SRC)/openssh $(SSH)/host
 	@echo [DONE] $(SSH)/host: dropbearmulti and sftp-server for this machine
 
 ssh-check:
 	python3 tools/check_ssh.py
+
+# sshrelay, ours (ssh/relay/, ssh/README "The relay"): the program of the SSH package's channel. It takes the agent's
+# JSON reader and file helpers as source files. For the head unit as the agent's programs are built (qcc, the
+# Dinkumware C++ library, no -fPIC), which needs the QNX licence: ./build.sh ssh runs this target in the SDP image.
+# For this machine with the test hooks (NBT_SSHRELAY_TEST_*), which the head unit's build has not.
+SSH_RELAY_SRCS = ssh/relay/main.cpp ssh/relay/relay.cpp ssh/relay/driver.cpp ssh/relay/state.cpp \
+                 ssh/relay/key_lines.cpp ssh/relay/processes.cpp ssh/relay/child.cpp agent/json.cpp agent/fsutil.cpp \
+                 agent/sha256.cpp agent/programs.cpp
+SSH_RELAY_HDRS = $(wildcard ssh/relay/*.hpp) agent/json.hpp agent/json_writer.hpp agent/fsutil.hpp agent/bytes.hpp \
+                 agent/sha256.hpp agent/programs.hpp
+SSH_TEST = $(SSH)/test
+
+ssh-relay: $(SSH)/qnx/sshrelay
+	@echo [DONE] $(SSH)/qnx/sshrelay: the relay for the head unit. make ssh-check looks at it
+
+$(SSH)/qnx/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS)
+	@echo [BUILD] $@
+	@mkdir -p $(SSH)/qnx $(SSH)/relay-qnx
+	$(TOOL_CXX) $(TOOL_CXXFLAGS) -Wextra -Iagent -o $(SSH)/relay-qnx/sshrelay $(SSH_RELAY_SRCS) -lsocket
+	ntoarmv7-strip -o $@ $(SSH)/relay-qnx/sshrelay
+
+ssh-relay-host: $(SSH)/host/sshrelay
+	@echo [DONE] $(SSH)/host/sshrelay: the relay for this machine, with the test hooks
+
+$(SSH)/host/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS)
+	@mkdir -p $(SSH)/host
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_SSHRELAY_TEST_HOOK -Iagent -o $@ $(SSH_RELAY_SRCS)
+
+$(SSH_TEST)/test_key_lines: tests/ssh/test_key_lines.cpp ssh/relay/key_lines.cpp agent/json.cpp $(SSH_RELAY_HDRS)
+	@mkdir -p $(SSH_TEST)
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -Iagent -Issh/relay -o $@ $< ssh/relay/key_lines.cpp agent/json.cpp
+
+$(SSH_TEST)/test_processes: tests/ssh/test_processes.cpp ssh/relay/processes.cpp $(SSH_RELAY_HDRS)
+	@mkdir -p $(SSH_TEST)
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -Issh/relay -o $@ $< ssh/relay/processes.cpp
+
+# A stand-in for the pty driver, which the tests copy under the name devc-pty.
+$(SSH_TEST)/standin_pty: tests/ssh/standin_pty.cpp
+	@mkdir -p $(SSH_TEST)
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -o $@ $<
+
+# On this machine, not in the bench's container: the relay starts only its own stand-ins and this machine's build
+# of Dropbear, as this user, in a temporary folder. Needs make ssh-host first.
+ssh-test: $(SSH)/host/sshrelay $(SSH_TEST)/test_key_lines $(SSH_TEST)/test_processes $(SSH_TEST)/standin_pty
+	@python3 tests/ssh/run_relay.py $(SSH)
 
 # ---- host side -------------------------------------------------------------------------------------------------
 pkg:
