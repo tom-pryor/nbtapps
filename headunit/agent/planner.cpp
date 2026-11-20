@@ -470,7 +470,7 @@ bool Planner::resolve(const PlanRequest& request, const std::map<std::string, Of
         plan->fetchBytes += offer.size - cached;
     }
     // The flags always come in one order, whatever order the steps brought them in.
-    static const char* const kFlagOrder[] = {"runs-scripts", "modifies-system", "needs-reboot"};
+    static const char* const kFlagOrder[] = {"runs-scripts", "modifies-system", "needs-reboot", "starts-program"};
     std::vector<std::string> sorted;
     for (size_t f = 0; f < sizeof kFlagOrder / sizeof kFlagOrder[0]; ++f) {
         for (size_t k = 0; k < plan->flags.size(); ++k) {

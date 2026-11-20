@@ -464,9 +464,18 @@ public:
 
 static const char kHeadUnitId[] = "000102030405060708090a0b0c0d0e0f";
 
+// A head unit in a folder, whose ${tmp} a test may put in a short folder of its own: a channel's program listens on a
+// local socket there, whose path has to fit a local socket's address, which a work folder deep in a checkout passes.
+class BenchPlatform : public HostPlatform {
+public:
+    explicit BenchPlatform(const std::string& root) : HostPlatform(root) {}
+    virtual std::string tmpDir(const std::string& id) const { return tmp.empty() ? HostPlatform::tmpDir(id) : tmp + "/" + id; }
+    std::string tmp;
+};
+
 struct Bench {
     std::string root;
-    HostPlatform platform;
+    BenchPlatform platform;
     FakeClock clock;
     FakeRandom random;
     Agent agent;
@@ -3022,8 +3031,12 @@ static std::string fetchParams(const std::string& package, const std::string& pa
 
 
 static std::string sessionText() {
-    Bench b("session");
+    // An agent that knows channels, for the package with them near the end, whose ${tmp} is in a short folder.
+    Bench b("session", false, false, "1.7.0");
     b.platform.fakeFree = 500000000;
+    std::string tmp = "/tmp/nbt-session-" + num(getpid()), why;
+    CHECK_IN(why, fs::removeTree(tmp, &why) && fs::makeDirs(tmp, &why));
+    b.platform.tmp = tmp;
     // The car's screen: a controller on the local socket, whose link is not written down.
     Phone* screen = b.connect();
     CHECK(Parsed(b.hello(screen, kGoodHello)).result.isObject());
@@ -3093,6 +3106,14 @@ static std::string sessionText() {
     b.call(p, "settings.set", "{\"package\":\"org.nbtapp.dial\",\"set\":{\"CHIME\":false,\"DIAL_SPEED\":25},\"reset\":[\"FACE\"]}");
     b.call(p, "settings.set", "{\"package\":\"org.nbtapp.dial\",\"set\":{\"DIAL_SPEED\":51,\"FACE\":\"oval\"}}");
     b.call(p, "settings.get", "{\"package\":\"org.nbtapp.dial\",\"from\":1}");
+    // A package with channels: installed, its switched channel read, refused while it is off, switched on and off.
+    Parsed chan(b.call(p, "job.plan", planParams("org.nbtapp.chan-1.0.0", "", "org.nbtapp.chan-1.0.0")));
+    startJob(b, p, str(chan.result, "planId"));
+    const std::string gated = "\"package\":\"org.nbtapp.chan\",\"channel\":\"gated\"";
+    b.call(p, "channel.get", "{" + gated + "}");
+    b.call(p, "channel.open", "{" + gated + "}");
+    b.call(p, "channel.set", "{" + gated + ",\"on\":true}");
+    b.call(p, "channel.set", "{" + gated + ",\"on\":false}");
     b.call(p, "system.restart", "{\"kind\":\"hmi\"}");
     // The phone's pairing is ended on the car's screen: the agent says that it closes the link, and why, and
     // closes it.
@@ -3130,7 +3151,10 @@ static std::string sessionText() {
            "# from the agent are one raw deflate stream (RFC 1951), as the zlib of the test bench's image makes it.\n"
            "# Then it installs tests/packages/dial-1.0.0, a package with settings, and reads and changes them with\n"
            "# settings.get and settings.set: one change goes through, and one is refused as `invalid`, with the\n"
-           "# keys at fault and why in the error.\n\n"
+           "# keys at fault and why in the error. Last it installs tests/packages/chan-1.0.0, a package with\n"
+           "# channels, which is why the agent here is 1.7.0, reads its switched channel with channel.get, is\n"
+           "# refused channel.open with `off`, and switches it on and off with channel.set. No channel is opened,\n"
+           "# so no DATA frame of a channel is in this file.\n\n"
            "magic 4e42544c\n\n" +
            p->transcript;
 }
