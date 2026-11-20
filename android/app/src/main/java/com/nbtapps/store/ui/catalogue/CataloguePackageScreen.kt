@@ -3,19 +3,24 @@
 package com.nbtapps.store.ui.catalogue
 
 import android.text.format.Formatter
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -262,7 +267,11 @@ private fun GetCard(
     onUninstall: () -> Unit,
 ) {
     val settings: (@Composable () -> Unit)? = if (get.settings) {
-        { TextButton(onClick = onSettings, enabled = get.connected) { Text("Settings") } }
+        {
+            TextButton(onClick = onSettings, enabled = get.connected, contentPadding = ButtonDefaults.TextButtonWithIconContentPadding) {
+                IconLabel(R.drawable.ic_settings, "Settings")
+            }
+        }
     } else {
         null
     }
@@ -283,14 +292,20 @@ private fun GetCard(
                     "Only pre-release versions of this package are out so far. To install it, turn on pre-release versions.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                Button(onClick = onAskSwitch) { Text("Install") }
+                Button(onClick = onAskSwitch, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
+                    IconLabel(R.drawable.ic_add, "Install")
+                }
             }
         } else {
             Offer(get, onDownload, onInstall, onAsk)
         }
         // An installed package can be taken off whatever is on offer, so this comes after either.
         if (get.uninstall.showsButton) {
-            OutlinedButton(onClick = onUninstall, enabled = get.uninstall == UninstallState.Ready) { Text("Uninstall") }
+            OutlinedButton(
+                onClick = onUninstall,
+                enabled = get.uninstall == UninstallState.Ready,
+                contentPadding = ButtonDefaults.ButtonWithIconContentPadding,
+            ) { IconLabel(R.drawable.ic_delete, "Uninstall") }
         }
         listOfNotNull(uninstallLine(get), jobLine(get)).forEach { line ->
             Text(line, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -322,7 +337,9 @@ private fun ColumnScope.Offer(get: GetState, onDownload: () -> Unit, onInstall: 
                 Text("Also needs ${others.joinToString { "${it.pkg.name} ${it.version.version}" }}.", style = MaterialTheme.typography.bodyMedium)
             }
             get.downloadError?.let { Text("The download failed: $it", color = MaterialTheme.colorScheme.error) }
-            Button(onClick = onDownload) { Text(if (get.stored) "Download what it needs ($size)" else "Download ${get.version.version} ($size)") }
+            Button(onClick = onDownload, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
+                IconLabel(R.drawable.ic_download, if (get.stored) "Download what it needs ($size)" else "Download ${get.version.version} ($size)")
+            }
         }
         else -> Text("Version ${get.version.version} is on this phone, checked and ready to install.")
     }
@@ -343,10 +360,22 @@ private fun ColumnScope.Offer(get: GetState, onDownload: () -> Unit, onInstall: 
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        else -> Button(onClick = onInstall, enabled = get.canInstall) {
-            Text(if (get.installedVersion != null) "Update on ${get.headUnitName}" else "Install on ${get.headUnitName}")
+        else -> Button(onClick = onInstall, enabled = get.canInstall, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
+            if (get.installedVersion != null) {
+                IconLabel(R.drawable.ic_upgrade, "Update on ${get.headUnitName}")
+            } else {
+                IconLabel(R.drawable.ic_add, "Install on ${get.headUnitName}")
+            }
         }
     }
+}
+
+/** A button's icon and label, spaced as Material's buttons with an icon are. The icon only goes with the words. */
+@Composable
+private fun IconLabel(@DrawableRes icon: Int, label: String) {
+    Icon(painterResource(icon), contentDescription = null, Modifier.size(ButtonDefaults.IconSize))
+    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+    Text(label)
 }
 
 /** The Uninstall button is on the card, pressed or greyed: for any package that is installed but the agent. */
