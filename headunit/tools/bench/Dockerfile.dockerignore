@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 # Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-# Only what the agent's programs are built from goes to Docker.
+# Only what the agent's programs and the SSH package's are built from goes to Docker: for the second, the export of
+# the sources that `make ssh-src` makes (not the submodules), the script that builds them, and the relay.
 *
 !Makefile
 !agent
 !tests/agent
 !src
+!build/ssh/src
+!ssh/build-host.sh
+!ssh/relay

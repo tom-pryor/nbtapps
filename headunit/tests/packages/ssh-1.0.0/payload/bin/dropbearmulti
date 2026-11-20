@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for Dropbear's dropbearmulti, which the test bench builds for its image from the same sources as the head
+# unit's: it is that program, under this name. Its first argument names what it acts as (dropbear, dropbearkey).
+exec /opt/nbtagent/ssh/dropbearmulti "$@"

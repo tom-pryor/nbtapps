@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for the SSH package's relay, which the test bench builds of ssh/relay/, without its test hooks, and keeps in
+# its image beside the agent: it is that program, under this name.
+exec /opt/nbtagent/ssh/sshrelay "$@"
