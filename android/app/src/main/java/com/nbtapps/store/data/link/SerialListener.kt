@@ -112,6 +112,9 @@ class SerialListener(
         failed.forEach { it.result.completeExceptionally(failure) }
     }
 
+    /** [e] as everyone waiting is failed with: itself where it is an [IOException], else one that carries its message. */
+    private fun asIOException(e: Exception): IOException = e as? IOException ?: IOException(e.message ?: e::class.java.simpleName, e)
+
     /** Opens the listener and accepts on it for as long as anyone waits. One runs at a time. */
     private fun serve() {
         while (true) {
@@ -123,9 +126,14 @@ class SerialListener(
             }
             val opened = try {
                 radio.listen(ProtocolConstants.SERIAL_SERVICE_NAME, BluetoothSerialLinkConnector.SERVICE_UUID)
-            } catch (e: IOException) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Not only an IOException: another that the phone's Bluetooth calls throw, as an IllegalStateException,
+                // fails everyone the same, rather than leaving them waiting for ever.
+                val failure = asIOException(e)
                 log.line(diagnostics.record(LinkTry.Path.LISTEN, LinkTry.Outcome.FAILED, failure = e).describe())
-                failAll(e)
+                failAll(failure)
                 continue
             }
             val kept = synchronized(lock) {
@@ -146,12 +154,20 @@ class SerialListener(
         while (true) {
             val incoming = try {
                 opened.accept()
-            } catch (e: IOException) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 // Closed by [leave], or failed of itself, as when Bluetooth goes off: then nobody can be given a link.
                 val failed = synchronized(lock) { (server === opened).also { if (it) server = null } }
                 opened.closeQuietly()
-                log.line(if (failed) "listening stopped: ${e.message}" else "listening stopped: nothing waits for the car's links")
-                if (failed) failAll(e)
+                val failure = asIOException(e)
+                when {
+                    !failed -> log.line("listening stopped: nothing waits for the car's links")
+                    e is IOException -> log.line("listening stopped: ${e.message}")
+                    // Not what a listener throws when it fails: kept, as a listen that failed is.
+                    else -> log.line(diagnostics.record(LinkTry.Path.LISTEN, LinkTry.Outcome.FAILED, failure = e).describe())
+                }
+                if (failed) failAll(failure)
                 return
             }
             handOver(incoming)

@@ -71,11 +71,14 @@ class FakeServer : SerialServer {
     /** Listening fails of itself, as it does when Bluetooth goes off. */
     fun fail(message: String) = queue.put(IOException(message))
 
+    /** Listening throws [e], as no listener should but one might: a SecurityException, say. */
+    fun fail(e: Exception) = queue.put(e)
+
     override fun accept(): AcceptedSocket {
         accepting.put(Unit)
         return when (val next = queue.take()) {
             is AcceptedSocket -> next
-            is IOException -> throw next
+            is Exception -> throw next
             else -> {
                 // Closed: so is every accept after this one.
                 queue.put(next)
@@ -108,6 +111,10 @@ class FakeRadio(private val socketFor: (attempt: Int) -> SerialSocket = { FakeSo
     @Volatile
     var listenFailure: String? = null
 
+    /** When set, listening cannot start, and throws this, once. */
+    @Volatile
+    var listenThrows: Exception? = null
+
     /** Each listen, with the name and UUID it was asked for. */
     val listens = CopyOnWriteArrayList<Pair<String, UUID>>()
     val servers = CopyOnWriteArrayList<FakeServer>()
@@ -126,6 +133,10 @@ class FakeRadio(private val socketFor: (attempt: Int) -> SerialSocket = { FakeSo
     override fun listen(name: String, uuid: UUID): SerialServer {
         listens += name to uuid
         listenFailure?.let { throw IOException(it) }
+        listenThrows?.let {
+            listenThrows = null
+            throw it
+        }
         return FakeServer().also {
             servers += it
             serverMade.put(it)

@@ -156,6 +156,48 @@ class SerialListenerTest {
     }
 
     @Test
+    fun `listening that cannot start with an exception other than an IOException fails the caller with its message, and a later caller starts afresh`() = test {
+        radio.listenThrows = SecurityException("Need BLUETOOTH_CONNECT permission")
+        try {
+            listener.accept(listOf(car))
+            fail("accepted")
+        } catch (e: IOException) {
+            assertEquals("Need BLUETOOTH_CONNECT permission", e.message)
+        }
+        until("the listener idle") { listener.idle }
+        val kept = diagnostics.tries().single()
+        assertEquals(LinkTry.Path.LISTEN, kept.path)
+        assertEquals(LinkTry.Outcome.FAILED, kept.outcome)
+        assertEquals("SecurityException", kept.error)
+
+        val again = async { listener.accept(listOf(car)) }
+        radio.nextServer().dialIn(FakeSocket(), car)
+        assertEquals(car, again.await().address)
+    }
+
+    @Test
+    fun `listening that fails of itself with an exception other than an IOException fails everyone waiting, and a later caller starts afresh`() = test {
+        val waiting = async { runCatching { listener.accept(listOf(car)) } }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+
+        server.fail(IllegalStateException("adapter gone"))
+
+        val failure = waiting.await().exceptionOrNull()
+        assertTrue(failure is IOException)
+        assertEquals("adapter gone", failure?.message)
+        assertEquals(1, server.closes.get())
+        until("the listener idle") { listener.idle }
+        assertEquals("IllegalStateException", diagnostics.tries().single().error)
+
+        val again = async { listener.accept(listOf(car)) }
+        val next = radio.nextServer()
+        next.dialIn(FakeSocket(), car)
+        assertEquals(car, again.await().address)
+        assertEquals(2, radio.servers.size)
+    }
+
+    @Test
     fun `two callers share one listener, and a link both would take goes to the one that comes first`() = test {
         val atRest = async { listener.accept(listOf(car, other)) }
         val server = radio.nextServer()
