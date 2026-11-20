@@ -169,7 +169,7 @@
 //
 //   { "listener": true, "registered": true, "checkedMsAgo": 12000, "stack": [ "...", ... ],
 //     "phonesPresent": 1, "phonesEligible": 1, "dial": "on", "dialState": "idle", "lastResult": "DEFAULT",
-//     "link": "none", "recordDoubtful": false, "counts": { "dials", "answeredOk", "notListening", "notInReach",
+//     "link": "none", "recordDoubtful": false, "phoneOpenedLeft": false, "counts": { "dials", "answeredOk", "notListening", "notInReach",
 //     "busy", "otherAnswers", "noAnswer", "notTheApp", "leftBehind", "asks", "asksListed", "asksNotListed",
 //     "asksNoAnswer", "askErrors", "checks", "checksRestored", "refusals", "leftUnread" },
 //     "problems": { "recorded", "counted" } }
@@ -180,7 +180,10 @@
 // rejected, no answer, not the app, or none; link is the agent's serial links that are up: none, phone-opened,
 // dialled or both. recordDoubtful is true from a dial that failed although the phone's service list named the
 // agent's service, which may leave the car's record of phone-opened serial links wrong, until a dial is answered
-// 0, the car says such a link ended, or its Bluetooth service goes (dial_rules.hpp). notListening counts the dials
+// 0, the car says such a link ended, or its Bluetooth service goes (dial_rules.hpp). phoneOpenedLeft is for the
+// phone on the link it is asked on: true while a link that phone opens itself is left to another program, unread
+// (serial_link.hpp), so that its app waits for the car's link instead of opening one; false for a link that knows
+// no phone's address, as the bench's TCP, and absent on the local socket. notListening counts the dials
 // answered 5 (DEFAULT): since each dial follows an ask whose answer named the agent's service, such a dial means the
 // app stopped listening in between or something else went wrong, not that it was not listening; the name stays, for
 // the app's sake. asks counts the asks for a
@@ -538,7 +541,8 @@ private:
     // serial.status, serial.dial and the `serial` member of info.get: see the top of this file.
     void serialStatus(Session* s, int64_t id);
     void serialDialNow(Session* s, int64_t id);
-    void writeSerial(json::Writer& w);
+    // For the link `s` is on: a phone's gets phoneOpenedLeft, the local socket's does not.
+    void writeSerial(json::Writer& w, Session* s);
     // The settings of an installed package: see the top of this file, and settings.hpp.
     void settingsGet(Session* s, int64_t id, const json::Value& params);
     void settingsSet(Session* s, int64_t id, const json::Value& params);

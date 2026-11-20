@@ -1561,14 +1561,14 @@ void Agent::infoGet(Session* s, int64_t id) {
         w.key(places[i].name).integer((int64_t)free);
     }
     w.endObject().key("restartNeeded").string(restartNeeded()).key("serial");
-    writeSerial(w);
+    writeSerial(w, s);
     w.endObject();
     answer(s, id, w.text());
 }
 
 // ---- serial.status, serial.dial -----------------------------------------------------------------------------------
 
-void Agent::writeSerial(json::Writer& w) {
+void Agent::writeSerial(json::Writer& w, Session* s) {
     w.beginObject();
     if (serialDial_ == 0) {
         w.key("listener").boolean(false).endObject();
@@ -1584,6 +1584,8 @@ void Agent::writeSerial(json::Writer& w) {
     w.key("dial").string(st.dialOn ? "on" : "off").key("dialState").string(st.dialState);
     w.key("lastResult").string(st.lastResult).key("link").string(st.link);
     w.key("recordDoubtful").boolean(st.recordDoubtful);
+    // For the phone on this link; a link that knows no address (the bench's TCP) is never left.
+    if (!s->local) w.key("phoneOpenedLeft").boolean(serialDial_->phoneOpenedLeft(s->peer->linkPhoneAddress()));
     w.key("counts").beginObject();
     w.key("dials").integer(st.dials).key("answeredOk").integer(st.answeredOk).key("notListening").integer(st.notListening);
     w.key("notInReach").integer(st.notInReach).key("busy").integer(st.busy).key("otherAnswers").integer(st.otherAnswers);
@@ -1604,7 +1606,7 @@ void Agent::serialStatus(Session* s, int64_t id) {
         return;
     }
     json::Writer w;
-    writeSerial(w);
+    writeSerial(w, s);
     answer(s, id, w.text());
 }
 

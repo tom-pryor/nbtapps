@@ -196,7 +196,8 @@ format and the protocol.
   phones are connected to the car and how many of them the car may dial, whether the dial is on, where it is and
   what the last dial came to, which of the agent's serial links are up (`none`, `phone-opened`, `dialled` or
   `both`), whether a failed dial may have left the car's record of phone-opened links wrong (`recordDoubtful`),
-  counts of the asks before the dials, of the dials, their answers and the registration checks, of the links
+  for a phone's link whether a link that phone opens itself is left to another program now (`phoneOpenedLeft`,
+  see "Other programs' links"; not there on the local socket), counts of the asks before the dials, of the dials, their answers and the registration checks, of the links
   phones opened that were left to another program unread (`leftUnread`, see "Other programs' links"), and how many
   problems were written to the problem file and how many only counted. The count `notListening` is of the dials
   answered 5; every dial now follows an ask that listed the agent's service, so it no longer means the app was not
@@ -711,8 +712,10 @@ links phones open, as before.
 
 The phone app listens while it is open, or busy with something that needs the link (a job, a pull of logs), with
 Bluetooth on and no link, and not after the user's own Disconnect until they connect again or come back to the
-app; a connect of its own listens too, beside the phone's dial, and takes whichever link comes up first. It
-listens on the secure kind of RFCOMM socket, so only a device paired with the phone gets through, and it takes a
+app; a connect of its own listens too, beside the phone's dial, and takes whichever link comes up first. Where
+`info.get` said that the phone's own links are left to another program (`phoneOpenedLeft`), a connect makes no dial
+and only listens, for 40 seconds, and the app offers the phone's own connect, once, when no link came; a link the
+phone did open gives way to one the car opens while it waits for its answer. It listens on the secure kind of RFCOMM socket, so only a device paired with the phone gets through, and it takes a
 link only from the Bluetooth address of a head unit it has saved: any other is closed at once. A link the car
 opened is then the same as one the phone opened: the phone writes the magic bytes and `hello`, the agent answers
 nothing but `hello`, `ping`, `auth` and `pairing.issue` until the phone has proved with `auth` that it holds a
@@ -863,7 +866,9 @@ Three things keep the two apart, all in the agent:
   In every other case (dial off, no such program, a phone that is not the agent's or that no dial has reached, a
   request that gave no address, a node with no request) the agent goes on as below, and so it does when the rule
   held at the request and no longer does when the node appears. The log says once for each link that it was left
-  to another program, and why; `serial.status` counts them (`leftUnread`).
+  to another program, and why; `serial.status` counts them (`leftUnread`). The phone's app learns that the rule
+  holds for its phone from `info.get` (`"phoneOpenedLeft": true` in `serial`), and then opens no link itself:
+  it only waits for the car's.
 - The agent opens a link's node and reads what the phone says first. A link that opens with the protocol's magic
   bytes, after any leftovers of an earlier link ("What the node does", above), is the agent's. Any other is let
   go, at once if something else came first and after 500 ms if nothing came, and the agent has written nothing

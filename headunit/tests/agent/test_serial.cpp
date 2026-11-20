@@ -3413,6 +3413,33 @@ static void testLeftUnread() {
     }
 }
 
+// What the app is told of the rule for its phone (phoneOpenedLeft(), info.get): true only while all three hold.
+static void testPhoneOpenedLeft() {
+    {
+        Rule r("opened-left");
+        r.start();
+        CHECK(r.listener->phoneOpenedLeft(kDialled));
+        CHECK(!r.listener->phoneOpenedLeft("66:77:88:99:AA:BB"));   // not one of the agent's phones
+        CHECK(!r.listener->phoneOpenedLeft(""));                    // a link that knows no address
+        r.services.setDeclared(std::vector<SerialServiceOwner>());   // none is declared
+        CHECK(!r.listener->phoneOpenedLeft(kDialled));
+        r.services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        CHECK(r.listener->phoneOpenedLeft(kDialled));
+        r.ours.set(std::vector<std::string>(1, kDialled));           // the agent's, never reached by a dial
+        CHECK(!r.listener->phoneOpenedLeft(kDialled));
+        r.ours.set(std::vector<std::string>());                      // forgotten
+        CHECK(!r.listener->phoneOpenedLeft(kDialled));
+        CHECK(!r.trace.logged("00:11:22") && !r.trace.logged("66:77:88"));
+    }
+    for (int c = 0; c < 2; ++c) {
+        Rule r("opened-left-not");
+        if (c == 0) r.config.dial.on = false;   // the car does not dial in this run
+        if (c == 1) r.machine.running = "";     // the program declared for a serial service is not running
+        r.start();
+        CHECK_IN(c == 0 ? "dial off" : "not running", !r.listener->phoneOpenedLeft(kDialled));
+    }
+}
+
 // ---- the node's reader ----------------------------------------------------------------------------------------------
 
 // What a stand-in for the car's Bluetooth stack holds for a node: bytes the phone sent that wait ahead of the node,
@@ -4106,6 +4133,7 @@ int main(int argc, char** argv) {
     testReset();
     testHold();
     testLeftUnread();
+    testPhoneOpenedLeft();
     printf("test_serial: ok\n");
     return 0;
 }

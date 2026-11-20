@@ -1796,6 +1796,12 @@ bool SerialListener::leftToOther(const std::string& address, std::string* why) {
     return true;
 }
 
+// The rule above for the phone at `address`, asked for its app (agent.hpp, info.get): the why is not wanted there.
+bool SerialListener::phoneOpenedLeft(const std::string& address) {
+    std::string why;
+    return !address.empty() && leftToOther(address, &why);
+}
+
 // After the listener has given up, on its thread: waits, then puts the gate in front and asks for the service
 // again, as start() did, and once more after each time that does not work. False when stop() came first.
 bool SerialListener::comeBack() {

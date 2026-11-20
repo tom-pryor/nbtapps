@@ -3802,12 +3802,18 @@ public:
         return phones;
     }
     virtual SerialStatus serialStatus() { return status; }
+    virtual bool phoneOpenedLeft(const std::string& address) {
+        askedFor.push_back(address);
+        return left.count(address) != 0;
+    }
     std::string said;
     bool on;
     unsigned phones;
     const char* code;
     unsigned dials;
     SerialStatus status;
+    std::set<std::string> left;           // the phones whose own links the rule leaves to another program
+    std::vector<std::string> askedFor;    // the addresses phoneOpenedLeft() was asked for
 };
 
 static void testSerialDial() {
@@ -3854,9 +3860,28 @@ static void testSerialDial() {
     std::string member = status.substr(status.find("\"result\":") + 9);
     member = member.substr(0, member.size() - 1);
     CHECK_IN(info, info.find("\"serial\":" + member) != std::string::npos);
-    // A phone may ask too, once it has done auth.
+    // The local socket's has no phoneOpenedLeft, and the rule is not asked for it.
+    CHECK(!st.result.find("phoneOpenedLeft").present() && dial.askedFor.empty());
+    // A phone may ask too, once it has done auth; a link that knows no phone's address is never left.
     Phone* paired = b.phone("6", 4096, "serial");
-    CHECK(Parsed(b.call(paired, "serial.status", "{}")).result.isObject());
+    Parsed fromPhone(b.call(paired, "serial.status", "{}"));
+    CHECK(fromPhone.result.isObject() && fromPhone.result.find("phoneOpenedLeft").isBool());
+    CHECK(!fromPhone.result.find("phoneOpenedLeft").boolean() && dial.askedFor.size() == 1 && dial.askedFor[0].empty());
+
+    // A phone's link that knows its address: the rule for that phone, in serial.status and info.get alike.
+    Phone* known = b.connect("serial", "00:11:22:33:44:55");
+    known->maxFrame = 4096;
+    CHECK(Parsed(b.hello(known, Bench::phoneHello("7", 4096))).result.isObject());
+    b.pair("7");
+    CHECK(Parsed(b.authenticate(known, Bench::keyOf("7"))).result.isObject());
+    Parsed notLeft(b.call(known, "info.get", "{}"));
+    CHECK(!notLeft.result.find("serial").find("phoneOpenedLeft").boolean() && dial.askedFor.back() == "00:11:22:33:44:55");
+    dial.left.insert("00:11:22:33:44:55");
+    CHECK(Parsed(b.call(known, "info.get", "{}")).result.find("serial").find("phoneOpenedLeft").boolean());
+    CHECK(Parsed(b.call(known, "serial.status", "{}")).result.find("phoneOpenedLeft").boolean());
+    // Another phone's link is not that phone's.
+    CHECK(!Parsed(b.call(paired, "info.get", "{}")).result.find("serial").find("phoneOpenedLeft").boolean());
+    dial.left.clear();
     // No checkedMsAgo before the first registration.
     dial.status.checkedMsAgo = -1;
     CHECK(!Parsed(b.call(ctl, "serial.status", "{}")).result.find("checkedMsAgo").present());

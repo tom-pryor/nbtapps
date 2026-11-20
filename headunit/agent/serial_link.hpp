@@ -550,6 +550,7 @@ public:
     virtual bool dialOn() { return config_.dial.on; }
     virtual unsigned dialNow(std::string* why, const char** code);
     virtual SerialStatus serialStatus();
+    virtual bool phoneOpenedLeft(const std::string& address);
     virtual bool removeSerialService(const std::string& name) { return spp_.removeOther(name); }
 
     // Puts the gate in front and opens the client of the car's Bluetooth service. If either does not work, the

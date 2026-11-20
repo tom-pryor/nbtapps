@@ -60,6 +60,9 @@ public:
     // "not-found" with no such phone, "io-error" when the car cannot be asked).
     virtual unsigned dialNow(std::string* why, const char** code) = 0;
     virtual SerialStatus serialStatus() = 0;
+    // Whether a link the phone at `address` opens itself is left to another program now, unread (the rule of
+    // serial_link.hpp): for that phone's app, which then only waits for the car's link. From the agent's thread.
+    virtual bool phoneOpenedLeft(const std::string& address) = 0;
 };
 
 }  // namespace nbt
