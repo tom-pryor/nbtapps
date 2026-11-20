@@ -34,6 +34,9 @@
 //   serial.reset                    has the car end the phone's Bluetooth serial link (serial_reset.hpp): see below
 //   settings.get, settings.set      the settings of an installed package (settings.hpp): see below
 //   agent.stop                      the local socket only: the agent ends, as it does for SIGTERM: see below
+//   channel.open, channel.get,      a channel to the program of an installed package (channels.hpp), and the switch
+//   channel.set                     of a switched one; with the events channel.credit and channel.close either way,
+//                                   and channel.paused and channel.resumed: see "Channels" below
 //   job.progress, job.log, job.done the agent's events, to every controller
 //   link.closing                    the agent's event to a phone whose link it is about to end; the last thing it
 //                                   says on that link
