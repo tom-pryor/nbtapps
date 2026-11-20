@@ -1,0 +1,19 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.ssh",
+  "name": "SSH access",
+  "version": "1.0.0",
+  "requires": { "agent": ">=1.7.0-beta.1", "app": ">=0.9.0" },
+  "install": {
+    "files": [
+      { "src": "payload/bin/", "dest": "${app}/bin/", "mode": "0755" }
+    ]
+  },
+  "channels": [
+    { "name": "ssh", "apps": [], "access": "both", "switch": true, "start": { "program": "bin/sshrelay" } }
+  ],
+  "logs": [
+    { "path": "${tmp}/channels/ssh.log" },
+    { "path": "${tmp}/channels/ssh.log.1" }
+  ]
+}

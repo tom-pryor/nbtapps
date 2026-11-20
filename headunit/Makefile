@@ -15,12 +15,14 @@
 #                   does the agent's   needs python3 + cryptography, git (host)
 #   make check      ids, XML, the built library and the plugin's package  needs python3 + readelf (host)
 #   make agent-test tests of the agent (agent/): package reader, install engine, protocol, nbtagent with
-#                   nbtctl end to end, and the launcher and install scripts. The agent's side runs in a Docker
+#                   nbtctl end to end, the SSH package's bench form through the agent with an OpenSSH client
+#                   (make ssh-e2e), and the launcher and install scripts. The agent's side runs in a Docker
 #                   container (tools/bench.py), so that the packages' scripts do not run loose on this machine
 #                   needs docker, g++, gcc, zlib, python3 + cryptography (host). About four minutes one part after
 #                   another; `make -j4 --output-sync=target agent-test` runs four parts at a time, as build.sh agent
 #                   does, and takes about as long as the longest part, test_serial
-#   make bench-image the Docker image for that: nbtagent and the test programs, built inside it
+#   make bench-image the Docker image for that: nbtagent and the test programs, built inside it, and the SSH
+#                   package's programs, built of the export make ssh-src makes first, with Debian's OpenSSH client
 #   make agent-host build/agent-host/: nbtagent and nbtctl for this machine. nbtctl is the one to use; run the
 #                   agent with tools/bench.py
 #   make agent      the same code, tests and programs compiled for the head unit, and release/agent/: nbtagent,
@@ -96,7 +98,7 @@ PLUGIN_AGENT_SRCS = agent/frame.cpp agent/json.cpp agent/peer.cpp
 HDRS = $(wildcard src/*.hpp) $(wildcard agent/*.hpp)
 
 .PHONY: all lib pkg check agent agent-check agent-test agent-host agent-programs agent-e2e agent-launcher \
-        agent-pkg agent-release test-agent-pkg plugin-pkg plugin-release test-plugin-pkg \
+        agent-pkg agent-release test-agent-pkg plugin-pkg plugin-release test-plugin-pkg ssh-e2e \
         bench-image ssh-src ssh ssh-host ssh-check ssh-relay ssh-relay-host ssh-test ssh-pkg ssh-release test-ssh-pkg \
         test-protocol test-pkg testdata icons clean FORCE
 .SECONDARY:
@@ -210,8 +212,8 @@ TESTDATA = $(BUILD)/testdata/vectors.json
 # beside them.
 AGENT_TESTS_FIRST = test_serial test_engine
 agent-test: $(addprefix run-agent-,$(AGENT_TESTS_FIRST) $(filter-out $(AGENT_TESTS_FIRST),$(AGENT_TESTS))) \
-            test-protocol test-agent-pkg test-plugin-pkg test-ssh-pkg agent-e2e agent-launcher
-	@echo [DONE] $(words $(AGENT_TESTS)) agent tests, the protocol vectors, the tests of the three package scripts, the end-to-end test and the launcher test passed
+            test-protocol test-agent-pkg test-plugin-pkg test-ssh-pkg agent-e2e ssh-e2e agent-launcher
+	@echo [DONE] $(words $(AGENT_TESTS)) agent tests, the protocol vectors, the tests of the three package scripts, the two end-to-end tests and the launcher test passed
 
 agent-host: $(addprefix $(AGENT_HOST)/,$(AGENT_PROGS))
 	@echo [DONE] $(AGENT_HOST): nbtagent and nbtctl for this machine
@@ -228,6 +230,13 @@ bench-image:
 agent-e2e: bench-image $(AGENT_HOST)/nbtctl $(TESTDATA)
 	@echo [TEST] agent end to end
 	@python3 tests/e2e/run_agent.py $(AGENT_HOST) $(BUILD)/testdata
+
+# The SSH package's bench form (tests/packages/ssh-1.0.0) installed through the agent in its container, and the
+# image's OpenSSH client, in a container of its own, logging in through nbtctl channel as its proxy command: a
+# command, a pty, scp and sftp, the switch, an upgrade, the agent started again, removal (tests/e2e/run_ssh.py).
+ssh-e2e: bench-image $(AGENT_HOST)/nbtctl $(TESTDATA)
+	@echo [TEST] the SSH package end to end
+	@python3 tests/e2e/run_ssh.py $(AGENT_HOST) $(BUILD)/testdata
 
 # The starter (agent/nbtstart.sh), a version's launcher (agent/nbtlaunch.sh) and the first install
 # (agent/hu_install.sh), in a container: on folders, with stand-ins for nbtagent that end as each case says, with
@@ -495,6 +504,12 @@ ssh-relay-host: $(SSH)/host/sshrelay
 $(SSH)/host/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS) $(BUILD)/version
 	@mkdir -p $(SSH)/host
 	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_SSHRELAY_TEST_HOOK -DNBT_APP_VERSION='"$(VERSION)"' -Iagent -o $@ $(SSH_RELAY_SRCS)
+
+# The relay of the test bench's image (tools/bench/Dockerfile builds it there, with Dropbear and sftp-server from
+# build-host.sh): this machine's kind of program, without the test hooks, as the head unit's is built.
+$(SSH)/bench/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS) $(BUILD)/version
+	@mkdir -p $(SSH)/bench
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_APP_VERSION='"$(VERSION)"' -Iagent -o $@ $(SSH_RELAY_SRCS)
 $(SSH_TEST)/test_key_lines: tests/ssh/test_key_lines.cpp ssh/relay/key_lines.cpp agent/json.cpp $(SSH_RELAY_HDRS)
 	@mkdir -p $(SSH_TEST)
 	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -Iagent -Issh/relay -o $@ $< ssh/relay/key_lines.cpp agent/json.cpp

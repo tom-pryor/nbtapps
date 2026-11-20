@@ -47,6 +47,14 @@ are shell scripts that stand in for binaries.
                          (tests/agent/chan_echo.cpp, chan_feed.cpp) and keeps beside the agent in its image. Their
                          logs are the package's. It requires agent >=1.7.0-beta.1, the first that knows channels
   chan-1.1.0             the same one version on: an upgrade of a package whose channels are open
+  ssh-1.0.0              the SSH package, org.nbtapp.ssh, as the test bench has it: the real package's manifest
+                         (ssh/package/manifest.json.in) with the same channel, switch, program, logs and requires,
+                         but no licences and no link. Its bin/sshrelay, bin/dropbearmulti and bin/sftp-server are
+                         scripts that run the programs of the same names the bench builds for its image and keeps
+                         in /opt/nbtagent/ssh/ (Dropbear and sftp-server from the same sources as the head unit's,
+                         the relay without its test hooks), and bin/scp is a script that runs dropbearmulti as scp,
+                         where the real package has a link. tests/e2e/run_ssh.py logs in through it
+  ssh-1.0.1              the same one version on: an upgrade with a session open
   agent-1.1.0            the agent's own package, org.nbtapp.agent: ${app}/nbtagent, ${app}/nbtctl and the
                          version's launcher, ${app}/nbtlaunch.sh. Its nbtagent answers --version only, and its
                          launcher is read by the shell and never run. The launcher's test, which has to start

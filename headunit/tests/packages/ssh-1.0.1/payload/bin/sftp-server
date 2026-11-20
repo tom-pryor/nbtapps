@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for OpenSSH's sftp-server, which the test bench builds for its image from the same sources as the head
+# unit's: it is that program, under this name.
+exec /opt/nbtagent/ssh/sftp-server "$@"

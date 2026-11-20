@@ -3,12 +3,16 @@
 # Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 """The agent on the test bench, in a Docker container.
 
-  tools/bench.py image                 build the image (quick when nothing has changed)
+  tools/bench.py image                 build the image (quick when nothing has changed), after `make ssh-src`
   tools/bench.py have                  exit status 0 if Docker and the image are there, 1 if not
-  tools/bench.py agent ARGS...         nbtagent in a container; ARGS as the host build's nbtagent takes them
+  tools/bench.py agent [--restart PIDFILE] ARGS...
+                                       nbtagent in a container; ARGS as the host build's nbtagent takes them
   tools/bench.py test NAME [ARGS...]   the test program NAME (such as test_engine) in a container
   tools/bench.py sh SCRIPT [ARGS...]   a shell script of this checkout in a container, under the image's sh
   tools/bench.py testdata OUTDIR       the test packages (tests/make_packages.py) built in a container, into OUTDIR
+  tools/bench.py client DIR... -- PROGRAM [ARGS...]
+                                       a program of the image (ssh, scp, sftp, nbtctl) in a container that may write
+                                       each DIR, with this program's standard input
 
 Why: a package's hook is an ordinary process of whoever runs the agent. --root says where the agent puts files; it
 does not keep a script from the rest of the machine. In the container a hook sees a small Debian, the folders
@@ -21,6 +25,16 @@ named below, and nothing else of this machine, and it is not root there.
 With no --debug-tcp the container has no network at all, and the local socket is the only way in. With
 --debug-tcp PORT, 127.0.0.1:PORT of this machine leads to the agent (0: a free port, which the agent's first lines
 name), and the container is on Docker's default network: a hook can then reach whatever that network reaches.
+With --restart PIDFILE (which has to be in the root or the socket's folder) the agent is started again whenever it
+ends, a second later, as a version's launcher starts it again on a head unit, and the pid it has in the container
+is written to PIDFILE each time: so a test can end the agent and leave what it started running. A SIGINT or SIGTERM
+to this program then ends the agent and the container.
+
+`agent` and `client` give the container an /etc/passwd with a line for the user this program runs as (bench, its
+home /tmp, its shell /bin/sh): an SSH server, which the SSH package starts in the agent's container, logs in only a
+user it can look up, and an SSH client runs only as one. `client` runs a program of the image, with this
+program's standard input, in a container that may write each DIR, has no network, and has nothing else of this
+machine: the agent's socket is reached through a DIR that holds it.
 
 `test` and `sh` run from the repo's top folder, which the container may read, and may write build/bench/work only:
 a test that takes a work folder has to be given one in there. They are handed the NBT_TEST_... variables of this
@@ -37,7 +51,10 @@ Debian, in an image of their own (the Dockerfile's stage `vectors`, named as the
 which may read this checkout and write OUTDIR only, and has no network. `make testdata` still builds them with this
 machine's Python, for the agent's own tests, which compare them with nothing.
 
-The image is nbtapp-bench, or what NBT_BENCH_IMAGE names. Needs docker, and for `image` git.
+`image` runs `make ssh-src` first: the image builds Dropbear and sftp-server of the export it makes in
+build/ssh/src/ (the image has no git), and that fetches the two submodules, shallow, when they are not there.
+
+The image is nbtapp-bench, or what NBT_BENCH_IMAGE names. Needs docker, and for `image` git, make and patch.
 """
 import os, socket, subprocess, sys
 
@@ -60,6 +77,15 @@ def image():
                                  stderr=subprocess.DEVNULL).stdout.decode().strip() or "unknown"
     except OSError:
         version = "unknown"
+    # The export of the SSH sources, which the image builds of. Its own make, not the one that may have started this:
+    # that one's job slots are not this program's.
+    env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+    try:
+        exported = subprocess.run(["make", "-s", "--no-print-directory", "-C", REPO, "ssh-src"], stdout=sys.stderr, env=env)
+    except OSError:
+        fail("make is not installed, or not on the PATH", 1)
+    if exported.returncode != 0:
+        fail("make ssh-src failed: the image needs the SSH sources it exports", exported.returncode)
     print("bench.py: building the image %s (minutes the first time, a moment when nothing has changed)" % IMAGE,
           file=sys.stderr, flush=True)
     os.execvp("docker", ["docker", "build", "--quiet", "--provenance=false", "--tag", IMAGE, "--build-arg", "VERSION=" + version,
@@ -107,8 +133,44 @@ def inside(path, folder):
     return path == folder or path.startswith(folder.rstrip("/") + "/")
 
 
+def passwd():
+    """The options that give a container build/bench/passwd as its /etc/passwd: root, and the user this program
+    runs as."""
+    path = os.path.join(REPO, "build", "bench", "passwd")
+    text = "root:x:0:0:root:/root:/bin/sh\nbench:x:%d:%d:bench:/tmp:/bin/sh\n" % (os.getuid(), os.getgid())
+    try:
+        with open(path) as f:
+            same = f.read() == text
+    except OSError:
+        same = False
+    if not same:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".new", "w") as f:
+            f.write(text)
+        os.replace(path + ".new", path)
+    if "," in path or ":" in path:
+        fail("%s: a path handed to Docker cannot hold a comma or a colon" % path)
+    return ["--mount", "type=bind,source=%s,target=/etc/passwd,readonly" % path]
+
+
+# The agent, started again whenever it ends, its pid in the container written to the file "$1" each time; the
+# agent's arguments follow. A SIGTERM or SIGINT ends the agent, and then the loop.
+RESTART = """pidfile=$1
+shift
+stop=0
+trap 'stop=1; kill -TERM $pid 2>/dev/null' TERM INT
+while [ $stop = 0 ]; do
+    %s/nbtagent "$@" &
+    pid=$!
+    echo $pid > "$pidfile"
+    while kill -0 $pid 2>/dev/null; do wait $pid; done
+    [ $stop = 0 ] && sleep 1
+done
+""" % PROGRAMS
+
+
 def agent(args):
-    root = socket_path = port = None
+    root = socket_path = port = pidfile = None
     keys, passed = [], []
     at = 0
     while at < len(args):
@@ -117,10 +179,13 @@ def agent(args):
             passed.append(name)
             at += 1
             continue
-        if name not in ("--root", "--socket", "--test-key", "--debug-tcp") or at + 1 == len(args):
-            fail("agent takes --root DIR [--socket PATH] [--test-key FILE]... [--debug-tcp PORT]")
+        if name not in ("--root", "--socket", "--test-key", "--debug-tcp", "--restart") or at + 1 == len(args):
+            fail("agent takes [--restart PIDFILE] --root DIR [--socket PATH] [--test-key FILE]... [--debug-tcp PORT]")
         value = args[at + 1]
         at += 2
+        if name == "--restart":
+            pidfile = os.path.abspath(value)
+            continue
         if name == "--debug-tcp":
             if not value.isdigit() or int(value) > 65535:
                 fail("--debug-tcp takes a port, 0 for any free one")
@@ -158,7 +223,26 @@ def agent(args):
         options += ["--publish", "127.0.0.1:%d:%d" % (port, port)]
         passed += ["--debug-tcp", "0.0.0.0:%d" % port]
         print("bench.py: the agent's debug TCP link is 127.0.0.1:%d on this machine" % port, file=sys.stderr, flush=True)
-    container("agent", options, [PROGRAMS + "/nbtagent"] + passed)
+    options += passwd()
+    if pidfile is None:
+        container("agent", options, [PROGRAMS + "/nbtagent"] + passed)
+    if root is None or not (inside(pidfile, root) or (socket_path is not None and inside(pidfile, os.path.dirname(socket_path)))):
+        fail("--restart takes a file in the root or in the socket's folder")
+    container("agent", options, ["/bin/sh", "-c", RESTART, "restart", pidfile] + passed)
+
+
+def client(args):
+    if "--" not in args or args.index("--") == 0 or args.index("--") == len(args) - 1:
+        fail("client takes DIR... -- PROGRAM [ARGS...]")
+    split = args.index("--")
+    options = ["--interactive", "--network", "none"]
+    for folder in args[:split]:
+        folder = os.path.abspath(folder)
+        if not os.path.isdir(folder):
+            fail("%s is not a folder" % folder)
+        options += bind(folder)
+    options += passwd() + ["--workdir", os.path.abspath(args[0])]
+    container("client", options, args[split + 1:])
 
 
 def in_repo():
@@ -201,7 +285,7 @@ def testdata(args):
 
 def main():
     commands = {"image": image, "have": have}
-    with_args = {"agent": agent, "test": test, "sh": shell, "testdata": testdata}
+    with_args = {"agent": agent, "test": test, "sh": shell, "testdata": testdata, "client": client}
     args = sys.argv[1:]
     try:
         if len(args) == 1 and args[0] in commands:
