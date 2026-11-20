@@ -43,6 +43,9 @@ import com.nbtapps.store.data.ssh.DataStoreAuthorizedClients
 import com.nbtapps.store.data.ssh.KeystoreSshIdentity
 import com.nbtapps.store.data.ssh.SshIdentity
 import com.nbtapps.store.data.ssh.authorizedClientsStore
+import com.nbtapps.store.data.terminal.JobTerminalLink
+import com.nbtapps.store.data.terminal.SshShellOpener
+import com.nbtapps.store.data.terminal.TerminalRepository
 import com.nbtapps.store.data.update.ApkInstaller
 import com.nbtapps.store.data.update.AppUpdater
 import com.nbtapps.store.data.update.InstalledApp
@@ -228,6 +231,24 @@ abstract class AppModule {
             carsHolding = bluetooth.connected,
             mediaAudio = bluetooth::mediaAudio,
             log = AndroidLinkLog,
+        )
+
+        /** The terminal on a head unit: its shell goes on when the screen, or the app, is left. */
+        @Provides
+        @Singleton
+        fun provideTerminalRepository(
+            jobs: JobRepository,
+            identity: SshIdentity,
+            keeper: JobKeeper,
+            @ApplicationScope scope: CoroutineScope,
+            clock: ElapsedClock,
+        ): TerminalRepository = TerminalRepository(
+            JobTerminalLink(jobs),
+            SshShellOpener(identity),
+            keeper,
+            scope,
+            // The idle limit counts the time the phone slept, as the head unit's server does.
+            clock = clock::millis,
         )
 
         /** Setting a head unit up to start the agent with the car, which goes on when the pairing screen is left. */
