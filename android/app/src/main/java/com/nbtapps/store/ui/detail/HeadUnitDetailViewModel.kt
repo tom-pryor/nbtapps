@@ -9,19 +9,27 @@ import androidx.navigation.toRoute
 import com.nbtapps.store.data.BluetoothAccess
 import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.PhoneBluetooth
+import com.nbtapps.store.data.PrereleaseRepository
+import com.nbtapps.store.data.catalogue.CatalogueRepository
+import com.nbtapps.store.data.catalogue.CatalogueState
 import com.nbtapps.store.data.jobs.AutostartSetup
 import com.nbtapps.store.data.jobs.AutostartSetupState
 import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.data.jobs.SerialResetOutcome
+import com.nbtapps.store.data.jobs.packageStatus
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.data.serialUnavailable
+import com.nbtapps.store.data.ssh.SshTunnel
+import com.nbtapps.store.data.terminal.TerminalRepository
+import com.nbtapps.store.data.terminal.TerminalState
 import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.Autostart
+import com.nbtapps.store.model.ChannelSwitch
 import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.HeadUnitChecks
 import com.nbtapps.store.model.HeadUnitProfile
@@ -38,12 +46,16 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** The link to the agent on this head unit. */
 sealed interface LinkState {
@@ -164,6 +176,52 @@ data class HeadUnitDetailUiState(
     val canResetSerial: Boolean = false,
     /** The reset asked from this page, while it runs and once it is over. Null where none was. */
     val serialReset: SerialResetUi? = null,
+    /** There is a link to this head unit, and its agent has channels: see [DebugCard]. */
+    val channels: Boolean = false,
+    /** The version of the agent on this head unit, as it says over the link that is open, or said last. */
+    val agentVersion: String? = null,
+    /** The Debug card, where it is shown. */
+    val debug: DebugCard? = null,
+    /** The question before SSH access is switched on is open. */
+    val confirmingSsh: Boolean = false,
+)
+
+/**
+ * The Debug card for [page], or null where it is not shown: with a link, where the agent has channels and the SSH
+ * package is installed or [offered]; with none, where the package was installed when the agent last said, and then
+ * its switch is not known. [ssh] is what the agent said of the switch, [terminal] the app's terminal.
+ */
+internal fun debugCard(page: HeadUnitDetailUiState, offered: Boolean, ssh: SshSwitchUi, terminal: TerminalState, headUnitId: String): DebugCard? {
+    val installed = page.installed.any { it.id == SshTunnel.PACKAGE }
+    val connected = page.link is LinkState.Connected
+    val shown = if (connected) page.channels && (installed || offered) else installed
+    if (!shown) return null
+    return DebugCard(
+        installed = installed,
+        on = ssh.on.takeIf { connected },
+        connections = ssh.connections.takeIf { connected },
+        switching = ssh.switching,
+        error = ssh.error,
+        terminalOpen = terminal.active && terminal.headUnitId == headUnitId,
+    )
+}
+
+/**
+ * Whether the catalogue offers the SSH package for a head unit that has [installed] and runs agent [agentVersion]: a
+ * version of it runs on that agent and this app may install it, as the package's page has it.
+ */
+internal fun sshOffered(catalogue: CatalogueState, installed: List<InstalledPackage>, agentVersion: String?, switchedOn: Set<String>): Boolean {
+    val pkg = catalogue.index?.packages?.find { it.id == SshTunnel.PACKAGE } ?: return false
+    return packageStatus(pkg, installed, agentVersion, switchedOn)?.suits == true
+}
+
+/** What the agent last said of the SSH package's switch over the link that is open, and how a throw of it went. */
+internal data class SshSwitchUi(
+    val on: Boolean? = null,
+    val connections: Int? = null,
+    val switching: Boolean = false,
+    val error: String? = null,
+    val confirming: Boolean = false,
 )
 
 /** The ids of the [installed] packages whose installed version is among the [stored] archives with [StoredPackage.laterFormat]. */
@@ -182,6 +240,12 @@ class HeadUnitDetailViewModel internal constructor(
     /** The archives on this phone, for what their manifests say: see [HeadUnitDetailUiState.laterFormat]. */
     private val stored: Flow<List<StoredPackage>> = flowOf(emptyList()),
     private val diagnostics: SerialDiagnostics = SerialDiagnostics(),
+    /** The app's terminal, which the Debug card's second row follows. */
+    private val terminal: Flow<TerminalState> = flowOf(TerminalState.Idle),
+    /** The catalogue, for whether it offers the SSH package. */
+    private val catalogue: Flow<CatalogueState> = flowOf(CatalogueState()),
+    /** The packages whose pre-releases are offered. */
+    private val switchedOn: Flow<Set<String>> = flowOf(emptySet()),
 ) : ViewModel() {
 
     @Inject
@@ -195,7 +259,13 @@ class HeadUnitDetailViewModel internal constructor(
         @ApplicationScope appScope: CoroutineScope,
         store: PackageStore,
         diagnostics: SerialDiagnostics,
-    ) : this(savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope, store.packages, diagnostics)
+        terminal: TerminalRepository,
+        catalogue: CatalogueRepository,
+        prereleases: PrereleaseRepository,
+    ) : this(
+        savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope, store.packages,
+        diagnostics, terminal.state, catalogue.catalogue, prereleases.switchedOn,
+    )
 
     private data class Local(
         val serial: SerialStatus? = null,
@@ -208,6 +278,12 @@ class HeadUnitDetailViewModel internal constructor(
     )
 
     private val local = MutableStateFlow(Local())
+
+    /** The SSH package's switch, as the agent last said, and the throw of it from the Debug card. */
+    private val ssh = MutableStateFlow(SshSwitchUi())
+
+    /** One request about the switch at a time, so that an older answer never takes the place of a newer one. */
+    private val sshLock = Mutex()
 
     /** The confirmation of a check's fix: it is the app's, so a fix goes on when the screen is left. */
     private val fixes = CheckFixFlow(jobs, appScope)
@@ -244,17 +320,102 @@ class HeadUnitDetailViewModel internal constructor(
                 checkError = local.checkError,
                 canResetSerial = connected?.serialReset == true && job?.needsPhone != true,
                 serialReset = local.serialReset,
+                channels = connected?.channels == true,
+                agentVersion = connected?.info?.agentVersion ?: unit?.profile?.agentVersion,
             )
         }
 
+    /** What the Debug card is made of besides the page: the catalogue, the pre-release switches, the SSH switch, the terminal. */
+    private val debugSide = combine(catalogue, switchedOn, ssh, terminal, ::DebugSide)
+
+    private data class DebugSide(val catalogue: CatalogueState, val switchedOn: Set<String>, val ssh: SshSwitchUi, val terminal: TerminalState)
+
     val uiState: StateFlow<HeadUnitDetailUiState> =
-        combine(page, fixes.state, stored) { page, fix, stored ->
-            page.copy(fix = fix, laterFormat = laterFormat(page.installed, stored))
+        combine(page, fixes.state, stored, debugSide) { page, fix, stored, side ->
+            val offered = sshOffered(side.catalogue, page.installed, page.agentVersion, side.switchedOn)
+            page.copy(
+                fix = fix,
+                laterFormat = laterFormat(page.installed, stored),
+                debug = debugCard(page, offered, side.ssh, side.terminal, headUnitId),
+                confirmingSsh = side.ssh.confirming,
+            )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
 
     init {
         // Bluetooth switched off or on while the page is open changes what it says at once.
         viewModelScope.launch { bluetooth.on.collect { readBluetooth() } }
+        viewModelScope.launch { followSsh() }
+    }
+
+    /**
+     * Reads the SSH package's switch whenever a link to this head unit comes up whose agent has channels and the package,
+     * and again when the package's version, whether a job runs on this head unit, or the terminal's state on it changes.
+     * With no such link what the agent said is forgotten.
+     */
+    private suspend fun followSsh() {
+        combine(jobs.connection, jobs.job, terminal) { connection, job, terminal ->
+            val connected = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == headUnitId && it.channels }
+            connected?.installed?.find { it.id == SshTunnel.PACKAGE }?.let { pkg ->
+                SshLook(pkg.version, job?.headUnitId == headUnitId && !job.ended, terminal.takeIf { it.headUnitId == headUnitId })
+            }
+        }.distinctUntilChanged().collectLatest { look ->
+            if (look == null) ssh.update { it.copy(on = null, connections = null, error = null) } else readSsh()
+        }
+    }
+
+    /** What a reading of the switch follows: see [followSsh]. */
+    private data class SshLook(val version: String, val jobRunning: Boolean, val terminal: TerminalState?)
+
+    /**
+     * Reads the switch, for [followSsh]: an answer also puts away the line of a refusal, which was of a moment that has
+     * passed, such as a job that has now ended. Where the agent does not answer, what it said before stands, the line too.
+     */
+    private suspend fun readSsh() = sshLock.withLock {
+        jobs.channelSwitch(headUnitId, SshTunnel.PACKAGE, SshTunnel.CHANNEL).onSuccess { answer ->
+            tookSsh(answer)
+            ssh.update { it.copy(error = null) }
+        }
+    }
+
+    private fun tookSsh(answer: ChannelSwitch) = ssh.update { it.copy(on = answer.on, connections = answer.open) }
+
+    /**
+     * The Debug card's switch thrown to [on]: on asks first ([confirmSsh]), off is done at once. Nothing is done while
+     * the switch's state is not known, or a throw waits for the agent.
+     */
+    fun switchSsh(on: Boolean) {
+        if (uiState.value.debug?.canSwitch != true) return
+        if (on) ssh.update { it.copy(confirming = true) } else applySsh(false)
+    }
+
+    /** The question before SSH access is switched on is answered yes. */
+    fun confirmSsh() {
+        if (!ssh.value.confirming) return
+        ssh.update { it.copy(confirming = false) }
+        applySsh(true)
+    }
+
+    /** The question before SSH access is switched on is answered no, or put away. */
+    fun cancelSsh() = ssh.update { it.copy(confirming = false) }
+
+    /**
+     * Has the agent switch SSH access [on] or off. Its answer says how the switch then stands; a refusal is told in a
+     * line, and the switch is read again so that it shows what the head unit has. That reading leaves the line, which
+     * goes at the next throw or the next reading of [followSsh]'s.
+     */
+    private fun applySsh(on: Boolean) {
+        ssh.update { it.copy(switching = true, error = null) }
+        viewModelScope.launch {
+            sshLock.withLock {
+                jobs.setChannelSwitch(headUnitId, SshTunnel.PACKAGE, SshTunnel.CHANNEL, on)
+                    .onSuccess(::tookSsh)
+                    .onFailure { failure ->
+                        ssh.update { it.copy(error = sshSwitchError(failure)) }
+                        jobs.channelSwitch(headUnitId, SshTunnel.PACKAGE, SshTunnel.CHANNEL).onSuccess(::tookSsh)
+                    }
+                ssh.update { it.copy(switching = false) }
+            }
+        }
     }
 
     /**
