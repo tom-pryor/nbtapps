@@ -15,6 +15,9 @@ Both are shallow (.gitmodules). Ours, beside them:
   build-host.sh       the same for this machine, with its own compiler
   relay/              sshrelay, the program of the package's channel, which starts the server for each connection
                       (below, "The relay"). Ours, under the repository's licence
+  relay/version.hpp   the package's version (below, "The package")
+  package/manifest.json.in  the package's manifest, with a placeholder for the version
+  ../tools/ssh_pkg.py    make ssh-pkg, make ssh-release; its test is ../tests/test_ssh_pkg.py (make test-ssh-pkg)
   ../tools/check_ssh.py  make ssh-check
   ../tests/ssh/       the relay's tests, make ssh-test
 
@@ -43,9 +46,17 @@ From headunit/:
                    and its server, given one connection on a socket pair (-i), sends the banner
                    SSH-2.0-dropbear_<version>.
 
+  make ssh-pkg     release/pkg/org.nbtapp.ssh-<version>.nbtpkg, not signed (below, "The package").
+  make ssh-release KEY=FILE
+                   that package signed with the package key, to release/pkg/signed/, and its SHA-256 printed.
+
   QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh ssh
                    all of it in order: make ssh-host, make ssh-test, make ssh, make ssh-relay in the SDP image,
-                   make ssh-check.
+                   make ssh-check, make ssh-pkg.
+
+make ssh-src writes build/ssh/src/sources: each submodule's pinned commit, and the SHA-256 of the patch and of
+localoptions.h. make ssh copies it to build/ssh/qnx/sources with the SHA-256 of build-qnx.sh: what the head unit's
+dropbearmulti and sftp-server were built from, which hold no version or build of ours.
 
 `make ssh` and `make ssh-host` each export again and build from the start, outside the export, in
 build/ssh/<qnx|host>/obj/, where configure.log and make.log are kept. Everything is under build/, which
@@ -109,6 +120,35 @@ What localoptions.h sets:
     refuses a kernel whose getgroups() works: "Non-multiuser Dropbear requires a non-multiuser kernel".)
   - the head unit's shell PATH as the default PATH, which is used only without -e;
   - SFTPSERVER_PATH "sftp-server", found in PATH.
+
+
+The package
+
+org.nbtapp.ssh, "SSH access" (tools/ssh_pkg.py; ../README.md, "The SSH package"). Its manifest
+(package/manifest.json.in) places, all in the package's own folder ${app}:
+
+  bin/dropbearmulti, bin/sftp-server, bin/sshrelay   the head unit's three programs, mode 0755
+  bin/scp                                            a link to dropbearmulti, which acts as scp under that name
+  licenses/                                          the licence texts (below, "Licences to ship with the
+                                                     programs") and a README that says which program each is of
+
+It has one channel, ssh: for NBTApps itself (apps []), both ways, switched (off until a phone or nbtctl switches
+it on), and started on demand: its program is bin/sshrelay. Its logs are the channel's, ${tmp}/channels/ssh.log
+and ssh.log.1. It runs no hook, places nothing outside its folders, and asks for no restart, so the one risk flag it
+gets is starts-program. It requires agent >=1.7.0-beta.1, the first with channels (a pre-release is outside
+>=1.7.0), and app >=0.9.0.
+
+Its version is the relay's: NBT_SSH_VERSION in relay/version.hpp. sshrelay --version prints it with what
+git describe --always --dirty said when the relay was built, and the relay's log begins with the same line
+(sshrelay 1.0.0-beta.1 (build 03039b4)). make ssh-check finds it in the head unit's relay, and make ssh-release
+refuses a relay of another version, or of another commit than the one checked out, or of a checkout with changes;
+and Dropbear and sftp-server built from other sources than that commit pins (build/ssh/qnx/sources, above). The
+version is raised whenever anything the package holds changes, also when only Dropbear or OpenSSH does: a version
+that has been released is never built again with other content.
+
+What it writes on a head unit: the host key, once, in ${data} (hostkey_ed25519, kept until the package's data is
+removed); everything else on the RAM disk, in ${tmp}: the socket, the keys folders, the state file and, by the
+agent, the channel's logs.
 
 
 The relay
@@ -373,21 +413,38 @@ Moving to a new upstream version
   4. Read the new src/default_options.h and sysoptions.h for options that localoptions.h has to set, and the
      CHANGES file for anything that touches -i, -D, -e or what QNX lacks.
   5. make ssh ssh-host ssh-check, and change the tags and commits at the top of this file.
+  6. Look again at what the build compiles and links for the licences to ship (below), and raise the package's
+     version (ssh/relay/version.hpp).
 
 
 Licences to ship with the programs
 
-Not kept here: they are taken from the exported sources (build/ssh/src/) with the programs. For dropbearmulti:
+Not kept here: tools/ssh_pkg.py takes them from the exported sources (build/ssh/src/) when it makes the package,
+and puts them in its licenses/ folder with a README that says which program each belongs to. A notice is the
+comments at the head of its file, up to its first line of code. The lists are of what the head unit's build
+compiles and links: every object on dropbearmulti's link line that holds code, and the members of OpenSSH's two
+libraries that sftp-server takes (found by the symbols each object defines that the program holds; checked
+2026-11-20, for the pins above). For dropbearmulti:
 
-  - dropbear/LICENSE: Dropbear's MIT licence, and the notices of the parts from OpenSSH, PuTTY and TweetNaCl;
-  - dropbear/libtomcrypt/LICENSE and dropbear/libtommath/LICENSE;
-  - the notices at the head of these compiled files, whose holders or terms LICENSE does not give in full:
-    src/atomicio.c, src/chachapoly.c, src/fake-rfc2553.c, src/gcm.c, src/libcrux_mlkem768_sha3.h (MIT, Cryspen;
-    included by src/mlkem768.c), src/loginrec.c, src/mlkem768.c, src/scp.c, src/scpmisc.c, src/sshpty.c,
-    src/svr-authpam.c, src/svr-authpubkeyoptions.c. (src/progressmeter.c is compiled with its code switched
-    off; src/sntrup761.c is public domain.)
-For sftp-server: openssh/LICENCE, which collects the notices of OpenSSH's files and, in its part 8, those of the
-portable compatibility code.
+  - dropbear/LICENSE (dropbear-LICENSE): Dropbear's MIT licence, and the notices of the parts from OpenSSH, PuTTY
+    and TweetNaCl;
+  - dropbear/libtomcrypt/LICENSE and dropbear/libtommath/LICENSE (libtomcrypt-LICENSE, libtommath-LICENSE);
+  - in dropbear-notices, the notices at the head of these files, whose holders or terms LICENSE does not give in
+    full: src/atomicio.c, src/chachapoly.c, src/compat.c (getusershell(), which QNX's libc has not), src/loginrec.c,
+    src/mlkem768.c, src/libcrux_mlkem768_sha3.h (MIT, Cryspen; included by src/mlkem768.c), src/scp.c,
+    src/scpmisc.c, src/sshpty.c, src/svr-authpubkey.c (its part from OpenSSH) and src/svr-authpubkeyoptions.c.
+    src/fake-rfc2553.c, src/gcm.c, src/progressmeter.c and src/svr-authpam.c are compiled with their code switched
+    off for the head unit, and src/sntrup761.c is public domain.
+For sftp-server:
+
+  - openssh/LICENCE (openssh-LICENCE), which collects the notices of OpenSSH's files and, in its part 8, those of
+    the portable compatibility code;
+  - in openssh-notices, the notices of the files it takes whose holders that file does not name: atomicio.c,
+    misc.c, openbsd-compat/fmt_scaled.c, openbsd-compat/freezero.c, openbsd-compat/memmem.c,
+    openbsd-compat/reallocarray.c, openbsd-compat/recallocarray.c, openbsd-compat/strtonum.c and platform-pledge.c.
+    (openbsd-compat/explicit_bzero.c is public domain.)
+A new upstream version, or other build options, can change what is compiled: look again (step 6 above), and change
+the lists in tools/ssh_pkg.py with this one (make test-ssh-pkg holds the two together).
 
 
 Worktrees

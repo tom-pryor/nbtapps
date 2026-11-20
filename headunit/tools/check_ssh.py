@@ -11,8 +11,9 @@ the relay (ssh/README). Exits non-zero on any failure, and if a build is not the
     interpreter, no library search path of its own, and exactly libc.so.3 and libsocket.so.3 in NEEDED (so no
     zlib: compression is built out)
   - build/ssh/qnx/sshrelay (`make ssh-relay`, ./build.sh ssh): the same kind of program, which asks for
-    libc.so.3, libsocket.so.3 and libcpp.so.4 (the C++ library the agent's programs use) and nothing else, and
-    holds nothing of the test hooks (NBT_SSHRELAY_TEST_*), which only this machine's build has
+    libc.so.3, libsocket.so.3 and libcpp.so.4 (the C++ library the agent's programs use) and nothing else,
+    holds nothing of the test hooks (NBT_SSHRELAY_TEST_*), which only this machine's build has, and says it is the
+    version ssh/relay/version.hpp names, with the build it was made from (tools/ssh_pkg.py reads the same line)
   - build/ssh/host/ (`make ssh-host`): dropbearmulti's key tool makes an ed25519 host key, and its server, on one
     connection (-i, its standard input and output one end of a socket pair, as a program of the agent's gives it
     one), sends the SSH banner of the Dropbear version in build/ssh/src/dropbear before anything is said to it
@@ -23,6 +24,8 @@ Nothing of the head unit's builds is run. Writes build/ssh/check/ only. Needs re
 import os, re, shutil, socket, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import ssh_pkg  # noqa: E402
 SSH = os.path.join(ROOT, "build", "ssh")
 PROGRAMS = ("dropbearmulti", "sftp-server")
 NEEDED = {"libc.so.3", "libsocket.so.3"}
@@ -80,13 +83,20 @@ def check_qnx(name, wanted=NEEDED, builder="make ssh"):
     paths = re.findall(r"\((RPATH|RUNPATH)\).*\[(.*)\]", dynamic)
     if paths:
         fail("%s has a library search path of its own: %s" % (shown, paths))
+    said = ""
     if name == RELAY:
         with open(path, "rb") as f:
-            if TEST_HOOK in f.read():
-                fail("%s holds a test hook (%s...): only the build for this machine has them" % (shown, TEST_HOOK.decode()))
+            program = f.read()
+        if TEST_HOOK in program:
+            fail("%s holds a test hook (%s...): only the build for this machine has them" % (shown, TEST_HOOK.decode()))
+        line, version = ssh_pkg.build_line(program), ssh_pkg.source_version()
+        if line is None or line[0] != version:
+            fail("%s does not say it is version %s of ssh/relay/version.hpp: %s" % (shown, version, line))
+        else:
+            said = ", says version %s (build %s)" % line
     if len(failures) == before:
-        ok("%s: %d bytes, ELF32 ARM EABI5 soft-float executable, not PIC, NEEDED %s%s"
-           % (shown, os.path.getsize(path), " ".join(sorted(needed)), ", no test hook" if name == RELAY else ""))
+        ok("%s: %d bytes, ELF32 ARM EABI5 soft-float executable, not PIC, NEEDED %s%s%s"
+           % (shown, os.path.getsize(path), " ".join(sorted(needed)), ", no test hook" if name == RELAY else "", said))
 
 
 def dropbear_version():

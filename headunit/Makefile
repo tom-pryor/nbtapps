@@ -38,6 +38,7 @@
 #                   needs python3 + cryptography, git (host)
 #   make test-agent-pkg   host test of tools/agent_pkg.py, which those two run   needs python3 + cryptography
 #   make test-plugin-pkg  host test of tools/plugin_pkg.py   needs python3 + cryptography
+#   make test-ssh-pkg     host test of tools/ssh_pkg.py      needs python3 + cryptography
 #   make test-pkg   host test of tools/nbtpkg.py and the test packages   needs python3 + cryptography
 #   make testdata   build/testdata/: good and deliberately broken .nbtpkg files for every reader's tests
 #   make icons      redraw assets/*.png             needs python3 + Pillow (host)
@@ -59,8 +60,13 @@
 #                   needs g++, python3 (host)
 #   make ssh-check  the builds looked at: the head unit's programs, which are not run, ask for libc.so.3 and
 #                   libsocket.so.3 only (and the relay for libcpp.so.4 too, and has no test hook); this machine's key
-#                   tool makes a host key and its server says it is Dropbear on one connection
-#                   needs python3 + readelf (host)
+#                   tool makes a host key and its server says it is Dropbear on one connection; the head unit's relay
+#                   says it is the version of ssh/relay/version.hpp   needs python3 + readelf (host)
+#   make ssh-pkg    release/pkg/org.nbtapp.ssh-<version>.nbtpkg: the SSH package, of build/ssh/qnx/'s three programs
+#                   and the licence texts of build/ssh/src/, not signed   needs python3 (host)
+#   make ssh-release KEY=FILE   signs that package for the catalogue, to release/pkg/signed/, as plugin-release does
+#                   the plugin's; refuses a relay not built from the commit checked out, and Dropbear and sftp-server
+#                   not built from the sources that commit pins   needs python3 + cryptography, git (host)
 #   make clean
 
 QCC ?= qcc
@@ -91,7 +97,7 @@ HDRS = $(wildcard src/*.hpp) $(wildcard agent/*.hpp)
 
 .PHONY: all lib pkg check agent agent-check agent-test agent-host agent-programs agent-e2e agent-launcher \
         agent-pkg agent-release test-agent-pkg plugin-pkg plugin-release test-plugin-pkg \
-        bench-image ssh-src ssh ssh-host ssh-check ssh-relay ssh-relay-host ssh-test \
+        bench-image ssh-src ssh ssh-host ssh-check ssh-relay ssh-relay-host ssh-test ssh-pkg ssh-release test-ssh-pkg \
         test-protocol test-pkg testdata icons clean FORCE
 .SECONDARY:
 
@@ -204,8 +210,8 @@ TESTDATA = $(BUILD)/testdata/vectors.json
 # beside them.
 AGENT_TESTS_FIRST = test_serial test_engine
 agent-test: $(addprefix run-agent-,$(AGENT_TESTS_FIRST) $(filter-out $(AGENT_TESTS_FIRST),$(AGENT_TESTS))) \
-            test-protocol test-agent-pkg test-plugin-pkg agent-e2e agent-launcher
-	@echo [DONE] $(words $(AGENT_TESTS)) agent tests, the protocol vectors, the tests of the two package scripts, the end-to-end test and the launcher test passed
+            test-protocol test-agent-pkg test-plugin-pkg test-ssh-pkg agent-e2e agent-launcher
+	@echo [DONE] $(words $(AGENT_TESTS)) agent tests, the protocol vectors, the tests of the three package scripts, the end-to-end test and the launcher test passed
 
 agent-host: $(addprefix $(AGENT_HOST)/,$(AGENT_PROGS))
 	@echo [DONE] $(AGENT_HOST): nbtagent and nbtctl for this machine
@@ -440,14 +446,17 @@ ssh-src:
 	rm -f build/ssh/src/dropbear.tar build/ssh/src/openssh.tar
 	patch -d $(SSH_SRC)/dropbear -p1 -s -F 0 -i $(CURDIR)/ssh/dropbear-qnx.patch
 	cp ssh/localoptions.h $(SSH_SRC)/dropbear/
+	{ echo "$$(git rev-parse :./ssh/dropbear)  ssh/dropbear"; echo "$$(git rev-parse :./ssh/openssh)  ssh/openssh"; \
+	  sha256sum ssh/dropbear-qnx.patch ssh/localoptions.h; } > $(SSH_SRC)/sources
 	@echo [DONE] $(SSH_SRC): Dropbear $$(git rev-parse --short :./ssh/dropbear), patched, and OpenSSH $$(git rev-parse --short :./ssh/openssh)
 
 ssh: ssh-src
 	@docker image inspect $(QNX_IMAGE) >/dev/null 2>&1 || { echo "make ssh: Docker image '$(QNX_IMAGE)' not found (set QNX_IMAGE)" >&2; exit 1; }
 	rm -rf build/ssh/qnx/obj
-	rm -f build/ssh/qnx/dropbearmulti build/ssh/qnx/sftp-server
+	rm -f build/ssh/qnx/dropbearmulti build/ssh/qnx/sftp-server build/ssh/qnx/sources
 	docker run --rm -u "$$(id -u):$$(id -g)" -v "$(CURDIR)":/src -w /src $(QNX_IMAGE) \
 	    sh ssh/build-qnx.sh $(SSH_SRC)/dropbear $(SSH_SRC)/openssh $(SSH)/qnx
+	{ cat $(SSH_SRC)/sources; sha256sum ssh/build-qnx.sh; } > $(SSH)/qnx/sources
 	@echo [DONE] $(SSH)/qnx: dropbearmulti and sftp-server for the head unit. make ssh-check looks at them
 
 ssh-host: ssh-src
@@ -473,19 +482,19 @@ SSH_TEST = $(SSH)/test
 ssh-relay: $(SSH)/qnx/sshrelay
 	@echo [DONE] $(SSH)/qnx/sshrelay: the relay for the head unit. make ssh-check looks at it
 
-$(SSH)/qnx/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS)
-	@echo [BUILD] $@
+$(SSH)/qnx/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS) $(BUILD)/version
+	@echo [BUILD] $@ $(VERSION)
 	@mkdir -p $(SSH)/qnx $(SSH)/relay-qnx
-	$(TOOL_CXX) $(TOOL_CXXFLAGS) -Wextra -Iagent -o $(SSH)/relay-qnx/sshrelay $(SSH_RELAY_SRCS) -lsocket
+	$(TOOL_CXX) $(TOOL_CXXFLAGS) -Wextra -Iagent -DNBT_APP_VERSION='"$(VERSION)"' -o $(SSH)/relay-qnx/sshrelay \
+	    $(SSH_RELAY_SRCS) -lsocket
 	ntoarmv7-strip -o $@ $(SSH)/relay-qnx/sshrelay
 
 ssh-relay-host: $(SSH)/host/sshrelay
 	@echo [DONE] $(SSH)/host/sshrelay: the relay for this machine, with the test hooks
 
-$(SSH)/host/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS)
+$(SSH)/host/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS) $(BUILD)/version
 	@mkdir -p $(SSH)/host
-	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_SSHRELAY_TEST_HOOK -Iagent -o $@ $(SSH_RELAY_SRCS)
-
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_SSHRELAY_TEST_HOOK -DNBT_APP_VERSION='"$(VERSION)"' -Iagent -o $@ $(SSH_RELAY_SRCS)
 $(SSH_TEST)/test_key_lines: tests/ssh/test_key_lines.cpp ssh/relay/key_lines.cpp agent/json.cpp $(SSH_RELAY_HDRS)
 	@mkdir -p $(SSH_TEST)
 	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -Iagent -Issh/relay -o $@ $< ssh/relay/key_lines.cpp agent/json.cpp
@@ -503,6 +512,22 @@ $(SSH_TEST)/standin_pty: tests/ssh/standin_pty.cpp
 # of Dropbear, as this user, in a temporary folder. Needs make ssh-host first.
 ssh-test: $(SSH)/host/sshrelay $(SSH_TEST)/test_key_lines $(SSH_TEST)/test_processes $(SSH_TEST)/standin_pty
 	@python3 tests/ssh/run_relay.py $(SSH)
+
+# The SSH package, org.nbtapp.ssh (README "The SSH package"), of the head unit's three programs in build/ssh/qnx/ and
+# the licence texts of build/ssh/src/. ssh-pkg leaves it not signed; ssh-release signs it with the package key, as
+# plugin-release signs the plugin's, and the signed archive is what the catalogue records.
+ssh-pkg:
+	python3 tools/ssh_pkg.py build $(SSH)/qnx --src $(SSH_SRC) -o $(AGENT_PKG_OUT)
+
+ssh-release:
+	@test -n "$(KEY)" || { echo "usage: make ssh-release KEY=FILE   (the private half of the package key)" >&2; exit 2; }
+	python3 tools/ssh_pkg.py build $(SSH)/qnx --src $(SSH_SRC) -o $(AGENT_PKG_OUT)
+	python3 tools/check_ssh.py
+	python3 tools/ssh_pkg.py release $(SSH)/qnx --src $(SSH_SRC) --pkg $(AGENT_PKG_OUT) --key "$(KEY)"
+
+test-ssh-pkg:
+	@echo [TEST] tools/ssh_pkg.py
+	@python3 tests/test_ssh_pkg.py
 
 # ---- host side -------------------------------------------------------------------------------------------------
 pkg:
