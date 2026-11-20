@@ -12,7 +12,10 @@ spec/protocol/constants.txt, which each side's own test compares with its code. 
      the events of a job are numbered from 1 with no gap; and the DATA frames of each stream add up to the size its
      blob.fetch reply gave, ending on the frame that has the last-frame flag; those of a files.fetch, from the
      agent, are the size its reply gave once inflated (zlib's own inflate, when they are deflated), end on the
-     frame with that flag, and come before the answer to a files.cancel of the stream; the session has a pairing.issue
+     frame with that flag, and come before the answer to a files.cancel of the stream; a channel's DATA frames, either
+     way, are on the stream its channel.open answer named, from 32,768 up, each one message of 1 to maxMessage bytes
+     with the last-frame flag, and no side sends more than the other granted, in that open (the request's credit and
+     the answer's) and with channel.credit, until a channel.close; the session has a pairing.issue
      that gives a key and an `auth` whose two proofs are the ones that key gives, worked out here from the bytes
      of the two hello payloads; until that `auth` is done the agent answers nothing but hello, ping, auth and
      pairing.issue with a result; and the session ends with the agent's link.closing, with a reason that is one
@@ -40,6 +43,10 @@ MAGIC = b"NBTL"
 MSG, DATA = 1, 2
 LAST = 2
 MAX_PAYLOAD = 65536
+# As constants.txt has them, which check_constants reads; the session is read first.
+CHANNEL_FIRST_STREAM = 32768
+CHANNEL_MAX_MESSAGE = 4096
+CHANNEL_CREDIT = 16
 
 
 def fail(message):
@@ -137,6 +144,10 @@ def check_session():
     proof_sent = None                   # the proof the phone sent
     trusted = False                     # auth is done
     closing = False                     # the agent has said link.closing
+    opening = {}                        # channel.open requests of the phone with no answer yet: id -> credit asked
+    channels = {}                       # open channels: stream -> {">": what the phone may send, "<": the agent's, "max"}
+    closed_channels = set()             # streams of channels that were closed: a frame that crossed the close is dropped
+    channel_messages = {">": 0, "<": 0}  # channels' messages each way
 
     def proof(label):
         transcript = nonces[">"] + nonces["<"] + hashlib.sha256(hello[">"]).digest() + hashlib.sha256(hello["<"]).digest()
@@ -160,6 +171,21 @@ def check_session():
             fail("%s: a frame after link.closing, which is the last thing said on a link" % where)
         frames += 1
         other = "<" if direction == ">" else ">"
+        if kind == DATA and stream >= CHANNEL_FIRST_STREAM and stream not in streams and stream not in files:
+            # A channel's message, either way: within what the other side granted.
+            if stream in closed_channels and stream not in channels:
+                continue
+            channel = channels.get(stream)
+            if channel is None:
+                fail("%s: a DATA frame for a channel that is not open" % where)
+            if not flags & LAST or not 1 <= len(payload) <= channel["max"]:
+                fail("%s: a channel's DATA frame that is not one message of 1 to %d bytes with the last-frame flag"
+                     % (where, channel["max"]))
+            channel[direction] -= 1
+            channel_messages[direction] += 1
+            if channel[direction] < 0:
+                fail("%s: a channel's message over the credit the other side granted" % where)
+            continue
         if kind == DATA and direction == "<":
             # A files stream: the bytes it holds are those of the file once inflated.
             if stream not in files:
@@ -197,6 +223,8 @@ def check_session():
                 fetching[message["id"]] = message["params"].get("compress")
             if message["method"] == "files.cancel" and direction == ">":
                 cancelling[message["id"]] = message["params"].get("stream")
+            if message["method"] == "channel.open" and direction == ">":
+                opening[message["id"]] = message["params"].get("credit", CHANNEL_CREDIT)
             if message["method"] == "auth" and direction == ">":
                 if "nonce" in message["params"]:
                     nonces[">"] = bytes.fromhex(message["params"]["nonce"])
@@ -214,12 +242,30 @@ def check_session():
                 if direction != "<" or message["params"].get("reason") not in CLOSING_REASONS or "seq" in message:
                     fail("%s: link.closing is the agent's, with a reason it knows and no seq" % where)
                 closing = True
+            if message["event"] in ("channel.credit", "channel.close"):
+                number = message["params"].get("stream")
+                if "seq" in message or not isinstance(number, int):
+                    fail("%s: a channel's event with a seq, or with no stream" % where)
+                if number in channels and message["event"] == "channel.credit":
+                    granted = message["params"].get("messages")
+                    if not isinstance(granted, int) or not 1 <= granted <= 65535:
+                        fail("%s: a channel.credit with no messages from 1 to 65535" % where)
+                    channels[number][other] += granted
+                elif number in channels:
+                    if not isinstance(message["params"].get("reason"), str):
+                        fail("%s: a channel.close with no reason" % where)
+                    del channels[number]
+                    closed_channels.add(number)
+                elif number not in closed_channels:
+                    fail("%s: %s for a channel that was never open" % (where, message["event"]))
         elif ("result" in message) != ("error" in message):
             method = waiting[other].pop(message.get("id"), None)
             if method is None:
                 fail("%s: an answer to no request" % where)
             if "error" in message:
                 error = message["error"]
+                if method == "channel.open" and direction == "<":
+                    opening.pop(message["id"], None)
                 if not isinstance(error.get("code"), str) or not isinstance(error.get("message"), str):
                     fail("%s: an error with no code or message" % where)
             elif not isinstance(message["result"], dict):
@@ -254,6 +300,15 @@ def check_session():
             elif method == "files.cancel" and direction == "<":
                 # Nothing more comes on the stream after this answer.
                 files.pop(cancelling.pop(message["id"]), None)
+            elif method == "channel.open" and direction == "<":
+                result = message["result"]
+                number, credit, most = result.get("stream"), result.get("credit"), result.get("maxMessage")
+                if (not isinstance(number, int) or not CHANNEL_FIRST_STREAM <= number <= 65535 or number in channels
+                        or not isinstance(credit, int) or credit < 0 or most != CHANNEL_MAX_MESSAGE
+                        or not isinstance(result.get("version"), str)):
+                    fail("%s: a channel.open answer with no channel's stream, credit, maxMessage or version" % where)
+                channels[number] = {">": credit, "<": opening.pop(message["id"]), "max": most}
+                closed_channels.discard(number)
             elif method == "hello":
                 versions.add((message["result"].get("protocolMin"), message["result"].get("protocolMax")))
                 hello[direction] = payload
@@ -261,7 +316,7 @@ def check_session():
             fail("%s: not a request, a response or an event" % where)
     if not saw_magic or waiting[">"] or waiting["<"] or streams or files:
         fail("session.vectors ends with a request unanswered or a stream open")
-    if frames < 40 or len(job_seq) < 2 or not trusted or not closing:
+    if frames < 40 or len(job_seq) < 2 or not trusted or not closing or not all(channel_messages.values()):
         fail("session.vectors holds less than expected")
     return frames, versions
 
@@ -336,6 +391,9 @@ def main():
     constants = check_constants()
     if versions != {(constants["protocol.version"], constants["protocol.version"])}:
         fail("session.vectors: hello does not carry protocol.version of constants.txt")
+    if (constants["channel.firstStream"], constants["channel.maxMessage"], constants["channel.credit"]) != (
+            CHANNEL_FIRST_STREAM, CHANNEL_MAX_MESSAGE, CHANNEL_CREDIT):
+        fail("constants.txt: the channels' numbers are not the ones session.vectors was read with")
     print("test-protocol: ok (%d good and %d bad frames, a session of %d frames, %d constants)"
           % (good, bad, frames, len(constants)))
 

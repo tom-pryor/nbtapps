@@ -2967,7 +2967,40 @@ static std::string fetchParams(const std::string& package, const std::string& pa
 }
 
 
+// The program of the channel the session opens: the test's own, in this process, which skips the agent's first line
+// and then sends back what it is given, byte for byte, so each message comes back as it went.
+class EchoEnd : public ProgramEnd {
+public:
+    EchoEnd() : lineDone_(false) {}
+    virtual Connect connect(std::string*) { return kConnected; }
+    virtual int fd() const { return -1; }
+    virtual bool read(std::string* in, size_t most) {
+        size_t n = back_.size() < most ? back_.size() : most;
+        in->append(back_, 0, n);
+        back_.erase(0, n);
+        return true;
+    }
+    virtual long write(const char* bytes, size_t len) {
+        for (size_t i = 0; i < len; ++i) {
+            if (lineDone_) back_ += bytes[i];
+            else if (bytes[i] == '\n') lineDone_ = true;
+        }
+        return (long)len;
+    }
+
+private:
+    bool lineDone_;
+    std::string back_;
+};
+
+class EchoEnds : public ProgramEnds {
+public:
+    virtual ProgramEnd* make(const std::string&) { return new EchoEnd(); }
+};
+
 static std::string sessionText() {
+    // Made before the agent, so that it outlasts every channel the agent has.
+    EchoEnds echo;
     // An agent that knows channels, for the package with them near the end, whose ${tmp} is in a short folder.
     Bench b("session", false, false, "1.7.0");
     b.platform.fakeFree = 500000000;
@@ -3048,9 +3081,21 @@ static std::string sessionText() {
     startJob(b, p, str(chan.result, "planId"));
     const std::string gated = "\"package\":\"org.nbtapp.chan\",\"channel\":\"gated\"";
     b.call(p, "channel.get", "{" + gated + "}");
-    b.call(p, "channel.open", "{" + gated + "}");
+    b.call(p, "channel.open", "{" + gated + ",\"credit\":16}");
     b.call(p, "channel.set", "{" + gated + ",\"on\":true}");
     b.call(p, "channel.set", "{" + gated + ",\"on\":false}");
+    // A channel opened, echo, whose program is the test's stand-in that sends back what it is given: a message each
+    // way, and the channel closed by the phone.
+    b.agent.setProgramEnds(&echo);
+    Parsed opened(b.call(p, "channel.open", "{\"package\":\"org.nbtapp.chan\",\"channel\":\"echo\",\"credit\":16}"));
+    unsigned stream = (unsigned)integer(opened.result, "stream");
+    CHECK_IN(p->lastHeard, stream == kChannelFirstStream);
+    p->sendFrame(2, 2, stream, "hello, channel");
+    b.settle();
+    CHECK_IN(p->received[stream], p->received[stream] == "hello, channel" && p->ended.count(stream) == 1);
+    p->event("channel.close", "{\"stream\":" + num(stream) + ",\"reason\":\"closed\"}");
+    b.settle();
+    CHECK(b.agent.channels().count("org.nbtapp.chan", "echo") == 0);
     b.call(p, "system.restart", "{\"kind\":\"hmi\"}");
     // The phone's pairing is ended on the car's screen: the agent says that it closes the link, and why, and
     // closes it.
@@ -3090,8 +3135,10 @@ static std::string sessionText() {
            "# settings.get and settings.set: one change goes through, and one is refused as `invalid`, with the\n"
            "# keys at fault and why in the error. Last it installs tests/packages/chan-1.0.0, a package with\n"
            "# channels, which is why the agent here is 1.7.0, reads its switched channel with channel.get, is\n"
-           "# refused channel.open with `off`, and switches it on and off with channel.set. No channel is opened,\n"
-           "# so no DATA frame of a channel is in this file.\n\n"
+           "# refused channel.open with `off`, and switches it on and off with channel.set. Then it opens the\n"
+           "# channel echo, whose program here is the test's stand-in that sends back each message as it came,\n"
+           "# sends it one message as a DATA frame on the channel's stream, gets channel.credit for it and the\n"
+           "# same message back, and closes the channel with channel.close.\n\n"
            "magic 4e42544c\n\n" +
            p->transcript;
 }

@@ -47,6 +47,8 @@ class BlobServer(
     /** Streams run here, so they end with the link's owner. */
     private val scope: CoroutineScope,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** The number the first stream is given; a test starts near the last. */
+    firstStream: Int = 1,
 ) {
     private class Stream(val number: Int) {
         /** Set before the stream becomes the open one, so whoever finds it there can stop it. */
@@ -60,7 +62,9 @@ class BlobServer(
     private var running: Map<String, Blob> = emptyMap()
 
     private val open = AtomicReference<Stream?>(null)
-    private var nextStream = 1
+
+    /** Counting up from 1 to [ProtocolConstants.STREAM_LAST] and round again: the numbers above are channels'. */
+    private var nextStream = firstStream.also { require(it in 1..ProtocolConstants.STREAM_LAST) }
 
     /** The blobs of the offers just sent in a `job.plan`, by hash. They replace those of the plan before. */
     fun offer(blobs: Map<String, Blob>) {
@@ -105,7 +109,7 @@ class BlobServer(
         }
 
         val stream = Stream(nextStream)
-        nextStream = if (nextStream == 65535) 1 else nextStream + 1
+        nextStream = if (nextStream == ProtocolConstants.STREAM_LAST) 1 else nextStream + 1
         stream.job = scope.launch(io, start = CoroutineStart.LAZY) { send(peer, stream, blob, offset, count) }
         open.set(stream)
         try {

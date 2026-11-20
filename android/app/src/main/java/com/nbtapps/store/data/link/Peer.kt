@@ -7,6 +7,7 @@ import com.nbtapps.store.data.json.StrictJson
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +55,37 @@ interface StreamSink {
     fun onEnd(code: String?, message: String)
 }
 
+/**
+ * One channel of a package's program (`channel.open`), as the link sees it: where its DATA frames go, and its events,
+ * which the session hands on ([AgentSession]). Each is called on the peer's reading coroutine, in the order the
+ * frames came, so a sink hands things on and returns; one that sends something back holds up the reading while the
+ * link takes it.
+ */
+interface ChannelSink {
+    /**
+     * The answer to the sink's `channel.open` names [stream]: from here on that channel's frames come to this sink.
+     * Called as the answer is read, before the next frame is, so that a message that follows the answer at once is not
+     * missed. False when whoever asked has given up waiting: the channel is then closed at once, and nothing of it is
+     * taken.
+     */
+    fun opened(stream: Int): Boolean
+
+    /** One DATA frame on the channel's stream, as it came: one message, if the agent keeps to the rules. */
+    suspend fun onFrame(payload: ByteArray, last: Boolean)
+
+    /** The agent's `channel.credit`: it grants [messages] more. Out of the range the protocol allows if it broke it. */
+    suspend fun onCredit(messages: Long)
+
+    /** The agent's `channel.close`, with its reason. Nothing more comes on the channel. */
+    fun onClosed(reason: String)
+
+    /** The agent's `channel.paused` (true) or `channel.resumed` (false): a job began, or ended. */
+    fun onPaused(paused: Boolean)
+
+    /** The link ended, for [reason]. Nothing more comes on the channel. */
+    fun onLinkEnd(reason: String)
+}
+
 /** What a [Peer] hands up: the requests and events the other side sends. Called on the peer's reading coroutine. */
 interface PeerHandler {
     /**
@@ -76,6 +108,10 @@ interface PeerHandler {
  *    framing error. There is no resync: the phone connects again.
  *  - A DATA frame from the agent is taken only for a stream the phone asked for with [requestStream], which
  *    the answer to that request names. Any other closes the link, as one after a stream's last frame does.
+ *  - The stream numbers from [ProtocolConstants.CHANNEL_FIRST_STREAM] up are channels' ([requestChannel]). A DATA frame
+ *    on one goes to that channel's [ChannelSink], and one for a channel that is not open is dropped: a close and a
+ *    message can cross. What a channel sends goes one frame at a time through the same lock as every other frame
+ *    ([channelMessage]), which takes its waiters in turn, so channels and a package being sent take turns.
  *  - With [silenceMs], a link on which nothing has been heard for longer than that has been given up by the other
  *    side, which keeps the same rule ([KeepAlive]). The bytes that come after such a gap are not read, and nothing
  *    is written: the link is closed at once, with [WENT_SILENT] as the reason. That is how a phone whose process was
@@ -143,6 +179,15 @@ class Peer(
     /** The streams from the other side that are open, by their number. Only the reading coroutine adds or ends one. */
     private val streams = ConcurrentHashMap<Int, StreamSink>()
 
+    /**
+     * By request id: the sink of a `channel.open` with no answer yet. Kept when its asker gives up waiting, so that a
+     * late answer still closes the channel it opens; gone with the answer, or with the link.
+     */
+    private val channelRequests = ConcurrentHashMap<Long, ChannelSink>()
+
+    /** The channels that are open, by their stream numbers. Only the reading coroutine adds one. */
+    private val channels = ConcurrentHashMap<Int, ChannelSink>()
+
     /** Reads and dispatches until the link ends, and returns why it ended. Call it once. */
     suspend fun run(): String = withContext(io) {
         try {
@@ -172,7 +217,13 @@ class Peer(
                 while (isOpen) {
                     val frame = decoder.next() ?: break
                     if (frame.type == FrameCodec.TYPE_DATA) {
-                        val sink = streams[frame.stream] ?: throw FrameException("a DATA frame of stream ${frame.stream}, which the phone did not ask for")
+                        val stream = streams[frame.stream]
+                        // A channel's number, unless it is that of a files stream an older agent gave out.
+                        if (stream == null && frame.stream >= ProtocolConstants.CHANNEL_FIRST_STREAM) {
+                            channels[frame.stream]?.onFrame(frame.payload, frame.last)
+                            continue
+                        }
+                        val sink = stream ?: throw FrameException("a DATA frame of stream ${frame.stream}, which the phone did not ask for")
                         if (frame.last) streams.remove(frame.stream)
                         sink.onData(frame.payload, frame.last)
                         continue
@@ -221,10 +272,45 @@ class Peer(
         streams.remove(stream)?.onEnd(code, message)
     }
 
+    /**
+     * Sends `channel.open` with [params] and waits for its answer. The channel the answer names is [sink]'s from the
+     * moment the answer is read, before the next frame is, since the channel's first messages may follow it at once
+     * ([ChannelSink.opened]). An answer that names no channel's stream closes the link.
+     *
+     * A caller that gives up waiting is not the end of it: a late answer still opens the channel, and the sink then
+     * says it is not wanted, and it is closed at once.
+     */
+    suspend fun requestChannel(params: JsonObject, sink: ChannelSink): JsonObject = exchange(CHANNEL_OPEN, params, null, sink).result
+
+    /** The sink of the open channel [stream], or null if none is open with that number. */
+    fun channel(stream: Int): ChannelSink? = channels[stream]
+
+    /** The sinks of the channels that are open. */
+    fun openChannels(): List<ChannelSink> = channels.values.toList()
+
+    /**
+     * Ends the channel [stream] on this side, if [sink] is still its sink: nothing more of it is taken, and a DATA frame
+     * of it that still comes is dropped. Returns whether it was open. Whoever ends it says so to the other side.
+     */
+    fun endChannel(stream: Int, sink: ChannelSink): Boolean = channels.remove(stream, sink)
+
+    /**
+     * Sends one message of the channel [stream]: one DATA frame with the last flag, of 1 to
+     * [ProtocolConstants.CHANNEL_MAX_MESSAGE] bytes. It goes when the write lock comes to it, as every frame does, and
+     * this returns once the link has taken it.
+     *
+     * @throws LinkClosedException if the link has ended.
+     */
+    suspend fun channelMessage(stream: Int, bytes: ByteArray) {
+        require(stream >= ProtocolConstants.CHANNEL_FIRST_STREAM && stream <= MAX_STREAM) { "$stream is not a channel's stream" }
+        require(bytes.size in 1..ProtocolConstants.CHANNEL_MAX_MESSAGE) { "a channel's message is 1 to ${ProtocolConstants.CHANNEL_MAX_MESSAGE} bytes" }
+        data(stream, bytes, 0, bytes.size, last = true)
+    }
+
     /** [request], with the bytes the request and its answer went as. */
     suspend fun exchange(method: String, params: JsonObject = JsonObject(emptyMap())): Exchange = exchange(method, params, null)
 
-    private suspend fun exchange(method: String, params: JsonObject, sink: StreamSink?): Exchange {
+    private suspend fun exchange(method: String, params: JsonObject, sink: StreamSink?, channel: ChannelSink? = null): Exchange {
         val id = nextId.getAndIncrement()
         val text = buildJsonObject {
             put("id", id)
@@ -234,14 +320,21 @@ class Peer(
         val answer = CompletableDeferred<Pair<JsonObject, ByteArray>>()
         waiting[id] = answer
         sink?.let { streamRequests[id] = it }
+        channel?.let { channelRequests[id] = it }
+        var gaveUp = false
         try {
             closeReason?.let { throw LinkClosedException(it) }
             val sent = sendMessage(text)
             val (result, received) = answer.await()
             return Exchange(result, sent, received)
+        } catch (e: CancellationException) {
+            gaveUp = true
+            throw e
         } finally {
             waiting.remove(id)
             streamRequests.remove(id)
+            // Kept for a late answer when the caller gave up: the channel that answer opens is closed then.
+            if (!gaveUp) channelRequests.remove(id)
         }
     }
 
@@ -293,6 +386,8 @@ class Peer(
         link.close()
         for (answer in waiting.values) answer.completeExceptionally(LinkClosedException(reason))
         for (stream in streams.keys.toList()) streams.remove(stream)?.onEnd(null, reason)
+        channelRequests.clear()
+        for (stream in channels.keys.toList()) channels.remove(stream)?.onLinkEnd(reason)
     }
 
     /** Sends [message] in one frame, and returns the payload it went as. */
@@ -364,6 +459,10 @@ class Peer(
         val result = root["result"]
         val error = root["error"]
         if (id != null && (result is JsonObject || error is JsonObject) && !(result != null && error != null)) {
+            // Here, before the next frame is read, and whether or not anyone still waits for the answer: the channel's
+            // first message may be that frame, and a channel nobody waits for any more is closed.
+            val opening = channelRequests.remove(id)
+            if (opening != null && result is JsonObject) openChannel(result, opening)
             val answer = waiting[id] ?: return // an answer to nothing we asked: ignored
             if (result is JsonObject) {
                 // Here, before the next frame is read: the stream's first DATA frame may be that one.
@@ -387,11 +486,41 @@ class Peer(
         closeReason?.let { reason -> streams.remove(stream.toInt())?.onEnd(null, reason) }
     }
 
+    /**
+     * Takes up the channel that [result], the answer to a `channel.open`, names, for [sink]; or closes it at once when
+     * the sink's asker has given up.
+     */
+    private suspend fun openChannel(result: JsonObject, sink: ChannelSink) {
+        val stream = result["stream"]?.integerOrNull()
+        if (stream == null || stream !in ProtocolConstants.CHANNEL_FIRST_STREAM..MAX_STREAM) {
+            throw FrameException("an answer to channel.open that names no channel's stream")
+        }
+        val number = stream.toInt()
+        if (channels.containsKey(number)) throw FrameException("an answer to channel.open that names stream $stream, which is open already")
+        if (!sink.opened(number)) {
+            try {
+                event(CHANNEL_CLOSE, buildJsonObject {
+                    put("stream", number)
+                    put("reason", "closed")
+                })
+            } catch (e: LinkClosedException) {
+                // It ends with the link.
+            }
+            return
+        }
+        channels[number] = sink
+        // The link may have closed meanwhile, and told only the sinks it found.
+        closeReason?.let { reason -> if (channels.remove(number, sink)) sink.onLinkEnd(reason) }
+    }
+
     private fun encode(message: JsonObject): ByteArray = Json.encodeToString(JsonObject.serializer(), message).encodeToByteArray()
 }
 
 /** The highest stream number: streams are numbered from 1, in the frame header's 16 bits. */
 private const val MAX_STREAM = 65_535L
+
+private const val CHANNEL_OPEN = "channel.open"
+private const val CHANNEL_CLOSE = "channel.close"
 
 /**
  * Why a link is ended that was silent for longer than the other side allows ([Peer]'s `silenceMs`): for the user,
