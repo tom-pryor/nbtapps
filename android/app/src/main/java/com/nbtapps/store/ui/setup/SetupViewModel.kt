@@ -24,6 +24,7 @@ import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.ui.headunits.CheckFixFlow
 import com.nbtapps.store.ui.headunits.CheckFixStep
+import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.pairing.CodeEntry
 import com.nbtapps.store.ui.pairing.CodePairing
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -104,6 +105,8 @@ class SetupViewModel @Inject constructor(
     connector: LinkConnector,
     @ApplicationScope private val appScope: CoroutineScope,
     private val diagnostics: SerialDiagnostics = SerialDiagnostics(),
+    /** What the user's connect goes through first: [com.nbtapps.store.ui.headunits.ConnectGate]. */
+    private val guard: ConnectGuard = ConnectGuard.NONE,
 ) : ViewModel() {
 
     /** Whether the set-up adds a further car: the route says so. */
@@ -308,10 +311,25 @@ class SetupViewModel @Inject constructor(
         }
     }
 
-    /** Takes [id] as the car being set up, and connects to it unless the app has a link to it already. */
+    /**
+     * Takes [id] as the car being set up, and connects to it unless the app has a link to it already. Where that would
+     * end a terminal or the SSH port of another head unit, the user is asked first ([ConnectGuard]); on Cancel the
+     * set-up stays where it was, the car saved.
+     */
     private fun choose(id: String, added: Boolean, name: String?, address: String?) {
         val own = jobs.connection.value.takeIf { it.headUnitId == id }
-        if (own !is ConnectionState.Connected && own !is ConnectionState.NeedsPairing && own !is ConnectionState.Connecting) connect(id)
+        if (own is ConnectionState.Connected || own is ConnectionState.NeedsPairing || own is ConnectionState.Connecting) {
+            take(id, added, name, address)
+            return
+        }
+        viewModelScope.launch {
+            if (!guard.mayConnect(id) || kept.value.answers.headUnitId != null) return@launch
+            connect(id)
+            take(id, added, name, address)
+        }
+    }
+
+    private fun take(id: String, added: Boolean, name: String?, address: String?) {
         change {
             Kept(
                 answers = SetupAnswers(agentInstalled = true, headUnitId = id, enableAutostart = it.answers.enableAutostart),
@@ -347,7 +365,8 @@ class SetupViewModel @Inject constructor(
 
     /** Try again, after the connect failed. */
     fun retry() {
-        kept.value.answers.headUnitId?.let(::connect)
+        val id = kept.value.answers.headUnitId ?: return
+        viewModelScope.launch { if (guard.mayConnect(id)) connect(id) }
     }
 
     /** Cancel on the Connect page, and back from it: the connect is given up, and the car picked with it. */

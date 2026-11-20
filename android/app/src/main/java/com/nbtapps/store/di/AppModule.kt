@@ -54,6 +54,8 @@ import com.nbtapps.store.data.terminal.SshShellOpener
 import com.nbtapps.store.data.terminal.TerminalRepository
 import com.nbtapps.store.data.update.ApkInstaller
 import com.nbtapps.store.data.update.AppUpdater
+import com.nbtapps.store.ui.headunits.ConnectGate
+import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.terminal.CommandHistory
 import com.nbtapps.store.data.update.InstalledApp
 import com.nbtapps.store.data.update.PackageManagerApkInspector
@@ -101,6 +103,9 @@ abstract class AppModule {
 
     @Binds
     abstract fun bindAppForeground(impl: ActivityForeground): AppForeground
+
+    @Binds
+    abstract fun bindConnectGuard(impl: ConnectGate): ConnectGuard
 
     companion object {
         @Provides

@@ -97,6 +97,8 @@ class HeadUnitIndicatorViewModel @Inject constructor(
     connector: LinkConnector,
     @ApplicationScope private val appScope: CoroutineScope,
     private val diagnostics: SerialDiagnostics = SerialDiagnostics(),
+    /** What the user's connect goes through first: [ConnectGate]. */
+    private val guard: ConnectGuard = ConnectGuard.NONE,
 ) : ViewModel() {
 
     val uiState: StateFlow<HeadUnitIndicatorUiState> =
@@ -110,7 +112,7 @@ class HeadUnitIndicatorViewModel @Inject constructor(
      * for twenty seconds, so the user may well have moved between them before it is settled.
      */
     fun connect(id: String) {
-        appScope.launch { jobs.connect(id) }
+        appScope.launch { if (guard.mayConnect(id)) jobs.connect(id) }
     }
 
     fun disconnect() {

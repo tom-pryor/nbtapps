@@ -19,6 +19,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.nbtapps.store.data.update.AppUpdater
 import com.nbtapps.store.data.update.SessionApkInstaller
+import com.nbtapps.store.ui.headunits.ConnectGate
+import com.nbtapps.store.ui.headunits.ConnectQuestionDialog
 import com.nbtapps.store.ui.navigation.NbtNavHost
 import com.nbtapps.store.ui.navigation.StartViewModel
 import com.nbtapps.store.ui.theme.NbtAppTheme
@@ -36,6 +38,10 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var updater: AppUpdater
+
+    /** Asks before a connect of the user's ends a terminal or the SSH port of another head unit. */
+    @Inject
+    lateinit var connectGate: ConnectGate
 
     /** The head unit whose page the intent asked for ([EXTRA_HEAD_UNIT]), until it has been opened. */
     private val headUnitToOpen = MutableStateFlow<String?>(null)
@@ -77,6 +83,7 @@ class MainActivity : ComponentActivity() {
                         onSshAccessOpened = { sshAccessToOpen.value = null },
                     )
                 }
+                ConnectQuestionDialog(connectGate)
             }
         }
         holdFirstFrameUntilStartIsKnown()
