@@ -168,12 +168,14 @@ class SerialListener(
         log.line(diagnostics.record(LinkTry.Path.ACCEPT, outcome, now() - began, failure, facts).describe())
     }
 
+    /** Who waits for a link from [address] at this moment, the one to be given it first at the front. */
+    private fun takersOf(address: String): List<Waiter> = synchronized(lock) { waiters.filter { address in it.addresses } }
+
     /** Gives [incoming] to the first who waits for its address, with the magic bytes written; closes it where nobody does. */
     private fun handOver(incoming: AcceptedSocket) {
         val began = now()
         val address = incoming.address.uppercase()
-        val takers = synchronized(lock) { waiters.filter { address in it.addresses } }
-        if (takers.isEmpty()) {
+        if (takersOf(address).isEmpty()) {
             // Not a car the app waits for: let go at once, for whatever opened it.
             incoming.socket.closeQuietly()
             note(incoming, LinkTry.Outcome.TURNED_AWAY, null, began)
@@ -190,7 +192,9 @@ class SerialListener(
         }
         note(incoming, LinkTry.Outcome.UP, null, began)
         val link = SerialLink(incoming.socket)
-        // One that gave up meanwhile does not take it; the next does.
-        if (takers.none { it.result.complete(AcceptedLink(incoming.address, link)) }) link.close()
+        val accepted = AcceptedLink(incoming.address, link)
+        // To whoever waits for it now, not when it came: one that came during the write, a connect stepping in ahead
+        // of the one there, takes it; one that gave up meanwhile does not, and the next does.
+        if (takersOf(address).none { it.result.complete(accepted) }) link.close()
     }
 }

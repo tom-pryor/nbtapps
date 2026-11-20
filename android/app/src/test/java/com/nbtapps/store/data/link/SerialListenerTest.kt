@@ -3,8 +3,13 @@
 package com.nbtapps.store.data.link
 
 import com.nbtapps.store.withTestTimeout
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -164,5 +169,49 @@ class SerialListenerTest {
         server.dialIn(FakeSocket(), other)
         assertEquals(other, atRest.await().address)
         assertEquals(1, radio.servers.size)
+    }
+
+    @Test
+    fun `a link goes to whoever waits for it once the magic bytes are written, one that came during the write too`() = test {
+        val atRest = async { listener.accept(listOf(car)) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+
+        val socket = HeldSocket()
+        server.dialIn(socket, car)
+        until("the magic bytes being written") { socket.writing.count == 0L }
+        // A connect comes in while they are written, and the one at rest steps aside for it.
+        val connecting = async(start = CoroutineStart.UNDISPATCHED) { listener.accept(listOf(car), first = true) }
+        atRest.cancel()
+        atRest.join()
+        socket.go.countDown()
+
+        val accepted = connecting.await()
+        assertEquals(car, accepted.address)
+        assertArrayEquals(FrameCodec.MAGIC, socket.written)
+        assertEquals(0, socket.closes.get())
+        accepted.link.close()
+    }
+
+    /** A link up from the car whose first write is held until the test lets it go. */
+    private class HeldSocket : SerialSocket {
+        val closes = AtomicInteger()
+        val writing = CountDownLatch(1)
+        val go = CountDownLatch(1)
+        override val input = ByteArrayInputStream(ByteArray(0))
+        override val output = object : ByteArrayOutputStream() {
+            override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                writing.countDown()
+                go.await(10, TimeUnit.SECONDS)
+                super.write(bytes, offset, length)
+            }
+        }
+        val written: ByteArray get() = output.toByteArray()
+
+        override fun connect() = Unit
+
+        override fun close() {
+            closes.incrementAndGet()
+        }
     }
 }
