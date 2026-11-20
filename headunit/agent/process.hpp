@@ -13,6 +13,7 @@
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stddef.h>
+#include <sys/types.h>
 
 #include <string>
 #include <vector>
@@ -51,6 +52,15 @@ struct ProcessResult {
 bool runProcess(const std::string& shell, const std::vector<std::string>& argv, const std::vector<std::string>& env,
                 const std::string& cwd, unsigned timeoutSeconds, OutputSink* sink, ProcessResult* result,
                 std::string* error);
+
+// Starts `program` with `args`, in the folder `cwd`, and does not wait for it: a channel's program (channels.hpp),
+// which runs for as long as it likes. As runProcess starts a child: through `shell`, with `env` as its whole
+// environment, in a process group of its own, standard input from /dev/null, and no other file of the caller's; its
+// standard output and error are appended to the file `logPath`, which is made if it is not there. The process's id,
+// which the caller collects with waitpid when it has ended; -1 with *error set if it could not be started.
+pid_t startProgram(const std::string& shell, const std::string& program, const std::vector<std::string>& args,
+                   const std::vector<std::string>& env, const std::string& cwd, const std::string& logPath,
+                   std::string* error);
 
 }  // namespace nbt
 

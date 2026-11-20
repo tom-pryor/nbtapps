@@ -220,4 +220,43 @@ bool runProcess(const std::string& shell, const std::vector<std::string>& argv, 
     return true;
 }
 
+pid_t startProgram(const std::string& shell, const std::string& program, const std::vector<std::string>& args,
+                   const std::vector<std::string>& env, const std::string& cwd, const std::string& logPath,
+                   std::string* error) {
+    // As runProcess: the shell goes to the folder and becomes the program, so the process is the program's.
+    std::vector<char*> argv, vars;
+    argv.push_back((char*)shell.c_str());
+    argv.push_back((char*)"-c");
+    argv.push_back((char*)kInFolder);
+    argv.push_back((char*)shell.c_str());
+    argv.push_back((char*)cwd.c_str());
+    argv.push_back((char*)program.c_str());
+    for (size_t i = 0; i < args.size(); ++i) argv.push_back((char*)args[i].c_str());
+    argv.push_back(0);
+    for (size_t i = 0; i < env.size(); ++i) vars.push_back((char*)env[i].c_str());
+    vars.push_back(0);
+
+    int null = open("/dev/null", O_RDONLY);
+    if (null < 0) {
+        if (error != 0) *error = std::string("cannot open /dev/null: ") + strerror(errno);
+        return -1;
+    }
+    int log = open(logPath.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (log < 0) {
+        if (error != 0) *error = "cannot open " + logPath + ": " + strerror(errno);
+        close(null);
+        return -1;
+    }
+#ifndef __QNXNTO__
+    closeOnExec(null);
+    closeOnExec(log);
+#endif
+    pid_t pid = start(&argv[0], &vars[0], null, log);
+    int startError = errno;
+    close(null);
+    close(log);
+    if (pid < 0 && error != 0) *error = "cannot start " + shell + ": " + strerror(startError);
+    return pid;
+}
+
 }  // namespace nbt
