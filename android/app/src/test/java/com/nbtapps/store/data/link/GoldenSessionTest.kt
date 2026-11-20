@@ -195,7 +195,7 @@ class GoldenSessionTest {
                 val greeting = client.hello("5f2c9a1e07b34d6688a0c1d2e3f40516", "Pixel 9")
                 val headUnitId = requireNotNull(greeting.headUnitId)
                 assertEquals("000102030405060708090a0b0c0d0e0f", headUnitId)
-                assertEquals("1.0.0", greeting.agentVersion)
+                assertEquals("1.7.0", greeting.agentVersion)
                 assertEquals(ProtocolConstants.SERIAL_MAX_FRAME, session.peer.maxFrame)
 
                 // A phone that has not proved itself is told nothing, but its ping is answered.
@@ -215,7 +215,7 @@ class GoldenSessionTest {
                 client.auth(AgentVectors.hex("5a0f3c9d2e7b4a61c8d5e2f7a4b1c6d3")) { requireNotNull(keys.mac(headUnitId, it)) }
 
                 val info = client.info()
-                assertEquals("1.0.0", info.agentVersion)
+                assertEquals("1.7.0", info.agentVersion)
                 assertEquals(1, info.manifestVersion)
                 assertEquals(500_000_000L, info.free.staging)
                 assertEquals("none", info.restartNeeded)
@@ -387,6 +387,27 @@ class GoldenSessionTest {
                 assertEquals(listOf("DIAL_SPEED", "GREETING", "LAMP_HOST", "FACE", "LAMP_COLOUR"), rest.options.map { it.option.key })
                 assertEquals(SettingState.SET, rest.options.first().state)
                 assertEquals(SettingValue.Number(25), rest.options.first().value)
+
+                // A package with channels: installed, with the flag of the programs the agent starts for them; its
+                // switched channel read, refused while off, and switched on and off. No channel is opened here: the
+                // DATA of a channel is the link layer's of a later step.
+                val (chanFile, chan) = verified("org.nbtapp.chan-1.0.0.nbtpkg")
+                session.blobs.offer(blobs(chanFile, chan))
+                val chanPlan = client.plan(PlanRequest(install = listOf(InstallTarget("org.nbtapp.chan", "1.0.0")), offers = listOf(offer(chan))))
+                assertEquals(listOf("starts-program"), chanPlan.flags)
+                session.blobs.jobStarted()
+                assertEquals(JobState.FETCHING, client.start(chanPlan.planId!!).state)
+                assertEquals(JobState.SUCCEEDED, (session.eventsUntilDone().last() as JobEvent.Done).result.state)
+                session.blobs.jobEnded()
+                fun gated(on: Boolean? = null) = buildJsonObject {
+                    put("package", "org.nbtapp.chan")
+                    put("channel", "gated")
+                    if (on != null) put("on", on)
+                }
+                assertEquals("""{"switched":true,"on":false,"open":0}""", session.peer.request("channel.get", gated()).toString())
+                assertEquals("off", codeOf { session.peer.request("channel.open", gated()) })
+                assertEquals("""{"switched":true,"on":true,"open":0}""", session.peer.request("channel.set", gated(true)).toString())
+                assertEquals("""{"switched":true,"on":false,"open":0}""", session.peer.request("channel.set", gated(false)).toString())
 
                 client.restart("hmi")
 

@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -386,10 +387,10 @@ static std::vector<TrustedKey> keys() { return std::vector<TrustedKey>(1, gKey);
 // A local socket's path has a limit of about 100 bytes, which a work folder deep in a checkout passes: the ${tmp} of
 // a test's head unit, where the programs' sockets are, is a short folder of its own under /tmp. The rest stays in
 // the work folder, as in the bench's container nothing under /tmp may be run.
+// The head unit's C library has no mkdtemp: the name is the process's own.
 static std::string shortFolder(const std::string& name) {
-    char path[64];
-    snprintf(path, sizeof path, "/tmp/nbtch-%s-XXXXXX", name.c_str());
-    CHECK_IN(name, mkdtemp(path) != 0);
+    std::string path = "/tmp/nbtch-" + name + "-" + num(getpid()), why;
+    CHECK_IN(why, fs::removeTree(path, &why) && fs::makeDirs(path, &why));
     return path;
 }
 
@@ -423,6 +424,7 @@ struct Bench {
     std::vector<Phone*> phones;
     std::vector<pid_t> programs;   // the ones the test started
     std::vector<pid_t> orphans;    // the ones an agent before restart() started
+    std::string lastPlan;          // the answer to the last job.plan of plan()
 
     // With `sockets`, the programs' ends are their sockets, as on a head unit; otherwise stand-ins. With `trial`, the
     // agent is a version on trial, as the launcher starts it after its own update.
@@ -570,6 +572,7 @@ struct Bench {
                                                    "\"}],\"remove\":[],\"offers\":[" + o.text + "]}");
         json::Document doc;
         CHECK_IN(text, doc.parse(text, 0) && doc.root().find("result").find("planId").isString());
+        lastPlan = text;
         return doc.root().find("result").find("planId").string();
     }
 
@@ -988,6 +991,7 @@ static void testJobs() {
         unsigned echo = openedOn(b.open(p, "echo"));
         EndRecord* r = b.ends.last();
         std::string planId = b.plan(other, offerOf("org.nbtapp.chan-1.1.0"));
+        CHECK_IN(b.lastPlan, has(b.lastPlan, "\"flags\":[\"starts-program\"]"));   // its programs, which the agent starts
         CHECK(code(b.call(other, "job.start", "{\"planId\":\"" + planId + "\"}")) == "");
         b.settle();
         std::vector<std::string> closes = p->events("channel.close");
@@ -1430,10 +1434,9 @@ int main(int argc, char** argv) {
     // Absolute, as nbtagent makes its root: a program is started in a folder of its own, by a path under the root.
     std::string why;
     CHECK_IN(why, fs::makeDirs(argv[2], &why));
-    char* work = realpath(argv[2], 0);
-    CHECK(work != 0);
+    char work[PATH_MAX];
+    CHECK(realpath(argv[2], work) != 0);
     gWork = work;
-    free(work);
     std::string text = testutil::readFile(gData + "/vectors.json");
     json::Document doc;
     CHECK(doc.parse(text, 0));
