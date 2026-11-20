@@ -98,7 +98,11 @@ int main(int argc, char** argv) {
     //   NBT_SSHRELAY_TEST_DEV          a folder that stands for QNX's /dev where pty names are looked for; without
     //                                  it there are always ptys
     //   NBT_SSHRELAY_TEST_DRIVER_MS    the driver's 30 s (with no connection, and between failed starts)
-    const char* value = getenv("NBT_SSHRELAY_TEST_SERVER");
+    //   NBT_SSHRELAY_TEST_START_OFFSET a number added to every start time the process list gives, so that the state
+    //                                  file holds start times of the size QNX's are
+    const char* value = getenv("NBT_SSHRELAY_TEST_START_OFFSET");
+    if (value != 0 && value[0] != '\0') sshrelay::setStartOffset(strtoull(value, 0, 10));
+    value = getenv("NBT_SSHRELAY_TEST_SERVER");
     if (value != 0 && value[0] != '\0') config.testServer = value;
     value = getenv("NBT_SSHRELAY_TEST_SERVER_NAME");
     if (value != 0 && value[0] != '\0') config.testServerName = value;
