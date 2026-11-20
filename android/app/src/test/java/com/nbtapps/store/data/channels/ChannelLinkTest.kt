@@ -6,11 +6,16 @@ import com.nbtapps.store.data.jobs.FakeAgent
 import com.nbtapps.store.data.jobs.FakeChannel
 import com.nbtapps.store.data.link.AgentEnd
 import com.nbtapps.store.data.link.AgentSession
+import com.nbtapps.store.data.link.ChannelSink
 import com.nbtapps.store.data.link.FrameCodec
 import com.nbtapps.store.data.link.MemoryLink
+import com.nbtapps.store.data.link.Peer
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.data.link.ProtocolException
 import com.nbtapps.store.data.link.RemoteException
+import com.nbtapps.store.data.link.StreamSink
+import java.lang.management.ManagementFactory
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -26,6 +31,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -285,6 +291,104 @@ class ChannelLinkTest {
     }
 
     /**
+     * The peer's entry for the channel [stream], held from a thread of its own until [close]: whatever ends the channel
+     * meanwhile stops where it takes the channel off the peer, part way through ending it.
+     */
+    private class HeldEntry(peer: Peer, stream: Int) : AutoCloseable {
+        private val holding = CountDownLatch(1)
+        private val release = CountDownLatch(1)
+        private val thread = Thread({
+            @Suppress("UNCHECKED_CAST")
+            val channels = Peer::class.java.getDeclaredField("channels").apply { isAccessible = true }.get(peer) as ConcurrentHashMap<Int, ChannelSink>
+            // The map holds the entry's lock while this runs.
+            channels.computeIfPresent(stream) { _, sink ->
+                holding.countDown()
+                release.await(20, TimeUnit.SECONDS)
+                sink
+            }
+        }, "held-entry").apply { start() }
+
+        init {
+            assertTrue("the entry is held", holding.await(5, TimeUnit.SECONDS))
+        }
+
+        /** Returns once another thread waits for the entry. */
+        suspend fun awaitWaiter() {
+            val threads = ManagementFactory.getThreadMXBean()
+            while (threads.dumpAllThreads(false, false).none { it.lockOwnerName == thread.name }) delay(5)
+        }
+
+        override fun close() {
+            release.countDown()
+            thread.join()
+        }
+    }
+
+    @Test
+    fun `a receiver told of the end finds the state closed with why, however far the ending has got`() = test {
+        // The agent's close, read up to where the channel is taken off the peer.
+        run {
+            val rig = rig()
+            val link = open(rig)
+            HeldEntry(rig.session.peer, STREAM).use { held ->
+                rig.agent.raw(data("last words") + msg(closeEvent("off")))
+                held.awaitWaiter()
+                assertEquals("last words", link.text())
+                assertNull(link.receive())
+                assertEquals(ChannelState.Closed(ChannelEnd.ByAgent("off")), link.state.value)
+                // A close meanwhile returns with the state saying so too.
+                link.close()
+                assertEquals(ChannelState.Closed(ChannelEnd.ByAgent("off")), link.state.value)
+            }
+            assertTrue(rig.agent.pingAnswered())
+        }
+        // This side's close, as far.
+        run {
+            val rig = rig()
+            val link = open(rig)
+            HeldEntry(rig.session.peer, STREAM).use { held ->
+                val closing = async { link.close() }
+                held.awaitWaiter()
+                assertNull(link.receive())
+                assertEquals(ChannelState.Closed(ChannelEnd.ByApp), link.state.value)
+                link.close()
+                assertEquals(ChannelState.Closed(ChannelEnd.ByApp), link.state.value)
+                assertFalse(closing.isCompleted)
+                held.close()
+                closing.await()
+            }
+            assertEquals(closeEvent("closed"), rig.agent.next())
+            assertTrue(rig.agent.pingAnswered())
+        }
+    }
+
+    /**
+     * The link ends while the channel's sender is mid-way: the peer tells a stream of another request of its end
+     * before it tells the channel, and that stream's sink sends on the channel then.
+     */
+    @Test
+    fun `a sender that finds the link gone finds the state closed with the link's reason`() = test {
+        val rig = rig()
+        val link = open(rig)
+        var seen: Pair<Throwable?, ChannelState>? = null
+        val sink = object : StreamSink {
+            override fun onData(bytes: ByteArray, last: Boolean) = Unit
+
+            override fun onEnd(code: String?, message: String) {
+                seen = runBlocking { failure { link.send("late".encodeToByteArray()) } to link.state.value }
+            }
+        }
+        val fetching = async { rig.session.peer.requestStream("files.fetch", JsonObject(emptyMap()), sink) }
+        rig.agent.send("""{"id":${rig.agent.message()["id"]},"result":{"stream":1}}""")
+        fetching.await()
+        rig.session.close("gone")
+        val (failed, state) = seen ?: error("the stream was not told of the end")
+        assertEquals(ChannelState.Closed(ChannelEnd.LinkLost("gone")), state)
+        assertEquals(ChannelEnd.LinkLost("gone"), (failed as ChannelClosedException).end)
+        assertEquals(state, link.state.value)
+    }
+
+    /**
      * The answer to `channel.open` and the channel's first messages and its close can come in one read of the link.
      * They are taken up as the answer is read, by the reading coroutine, not later by the coroutine that waited for
      * the answer: that one is held here until the agent has seen a ping answered, which is read after them all.
@@ -298,9 +402,18 @@ class ChannelLinkTest {
             val opening = async(holder) { rig.session.openChannel("org.example.chan", "echo") }
             rig.agent.expectMagic()
             val request = rig.agent.message()
-            // The opener's thread is kept busy: it cannot take up anything of the answer until it is let go.
+            // The opener has let go of the link's write lock once something else has been written: it does so on its
+            // own thread, which is taken next.
+            assertTrue(rig.agent.pingAnswered(899))
+            // The opener's thread is kept busy: it cannot take up anything of the answer until it is let go. The answer
+            // goes once the thread is taken, so that the opener has stopped to wait for it and cannot run on.
+            val taken = CountDownLatch(1)
             val release = CountDownLatch(1)
-            executor.execute { release.await(20, TimeUnit.SECONDS) }
+            executor.execute {
+                taken.countDown()
+                release.await(20, TimeUnit.SECONDS)
+            }
+            assertTrue("the opener's thread is taken", taken.await(5, TimeUnit.SECONDS))
             rig.agent.raw(
                 msg(answer(request["id"])) + data("first") + data("second") + msg(closeEvent("closed")) +
                     msg("""{"id":900,"method":"ping","params":{}}"""),
