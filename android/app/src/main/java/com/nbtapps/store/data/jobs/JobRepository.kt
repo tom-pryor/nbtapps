@@ -241,7 +241,10 @@ sealed interface SerialResetOutcome {
     data class Armed(val forMs: Long) : SerialResetOutcome
 }
 
-/** Told when a job starts needing the phone, so the process is kept running for it. */
+/**
+ * Told when something starts that the process is kept running for, under the foreground service: a job that needs
+ * the phone, a pull of logs, a terminal being opened.
+ */
 fun interface JobKeeper {
     fun jobRunning()
 }
@@ -281,8 +284,8 @@ fun interface JobKeeper {
  * background with its socket open, and a phone that answers the agent long after the agent gave the link up spoils
  * the car's next links. So when the app leaves the foreground with nothing using the link, the link is ended from
  * this side and the head unit remembered; when it comes back, the app connects to that head unit again by itself.
- * A job that needs the phone, a pull of logs, and a call that waits for the agent's answer ([usingLink]) keep the
- * link for as long as they last: see [watchForeground].
+ * A job that needs the phone, a pull of logs, a call that waits for the agent's answer ([usingLink]), and an open
+ * terminal ([usingSession]) keep the link for as long as they last: see [watchForeground].
  *
  * An agent that dials has the car open a link to the phone by itself ([ProtocolConstants.CAPABILITY_SERIAL_DIAL]).
  * The app takes such a link whenever it would want one and has none: while it is in front of the user or something
@@ -540,8 +543,8 @@ class JobRepository(
     /**
      * Follows whether the app is in front of the user and whether anything uses the link, for as long as the
      * repository lives. Busy means a job that needs the phone ([JobView.needsPhone], which covers the app's own wait
-     * to connect again after the agent restarted), a pull of logs that runs, or a call that waits for the agent's
-     * answer ([usingLink]).
+     * to connect again after the agent restarted), a pull of logs that runs, a call that waits for the agent's
+     * answer ([usingLink]), or an open terminal ([usingSession]).
      *
      * Out of sight and not busy, the link goes ([leave]): at once when the app leaves, or once what kept it busy is
      * over if the app is still out of sight then. Back in sight, the app connects again to the head unit it let go
@@ -1645,10 +1648,24 @@ class JobRepository(
     /**
      * Runs [block] as a use of the link: while it runs, the app leaving the foreground does not end the link, and
      * once it is over the link goes if the app is out of sight then ([watchForeground]). For app-scoped code that
-     * waits for the agent's answer, over one call or over several in a row; not for a wait for the user's answer.
-     * The repository's own calls to the agent count as uses already.
+     * waits for the agent's answer, over one call or over several in a row; and for a connection over the link to a
+     * program on the head unit, such as a terminal's shell, which waits for what the user types and is held for as
+     * long as it is open ([usingSession]). Not for a wait for the user's answer otherwise. The repository's own calls
+     * to the agent count as uses already.
      */
     suspend fun <T> usingLink(block: suspend () -> T): T = using { block() }
+
+    /**
+     * Runs [block] with the link to the head unit [headUnitId], as a use of the link ([usingLink]): for app-scoped code
+     * that speaks over the link itself, as a terminal does over a channel to the SSH package
+     * ([AgentSession.openChannel]). Fails where the link in use is not to that head unit, or is not up; a refusal of the
+     * agent's and an [IOException] come out as with the repository's own calls. A link that ends meanwhile ends what
+     * [block] has open over it.
+     */
+    suspend fun <T> usingSession(headUnitId: String, block: suspend (AgentSession) -> T): Result<T> = withSession { current ->
+        if ((connectionState.value as? ConnectionState.Connected)?.headUnitId != headUnitId) throw IOException(NOT_CONNECTED)
+        block(current)
+    }
 
     /** [usingLink], for the repository's own calls: inline, so that a call returns from within it. */
     private inline fun <T> using(block: () -> T): T {

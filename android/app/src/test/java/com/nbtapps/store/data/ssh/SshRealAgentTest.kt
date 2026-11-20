@@ -15,6 +15,13 @@ import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.packages.PackageStore
+import com.nbtapps.store.data.terminal.JobTerminalLink
+import com.nbtapps.store.data.terminal.SshShellOpener
+import com.nbtapps.store.data.terminal.TerminalEnd
+import com.nbtapps.store.data.terminal.TerminalLine
+import com.nbtapps.store.data.terminal.TerminalRepository
+import com.nbtapps.store.data.terminal.TerminalState
+import com.nbtapps.store.data.terminal.TerminalText
 import com.nbtapps.store.model.ChannelCloseReason
 import com.nbtapps.store.model.ChannelError
 import com.nbtapps.store.model.Endpoint
@@ -30,6 +37,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -53,6 +61,8 @@ import org.junit.Test
  * [com.nbtapps.store.data.jobs.RealAgentTest] installs: its `requires.app` names a later app than this one, which only
  * the catalogue's resolver looks at. On the bench the server logs in the user the agent runs as, `bench`, whose shell
  * is `/bin/sh`. Nothing here goes near a car.
+ *
+ * The terminal's session holder ([TerminalRepository]) is run here too, over the app's link, this tunnel and this shell.
  */
 class SshRealAgentTest {
 
@@ -61,6 +71,9 @@ class SshRealAgentTest {
     private var agent: Process? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** The app's link to the bench, once [installed] has made it. */
+    private lateinit var jobs: JobRepository
     private val links = java.util.concurrent.CopyOnWriteArrayList<SocketLink>()
     private val identity = object : PhoneIdentity {
         override suspend fun id() = "5f2c9a1e07b34d6688a0c1d2e3f40516"
@@ -122,7 +135,7 @@ class SshRealAgentTest {
         val headUnits = InMemoryHeadUnitRepository()
         headUnits.add(HeadUnit("bench", "Test bench", listOf(TcpEndpoint("local", 1))))
         val store = PackageStore(File(work, "phone")).apply { load() }
-        val jobs = JobRepository(headUnits, connector, identity, MemoryPairingKeys(), store, {}, scope, shareDir = File(work, "share"))
+        jobs = JobRepository(headUnits, connector, identity, MemoryPairingKeys(), store, {}, scope, shareDir = File(work, "share"))
         assertTrue(jobs.connect("bench").isSuccess)
         assertTrue("the agent has channels", (jobs.connection.value as ConnectionState.Connected).channels)
         val ssh = AgentVectors.file("packages/good/org.nbtapp.ssh-1.0.0.nbtpkg").inputStream().use { store.add(it, listOf(AgentVectors.packageKey)) }
@@ -278,6 +291,41 @@ class SshRealAgentTest {
         session.close("The test dropped the link")
         assertEquals(ShellEnd.TunnelCut(ChannelEnd.LinkLost("The test dropped the link")), withTimeout(20_000) { shell.ended.await() })
         assertNoJschThread()
+    }
+
+    @Test
+    fun `the terminal opens over the app's link, shows a command's output, and is told the switch went off`() = test {
+        // The test's own link, which switched SSH on, took the app's place: the agent keeps one link a phone. So the
+        // terminal connects first, as the user's connect does, and that link takes the test's place in turn.
+        installed()
+        val key = SshKey.generate()
+        val app = object : SshIdentity {
+            override suspend fun key() = key
+        }
+        val kept = AtomicInteger()
+        val terminal = TerminalRepository(JobTerminalLink(jobs), SshShellOpener(app, USER), { kept.incrementAndGet() }, scope)
+        terminal.open("bench", 80, 24)
+        assertEquals(1, kept.get())
+        assertEquals(TerminalState.Open("bench"), withTimeoutOrNull(30_000) { terminal.state.first { !it.active || it is TerminalState.Open } })
+
+        // Sent before the shell's prompt may have come: the pty echoes the line at once, and the shell then writes its
+        // prompt and the command's output on one line ("$ term-42"), as a terminal shows typing ahead.
+        terminal.send("echo term-$((6 * 7))\n".encodeToByteArray())
+        val shown = withTimeoutOrNull(20_000) { terminal.lines.first { snapshot -> snapshot.lines.any { it.text.endsWith("term-42") } } }
+        assertTrue("the terminal shows:\n${terminal.text()}", shown != null)
+
+        // Switched off over the app's link, the one there is.
+        val off = jobs.usingSession("bench") { it.client.channelSet(SshTunnel.PACKAGE, SshTunnel.CHANNEL, false) }
+        assertTrue(!off.getOrThrow().on)
+        assertEquals(TerminalState.Ended("bench", TerminalEnd.SwitchedOff), withTimeoutOrNull(20_000) { terminal.state.first { !it.active } })
+        val marked = withTimeoutOrNull(5_000) { terminal.lines.first { it.lines.lastOrNull()?.mark == true } }
+        assertEquals(TerminalLine(TerminalText.ended(TerminalEnd.SwitchedOff), mark = true), marked?.lines?.last())
+        assertNoJschThread()
+
+        // The link stays, and the next open is told that the switch is off.
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+        terminal.open("bench", 80, 24)
+        assertEquals(TerminalState.Off("bench"), withTimeoutOrNull(20_000) { terminal.state.first { !it.active } })
     }
 
     private companion object {

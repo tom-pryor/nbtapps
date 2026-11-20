@@ -8,6 +8,7 @@ import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.MemoryPairingKeys
 import com.nbtapps.store.data.PhoneIdentity
 import com.nbtapps.store.data.crypto.sha256Hex
+import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.BluetoothSerialLinkConnector
 import com.nbtapps.store.data.link.FakeRadio
 import com.nbtapps.store.data.link.Link
@@ -1734,6 +1735,33 @@ class JobRepositoryTest {
         using.complete(Unit)
         other.join()
 
+        assertTrue(connector.agent.phoneLeft())
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+    }
+
+    @Test
+    fun `app-scoped code given the session to the head unit holds the link while it has it, and none is given for another`() = test {
+        val jobs = watched()
+        assertTrue(jobs.usingSession("car") { it }.exceptionOrNull() is IOException)
+        assertTrue(jobs.connect("car").isSuccess)
+        assertTrue(jobs.usingSession("another") { it }.exceptionOrNull() is IOException)
+
+        val release = CompletableDeferred<Unit>()
+        val given = CompletableDeferred<AgentSession>()
+        val holder = scope.launch {
+            jobs.usingSession("car") { session ->
+                given.complete(session)
+                release.await()
+            }
+        }
+        // The link's own session: a request over it is answered.
+        given.await().client.info()
+        shown.state.value = false
+        delay(300)
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
+
+        release.complete(Unit)
+        holder.join()
         assertTrue(connector.agent.phoneLeft())
         await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
     }
