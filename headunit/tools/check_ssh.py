@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 # Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-"""`make ssh-check`: what can be said on this machine about the builds of Dropbear and OpenSSH's sftp-server
-(ssh/README). Exits non-zero on any failure, and if a build is not there.
+"""`make ssh-check`: what can be said on this machine about the builds of Dropbear and OpenSSH's sftp-server, and of
+the relay (ssh/README). Exits non-zero on any failure, and if a build is not there.
 
   python3 tools/check_ssh.py
 
@@ -10,6 +10,9 @@
     ARM, EABI5, soft-float calls, an executable that is not position-independent, the QNX runtime linker as its
     interpreter, no library search path of its own, and exactly libc.so.3 and libsocket.so.3 in NEEDED (so no
     zlib: compression is built out)
+  - build/ssh/qnx/sshrelay (`make ssh-relay`, ./build.sh ssh): the same kind of program, which asks for
+    libc.so.3, libsocket.so.3 and libcpp.so.4 (the C++ library the agent's programs use) and nothing else, and
+    holds nothing of the test hooks (NBT_SSHRELAY_TEST_*), which only this machine's build has
   - build/ssh/host/ (`make ssh-host`): dropbearmulti's key tool makes an ed25519 host key, and its server, on one
     connection (-i, its standard input and output one end of a socket pair, as a program of the agent's gives it
     one), sends the SSH banner of the Dropbear version in build/ssh/src/dropbear before anything is said to it
@@ -23,6 +26,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SSH = os.path.join(ROOT, "build", "ssh")
 PROGRAMS = ("dropbearmulti", "sftp-server")
 NEEDED = {"libc.so.3", "libsocket.so.3"}
+RELAY = "sshrelay"
+RELAY_NEEDED = {"libc.so.3", "libsocket.so.3", "libcpp.so.4"}
+TEST_HOOK = b"NBT_SSHRELAY_TEST_"
 INTERPRETER = "/usr/lib/ldqnx.so.2"
 
 failures = []
@@ -42,11 +48,11 @@ def readelf(*args):
                           universal_newlines=True).stdout
 
 
-def check_qnx(name):
+def check_qnx(name, wanted=NEEDED, builder="make ssh"):
     path = os.path.join(SSH, "qnx", name)
     shown = os.path.relpath(path, ROOT)
     if not os.path.isfile(path):
-        fail("%s does not exist: make ssh builds it" % shown)
+        fail("%s does not exist: %s builds it" % (shown, builder))
         return
     before = len(failures)
     header = readelf("-h", path)
@@ -69,14 +75,18 @@ def check_qnx(name):
         fail("%s asks for the interpreter %s, expected %s" % (shown, interpreter, INTERPRETER))
     dynamic = readelf("-d", path)
     needed = set(re.findall(r"\(NEEDED\).*\[(.*)\]", dynamic))
-    if needed != NEEDED:
-        fail("%s NEEDED is %s, expected %s" % (shown, sorted(needed), sorted(NEEDED)))
+    if needed != wanted:
+        fail("%s NEEDED is %s, expected %s" % (shown, sorted(needed), sorted(wanted)))
     paths = re.findall(r"\((RPATH|RUNPATH)\).*\[(.*)\]", dynamic)
     if paths:
         fail("%s has a library search path of its own: %s" % (shown, paths))
+    if name == RELAY:
+        with open(path, "rb") as f:
+            if TEST_HOOK in f.read():
+                fail("%s holds a test hook (%s...): only the build for this machine has them" % (shown, TEST_HOOK.decode()))
     if len(failures) == before:
-        ok("%s: %d bytes, ELF32 ARM EABI5 soft-float executable, not PIC, NEEDED %s"
-           % (shown, os.path.getsize(path), " ".join(sorted(needed))))
+        ok("%s: %d bytes, ELF32 ARM EABI5 soft-float executable, not PIC, NEEDED %s%s"
+           % (shown, os.path.getsize(path), " ".join(sorted(needed)), ", no test hook" if name == RELAY else ""))
 
 
 def dropbear_version():
@@ -144,6 +154,7 @@ def main():
         return 1
     for name in PROGRAMS:
         check_qnx(name)
+    check_qnx(RELAY, RELAY_NEEDED, "./build.sh ssh (make ssh-relay in the SDP image)")
     check_host()
     if failures:
         print("%d check(s) failed" % len(failures))

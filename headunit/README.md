@@ -39,7 +39,7 @@ Nothing in HmiMain3D is patched.
 | `tests/` | Host tests of the Python tools: `test_nbtpkg.py` (`make test-pkg`), `test_agent_pkg.py` (`make test-agent-pkg`) and `test_plugin_pkg.py` (`make test-plugin-pkg`) |
 | `tests/agent/` | Tests of `agent/` (`make agent-test`), run in a Docker container (`tools/bench.py`), and `chan_echo.cpp` and `chan_feed.cpp`, the programs of the test package chan's channels; `tests/compare_readers.py` holds the agent's package reader and the tool's together, `tests/test_protocol_vectors.py` reads `spec/protocol/` with a codec of its own, `tests/e2e/run_agent.py` runs `nbtagent` and `nbtctl` as two processes, and `tests/e2e/run_launcher.py` runs the starter, a version's launcher and the install script on folders |
 | `tests/packages/`, `tests/keys/` | Package sources and test keys for `tests/make_packages.py`, which builds good and deliberately broken packages (`make testdata`); `tests/test_nbtpkg.py` tests the tool against them (`make test-pkg`) |
-| `ssh/` | Third party: Dropbear's SSH server and OpenSSH's `sftp-server`, as git submodules pinned at release tags (`ssh/dropbear`, `ssh/openssh`), with our patch to Dropbear, its build options and the build scripts, for the head unit and for this machine; `tools/check_ssh.py` is `make ssh-check`. `ssh/README` says what each change is for and how the sources were checked against the signed releases |
+| `ssh/` | Third party: Dropbear's SSH server and OpenSSH's `sftp-server`, as git submodules pinned at release tags (`ssh/dropbear`, `ssh/openssh`), with our patch to Dropbear, its build options and the build scripts, for the head unit and for this machine; `tools/check_ssh.py` is `make ssh-check`. `ssh/README` says what each change is for and how the sources were checked against the signed releases. Ours: `ssh/relay/`, `sshrelay`, the program of the SSH package's channel, which starts a Dropbear server for each connection and carries its bytes (`ssh/README`, "The relay"); its tests are `tests/ssh/` (`make ssh-test`) |
 | `build/`, `release/` | Build products, not tracked. `release/NbtApp/` is the folder for the head unit; `release/agent/` holds the agent's programs for it, and `release/pkg/` the plugin's and the agent's own packages |
 
 Ids that must not collide with other apps on the car: the manifest's connector id (211; BMW's apps use 17 and 200,
@@ -71,13 +71,17 @@ To link against a head unit's real HU Framework libraries instead of the stubs:
 `make lib FRAMEWORK_LIBDIR=/path/to/opt/hmi/ID5/lib`. The result is identical.
 
 Dropbear and OpenSSH's `sftp-server` (`ssh/`, see `ssh/README`) are built from the submodules, which
-`make ssh-src` fetches when they are not there (a plain `git clone` leaves them out):
+`make ssh-src` fetches when they are not there (a plain `git clone` leaves them out), and the relay from `ssh/relay/`:
 
 ```sh
 make ssh-src      # the submodules' pinned commits exported to build/ssh/src/, Dropbear's patched; the submodules are only read
 make ssh          # -> build/ssh/qnx/: dropbearmulti and sftp-server for the head unit, in the SDP image (docker; no QNX licence)
 make ssh-host     # -> build/ssh/host/: the same two for this machine
-make ssh-check    # both looked at; the head unit's are not run
+make ssh-relay-host  # -> build/ssh/host/sshrelay: the relay for this machine, with its test hooks
+make ssh-test     # the relay's tests on this machine (after make ssh-host); the last line says what was skipped
+make ssh-check    # the builds looked at; the head unit's are not run
+QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh ssh   # all of it: ssh-host, ssh-test, ssh, the relay for the head unit
+                                                      # (make ssh-relay, qcc, in the image) -> build/ssh/qnx/sshrelay, ssh-check
 ```
 
 ## Packages and the agent
