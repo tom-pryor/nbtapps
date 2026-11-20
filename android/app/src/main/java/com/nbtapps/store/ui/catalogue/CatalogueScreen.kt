@@ -286,7 +286,7 @@ internal fun appUpdateStatus(update: AppUpdateView): String? {
         }
     }
     return when (val state = update.state) {
-        UpdateState.Idle -> WAITS_FOR_JOB.takeIf { update.waitsForJob }
+        UpdateState.Idle -> update.waitsFor?.let(::updateWaitText)
         UpdateState.NeedsPermission ->
             "Android has to be told, once, that this app may install its own updates. Allow it in Android's " +
                 "settings and come back: the update goes on from here."
@@ -297,7 +297,12 @@ internal fun appUpdateStatus(update: AppUpdateView): String? {
     }
 }
 
-private const val WAITS_FOR_JOB = "A job is running on a head unit. Update the app once it has finished."
+/** Why the update waits, in the words of [com.nbtapps.store.data.update.AppUpdater]'s refusals. */
+internal fun updateWaitText(wait: UpdateWait): String = when (wait) {
+    UpdateWait.JOB -> "A job is running on a head unit. Update the app once it has finished."
+    UpdateWait.TERMINAL -> "A terminal is open on a head unit. Close it, then update the app."
+    UpdateWait.PORT -> "SSH access for other apps is on. Turn it off, then update the app."
+}
 
 /** What the card's button does. */
 internal enum class AppUpdateAction(val label: String) {
@@ -510,8 +515,8 @@ private fun AppUpdateCard(update: AppUpdateView, onUpdate: () -> Unit) {
                 Button(
                     onClick = { if (action == AppUpdateAction.ALLOW) openInstallSettings(context) else onUpdate() },
                     modifier = Modifier.align(Alignment.End),
-                    // Allowing it does not end the app, so that need not wait for a job.
-                    enabled = action == AppUpdateAction.ALLOW || !update.waitsForJob,
+                    // Allowing it does not end the app, so that need not wait for a job, a terminal or the port.
+                    enabled = action == AppUpdateAction.ALLOW || update.waitsFor == null,
                 ) { Text(action.label) }
             }
         }

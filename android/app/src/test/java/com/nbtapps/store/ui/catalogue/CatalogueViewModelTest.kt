@@ -224,7 +224,7 @@ class CatalogueViewModelTest {
         assertEquals(AppUpdateOffer.Available(newer), card.offer)
         assertEquals("0.1.0", card.installedVersion)
         assertEquals(UpdateState.Idle, card.state)
-        assertFalse(card.waitsForJob)
+        assertNull(card.waitsFor)
 
         viewModel.updateApp()
         // The updater works on its own scope, in real time.

@@ -20,6 +20,7 @@ import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.Refusal
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
+import com.nbtapps.store.data.ssh.SshPortState
 import com.nbtapps.store.data.ssh.SshTunnel
 import com.nbtapps.store.data.terminal.TerminalEnd
 import com.nbtapps.store.data.terminal.TerminalState
@@ -410,6 +411,64 @@ class HeadUnitDebugCardTest {
         val refused = viewModel.card("the refusal") { it.error != null && !it.switching }
         assertEquals("The head unit couldn't change the switch.", refused.error)
         assertEquals(true, refused.on)
+    }
+
+    @Test
+    fun `the row SSH from other apps in its four forms`() {
+        val off = DebugCard(installed = true, on = false)
+        assertEquals("Switch on SSH access first", off.portLine)
+        assertEquals("Set up", off.portButton)
+        assertFalse(off.canOpenPort)
+        // Not known, with no link: the same.
+        assertEquals("Switch on SSH access first", DebugCard(installed = true).portLine)
+        assertFalse(DebugCard(installed = true).canOpenPort)
+
+        val ready = DebugCard(installed = true, on = true)
+        assertEquals("For an SSH app on this phone, or a laptop", ready.portLine)
+        assertEquals("Set up", ready.portButton)
+        assertTrue(ready.canOpenPort)
+
+        val port = SshPortState.On("car", 2222, connections = 1, hostKey = "SHA256:x")
+        val on = DebugCard(installed = true, on = true, port = port)
+        assertEquals("On · port 2222 · 1 connection", on.portLine)
+        assertEquals("Manage", on.portButton)
+        assertTrue(on.canOpenPort)
+
+        val wide = DebugCard(installed = true, on = true, port = port.copy(otherDevices = true, connections = 2))
+        assertEquals("On for other devices · port 2222 · 2 connections", wide.portLine)
+        // While the port is on here, Manage is there whatever the switch is known to be.
+        assertTrue(wide.copy(on = null).canOpenPort)
+        assertTrue(DebugCard(installed = true, on = false, port = port).canOpenPort)
+    }
+
+    @Test
+    fun `the row follows the port of this head unit only`() {
+        val page = HeadUnitDetailUiState(link = LinkState.Connected("TCP"), channels = true, installed = listOf(InstalledPackage(SshTunnel.PACKAGE, "SSH access", "1.0.0")))
+        val on = SshSwitchUi(on = true, connections = 0)
+        val there = SshPortState.On("other", 2222, hostKey = "SHA256:x")
+        assertEquals(SshPortState.Off(), debugCard(page, false, on, TerminalState.Idle, "car", there)!!.port)
+        val here = SshPortState.On("car", 2223, hostKey = "SHA256:x")
+        assertEquals(here, debugCard(page, false, on, TerminalState.Idle, "car", here)!!.port)
+    }
+
+    @Test
+    fun `switching SSH access off from the card tells the port at once`() = test {
+        agents()
+        channel.on = true
+        val told = java.util.concurrent.CopyOnWriteArrayList<Boolean>()
+        val viewModel = mainDispatcherRule.track(
+            HeadUnitDetailViewModel(
+                "car", headUnits, jobs, connector, FakePhoneBluetooth(), setup, scope,
+                terminal = terminal,
+                catalogue = catalogue,
+                sshSwitched = { told += it },
+            ),
+        )
+        assertTrue(jobs.connect("car").isSuccess)
+        viewModel.card("on") { it.on == true }
+        viewModel.switchSsh(false)
+        viewModel.card("off") { it.on == false && !it.switching }
+        assertEquals(listOf(false), told)
     }
 
     @Test

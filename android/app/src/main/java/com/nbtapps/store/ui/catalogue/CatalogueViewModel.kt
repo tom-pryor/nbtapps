@@ -17,6 +17,8 @@ import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.agentUpdate
 import com.nbtapps.store.data.jobs.holdings
 import com.nbtapps.store.data.jobs.packageStatus
+import com.nbtapps.store.data.ssh.SshPort
+import com.nbtapps.store.data.terminal.TerminalRepository
 import com.nbtapps.store.data.update.AppUpdateOffer
 import com.nbtapps.store.data.update.AppUpdater
 import com.nbtapps.store.data.update.InstalledApp
@@ -26,10 +28,12 @@ import com.nbtapps.store.model.CataloguePackage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -71,9 +75,29 @@ data class AppUpdateView(
     /** The version of the copy that runs. */
     val installedVersion: String,
     val state: UpdateState,
-    /** A job on a head unit needs the phone, and an update would end the app under it: the update waits. */
-    val waitsForJob: Boolean,
+    /** What an update would end with the app, so that it waits; null where nothing does. */
+    val waitsFor: UpdateWait? = null,
 )
+
+/** What the app's update waits for: the update would end it with the app. */
+enum class UpdateWait {
+    /** A job on a head unit that needs the phone. */
+    JOB,
+
+    /** A terminal open, or being opened, on a head unit. */
+    TERMINAL,
+
+    /** The SSH port for other apps on, or being switched on. */
+    PORT,
+}
+
+/** What the update waits for, the job first: see [UpdateWait]. Null where nothing is in the way. */
+internal fun updateWait(jobNeedsPhone: Boolean, terminalActive: Boolean, portActive: Boolean): UpdateWait? = when {
+    jobNeedsPhone -> UpdateWait.JOB
+    terminalActive -> UpdateWait.TERMINAL
+    portActive -> UpdateWait.PORT
+    else -> null
+}
 
 data class CatalogueUiState(
     /** False until an index has been accepted, so the screen can tell "loading" from "empty". */
@@ -192,11 +216,11 @@ internal fun CatalogueUiState.withAppUpdate(
     offer: AppUpdateOffer?,
     installedVersion: String,
     state: UpdateState,
-    jobNeedsPhone: Boolean,
+    waitsFor: UpdateWait?,
 ): CatalogueUiState = copy(
     appUpdate = offer
         ?.takeIf { loaded && filter == CatalogueFilter.All && query.isBlank() }
-        ?.let { AppUpdateView(it, installedVersion, state, jobNeedsPhone) },
+        ?.let { AppUpdateView(it, installedVersion, state, waitsFor) },
 )
 
 private fun CataloguePackage.matches(query: String): Boolean {
@@ -206,14 +230,31 @@ private fun CataloguePackage.matches(query: String): Boolean {
 }
 
 @HiltViewModel
-class CatalogueViewModel @Inject constructor(
+class CatalogueViewModel internal constructor(
     private val repository: CatalogueRepository,
     headUnits: HeadUnitRepository,
     private val jobs: JobRepository,
     private val updater: AppUpdater,
     private val installed: InstalledApp,
     prereleases: PrereleaseRepository,
+    /** What else an update would end with the app: a terminal or the SSH port for other apps ([UpdateWait]). */
+    private val inUse: Flow<UpdateWait?> = flowOf(null),
 ) : ViewModel() {
+
+    @Inject
+    constructor(
+        repository: CatalogueRepository,
+        headUnits: HeadUnitRepository,
+        jobs: JobRepository,
+        updater: AppUpdater,
+        installed: InstalledApp,
+        prereleases: PrereleaseRepository,
+        terminal: TerminalRepository,
+        port: SshPort,
+    ) : this(
+        repository, headUnits, jobs, updater, installed, prereleases,
+        combine(terminal.state, port.state) { shell, ssh -> updateWait(false, shell.active, ssh.active) },
+    )
 
     private val query = MutableStateFlow("")
     private val filter = MutableStateFlow<CatalogueFilter>(CatalogueFilter.All)
@@ -222,9 +263,12 @@ class CatalogueViewModel @Inject constructor(
     /** The head unit the list is shown against, and the packages switched on for pre-releases. */
     private val head = combine(combine(headUnits.headUnits, jobs.connection, ::holdings), prereleases.switchedOn, ::Pair)
 
-    /** The app's own update: what the catalogue offers this copy, how far it has got, and whether a job is in its way. */
-    private val ownUpdate = combine(repository.catalogue, updater.state, jobs.job) { catalogue, state, job ->
-        Triple(appUpdate(catalogue.index?.app, installed), state, job?.needsPhone == true)
+    /**
+     * The app's own update: what the catalogue offers this copy, how far it has got, and what is in its way: a job, a
+     * terminal or the SSH port.
+     */
+    private val ownUpdate = combine(repository.catalogue, updater.state, jobs.job, inUse) { catalogue, state, job, other ->
+        Triple(appUpdate(catalogue.index?.app, installed), state, if (job?.needsPhone == true) UpdateWait.JOB else other)
     }
 
     /** No head unit is saved, so the screen offers the set-up. False until the saved head units have been read. */
