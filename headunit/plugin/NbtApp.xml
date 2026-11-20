@@ -19,12 +19,15 @@
       <hmiAction id="27" target="15"/>
       <hmiAction id="29" target="16"/>
       <hmiAction id="31" target="17"/>
+      <hmiAction id="33" target="18"/>
       <!-- Handled by libNbtApp.so: tells the agent to forget every paired phone. -->
       <raAction id="28"/>
       <!-- Handled by libNbtApp.so: starts the agent's launcher. -->
       <raAction id="30"/>
       <!-- Handled by libNbtApp.so: asks the agent to have the car end the phone's Bluetooth serial link. -->
       <raAction id="32"/>
+      <!-- Handled by libNbtApp.so: asks the agent to stop. -->
+      <raAction id="34"/>
     </actions>
     <models>
       <textIdModel id="3" textId="1">
@@ -80,12 +83,23 @@
       <textIdModel id="50" textId="61">
         <synonyms/>
       </textIdModel>
+      <!-- Stop the agent: 51 is the menu row and the title; libNbtApp.so points 52 and 53 at how things stand. -->
+      <textIdModel id="51" textId="8">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="52" textId="70">
+        <synonyms/>
+      </textIdModel>
+      <textIdModel id="53" textId="71">
+        <synonyms/>
+      </textIdModel>
     </models>
     <hmiStates>
       <!-- The menu. -->
       <hmiState id="10" text="NBTApp" textModel="3">
         <components>
           <button action="29" id="68" model="45" text="Start the agent"/>
+          <button action="33" id="92" model="51" text="Stop the agent"/>
           <button action="26" id="66" model="38" text="Pair a phone"/>
           <button action="27" id="67" model="39" text="Forget all phones"/>
           <button action="31" id="89" model="48" text="Reset Bluetooth link"/>
@@ -122,6 +136,14 @@
         <components>
           <button id="90" model="49" text="Ends the phone's link for a new one"/>
           <button action="32" id="91" model="50" text="Reset now"/>
+        </components>
+      </hmiState>
+      <!-- Stop the agent: the first row says what it does, and then how it went; the second does it, once per
+           showing, and reads text 20 after that. The rows are what src/phone_screens.hpp (StopScreen) says. -->
+      <hmiState id="18" parentId="10" text="Stop the agent" textModel="51">
+        <components>
+          <button id="93" model="52" text="Off until the head unit restarts"/>
+          <button action="34" id="94" model="53" text="Stop it now"/>
         </components>
       </hmiState>
       <!-- About: a non-selectable Richtext list; libNbtApp.so puts text 3 into model 37 in onInit. -->

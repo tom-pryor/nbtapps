@@ -20,6 +20,7 @@
 #include "../../agent/engine.hpp"
 #include "../../agent/fsutil.hpp"
 #include "../../agent/json.hpp"
+#include "../../src/agent_start.hpp"
 #include "test_util.hpp"
 
 using namespace nbt;
@@ -161,6 +162,8 @@ static void testConfig() {
     CHECK(real.appDir("org.nbtapp.hello") == "/var/opt/nbtapp/apps/org.nbtapp.hello");
     CHECK(real.dataDir("org.nbtapp.hello") == "/var/opt/nbtapp/data/org.nbtapp.hello" && real.shell() == "/bin/ksh");
     CHECK(real.stagingDir() == "/var/opt/nbtapp/staging" && real.runDir() == "/tmp/nbtapp");
+    // The iDrive plugin looks for the mark of a stop where this agent leaves it (src/agent_start.hpp).
+    CHECK(real.runDir() + "/" + kStoppedMark == agentstart::Paths().stopped);
     CHECK(real.tmpDir("org.nbtapp.hello") == "/tmp/nbtapp/apps/org.nbtapp.hello");
     // The two plugin folders: the stock one on the system partition, and the one under /var, where apps installed by
     // hand are and where packages that have the path built in go. Both are read for the ids in use.

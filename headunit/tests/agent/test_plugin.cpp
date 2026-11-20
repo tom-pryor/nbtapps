@@ -5,6 +5,8 @@
 // real local socket, with a view that writes down what it is told to show; a phone on a link of the serial kind
 // types the code, and what Start the agent starts is an agent made by the test. What the agent's serial.reset asks of
 // the car is a stand-in, and what a real agent answers only while a job runs comes from a stand-in for the agent.
+// Stop the agent asks a real agent, which says yes; the test then takes that agent away, as the end of its process
+// would, and a stand-in answers what a real one answers only while a job runs, or says yes and does not end.
 // What the HMI does with a text is not tested here, or anywhere but on a car.
 //
 // One thread, as in the HMI: a screen's tick, then a turn of the agent, until both have had their say.
@@ -57,7 +59,7 @@ public:
 };
 
 // What the HMI would be told to show, in order: "code 123456", "done", ...
-class View : public PairView, public ForgetView, public StartView, public ResetView {
+class View : public PairView, public ForgetView, public StartView, public ResetView, public StopView {
 public:
     virtual void pairShow(PairStatus status, const std::string& code) {
         static const char* const names[] = {"asking", "code", "done", "wrong-codes", "ran-out", "too-soon", "no-agent", "failed"};
@@ -76,6 +78,10 @@ public:
     virtual void resetShow(ResetStatus status) {
         static const char* const names[] = {"ask", "working", "armed", "sent", "no-agent", "busy", "unsupported", "failed"};
         shown.push_back(std::string("reset ") + names[status]);
+    }
+    virtual void stopShow(StopStatus status) {
+        static const char* const names[] = {"ask", "working", "stopping", "stopped", "no-agent", "busy", "unsupported", "failed"};
+        shown.push_back(std::string("stop ") + names[status]);
     }
     // Everything shown since the last call, joined by ", ".
     std::string take() {
@@ -186,6 +192,13 @@ static void turns(ResetScreen* screen, Car* car, unsigned n) {
     }
 }
 
+static void turns(StopScreen* screen, Car* car, unsigned n) {
+    for (unsigned i = 0; i < n; ++i) {
+        screen->tick();
+        if (car != 0) car->agent.turn(0);
+    }
+}
+
 // What the agent's serial.reset asks of the car: the Bluetooth serial listener's part, which the bench has not got.
 // It comes to what the test says.
 class FakeSerialReset : public SerialReset {
@@ -223,6 +236,29 @@ public:
     virtual void onEvent(Peer*, const std::string&, int64_t, const json::Value&) {}
     virtual void onData(Peer*, uint16_t, const std::string&, bool) {}
     std::string code, result;
+    int asked;
+};
+
+// An agent that answers hello, and agent.stop as the test says: with an error's code, or with a yes. It does not
+// end after a yes; the test takes it away when it is to.
+class StopAnswers : public PeerHandler {
+public:
+    StopAnswers() : asked(0) {}
+    virtual void onRequest(Peer* peer, int64_t id, const std::string& method, const json::Value&) {
+        if (method == "hello") {
+            peer->respond(id, "{}");
+        } else if (method == "agent.stop") {
+            ++asked;
+            if (code.empty()) peer->respond(id, "{}");
+            else peer->respondError(id, code.c_str(), "as the test says");
+        } else {
+            peer->respondError(id, "unsupported", "this stand-in has no method " + method);
+        }
+    }
+    virtual void onResponse(Peer*, int64_t, bool, const json::Value&, const std::string&, const std::string&) {}
+    virtual void onEvent(Peer*, const std::string&, int64_t, const json::Value&) {}
+    virtual void onData(Peer*, uint16_t, const std::string&, bool) {}
+    std::string code;
     int asked;
 };
 
@@ -483,6 +519,128 @@ static void testResetAnswers() {
     }
 }
 
+// Stop the agent against a real agent: it says yes, and the screen waits for it to end, which here is the test
+// deleting it, as the end of its process would close its links.
+static void testStop() {
+    View view;
+    Car* car = new Car("stop");
+    StopScreen screen(car->socket, &view);
+    // It says what it does first, and nothing is sent until the row is pressed.
+    screen.shown();
+    turns(&screen, car, 12);
+    CHECK(view.take() == "stop ask" && !screen.wantsTick() && car->agent.sessions() == 0 && !car->agent.stopAsked());
+    screen.pressed();
+    CHECK(view.take() == "stop working" && screen.wantsTick());
+    turns(&screen, car, 12);
+    // The agent said yes: the program would end now. The screen keeps its link until it has.
+    CHECK(view.take() == "stop stopping" && screen.wantsTick() && car->agent.stopDue() && car->agent.sessions() == 1);
+    delete car;
+    turns(&screen, 0, 2);
+    CHECK(view.take() == "stop stopped" && !screen.wantsTick() && screen.status() == kStopStopped);
+    // A second press does nothing.
+    screen.pressed();
+    CHECK(view.take().empty() && !screen.wantsTick());
+    // Shown again, it starts over, and with no agent there says so.
+    screen.shown();
+    screen.pressed();
+    CHECK(view.take() == "stop ask, stop no-agent" && !screen.wantsTick());
+}
+
+// Stop the agent against a stand-in for the agent: what a real one answers only while a job runs, an agent from before
+// agent.stop, other errors, a yes from an agent that does not end, one that goes before it answers, and the screen
+// left while it waits.
+static void testStopAnswers() {
+    std::string why, path = gSocketDir + "/stop-answers.sock";
+    LocalListener listener;
+    CHECK_IN(why, listener.open(path, &why));
+    View view;
+    StopScreen screen(path, &view);
+    static const char* const cases[][2] = {
+        // code, what the screen shows
+        {"busy", "busy"},
+        {"unsupported", "unsupported"},
+        {"forbidden", "failed"},
+        {"bad-request", "failed"},
+        {"internal", "failed"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        StopAnswers answers;
+        answers.code = cases[i][0];
+        screen.shown();
+        screen.pressed();
+        Link* link = listener.accept();
+        CHECK(link != 0);
+        Peer agent(link, false, &answers);
+        for (int round = 0; round < 6; ++round) {
+            screen.tick();
+            agent.readable();
+            agent.flush();
+        }
+        std::string shown = view.take();
+        CHECK_IN(shown, shown == std::string("stop ask, stop working, stop ") + cases[i][1]);
+        CHECK(answers.asked == 1 && !screen.wantsTick());
+    }
+    {   // A yes, and the stand-in stays: after kStopWaitTicks the screen says that the agent did not stop.
+        StopAnswers answers;
+        screen.shown();
+        screen.pressed();
+        Peer agent(listener.accept(), false, &answers);
+        for (int round = 0; round < 6 && screen.status() != kStopStopping; ++round) {
+            screen.tick();
+            agent.readable();
+            agent.flush();
+        }
+        CHECK(answers.asked == 1 && view.take() == "stop ask, stop working, stop stopping");
+        for (unsigned i = 0; i + 1 < kStopWaitTicks; ++i) {
+            screen.tick();
+            agent.readable();
+        }
+        CHECK(view.take().empty() && screen.wantsTick() && screen.status() == kStopStopping);
+        screen.tick();
+        CHECK(view.take() == "stop failed" && !screen.wantsTick());
+    }
+    {   // It goes before it answers.
+        screen.shown();
+        screen.pressed();
+        delete listener.accept();
+        screen.tick();
+        screen.tick();
+        CHECK(view.take() == "stop ask, stop working, stop no-agent" && !screen.wantsTick());
+    }
+    {   // The screen is left while it waits for the answer, and then while it waits for the end: the link is closed,
+        // nothing more is shown, and the screen starts over when it is shown again.
+        StopAnswers answers;
+        screen.shown();
+        screen.pressed();
+        Peer agent(listener.accept(), false, &answers);
+        CHECK(view.take() == "stop ask, stop working");
+        screen.hidden();
+        CHECK(!screen.wantsTick() && screen.status() == kStopAsk);
+        for (int round = 0; round < 6; ++round) {
+            screen.tick();
+            agent.readable();
+            agent.flush();
+        }
+        CHECK(view.take().empty() && !screen.wantsTick());
+        screen.shown();
+        CHECK(view.take() == "stop ask" && screen.status() == kStopAsk);
+        screen.pressed();
+        Peer again(listener.accept(), false, &answers);
+        for (int round = 0; round < 6 && screen.status() != kStopStopping; ++round) {
+            screen.tick();
+            again.readable();
+            again.flush();
+        }
+        CHECK(view.take() == "stop working, stop stopping" && screen.wantsTick());
+        screen.hidden();
+        CHECK(!screen.wantsTick() && screen.status() == kStopAsk);
+        screen.tick();
+        CHECK(view.take().empty());
+        screen.shown();
+        CHECK(view.take() == "stop ask" && screen.status() == kStopAsk);
+    }
+}
+
 // Start the agent: one that is running, one that is not installed, one that comes a while after its start, and
 // one that does not come.
 static void testStart() {
@@ -572,6 +730,12 @@ static void testNoAgent() {
         CHECK(view.take() == "reset ask, reset no-agent" && !reset.wantsTick());
         reset.pressed();
         CHECK(view.take().empty());
+        StopScreen stop(gSocketDir + "/nobody.sock", &view);
+        stop.shown();
+        stop.pressed();
+        CHECK(view.take() == "stop ask, stop no-agent" && !stop.wantsTick());
+        stop.pressed();
+        CHECK(view.take().empty());
     }
     std::string why, path = gSocketDir + "/mute.sock";
     LocalListener mute;
@@ -601,6 +765,15 @@ static void testNoAgent() {
         CHECK(view.take() == "reset ask, reset working" && reset.wantsTick());
         reset.tick();
         CHECK(view.take() == "reset no-agent" && !reset.wantsTick());
+        delete held;
+        StopScreen stop(path, &view);
+        stop.shown();
+        stop.pressed();
+        held = mute.accept();
+        for (unsigned i = 0; i < kScreenAnswerTicks; ++i) stop.tick();
+        CHECK(view.take() == "stop ask, stop working" && stop.wantsTick());
+        stop.tick();
+        CHECK(view.take() == "stop no-agent" && !stop.wantsTick());
         delete held;
     }
     {   // It goes while the screen waits. The write that follows raises no signal: the HMI's process has to live.
@@ -659,6 +832,8 @@ int main(int argc, char** argv) {
     testForget();
     testReset();
     testResetAnswers();
+    testStop();
+    testStopAnswers();
     testStart();
     testNoAgent();
 
