@@ -48,13 +48,23 @@ fun HeadUnitIndicator(
     viewModel: HeadUnitIndicatorViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    HeadUnitIndicatorContent(uiState, viewModel::connect, viewModel::disconnect, onOpenHeadUnit, onSetUp, onPairHeadUnit, viewModel::diagnostics)
+    HeadUnitIndicatorContent(
+        uiState,
+        viewModel::connect,
+        viewModel::connectFromPhone,
+        viewModel::disconnect,
+        onOpenHeadUnit,
+        onSetUp,
+        onPairHeadUnit,
+        viewModel::diagnostics,
+    )
 }
 
 @Composable
 private fun HeadUnitIndicatorContent(
     uiState: HeadUnitIndicatorUiState,
     onConnect: (String) -> Unit,
+    onConnectFromPhone: (String) -> Unit,
     onDisconnect: () -> Unit,
     onOpenHeadUnit: (String) -> Unit,
     onSetUp: (() -> Unit)?,
@@ -113,6 +123,9 @@ private fun HeadUnitIndicatorContent(
                             text = { Text(if (uiState.status == IndicatorStatus.FAILED) "Connect again" else "Connect") },
                             onClick = { open = false; onConnect(unit.id) },
                         )
+                        if (uiState.fromPhone) {
+                            DropdownMenuItem(text = { Text(CONNECT_FROM_PHONE) }, onClick = { open = false; onConnectFromPhone(unit.id) })
+                        }
                         if (uiState.status == IndicatorStatus.FAILED) {
                             DropdownMenuItem(text = { Text(COPY_DIAGNOSTICS) }, onClick = { open = false; copyDiagnostics(context, diagnostics()) })
                         }

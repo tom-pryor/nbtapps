@@ -52,6 +52,11 @@ data class HeadUnitIndicatorUiState(
     val others: List<IndicatorHeadUnit> = emptyList(),
     /** A job is running over the link, which a connect to another head unit would take from under it. */
     val busy: Boolean = false,
+    /**
+     * The connect failed having only waited for the car's link, so the menu offers to connect from the phone: see
+     * [ConnectionState.Failed.listenedOnly].
+     */
+    val fromPhone: Boolean = false,
 )
 
 /** What the indicator shows for the saved [units], the app's [connection] and its [job]. [supports] is the build's. */
@@ -87,6 +92,7 @@ internal fun indicatorState(
         canConnect = reachable,
         others = units.filter { it.id != selected.id && it.endpoints.any(supports) }.map { IndicatorHeadUnit(it.id, it.name) },
         busy = own is ConnectionState.Connected && job != null && job.headUnitId == selected.id && !job.ended && !job.linkLost,
+        fromPhone = reachable && own is ConnectionState.Failed && own.listenedOnly,
     )
 }
 
@@ -111,6 +117,11 @@ class HeadUnitIndicatorViewModel @Inject constructor(
      */
     fun connect(id: String) {
         appScope.launch { jobs.connect(id) }
+    }
+
+    /** One connect to the head unit [id] with the phone dialling the car as well: see [JobRepository.connectFromPhone]. */
+    fun connectFromPhone(id: String) {
+        appScope.launch { jobs.connectFromPhone(id) }
     }
 
     fun disconnect() {

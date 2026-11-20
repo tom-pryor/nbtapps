@@ -13,6 +13,7 @@ import com.nbtapps.store.data.link.IncomingLink
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.MemoryLink
+import com.nbtapps.store.data.link.NoCarLinkException
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.SerialEndpoint
@@ -34,6 +35,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -653,6 +655,11 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
     }
 }
 
+/** [link], as a link the car opened to the phone says it is ([Link.openedByCar]). */
+private class CarOpened(private val link: Link) : Link by link {
+    override val openedByCar = true
+}
+
 /**
  * Gives the app a link to a new [FakeAgent] each time it connects. A test sets each one up in [onConnect]. It
  * reaches TCP endpoints, or with [serial] Bluetooth serial ones, over a link that says it is serial. With [serial]
@@ -684,6 +691,25 @@ class FakeConnector(
     override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link {
         this.dials += dials
         return connect(endpoint)
+    }
+
+    /** Whether each connect that was told whether to only listen was, in order. */
+    val listenOnly = CopyOnWriteArrayList<Boolean>()
+
+    /** How long a connect that only listens waits for the car's link ([dialIn]) before it fails, in milliseconds. */
+    @Volatile
+    var listenOnlyMs = 10_000L
+
+    /**
+     * As the app's serial connector: with [listenOnly], over [serial], no link of the phone's, only one the car opens
+     * ([dialIn]), and [NoCarLinkException] where none comes in [listenOnlyMs]. Over TCP it makes nothing of it.
+     */
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
+        this.listenOnly += listenOnly
+        if (!listenOnly || !serial) return connect(endpoint, dials)
+        this.dials += dials
+        return withTimeoutOrNull(listenOnlyMs) { accept(listOf(endpoint)).link }
+            ?: throw NoCarLinkException("The car didn't connect to this app")
     }
 
     override fun supports(endpoint: Endpoint): Boolean = if (serial) endpoint is SerialEndpoint else endpoint is TcpEndpoint
@@ -742,7 +768,8 @@ class FakeConnector(
     fun dialIn(address: String): FakeAgent? {
         for (waiter in listeners) {
             val endpoint = waiter.endpoints.firstOrNull { it is SerialEndpoint && it.address.equals(address, ignoreCase = true) } ?: continue
-            val (phone, other) = MemoryLink.pair(kind = Link.SERIAL)
+            val (memory, other) = MemoryLink.pair(kind = Link.SERIAL)
+            val phone = CarOpened(memory)
             val agent = FakeAgent(other, headUnitId).also {
                 it.phones = phones
                 onConnect(it)

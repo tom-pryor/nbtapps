@@ -97,7 +97,8 @@ class SerialConnectTimes(
     /**
      * How long, to one whose agent is known to dial ([com.nbtapps.store.model.HeadUnit.serialDial]): long enough for
      * the car's own dial to come, which a refused dial of the phone's brings within seconds, and a poll within half a
-     * minute.
+     * minute. Also how long a connect that only listens waits for the car's link: a poll's time, and the ask and the
+     * dial that follow it.
      */
     val dialWindowMillis: Long = 40_000,
     /** The most one try of the phone's is given: a connect that hears nothing blocks for about a minute. */
@@ -130,6 +131,13 @@ class SerialConnectTimes(
  * the first link that is up, with the magic bytes written, is the one returned. The other is given up, or closed at
  * once if it came up too, before anything else is written on it.
  *
+ * Where such an agent said that a link this phone opens itself is left to another program on the car
+ * ([com.nbtapps.store.model.HeadUnit.phoneOpenedLeft]), a link of the phone's would come up and never be answered,
+ * and would hold the car's one link for phone-opened links from that program. So a connect there only listens
+ * (`listenOnly`): no dial of the phone's is made, and the car's link is waited for, which it opens when it next looks
+ * for the app, every 10 to 30 seconds while the phone is connected to it. A wait that brings none fails with
+ * [NoCarLinkException]; listening that cannot be had falls back to the phone's own dial, as above.
+ *
  * The socket is the authenticated, encrypted kind, so the link is to the car the phone is paired with, and
  * nobody listens in. That does not say who opened it: any app on a paired phone can. The agent therefore asks
  * for `auth` on this link, with a key it issued when the user typed a code from the car's screen into this app
@@ -152,15 +160,19 @@ class BluetoothSerialLinkConnector(
 
     override suspend fun connect(endpoint: Endpoint): Link = connect(endpoint, dials = false)
 
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link = connect(endpoint, dials, listenOnly = false)
+
     /**
      * Dials [endpoint] and listens for its car at once, for [SerialConnectTimes.dialWindowMillis] where the agent
      * [dials] and [SerialConnectTimes.windowMillis] where it is not known to. Listening that cannot be had leaves the
-     * dial to go on alone. A caller that is cancelled leaves nothing open.
+     * dial to go on alone. With [listenOnly], for an agent that [dials], only listens, for
+     * [SerialConnectTimes.dialWindowMillis] ([waitForCar]). A caller that is cancelled leaves nothing open.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link {
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
         val serial = endpoint as? SerialEndpoint ?: throw IOException("Not a Bluetooth serial endpoint")
         radio.unavailable(serial.address)?.let { throw IOException(it) }
+        if (listenOnly && dials) waitForCar(serial)?.let { return it }
         val window = if (dials) times.dialWindowMillis else times.windowMillis
         // The first link that is up. A second one finds it taken, and is closed with nothing more written on it.
         val won = CompletableDeferred<Link>()
@@ -202,6 +214,36 @@ class BluetoothSerialLinkConnector(
             }
         }
     }
+
+    /**
+     * Waits for the car at [serial] to open a link to the phone, for [SerialConnectTimes.dialWindowMillis], and makes
+     * no link of the phone's: see the class. The wait is kept in the diagnostics either way. Null where the phone cannot
+     * listen, for the caller to dial as well.
+     *
+     * @throws NoCarLinkException if no link came in that time.
+     */
+    private suspend fun waitForCar(serial: SerialEndpoint): Link? {
+        val began = now()
+        val accepted = try {
+            withTimeoutOrNull(times.dialWindowMillis) { listener.accept(listOf(serial.address), first = true) }
+        } catch (e: IOException) {
+            log.line(diagnostics.record(LinkTry.Path.LISTEN_ONLY, LinkTry.Outcome.FAILED, now() - began, e).describe())
+            log.line("connect: the phone can't listen for the car, so it dials it as well")
+            return null
+        }
+        if (accepted == null) {
+            log.line(diagnostics.record(LinkTry.Path.LISTEN_ONLY, LinkTry.Outcome.NO_LINK, now() - began).describe())
+            throw NoCarLinkException(noCarLink())
+        }
+        log.line(diagnostics.record(LinkTry.Path.LISTEN_ONLY, LinkTry.Outcome.TAKEN, now() - began).describe())
+        return accepted.link
+    }
+
+    /** What the user is told when a connect that only listened had no link from the car. */
+    private fun noCarLink(): String =
+        "The car didn't connect to this app within ${times.dialWindowMillis / 1000} s. The app waits for the car here, " +
+            "which looks for it every 10 to 30 seconds while the phone is connected over Bluetooth. Check that the agent " +
+            "is running and the car is in range."
 
     override fun accepts(endpoint: Endpoint): Boolean = endpoint is SerialEndpoint
 
@@ -308,8 +350,8 @@ class BluetoothSerialLinkConnector(
     }
 }
 
-/** A serial link over [socket], whose magic bytes have gone out: one the phone dialled or one it accepted. */
-internal class SerialLink(private val socket: SerialSocket) : Link {
+/** A serial link over [socket], whose magic bytes have gone out: one the phone dialled, or one it accepted, [openedByCar]. */
+internal class SerialLink(private val socket: SerialSocket, override val openedByCar: Boolean = false) : Link {
     override val kind = Link.SERIAL
     override val input: InputStream = socket.input
     override val output: OutputStream = socket.output

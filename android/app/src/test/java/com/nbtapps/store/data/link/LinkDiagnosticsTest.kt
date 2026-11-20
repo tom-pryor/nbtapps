@@ -52,6 +52,20 @@ class LinkDiagnosticsTest {
     }
 
     @Test
+    fun `a connect that only listened says so, how long it listened, and whether the car's link came`() {
+        assertEquals(
+            "listen-only connect took the car's link after 12500 ms",
+            LinkTry(0, LinkTry.Path.LISTEN_ONLY, LinkTry.Outcome.TAKEN, 12_500).describe(),
+        )
+        assertEquals(
+            "listen-only connect had no link from the car after 40000 ms",
+            LinkTry(0, LinkTry.Path.LISTEN_ONLY, LinkTry.Outcome.NO_LINK, 40_000).describe(),
+        )
+        // Only the phone's own dials say why a connect failed: a wait for the car tells nothing of the car.
+        assertNull(causeOf(listOf(LinkTry(0, LinkTry.Path.LISTEN_ONLY, LinkTry.Outcome.NO_LINK, 40_000))))
+    }
+
+    @Test
     fun `the text to copy has the app, the head unit, the agent's serial status as it came, and every try`() {
         val diagnostics = SerialDiagnostics(about = "App 0.7.0, Android 16 (API 36), Pixel 9")
         diagnostics.record(LinkTry.Path.DIAL, LinkTry.Outcome.FAILED, millis = 700, failure = IOException("refused"))

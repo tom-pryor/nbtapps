@@ -20,8 +20,9 @@ class AcceptedLink(val address: String, val link: Link)
  * that lists [ProtocolConstants.CAPABILITY_SERIAL_DIAL] has the car dial a phone of its own on the agent's UUID, so
  * that another program holding the car's one link for phone-opened links does not keep the app out.
  *
- * Whoever wants such a link waits in [accept], for the addresses it takes one from: a connect for its car, the app
- * at rest for every car it has saved. However many wait, there is one listener on the phone, open while anyone waits
+ * Whoever wants such a link waits in [accept], for the addresses it takes one from: a connect for its car, whether it
+ * dials too or only listens, a connect whose link of the phone's waits for its answer, the app at rest for every car it
+ * has saved. A link handed over says that the car opened it ([Link.openedByCar]). However many wait, there is one listener on the phone, open while anyone waits
  * and closed when the last of them is done, and one link goes to one of them. A link from an address nobody waits
  * for is closed at once and listening goes on.
  *
@@ -207,7 +208,7 @@ class SerialListener(
             return
         }
         note(incoming, LinkTry.Outcome.UP, null, began)
-        val link = SerialLink(incoming.socket)
+        val link = SerialLink(incoming.socket, openedByCar = true)
         val accepted = AcceptedLink(incoming.address, link)
         // To whoever waits for it now, not when it came: one that came during the write, a connect stepping in ahead
         // of the one there, takes it; one that gave up meanwhile does not, and the next does.

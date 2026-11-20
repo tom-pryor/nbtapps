@@ -14,6 +14,12 @@ import androidx.compose.ui.platform.LocalContext
 internal const val COPY_DIAGNOSTICS = "Copy diagnostics"
 
 /**
+ * What the button, or the menu's row, says that has the phone connect to the car itself, once, where a connect that
+ * only waited for the car's link had none: see [com.nbtapps.store.data.jobs.JobRepository.connectFromPhone].
+ */
+internal const val CONNECT_FROM_PHONE = "Connect from the phone"
+
+/**
  * Puts [text], the diagnostics of the app's Bluetooth links ([com.nbtapps.store.data.link.SerialDiagnostics.report]),
  * on the clipboard as plain text, for the user to paste into a message to whoever helps them.
  */

@@ -33,6 +33,13 @@ data class HeadUnit(
      * before there was this.
      */
     val serialDial: Boolean = false,
+    /**
+     * The agent said in its last `info.get` (`phoneOpenedLeft` in its `serial` object) that a Bluetooth serial link
+     * this phone opens itself is left to another program on the car: a connect then only waits for the car's link
+     * ([com.nbtapps.store.data.link.BluetoothSerialLinkConnector]). False until an `info.get` says so, where one leaves
+     * it out, as an agent from before there was this does, and for a head unit saved before there was this.
+     */
+    val phoneOpenedLeft: Boolean = false,
 )
 
 /** What the agent's checks found on a head unit: see [HeadUnit.checks]. */

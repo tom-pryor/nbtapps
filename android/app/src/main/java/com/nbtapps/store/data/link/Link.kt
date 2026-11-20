@@ -28,6 +28,12 @@ interface Link : Closeable {
      */
     val magicSent: Boolean get() = false
 
+    /**
+     * Whether the head unit opened this link to the phone, as the car does for an agent that dials, rather than the
+     * phone: see [LinkConnector.accept]. False for every link the phone opened.
+     */
+    val openedByCar: Boolean get() = false
+
     /** Ends the link. A read or a write blocked on it fails. Safe to call twice, and from any thread. */
     override fun close()
 
@@ -55,6 +61,14 @@ interface LinkConnector {
      * it: see [BluetoothSerialLinkConnector].
      */
     suspend fun connect(endpoint: Endpoint, dials: Boolean): Link = connect(endpoint)
+
+    /**
+     * [connect], where with [listenOnly] the phone opens no link itself and only waits for the one the head unit opens:
+     * for an agent that said a link this phone opens is left to another program there
+     * ([com.nbtapps.store.model.HeadUnit.phoneOpenedLeft]). Only Bluetooth serial makes anything of it: see
+     * [BluetoothSerialLinkConnector]. A wait that brings no link fails with [NoCarLinkException].
+     */
+    suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link = connect(endpoint, dials)
 
     /** Whether [accept] can bring a link that the head unit at [endpoint] opens to the phone. Only Bluetooth serial can. */
     fun accepts(endpoint: Endpoint): Boolean = false
@@ -87,6 +101,9 @@ class LinkConnectors(private val connectors: List<LinkConnector>) : LinkConnecto
 
     override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link = connectorFor(endpoint).connect(endpoint, dials)
 
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link =
+        connectorFor(endpoint).connect(endpoint, dials, listenOnly)
+
     override fun accepts(endpoint: Endpoint): Boolean = connectors.any { it.accepts(endpoint) }
 
     /** Through the first connector that accepts any of [endpoints], for those it accepts. */
@@ -101,3 +118,9 @@ class LinkConnectors(private val connectors: List<LinkConnector>) : LinkConnecto
 
 /** The link ended, or was never usable. The message is shown to the user. */
 class LinkClosedException(message: String) : IOException(message)
+
+/**
+ * A connect that only waited for the head unit's link ([LinkConnector.connect] with `listenOnly`) and had none in its
+ * time. The message is shown to the user, who may then have the phone connect itself.
+ */
+class NoCarLinkException(message: String) : IOException(message)

@@ -230,6 +230,23 @@ class HeadUnitStoreTest {
     }
 
     @Test
+    fun `whether the phone's own links are left on the car is kept, and one saved before reads as not`() = runTest {
+        // As the version before there was this wrote it: with serialDial, without the new member.
+        file.writeText(
+            """[{"id":"one","name":"Car","endpoints":[{"type":"serial","address":"00:11:22:33:44:55","deviceName":"BMW 12345"}],""" +
+                """"serialDial":true}]""",
+        )
+        val before = opened { it.headUnit("one").first() }
+        assertEquals(true, before?.serialDial)
+        assertEquals(false, before?.phoneOpenedLeft)
+
+        opened { it.update("one") { unit -> unit.copy(phoneOpenedLeft = true) } }
+        assertEquals(true, opened { it.headUnit("one").first() }?.phoneOpenedLeft)
+        opened { it.update("one") { unit -> unit.copy(phoneOpenedLeft = false) } }
+        assertEquals(false, opened { it.headUnit("one").first() }?.phoneOpenedLeft)
+    }
+
+    @Test
     fun `a file this version cannot read is set aside, not lost`() = runTest {
         file.writeText("""[{"id":"one","name":"Car","host":"192.168.0.1","port":22,"transport":"WIFI"}]""")
 

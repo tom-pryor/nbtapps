@@ -42,8 +42,12 @@ sealed interface PairingStep {
     /** The agent takes this phone: it is paired, now or from before. */
     data object Paired : PairingStep
 
-    /** The app has no link to this head unit, and the code can go over nothing else. [reason]: why, if one just failed. */
-    data class NoLink(val reason: String?) : PairingStep
+    /**
+     * The app has no link to this head unit, and the code can go over nothing else. [reason]: why, if one just failed.
+     * [fromPhone]: that connect only waited for the car's link, and the phone may connect itself
+     * ([ConnectionState.Failed.listenedOnly]).
+     */
+    data class NoLink(val reason: String?, val fromPhone: Boolean = false) : PairingStep
 }
 
 data class PairingUiState(
@@ -87,7 +91,11 @@ internal fun pairingStep(headUnitId: String, connection: ConnectionState): Pairi
     }
     is ConnectionState.Connected -> if (connection.headUnitId == headUnitId) PairingStep.Paired else PairingStep.NoLink(null)
     is ConnectionState.Connecting -> if (connection.headUnitId == headUnitId) PairingStep.Connecting else PairingStep.NoLink(null)
-    is ConnectionState.Failed -> PairingStep.NoLink(connection.reason.takeIf { connection.headUnitId == headUnitId })
+    is ConnectionState.Failed -> if (connection.headUnitId == headUnitId) {
+        PairingStep.NoLink(connection.reason, connection.listenedOnly)
+    } else {
+        PairingStep.NoLink(null)
+    }
     ConnectionState.Disconnected -> PairingStep.NoLink(null)
 }
 
@@ -168,6 +176,11 @@ class PairingViewModel @Inject constructor(
     /** Opens the app's link to the head unit, for the code to go over. As in the top bar's menu, the attempt is the app's. */
     fun connect() {
         appScope.launch { jobs.connect(headUnitId) }
+    }
+
+    /** One connect with the phone dialling the car as well: see [JobRepository.connectFromPhone]. */
+    fun connectFromPhone() {
+        appScope.launch { jobs.connectFromPhone(headUnitId) }
     }
 
     /** Runs the set-up again from the top, after it stopped short. */

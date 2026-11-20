@@ -58,6 +58,7 @@ import com.nbtapps.store.model.LATER_FEATURES_WARNING
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.RiskFlag
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.CONNECT_FROM_PHONE
 import com.nbtapps.store.ui.headunits.CheckFixDialog
 import com.nbtapps.store.ui.headunits.CopyDiagnosticsButton
 import com.nbtapps.store.ui.headunits.Moves
@@ -294,7 +295,11 @@ private fun ConnectionCard(
             }
             is LinkState.Failed -> {
                 Text(link.reason, color = MaterialTheme.colorScheme.error)
-                Button(onClick = viewModel::connect) { Text("Connect again") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = viewModel::connect) { Text("Connect again") }
+                    // Where the connect only waited for the car: the one way to have the phone try itself.
+                    if (link.fromPhone) OutlinedButton(onClick = viewModel::connectFromPhone) { Text(CONNECT_FROM_PHONE) }
+                }
                 CopyDiagnosticsButton(viewModel::diagnostics)
             }
         }

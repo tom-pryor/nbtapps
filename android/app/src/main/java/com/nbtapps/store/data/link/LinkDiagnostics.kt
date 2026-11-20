@@ -34,7 +34,10 @@ data class LinkTry(
     val at: Long,
     val path: Path,
     val outcome: Outcome,
-    /** How long it took, in milliseconds: for a link the car opened, its hand-over, which only writes the magic bytes. */
+    /**
+     * How long it took, in milliseconds: for a link the car opened, its hand-over, which only writes the magic bytes;
+     * for a listen-only connect, how long it listened.
+     */
     val millis: Long? = null,
     /** The simple name of the exception's class, for one that failed. */
     val error: String? = null,
@@ -50,6 +53,12 @@ data class LinkTry(
 
         /** The phone began listening for the car's links. */
         LISTEN("listen"),
+
+        /**
+         * A connect that only listened for the car's link, and made no link of the phone's: its time is how long it
+         * listened. See [BluetoothSerialLinkConnector].
+         */
+        LISTEN_ONLY("listen-only connect"),
     }
 
     enum class Outcome(val label: String) {
@@ -61,6 +70,12 @@ data class LinkTry(
 
         /** A link the car opened from a device the app was not waiting for. */
         TURNED_AWAY("turned away"),
+
+        /** A listen-only connect took the car's link. */
+        TAKEN("took the car's link"),
+
+        /** A listen-only connect had no link from the car in its time. */
+        NO_LINK("had no link from the car"),
     }
 
     /** One line, as the diagnostics and the log have it. */

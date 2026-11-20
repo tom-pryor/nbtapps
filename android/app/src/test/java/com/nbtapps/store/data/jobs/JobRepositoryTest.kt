@@ -14,6 +14,7 @@ import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.LinkConnectors
 import com.nbtapps.store.data.link.LinkLog
+import com.nbtapps.store.data.link.NoCarLinkException
 import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.data.link.SerialListener
 import com.nbtapps.store.data.packages.PackageStore
@@ -1594,6 +1595,11 @@ class JobRepositoryTest {
             count.incrementAndGet()
             return inner.connect(endpoint, dials)
         }
+
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
+            count.incrementAndGet()
+            return inner.connect(endpoint, dials, listenOnly)
+        }
     }
 
     private suspend fun until(what: String, condition: () -> Boolean) {
@@ -2205,5 +2211,195 @@ class JobRepositoryTest {
 
         assertEquals(1, connector.agents.size)
         assertEquals(ConnectionState.Disconnected, jobs.connection.value)
+    }
+
+    // ---- a head unit whose agent leaves the phone's own links to another program ---------------------------------
+
+    /**
+     * Has [agent] list `serial-dial` in `hello`, as an agent that leaves the phone's links does, and answer `info.get`
+     * with a `serial` object whose `phoneOpenedLeft` is [left], or that has none for null.
+     */
+    private fun leaves(agent: FakeAgent, left: Boolean?) {
+        agent.capabilities = """["${ProtocolConstants.CAPABILITY_SERIAL_DIAL}"]"""
+        val member = left?.let { ""","phoneOpenedLeft":$it""" }.orEmpty()
+        agent.handlers["info.get"] = {
+            """{"agentVersion":"1.0.0","headUnitId":"$agentId","manifestVersion":1,"free":{},"restartNeeded":"none",""" +
+                """"serial":{"listener":true$member}}"""
+        }
+    }
+
+    private suspend fun saved(id: String): HeadUnit = requireNotNull(headUnits.headUnit(id).first())
+
+    @Test
+    fun `whether the phone's own links are left is kept with the head unit from every info, and absent is not`() = test {
+        assertFalse(saved("car").phoneOpenedLeft)
+        connector.onConnect = { leaves(it, true) }
+        assertTrue(jobs.connect("car").isSuccess)
+        assertTrue(saved("car").phoneOpenedLeft)
+
+        connector.onConnect = { leaves(it, false) }
+        assertTrue(jobs.connect("car").isSuccess)
+        assertFalse(saved("car").phoneOpenedLeft)
+
+        // Read again with the head unit's profile, as after a job.
+        connector.agent.let { leaves(it, true) }
+        assertTrue(jobs.refresh().isSuccess)
+        assertTrue(saved("car").phoneOpenedLeft)
+
+        // An agent that leaves the member out, as one from before there was it, never has it set.
+        connector.onConnect = { leaves(it, null) }
+        assertTrue(jobs.connect("car").isSuccess)
+        assertFalse(saved("car").phoneOpenedLeft)
+        headUnits.update("car") { it.copy(phoneOpenedLeft = true) }
+        connector.onConnect = {}
+        assertTrue(jobs.connect("car").isSuccess)
+        assertFalse(saved("car").phoneOpenedLeft)
+    }
+
+    /**
+     * A repository over [dialler] to [bluetoothCar], saved as one whose agent [dials] and, where [left], leaves the
+     * phone's own links, with waits for `hello` of [waitMs], by default long enough for a test to bring the car's link
+     * in. Out of sight, so that nothing listens but what a connect does.
+     */
+    private suspend fun leftCar(left: Boolean, dials: Boolean = true, waitMs: Long = 3_000): JobRepository {
+        shown.state.value = false
+        headUnits.add(bluetoothCar.copy(serialDial = dials, phoneOpenedLeft = left))
+        val jobs = JobRepository(
+            headUnits, dialler, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L },
+            greeting = Greeting(timeoutMs = waitMs, retryTimeoutMs = waitMs, pauseMs = 10), foreground = shown, bluetoothOn = bluetoothOn,
+        )
+        // The app's leaving at the start, which ends a connect under way, is over before the test connects.
+        delay(200)
+        return jobs
+    }
+
+    @Test
+    fun `a connect to a head unit whose agent leaves the phone's own links only listens, and takes the car's link`() = test {
+        val jobs = leftCar(left = true)
+        dialler.onConnect = { leaves(it, true) }
+
+        val connecting = async { jobs.connect("bt") }
+        val agent = dialIn()
+
+        assertTrue(connecting.await().isSuccess)
+        assertEquals(listOf(true), dialler.listenOnly)
+        assertEquals("the phone dialled", listOf(agent), dialler.agents)
+        assertEquals(listOf("hello", "info.get"), methods(agent).take(2))
+        assertTrue(saved("bt").phoneOpenedLeft)
+    }
+
+    @Test
+    fun `where listening brings no link, the failure says so and offers the phone's own connect, which dials once`() = test {
+        val jobs = leftCar(left = true)
+        dialler.onConnect = { leaves(it, true) }
+        dialler.listenOnlyMs = 300
+
+        val failed = jobs.connect("bt")
+
+        assertTrue(failed.exceptionOrNull() is NoCarLinkException)
+        val failure = jobs.connection.value as ConnectionState.Failed
+        assertTrue(failure.listenedOnly)
+        assertEquals("The car didn't connect to this app", failure.reason)
+        assertTrue("the phone dialled", dialler.agents.isEmpty())
+        // Any other failure offers nothing of the kind.
+        dialler.unreachable = "No route to the car"
+        assertTrue(jobs.connectFromPhone("bt").isFailure)
+        assertFalse((jobs.connection.value as ConnectionState.Failed).listenedOnly)
+        dialler.unreachable = null
+
+        assertTrue(jobs.connectFromPhone("bt").isSuccess)
+        assertEquals(listOf(true, false, false), dialler.listenOnly)
+        assertEquals(1, dialler.agents.size)
+        // The agent still says so: the next connect only listens again.
+        assertTrue(saved("bt").phoneOpenedLeft)
+        jobs.disconnect()
+        assertTrue(jobs.connect("bt").isFailure)
+        assertEquals(listOf(true, false, false, true), dialler.listenOnly)
+    }
+
+    @Test
+    fun `a quiet connect on coming back that only listens and has no link shows nothing, and listening goes on`() = test {
+        val jobs = leftCar(left = true)
+        dialler.onConnect = { leaves(it, true) }
+        dialler.listenOnlyMs = 300
+        shown.state.value = true
+        dialIn()
+        await(jobs.connection, "the link") { it is ConnectionState.Connected }
+        shown.state.value = false
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        val seen = states(jobs)
+        val asked = dialler.listenOnly.size
+
+        shown.state.value = true
+
+        until("the connect on coming back") { dialler.listenOnly.size == asked + 1 }
+        assertTrue(dialler.listenOnly.last())
+        until("listening again, at rest") { jobs.connection.value == ConnectionState.Disconnected && dialler.listening.value > 0 }
+        assertTrue("$seen", seen.none { it is ConnectionState.Failed })
+        dialIn()
+        await(jobs.connection, "the link") { it is ConnectionState.Connected }
+    }
+
+    @Test
+    fun `while a link the phone opened waits for its answer, a link the car opens takes its place`() = test {
+        val jobs = leftCar(left = false)
+        val calling = AtomicBoolean(false)
+        // The phone's own links are left unread on the car: they never answer.
+        dialler.onConnect = { agent -> if (!calling.get()) agent.silent += "hello" }
+
+        val connecting = async { jobs.connect("bt") }
+        until("the phone's link asked hello") { dialler.agents.firstOrNull()?.requestsOf("hello")?.isNotEmpty() == true }
+        val phones = dialler.agents.first()
+        calling.set(true)
+        val car = dialIn()
+
+        assertTrue(connecting.await().isSuccess)
+        assertEquals(listOf(false), dialler.listenOnly)
+        assertEquals(listOf(phones, car), dialler.agents)
+        assertTrue("the phone's silent link stayed open", phones.phoneLeft())
+        assertEquals(listOf("hello", "info.get"), methods(car).take(2))
+    }
+
+    @Test
+    fun `with no link of the car's, the phone's silent links are tried as ever, and none is left open`() = test {
+        val jobs = leftCar(left = false, waitMs = 300)
+        val listens = dialler.listens.get()
+        dialler.onConnect = { it.silent += "hello" }
+
+        val result = jobs.connect("bt")
+
+        assertEquals("The head unit didn't answer (3 links were tried)", result.exceptionOrNull()?.message)
+        assertEquals(3, dialler.agents.size)
+        assertTrue("a link stayed open", dialler.agents.all { it.phoneLeft() })
+        assertEquals("listened beside each", listens + 3, dialler.listens.get())
+        until("nothing listens") { dialler.listening.value == 0 }
+    }
+
+    @Test
+    fun `a connect cancelled while it listens beside a silent link of the phone's leaves nothing open`() = test {
+        val jobs = leftCar(left = false)
+        dialler.onConnect = { it.silent += "hello" }
+
+        val connecting = async { jobs.connect("bt") }
+        until("listening beside the phone's link") { dialler.listening.value > 0 }
+        connecting.cancelAndJoin()
+
+        until("nothing listens") { dialler.listening.value == 0 }
+        assertTrue("the phone's link stayed open", dialler.agent.phoneLeft())
+        assertEquals(ConnectionState.Disconnected, jobs.connection.value)
+        assertNull("a car's link was still taken", dialler.dialIn(carAddress))
+    }
+
+    @Test
+    fun `to a head unit whose agent does not dial, nothing is listened for beside the phone's link`() = test {
+        val jobs = leftCar(left = false, dials = false, waitMs = 300)
+        val listens = dialler.listens.get()
+        dialler.onConnect = { it.silent += "hello" }
+
+        assertTrue(jobs.connect("bt").isFailure)
+
+        assertEquals(listOf(false, false, false), dialler.listenOnly)
+        assertEquals(3, dialler.agents.size)
+        assertEquals(listens, dialler.listens.get())
     }
 }

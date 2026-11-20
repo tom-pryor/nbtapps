@@ -16,6 +16,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -29,6 +30,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.ui.headunits.AutostartSetupCard
+import com.nbtapps.store.ui.headunits.CONNECT_FROM_PHONE
 import com.nbtapps.store.ui.headunits.CheckFixDialog
 import com.nbtapps.store.ui.headunits.ChecksLine
 import com.nbtapps.store.ui.headunits.CopyDiagnosticsButton
@@ -109,6 +111,7 @@ fun PairingScreen(
                         )
                         step.reason?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         Button(onClick = viewModel::connect) { Text("Connect to the agent") }
+                        if (step.fromPhone) OutlinedButton(onClick = viewModel::connectFromPhone) { Text(CONNECT_FROM_PHONE) }
                         if (step.reason != null) CopyDiagnosticsButton(viewModel::diagnostics)
                     }
                 }

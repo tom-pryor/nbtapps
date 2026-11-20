@@ -113,6 +113,10 @@ class HeadUnitIndicatorTest {
         assertEquals(IndicatorStatus.FAILED, failed.status)
         assertEquals("No route to the car", failed.detail)
         assertTrue(failed.canConnect)
+        assertFalse(failed.fromPhone)
+        // Only a connect that waited for the car's link and had none offers the phone's own.
+        assertTrue(state(units, ConnectionState.Failed("car", "No link came", listenedOnly = true)).fromPhone)
+        assertFalse(state(listOf(bike), ConnectionState.Failed("bike", "No link came", listenedOnly = true)).fromPhone)
 
         // A link that waits for the phone to be paired is the head unit's as a connected one is.
         val unpaired = state(listOf(van, car), ConnectionState.NeedsPairing("car", tcp, stale = false))

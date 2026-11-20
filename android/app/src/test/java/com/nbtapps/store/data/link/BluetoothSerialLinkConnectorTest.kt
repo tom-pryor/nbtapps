@@ -376,6 +376,99 @@ class BluetoothSerialLinkConnectorTest {
         assertEquals(1, radio.listens.size)
     }
 
+    // ---- a connect that only listens ------------------------------------------------------------------------------
+
+    @Test
+    fun `a connect that only listens and has no link from the car fails after 40 seconds, with no dial made`() = runTest {
+        val radio = FakeRadio()
+        val diagnostics = SerialDiagnostics()
+        val listener = SerialListener(radio, Dispatchers.IO)
+        val connector = BluetoothSerialLinkConnector(radio, now = { currentTime }, io = StandardTestDispatcher(testScheduler), diagnostics = diagnostics, listener = listener)
+
+        val failure = try {
+            connector.connect(car, dials = true, listenOnly = true)
+            fail("the connect went through")
+            null
+        } catch (e: NoCarLinkException) {
+            e
+        }
+
+        assertEquals(40_000, currentTime)
+        assertTrue(radio.sockets.isEmpty())
+        val text = failure?.message.orEmpty()
+        assertTrue(text, text.startsWith("The car didn't connect to this app within 40 s."))
+        assertTrue(text, text.contains("The app waits for the car here") && text.contains("every 10 to 30 seconds"))
+        val waited = diagnostics.tries().single { it.path == LinkTry.Path.LISTEN_ONLY }
+        assertEquals(LinkTry.Outcome.NO_LINK, waited.outcome)
+        assertEquals(40_000L, waited.millis)
+        // Nothing is left listening.
+        val began = System.nanoTime()
+        while (!listener.idle && System.nanoTime() - began < 10_000_000_000) Thread.sleep(5)
+        assertTrue(listener.idle)
+    }
+
+    @Test
+    fun `a connect that only listens and cannot listen dials the car, as without`() = runTest {
+        val radio = FakeRadio()
+        radio.listenFailure = "The phone refused to listen"
+        val diagnostics = SerialDiagnostics()
+        val link = BluetoothSerialLinkConnector(
+            radio, now = { currentTime }, io = StandardTestDispatcher(testScheduler), diagnostics = diagnostics,
+            listener = SerialListener(radio, StandardTestDispatcher(testScheduler)),
+        ).connect(car, dials = true, listenOnly = true)
+
+        assertSame(radio.sockets.single().output, link.output)
+        assertFalse(link.openedByCar)
+        val waited = diagnostics.tries().first { it.path == LinkTry.Path.LISTEN_ONLY }
+        assertEquals(LinkTry.Outcome.FAILED, waited.outcome)
+        assertEquals("The phone refused to listen", waited.message)
+    }
+
+    @Test
+    fun `only listening is for an agent that dials, and to one that is not known to the phone dials`() = runTest {
+        val radio = FakeRadio()
+        val link = connector(radio).connect(car, dials = false, listenOnly = true)
+        assertSame(radio.sockets.single().output, link.output)
+    }
+
+    @Test
+    fun `a connect that only listens takes the car's link, and makes no dial of its own`() = live {
+        val radio = FakeRadio()
+        val diagnostics = SerialDiagnostics()
+        val listener = SerialListener(radio, diagnostics = diagnostics)
+        val connector = BluetoothSerialLinkConnector(radio, diagnostics = diagnostics, listener = listener)
+        val connecting = async { connector.connect(car, dials = true, listenOnly = true) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address)
+        val link = connecting.await()
+
+        assertSame(incoming.output, link.output)
+        assertTrue(link.magicSent && link.openedByCar)
+        assertArrayEquals(FrameCodec.MAGIC, incoming.written)
+        assertTrue("the phone dialled", radio.sockets.isEmpty())
+        assertEquals(LinkTry.Outcome.TAKEN, diagnostics.tries().single { it.path == LinkTry.Path.LISTEN_ONLY }.outcome)
+        until("the listener closed") { listener.idle }
+    }
+
+    @Test
+    fun `a connect that only listens and is cancelled leaves nothing listening`() = live {
+        val radio = FakeRadio()
+        val live = Live(radio)
+        val connecting = async { live.connector.connect(car, dials = true, listenOnly = true) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+
+        connecting.cancel()
+        connecting.join()
+
+        until("the listener closed") { live.listener.idle }
+        assertTrue(server.closes.get() >= 1)
+        assertTrue(radio.sockets.isEmpty())
+    }
+
     // ---- the phone's dial and the car's link, on real threads ----------------------------------------------------
 
     /** A connector with every time as in the app, on real threads, and its listener, to see that it is left closed. */
@@ -400,7 +493,7 @@ class BluetoothSerialLinkConnectorTest {
         val link = connecting.await()
 
         assertSame(incoming.output, link.output)
-        assertTrue(link.magicSent)
+        assertTrue(link.magicSent && link.openedByCar)
         assertArrayEquals(FrameCodec.MAGIC, incoming.written)
         assertEquals(0, incoming.closes.get())
         // Nothing else is left open: the phone's dial, and the listener.
@@ -417,6 +510,7 @@ class BluetoothSerialLinkConnectorTest {
         val link = live.connector.connect(car)
 
         assertSame(radio.sockets.single().output, link.output)
+        assertFalse(link.openedByCar)
         until("the listener closed") { live.listener.idle }
         assertTrue(radio.servers.all { it.closes.get() >= 1 })
     }
@@ -529,11 +623,17 @@ class LinkConnectorsTest {
 
     private class Named(val name: String, val reaches: (Endpoint) -> Boolean) : LinkConnector {
         val dials = CopyOnWriteArrayList<Boolean>()
+        val listenOnly = CopyOnWriteArrayList<Boolean>()
         override fun supports(endpoint: Endpoint) = reaches(endpoint)
         override suspend fun connect(endpoint: Endpoint): Link = MemoryLink.pair(kind = name).first
         override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link {
             this.dials += dials
             return connect(endpoint)
+        }
+
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
+            this.listenOnly += listenOnly
+            return connect(endpoint, dials)
         }
     }
 
@@ -553,6 +653,9 @@ class LinkConnectorsTest {
         val serialOnly = Named("serial") { it is SerialEndpoint }
         LinkConnectors(listOf(serialOnly)).connect(serial, dials = true)
         assertEquals(listOf(true), serialOnly.dials)
+        LinkConnectors(listOf(serialOnly)).connect(serial, dials = true, listenOnly = true)
+        assertEquals(listOf(true, true), serialOnly.dials)
+        assertEquals(listOf(true), serialOnly.listenOnly)
     }
 
     @Test

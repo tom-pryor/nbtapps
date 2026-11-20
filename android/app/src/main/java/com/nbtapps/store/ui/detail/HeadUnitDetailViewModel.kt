@@ -55,7 +55,8 @@ sealed interface LinkState {
 
     /** A link is open, and the agent wants this phone paired before it says more. [stale]: it knew the phone once. */
     data class NeedsPairing(val stale: Boolean) : LinkState
-    data class Failed(val reason: String) : LinkState
+    /** [fromPhone]: the connect only waited for the car's link, and the phone may connect itself: see [ConnectionState.Failed.listenedOnly]. */
+    data class Failed(val reason: String, val fromPhone: Boolean = false) : LinkState
 }
 
 /**
@@ -223,7 +224,7 @@ class HeadUnitDetailViewModel internal constructor(
                     connected != null -> LinkState.Connected(connected.endpoint.label)
                     connection is ConnectionState.Connecting && connection.headUnitId == headUnitId -> LinkState.Connecting
                     connection is ConnectionState.NeedsPairing && connection.headUnitId == headUnitId -> LinkState.NeedsPairing(connection.stale)
-                    connection is ConnectionState.Failed && connection.headUnitId == headUnitId -> LinkState.Failed(connection.reason)
+                    connection is ConnectionState.Failed && connection.headUnitId == headUnitId -> LinkState.Failed(connection.reason, connection.listenedOnly)
                     else -> LinkState.Idle
                 },
                 profile = unit?.profile,
@@ -274,6 +275,11 @@ class HeadUnitDetailViewModel internal constructor(
 
     fun connect() {
         viewModelScope.launch { jobs.connect(headUnitId) }
+    }
+
+    /** One connect with the phone dialling the car as well: see [JobRepository.connectFromPhone]. */
+    fun connectFromPhone() {
+        viewModelScope.launch { jobs.connectFromPhone(headUnitId) }
     }
 
     /** What "Copy diagnostics" copies, where the connect failed: see [SerialDiagnostics.report]. */

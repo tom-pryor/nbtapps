@@ -32,6 +32,12 @@ class PairingStepTest {
         assertEquals(PairingStep.Paired, pairingStep("car", connected("car")))
         assertEquals(PairingStep.NoLink(null), pairingStep("car", ConnectionState.Disconnected))
         assertEquals(PairingStep.NoLink("No route to the car"), pairingStep("car", ConnectionState.Failed("car", "No route to the car")))
+        // A connect that only waited for the car's link offers the phone's own.
+        assertEquals(
+            PairingStep.NoLink("No link came", fromPhone = true),
+            pairingStep("car", ConnectionState.Failed("car", "No link came", listenedOnly = true)),
+        )
+        assertEquals(PairingStep.NoLink(null), pairingStep("car", ConnectionState.Failed("van", "No link came", listenedOnly = true)))
     }
 
     @Test
