@@ -22,6 +22,8 @@
 //   status  [--events]                     the running or last job; with --events, its log too
 //   cancel                                 stop the job that is fetching or paused
 //   restart hmi|reboot
+//   stop                                   stop the agent (agent.stop): it ends now, with its launcher, and the
+//                                          iDrive plugin does not start it again until the head unit powers down
 //   pair                                   open the pairing window: prints the code for the phone app, waits
 //                                          until the window has closed, and says how. Stopping nbtctl closes it
 //   phones                                 the paired phones: id, the date it was paired (UTC), name
@@ -77,6 +79,11 @@
 // `serial status` prints a line for each member of serial.status's answer, "name value", with a member of an
 // object as "object.name", and an array's items with ", " between them: "registered true", "dial on",
 // "counts.dials 3". `serial dial` prints "dialling N phones", and the agent's log says what came of it.
+//
+// `stop` prints "stopping" as its first line, and then that the agent ends now with its launcher, and that the iDrive
+// plugin does not start it again until the head unit has powered down; Start the agent in the plugin's menu, or the
+// launcher started by hand, starts it before that. It comes back with the agent's answer and does not wait for the
+// process to end. The agent refuses it with `busy` while a job runs.
 //
 // `pair` prints "code NNNNNN" as its first line, then one line when the window has closed: "paired", or
 // "not paired: " and the reason (wrong-code, expired, replaced). Its exit status is 0 only for "paired".
@@ -180,7 +187,8 @@ public:
         return true;
     }
 
-    // Sends a request and serves the link until its answer is there. False if the link broke first.
+    // Sends a request and serves the link until its answer is there. False if the link broke first. An answer that
+    // came together with the link's end counts: agent.stop's does, when the agent has ended before this reads.
     bool call(const std::string& method, const std::string& params, Reply* out) {
         int64_t id = peer_->request(method, params);
         if (id == 0) {
@@ -188,16 +196,20 @@ public:
             return false;
         }
         while (replies_.count(id) == 0) {
-            if (!pump(1000)) return false;
+            if (!serve(1000) && replies_.count(id) == 0) return lost();
         }
         *out = replies_[id];
         replies_.erase(id);
         return true;
     }
 
-    // Serves the link once: reads what came, writes what is queued, and feeds an open stream.
-    bool pump(int timeoutMs) {
-        if (!peer_->open()) return lost();
+    // Serves the link once: reads what came, writes what is queued, and feeds an open stream. False, and said, if
+    // the link has ended.
+    bool pump(int timeoutMs) { return serve(timeoutMs) || lost(); }
+
+    // pump() that says nothing: false if the link has ended, whatever else came with its end.
+    bool serve(int timeoutMs) {
+        if (!peer_->open()) return false;
         feed();
         fd_set readable, writable;
         FD_ZERO(&readable);
@@ -213,7 +225,7 @@ public:
             if (FD_ISSET(fd, &writable)) peer_->flush();
             if (peer_->open() && FD_ISSET(fd, &readable)) peer_->readable();
         }
-        return peer_->open() || lost();
+        return peer_->open();
     }
 
     // files.fetch with these params, its stream written to `out`. True when the stream is whole; false with *why
@@ -610,6 +622,7 @@ int usage() {
             "  status  [--events]\n"
             "  cancel\n"
             "  restart hmi|reboot\n"
+            "  stop                     stop the agent; the iDrive plugin does not start it before the next power up\n"
             "  pair                     open the pairing window and print its code\n"
             "  phones                   the paired phones\n"
             "  forget  PHONEID | --all  end a phone's pairing\n"
@@ -1271,6 +1284,15 @@ int main(int argc, char** argv) {
         if (!c.call("system.restart", "{\"kind\":\"" + args[0] + "\"}", &reply)) return 3;
         if (!reply.ok) return refused("system.restart", reply);
         printf("restart (%s) accepted\n", args[0].c_str());
+        return 0;
+    }
+
+    if (command == "stop") {
+        if (!args.empty()) return usage();
+        if (!c.call("agent.stop", "{}", &reply)) return 3;
+        if (!reply.ok) return refused("agent.stop", reply);
+        printf("stopping\nThe agent ends now, and its launcher with it. The iDrive plugin does not start it again until the "
+               "head unit has powered down; Start the agent in its menu starts it before that.\n");
         return 0;
     }
 

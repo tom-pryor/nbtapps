@@ -1012,7 +1012,7 @@ static void testAuth() {
         Phone* p = b.greeted("1", 4096, "serial");
         const char* refused[] = {"info.get", "packages.list", "sources.list", "source.add", "job.plan", "job.start", "job.status",
                                  "job.cancel", "system.restart", "pairing.open", "pairing.close", "phones.list", "phones.forget",
-                                 "job.frobnicate", ""};
+                                 "agent.stop", "job.frobnicate", ""};
         for (size_t i = 0; i < sizeof refused / sizeof refused[0]; ++i) {
             CHECK_IN(refused[i], Parsed(b.call(p, refused[i], "{}")).code() == "unauthenticated");
         }
@@ -2402,6 +2402,65 @@ static void testSystemRestart() {
     CHECK(Parsed(b.call(p, "system.restart", "{\"kind\":\"reboot\"}")).code() == "busy" && b.platform.reboots == 1);
 }
 
+// agent.stop: the head unit's own controllers ask it, and the program ends once the answer is out (stopDue).
+static void testAgentStop() {
+    {   // The answer is written out at once: the stop is due.
+        Bench b("agent-stop");
+        Phone* ctl = b.connect();
+        CHECK(Parsed(b.hello(ctl, kGoodHello)).result.isObject());
+        CHECK(!b.agent.stopAsked() && !b.agent.stopDue());
+        // A phone may not, on its own link and with auth done; and the method takes no params.
+        Phone* phone = b.phone("2", 4096, "serial");
+        CHECK(Parsed(b.call(phone, "agent.stop", "{}")).code() == "forbidden");
+        CHECK(Parsed(b.call(ctl, "agent.stop", "{\"now\":true}")).code() == "bad-request");
+        CHECK(!b.agent.stopAsked() && !b.agent.stopDue());
+        Parsed stop(b.call(ctl, "agent.stop", "{}"));
+        CHECK_IN(ctl->lastHeard, stop.result.isObject() && stop.result.size() == 0);
+        CHECK(b.agent.stopAsked() && b.agent.stopDue());
+        // The links stay until the process ends: the program ends them.
+        CHECK(!ctl->closed && !phone->closed && Parsed(b.call(ctl, "info.get", "{}")).result.isObject());
+        // Asked again: the same answer, and nothing more. A phone is still refused.
+        CHECK(Parsed(b.call(ctl, "agent.stop", "{}")).result.isObject() && b.agent.stopDue());
+        CHECK(Parsed(b.call(phone, "agent.stop", "{}")).code() == "forbidden");
+    }
+    {   // A link that does not take what the agent writes: the stop is due two seconds after the answer, and a
+        // second agent.stop does not put that off.
+        Bench b("agent-stop-stuck");
+        Phone* ctl = b.connect();
+        CHECK(Parsed(b.hello(ctl, kGoodHello)).result.isObject());
+        Phone* deaf = b.connect();
+        CHECK(Parsed(b.hello(deaf, kGoodHello)).result.isObject());
+        deaf->deaf = true;   // it asks and asks, and reads nothing: what the agent answers fills the link
+        for (int i = 0; i < 6000; ++i) deaf->request("info.get", "{}");
+        b.settle();
+        CHECK(Parsed(b.call(ctl, "agent.stop", "{}")).result.isObject() && b.agent.stopAsked() && !b.agent.stopDue());
+        b.clock.now += 1000;
+        CHECK(Parsed(b.call(ctl, "agent.stop", "{}")).result.isObject() && !b.agent.stopDue());
+        b.clock.now += 999;
+        CHECK(!b.agent.stopDue());
+        b.clock.now += 1;
+        CHECK(b.agent.stopDue());
+    }
+    {   // Not while a job runs: here one that waits for its archives.
+        Bench b("agent-stop-job");
+        Phone* p = b.phone();
+        std::string planId = planOk(b, p, kRuntime, "", kRuntime);
+        p->serve = false;
+        startJob(b, p, planId);
+        CHECK(b.agent.job().active() && Parsed(b.call(p, "agent.stop", "{}")).code() == "busy");
+        CHECK(!b.agent.stopAsked() && !b.agent.stopDue());
+    }
+    {   // Nor while a restart is on its way: the two asked at once, and the restart is answered first.
+        Bench b("agent-stop-restart");
+        Phone* p = b.phone();
+        int64_t restart = p->request("system.restart", "{\"kind\":\"hmi\"}");
+        int64_t stop = p->request("agent.stop", "{}");
+        b.settle();
+        CHECK(Parsed(p->reply(restart)).result.isObject() && b.platform.hmiRestarts == 1);
+        CHECK(Parsed(p->reply(stop)).code() == "busy" && !b.agent.stopAsked());
+    }
+}
+
 // The agent stops and starts again: what it knew about the last job is still there.
 static void testAgentRestart() {
     std::string planId;
@@ -2838,6 +2897,10 @@ static void testAgentUpdate() {
         Bench b("update-back", true, false, "1.1.0");
         Phone* plugin = b.connect();
         CHECK(Parsed(b.call(plugin, "hello", kPluginHello)).result.isObject() && b.agent.onTrial());
+        // The plugin may stop a version on trial: the job that waits for it is no job that runs, and the try ends
+        // unconfirmed.
+        CHECK(Parsed(b.call(plugin, "agent.stop", "{}")).result.isObject() && b.agent.stopDue());
+        CHECK(b.agent.onTrial() && b.agent.job().restarting());
     }
     CHECK_IN(why, fs::removeTree(back + "/run", &why));     // the head unit is turned off
     {
@@ -4404,6 +4467,7 @@ int main(int argc, char** argv) {
     testFetchFaults();
     testDuringStep();
     testSystemRestart();
+    testAgentStop();
     testAgentRestart();
     testPowerCut();
     testQuietStart();

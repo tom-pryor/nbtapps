@@ -10,7 +10,8 @@ Each case is a folder under build/bench/work/launcher that holds an agent's fold
 (`home`), and what the case's agents are to do: the starter is there as `launcher`, and each version's folder
 holds its program and its launcher. Most agents here are a few lines of shell that stand in for nbtagent: one
 writes down that it was started, as which version and with which arguments, and ends with the status the case's
-`plan` names for that start. Four cases start the real nbtagent on a folder and end it with a signal. Two more
+`plan` names for that start. Four cases start the real nbtagent on a folder and end it with a signal, and one more
+has a controller stop it (`nbtctl stop`), which ends the starter as a signal to the agent does. Two more
 have nbtagent update itself under the starter, to a second build of it that says it is a later version: once with
 a controller that confirms the new version, once with a new version that falls over first. The package of that
 version is made here as `make agent-pkg` makes the one for a head unit (tools/agent_pkg.py), of the two programs
@@ -81,9 +82,10 @@ esac
 '''
 
 # The real nbtagent, which gets the signal the plan names for this start once it says that it is listening. The
-# shell becomes the agent, so the signal goes to the agent. Before the signal's name the plan's line may have
-# `ask`: nbtctl says hello and asks for the head unit's profile first; and `fill`: the log is made longer than the
-# agent lets it be before the agent has said a word.
+# shell becomes the agent, so the signal goes to the agent. Where the plan's line ends in `stop` in place of a
+# signal's name, no signal is sent: nbtctl asks the agent to stop (agent.stop), and what nbtctl printed and its
+# status are kept. Before that the plan's line may have `ask`: nbtctl says hello and asks for the head unit's
+# profile first; and `fill`: the log is made longer than the agent lets it be before the agent has said a word.
 REAL_AGENT = r'''#!/bin/sh
 here=${0%/*}
 top=$(cd "$here/../.." && pwd)
@@ -105,7 +107,10 @@ if [ -n "$step" ]; then
         case " $step " in
             *" ask "*) /opt/nbtagent/nbtctl --socket "$socket" info > "$top/asked$n.out" 2>&1; echo $? > "$top/asked$n.status" ;;
         esac
-        kill -"${step##* }" $$
+        case " $step " in
+            *" stop ") /opt/nbtagent/nbtctl --socket "$socket" stop > "$top/stopped$n.out" 2>&1; echo $? > "$top/stopped$n.status" ;;
+            *) kill -"${step##* }" $$ ;;
+        esac
     ) &
 fi
 exec /opt/nbtagent/nbtagent "$@"
@@ -600,6 +605,28 @@ def real_agent(c):
               "the agent that was killed")
         check("listening at " + REAL_SOCKET in c.log() and in_order(c.log(), "launcher: starting version 1.0.0") and
               c.log().endswith("stopped\nlauncher: the agent was stopped\n"), "the agent that was stopped", c.log())
+    return look
+
+
+@case
+def real_agent_stopped_by_a_controller(c):
+    # agent.stop in place of a signal: the agent, its launcher and the starter end as they do for SIGTERM, and the
+    # agent leaves its mark in the folder's `run`, which stands in for the RAM disk.
+    c.make_home(["1.0.0"], current="1.0.0\n", agent=REAL_AGENT)
+    root = c.path("root")
+    c.plan(["stop"])
+    c.launch(["--root", root, "--socket", REAL_SOCKET])
+
+    def look():
+        check(c.status() == 0 and c.starts() == ["real"], "nbtagent started once, and the starter ended with status 0", c.describe())
+        check(read(c.path("stopped1.status")) == "0\n" and read(c.path("stopped1.out")).startswith("stopping\n"),
+              "nbtctl stop", read(c.path("stopped1.out")))
+        check(in_order(c.log(), "launcher: starting version 1.0.0") and
+              "asked to stop by a controller: %s is written" % os.path.join(root, "run", "agent.stopped") in c.log() and
+              c.log().endswith("stopped\nlauncher: the agent was stopped\n"), "the agent that a controller stopped", c.log())
+        check(os.path.isfile(os.path.join(root, "run", "agent.stopped")), "the mark of the stop is in the run folder")
+        check(not os.path.exists(os.path.join(c.ram_log, "launcher.pid")), "the starter's launcher.pid was left behind",
+              str(os.listdir(c.ram_log)))
     return look
 
 

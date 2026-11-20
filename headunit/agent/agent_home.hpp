@@ -36,6 +36,14 @@
 //   autostart.boots       a line for each such start. Written by the plugin before the start, and removed by
 //                         the agent once it has run for kAutostartSettledS, or has been stopped: what the file
 //                         holds are the starts that no agent outlasted by that long
+//
+// One more is not in this folder but in the run folder, on the RAM disk (/tmp/nbtapp on a head unit, DIR/run with
+// --root), so that a power down takes it away:
+//
+//   agent.stopped         there: a controller stopped the agent with agent.stop (agent.hpp), from the plugin's menu
+//                         or with nbtctl, and the plugin does not start the launcher when the HMI starts. Written
+//                         by nbtagent as it ends for that, and removed by the next agent that starts. A signal
+//                         leaves none
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stddef.h>
@@ -58,6 +66,8 @@ const char kAutostartBoots[] = "autostart.boots";
 const char kPluginPackageId[] = "org.nbtapp.plugin";
 const char kAutostartPluginRange[] = ">=1.0.0";
 const int kAutostartSettledS = 5 * 60;
+// In the run folder, not in this one: see the top of this file.
+const char kStoppedMark[] = "agent.stopped";
 
 bool validVersionName(const std::string& name);
 

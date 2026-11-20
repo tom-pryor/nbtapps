@@ -88,11 +88,15 @@
 // `nbtagent --look PATH` is how the gate is checked, by this program run again: one stat() of PATH, answered by
 // the exit code.
 //
-// SIGINT and SIGTERM stop it between install steps, never inside one. An agent that stops, or ends for a newer
-// version of itself, tells each phone so first (link.closing, agent.hpp) and closes its links; with Bluetooth
-// serial it then waits, six seconds at most, for the phones to end their links, reading their nodes meanwhile,
-// before it takes its service and its gate away and ends (serial_link.hpp). A link that is still up then has its
-// node closed with the process. `kill -9` leaves it no time for any of that.
+// SIGINT and SIGTERM stop it between install steps, never inside one. So does agent.stop, which a controller on the
+// local socket asks (agent.hpp): the iDrive plugin's menu, or `nbtctl stop`. That way out is the same, and leaves
+// one thing more: the mark agent.stopped in the run folder (agent_home.hpp), on the RAM disk, which keeps the
+// plugin from starting the agent with the head unit again until the head unit has powered down, or until somebody
+// starts it. An agent that starts removes the mark, and says so. A signal leaves no mark. An agent that stops, or
+// ends for a newer version of itself, tells each phone so first (link.closing, agent.hpp) and closes its links;
+// with Bluetooth serial it then waits, six seconds at most, for the phones to end their links, reading their nodes
+// meanwhile, before it takes its service and its gate away and ends (serial_link.hpp). A link that is still up then
+// has its node closed with the process. `kill -9` leaves it no time for any of that.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <signal.h>
@@ -337,6 +341,34 @@ static void forgetAutostarts(Platform* platform, const char* why) {
     }
 }
 
+// The mark that keeps the iDrive plugin from starting the agent with the head unit (agent_home.hpp): written as the
+// agent ends for agent.stop. One that cannot be written is said in the log, and the agent stops all the same.
+static void markStopped(Platform* platform) {
+    const std::string mark = platform->runDir() + "/" + kStoppedMark;
+    std::string why;
+    if (fs::writeFile(mark, "", 0644, &why)) {
+        logLine(stderr, "asked to stop by a controller: " + mark + " is written, and the iDrive plugin does not start the agent "
+                        "again until the head unit has powered down, or somebody starts it");
+    } else {
+        logLine(stderr, "asked to stop by a controller; " + mark + " cannot be written, so the iDrive plugin may start the agent "
+                        "again when the HMI starts: " + why);
+    }
+}
+
+// A mark that an agent stopped by a controller left is gone once an agent runs again. Writes nothing where there is
+// none.
+static void clearStopped(Platform* platform) {
+    const std::string mark = platform->runDir() + "/" + kStoppedMark;
+    if (fs::kindOf(mark) == fs::kNone) return;
+    std::string why;
+    if (fs::removeFile(mark, &why)) {
+        logLine(stderr, mark + " is removed: the agent was stopped by a controller before, and runs again");
+    } else {
+        logLine(stderr, mark + " cannot be removed, and keeps the iDrive plugin from starting the agent with the head unit "
+                               "until the head unit has powered down: " + why);
+    }
+}
+
 // The agent on `platform`, until it is told to stop. `where` goes into the first log line, `note` after it.
 static int serve(Platform* platform, LocalListener* listener, const std::string& where, const std::string& note,
                  const Options& options) {
@@ -352,6 +384,7 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
     logLine(stderr, std::string(kAgentVersion) + " (build " NBT_APP_VERSION "), head unit " + agent.headUnitId() + ", " + where +
                         ", listening at " + options.socketPath);
     if (!note.empty()) logLine(stderr, note);
+    clearStopped(platform);
     {
         std::vector<InstalledPackage> installed;
         if (agent.engine().store().loadAll(&installed, &why)) {
@@ -441,7 +474,13 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
             handOver = true;
             break;
         }
+        // A controller asked the agent to stop (agent.stop), and has its answer: it stops as for SIGTERM, and the
+        // plugin is kept from starting it again.
+        if (!gStop && agent.stopDue()) break;
     }
+    // Whoever asked for agent.stop was told yes, so the mark is left for a signal that came after that answer and
+    // ended the loop first, too. Not where a newer version takes over: that one starts at once, and would remove it.
+    if (!handOver && agent.stopAsked()) markStopped(platform);
     // The phones are told that the agent is going, and why, and their links are closed here. A phone app ends its
     // link when it hears that, and connects again if a newer version is about to start.
     agent.endPhoneLinks(handOver ? kClosingRestarting : kClosingStopping, 2000);

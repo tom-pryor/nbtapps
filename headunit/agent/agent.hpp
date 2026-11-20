@@ -33,6 +33,7 @@
 //   checks.fix                      a check's fix, with the token of the lists the user was shown
 //   serial.reset                    has the car end the phone's Bluetooth serial link (serial_reset.hpp): see below
 //   settings.get, settings.set      the settings of an installed package (settings.hpp): see below
+//   agent.stop                      the local socket only: the agent ends, as it does for SIGTERM: see below
 //   job.progress, job.log, job.done the agent's events, to every controller
 //   link.closing                    the agent's event to a phone whose link it is about to end; the last thing it
 //                                   says on that link
@@ -205,6 +206,18 @@
 // while a link of the agent's is up or a dial is out, `not-found` with no such phone, `io-error` when the car's
 // Bluetooth service cannot be asked.
 //
+// agent.stop, on the local socket only: the agent ends because a person asked for that, in the iDrive plugin's menu
+// or with `nbtctl stop`. It takes no params (a member is bad-request), is `forbidden` on any other link, so that no
+// phone stops the agent it talks to, and is `busy` while a job runs, an install step is under way or a restart is on
+// its way. An agent on trial may be stopped: its try ends unconfirmed, and the next start is of the version before
+// it. Otherwise the answer is { }, and stopDue() tells the program to end once that answer, and whatever else the
+// links hold, is written out, or two seconds later. The program then ends as it does for SIGTERM, through the same
+// code: link.closing with "stopping" to the phones, Bluetooth serial taken away, and kExitStopped, which ends the
+// launcher too. On its way out it leaves the mark agent.stopped in the run folder (agent_home.hpp), which keeps the
+// plugin from starting the agent again until the head unit has powered down. The local socket's links are left
+// open until the process ends, so a controller that asked sees its link end then. A second agent.stop is answered
+// { } and changes nothing.
+//
 // The settings (settings.hpp). A package's settings are the options of a known type its installed manifest names,
 // in the manifest's order; their values are lines of its settings file, which the agent reads for every request and
 // keeps no copy of. Both methods need a link whose frame holds kSettingsMinFrame, and answer `unsupported` on a
@@ -343,6 +356,12 @@ public:
     // True when this agent has placed a newer version of itself and has told its controllers so, or has waited
     // long enough for their links to take it: the process is to end now, with kExitRestart (exit_status.hpp).
     bool restartDue();
+    // True when a controller has asked this agent to stop (agent.stop), no install step or promised restart is under
+    // way, and the answer and what else the links hold is written out, or has had long enough: the process is to
+    // end now, with kExitStopped, as it does for SIGTERM.
+    bool stopDue();
+    // True once agent.stop has been answered.
+    bool stopAsked() const { return stopAsked_; }
     // True while this agent is a version on trial, which no controller has confirmed yet.
     bool onTrial() const { return onTrial_; }
     // For the end of the process: ends every link but the local socket's, each with link.closing and this reason
@@ -529,6 +548,8 @@ private:
     void jobCancel(Session* s, int64_t id, const json::Value& params);
     void jobStatus(Session* s, int64_t id, const json::Value& params);
     void systemRestart(Session* s, int64_t id, const json::Value& params);
+    // See the top of this file.
+    void agentStop(Session* s, int64_t id, const json::Value& params);
     // Starting with the head unit (agent_home.hpp, src/agent_start.hpp). autostart.get says whether the agent is
     // started with the head unit, and whether it can be here; autostart.set switches that on or off, which is
     // the file `autostart` in the agent's folder. A person asks: a phone, or nbtctl. The iDrive plugin, which
@@ -612,6 +633,8 @@ private:
     int64_t restartDeadlineMs_;
     bool onTrial_;                   // this version waits to be confirmed
     int64_t handOverDeadlineMs_;     // 0, or when the process ends for a newer version whatever the links hold
+    bool stopAsked_;                 // agent.stop was answered: the process is to end
+    int64_t stopDeadlineMs_;         // and ends then whatever the links hold
     int64_t fetchTimeoutMs_;
     FILE* log_;
     std::string ownLog_;

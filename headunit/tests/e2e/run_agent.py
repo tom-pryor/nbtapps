@@ -15,8 +15,11 @@ this agent does not read (agent-too-old, not bad-manifest), a fetch that the con
 whose link drops and is resumed, removals, the logs of a package pulled (`nbtctl logs` and `nbtctl pull`, and once
 read off the local socket here, with Python's own inflate), a package's settings listed, set, set by hand and taken
 out again (`nbtctl settings`, `set` and `unset`), the checks of what was put on by hand and the fix of a
-made-up app (`nbtctl checks` and `nbtctl checks fix`), and a restart of the agent, and after each looks at what
-the agent says and at what is on disk. It also is a phone on the agent's debug TCP link, which the phone app on an emulator uses:
+made-up app (`nbtctl checks` and `nbtctl checks fix`), a restart of the agent, and a stop that a controller asks
+for (`nbtctl stop`), which leaves the mark that keeps the iDrive plugin from starting the agent and which the next
+agent removes, and after each looks at what the agent says and at what is on disk. A stand-in for the agent
+answers `nbtctl stop` and closes the link before nbtctl reads, which nbtctl has to take as the answer. It also is a phone on the
+agent's debug TCP link, which the phone app on an emulator uses:
 refused until it is paired, paired by the code `nbtctl pair` prints, let in by `auth`, and forgotten again, and
 told with link.closing why its link closes when it is forgotten and when the agent stops.
 
@@ -87,9 +90,28 @@ class Agent:
 
     def stop(self):
         self.process.send_signal(signal.SIGTERM)
+        return self.wait()
+
+    def wait(self):
+        """The exit status of an agent that ends, by a signal or by itself."""
         code = self.process.wait(timeout=20)
         self.log.close()
         return code
+
+    def said(self):
+        """What this run of the agent has written to its log."""
+        with open(os.path.join(WORK, "agent.log"), "rb") as f:
+            f.seek(self.log_start)
+            return f.read().decode("utf-8", "replace")
+
+    def says(self, text):
+        """True once this run's log holds `text`, which takes a moment to come out of the container; false after
+        five seconds."""
+        for _ in range(100):
+            if text in self.said():
+                return True
+            time.sleep(0.05)
+        return False
 
 
 def ctl(*args):
@@ -366,6 +388,70 @@ def pull_here(package, path):
         link.close()
 
 
+def stop_as_the_link_ends():
+    """`nbtctl stop` and a stand-in for the agent, whose answer and whose end of the link are both there before
+    nbtctl reads either, as they are on a head unit when the agent gets to run first: nbtctl is held still while
+    the stand-in writes the answer and closes. Returns (exit status, what nbtctl printed)."""
+    folder = tempfile.mkdtemp(prefix="nbt_e2e_standin_")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    nbtctl = None
+    try:
+        listener.bind(os.path.join(folder, "agent.sock"))
+        listener.listen(1)
+        listener.settimeout(10)
+        nbtctl = subprocess.Popen([os.path.join(BIN, "nbtctl"), "--socket", os.path.join(folder, "agent.sock"), "stop"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        link = listener.accept()[0]
+        link.settimeout(10)
+        buffered = [b""]
+
+        def more():
+            chunk = link.recv(65536)
+            check(chunk, "nbtctl closed its link to the stand-in agent")
+            buffered[0] += chunk
+
+        def request(method):
+            while True:
+                got = wire.decode(buffered[0])
+                if got[0] != "more":
+                    break
+                more()
+            check(got[0] == "frame" and got[1] == wire.MSG, "nbtctl sent the stand-in agent a bad frame: %s" % (got[1:],))
+            buffered[0] = buffered[0][got[5]:]
+            asked = json.loads(got[4].decode("utf-8"))
+            check(asked.get("method") == method, "nbtctl stop asked the stand-in agent for %r, not %s" % (asked.get("method"), method))
+            return asked["id"]
+
+        def answer(number, result):
+            return wire.encode(wire.MSG, 0, 0, json.dumps({"id": number, "result": result}, separators=(",", ":")).encode())
+
+        while len(buffered[0]) < len(wire.MAGIC):
+            more()
+        check(buffered[0].startswith(wire.MAGIC), "nbtctl did not open the link with the magic bytes")
+        buffered[0] = buffered[0][len(wire.MAGIC):]
+        link.sendall(answer(request("hello"), {"protocol": 1, "agentVersion": VERSION}))
+        stop = request("agent.stop")
+        os.kill(nbtctl.pid, signal.SIGSTOP)
+        held = time.time() + 10
+        while True:
+            with open("/proc/%d/stat" % nbtctl.pid) as f:
+                if f.read().rsplit(")", 1)[1].split()[0] == "T":
+                    break
+            check(time.time() < held, "nbtctl could not be held still")
+            time.sleep(0.01)
+        link.sendall(answer(stop, {}))
+        link.close()
+        os.kill(nbtctl.pid, signal.SIGCONT)
+        out = nbtctl.communicate(timeout=30)[0]
+        return nbtctl.returncode, out.decode("utf-8", "replace")
+    finally:
+        if nbtctl is not None and nbtctl.poll() is None:
+            nbtctl.kill()
+            nbtctl.wait()
+        listener.close()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def run():
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(STICK)
@@ -632,9 +718,40 @@ def run():
         check(head_unit in ok("info"), "the head-unit id changed")
         status = ok("status")
         check("succeeded" in status and "remove org.nbtapp.bulk 1.0.0: done" in status, "the last job after a restart", status)
+
+        # ---- a controller stops the agent (agent.stop): it ends as it does for SIGTERM, with the same words to a
+        # phone, and leaves a mark in the run folder, which stands in for the RAM disk, that keeps the iDrive plugin
+        # from starting it with the head unit. The next agent that starts removes the mark.
+        mark = os.path.join(HU, "run", "agent.stopped")
+        check(not os.path.exists(mark), "a mark of a stop before any stop")
+        check(ctl("stop", "now")[0] == 2, "stop with a word it does not take")
+        watcher = TcpPhone(agent.tcp_port())
+        check("result" in watcher.hello()[0], "hello over TCP before the agent is stopped")
+        out = ok("stop")
+        check(out.startswith("stopping\n") and "does not start it again until the head unit has powered down" in out, "nbtctl stop", out)
+        check(agent.wait() == 0, "nbtagent's exit status when a controller stopped it")
+        said = watcher.last_words()
+        check(said == [{"event": "link.closing", "params": {"reason": "stopping"}}],
+              "what a phone was told when a controller stopped the agent", repr(said))
+        watcher.close()
+        log = agent.said()
+        check("agent.stop: the agent ends once its answer is written out" in log and
+              "asked to stop by a controller: %s is written" % mark in log and log.endswith(" stopped\n"),
+              "the log of an agent that a controller stopped", log[-2000:])
+        check(os.path.isfile(mark), "the mark of a stop is not in the run folder")
+        check(not os.path.exists(SOCKET) and ctl("info")[0] == 3, "the agent is still there after nbtctl stop")
+        agent = Agent()
+        check(head_unit in ok("info"), "the head-unit id changed")
+        check(not os.path.exists(mark), "the mark of a stop outlived the next start")
+        check(agent.says("%s is removed: the agent was stopped by a controller before" % mark),
+              "the next agent did not say that it removed the mark", agent.said())
     finally:
         if agent.process.poll() is None:
             agent.stop()
+    check(not os.path.exists(os.path.join(HU, "run", "agent.stopped")), "an agent stopped by a signal left a mark")
+    # The answer to agent.stop and the link's end can reach nbtctl together: it is the answer that counts.
+    code, out = stop_as_the_link_ends()
+    check(code == 0 and out.startswith("stopping\n"), "nbtctl stop, answered as the link ends: exit status %d" % code, out)
     with open(os.path.join(WORK, "agent.log"), "rb") as f:
         log = f.read().decode("utf-8", "replace")
     check("TEST KEY" in log, "the agent did not say that it trusts a test key")
