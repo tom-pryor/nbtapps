@@ -13,12 +13,15 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include <algorithm>
 
 #include "fsutil.hpp"
 #include "json_writer.hpp"
+#include "process.hpp"
 #include "protocol_constants.hpp"
 
 namespace nbt {
@@ -54,6 +57,10 @@ bool fitsSocketAddress(const std::string& path) {
 }
 
 std::string channelsDir(const std::string& tmpDir) { return tmpDir + "/channels"; }
+
+std::string switchFile(const std::string& runDir, const std::string& package, const std::string& name) {
+    return runDir + "/channel-on." + package + "." + name;
+}
 
 bool makeChannelsDir(const std::string& tmpDir, std::string* error) {
     std::string dir = channelsDir(tmpDir);
@@ -165,7 +172,7 @@ std::string channelFrame(const std::string& message) {
     return out;
 }
 
-Channels::Channels(ChannelHost* host, ProgramEnds* ends) : host_(host), ends_(ends) {}
+Channels::Channels(ChannelHost* host, ProgramEnds* ends) : host_(host), ends_(ends), paused_(false) {}
 
 Channels::~Channels() {
     for (size_t i = 0; i < all_.size(); ++i) {
@@ -225,30 +232,72 @@ Channel* Channels::find(const Peer* peer, uint16_t stream) {
 void Channels::connect(Channel* c) {
     std::string why;
     if (ends_ == 0) {
-        why = "this agent has no way to reach a program";
-    } else {
-        if (c->end == 0) c->end = ends_->make(c->socketPath);
-        ProgramEnd::Connect state = c->end->connect(&why);
-        if (state == ProgramEnd::kConnected) {
-            c->connecting = false;
-            host_->channelConnected(c);
+        refuse(c, "unavailable", "this agent has no way to reach a program");
+        return;
+    }
+    if (c->end == 0) c->end = ends_->make(c->socketPath);
+    ProgramEnd::Connect state = c->end->connect(&why);
+    if (state == ProgramEnd::kConnected) {
+        c->connecting = false;
+        host_->channelConnected(c);
+        return;
+    }
+    int64_t now = host_->channelNowMs();
+    bool inTime = now - c->openedMs < kChannelStartWaitMs;
+    std::string late = "the program did not take the connection in " + number((uint64_t)(kChannelStartWaitMs / 1000)) + " s";
+    if (state == ProgramEnd::kWaiting) {
+        c->retryAtMs = now + kChannelStartRetryMs;
+        if (!inTime) refuse(c, "unavailable", late);
+        return;
+    }
+    if (!c->canStart) {
+        refuse(c, "unavailable", why);
+        return;
+    }
+    // Nothing listens, and the agent may start what should: once, and then it tries again every kChannelStartRetryMs
+    // until kChannelStartWaitMs. An open that comes meanwhile starts nothing more.
+    delete c->end;
+    c->end = 0;
+    if (!programRunning(c->package, c->name)) {
+        if (c->startedHere) {
+            std::string key = c->package + " " + c->name, how = "it has gone";
+            for (size_t i = 0; i < lastEnd_.size(); ++i) {
+                if (lastEnd_[i].first == key) how = lastEnd_[i].second;
+            }
+            refuse(c, "unavailable", "the program the agent started ended before it took the connection: " + how);
             return;
         }
-        if (state == ProgramEnd::kWaiting) {
-            c->retryAtMs = host_->channelNowMs() + kChannelStartRetryMs;
-            if (host_->channelNowMs() - c->openedMs < kChannelStartWaitMs) return;
-            why = "the program did not take the connection in " + number((uint64_t)(kChannelStartWaitMs / 1000)) + " s";
+        if (!start(c, &why)) {
+            refuse(c, "unavailable", "the program could not be started: " + why);
+            return;
         }
+        c->startedHere = true;
     }
-    // Nothing was said of this number to the phone, so nothing is said of its end either.
+    if (inTime) {
+        c->retryAtMs = now + kChannelStartRetryMs;
+        return;
+    }
+    // A program that never listens is ended, unless another channel of it has a connection.
+    if (c->startedHere && count(c->package, c->name) == 1) endPrograms(c->package, c->name, late);
+    refuse(c, "unavailable", late);
+}
+
+// Nothing was said of the channel's number to the phone, so nothing is said of its end either: its channel.open is
+// answered with the error.
+void Channels::refuse(Channel* c, const char* code, const std::string& why) {
     c->closed = true;
     delete c->end;
     c->end = 0;
-    host_->channelUnavailable(c, why);
+    c->out.clear();
+    host_->channelRefused(c, code, why);
 }
 
 void Channels::close(Channel* c, const char* reason, const std::string& why) {
     if (c->closed) return;
+    if (c->connecting && reason != 0) {
+        refuse(c, strcmp(reason, "off") == 0 ? "off" : strcmp(reason, "package-changed") == 0 ? "busy" : "unavailable", why);
+        return;
+    }
     c->closed = true;
     if (!c->connecting && reason != 0 && c->peer->open() && !c->peer->closing()) {
         json::Writer w;
@@ -273,6 +322,20 @@ void Channels::closePackage(const std::string& package, const std::string& name,
     for (size_t i = 0; i < all_.size(); ++i) {
         Channel* c = all_[i];
         if (!c->closed && c->package == package && (name.empty() || c->name == name)) close(c, reason, why);
+    }
+}
+
+void Channels::closeConnecting(const char* code, const std::string& why) {
+    std::vector<std::pair<std::string, std::string> > started;
+    for (size_t i = 0; i < all_.size(); ++i) {
+        Channel* c = all_[i];
+        if (c->closed || !c->connecting) continue;
+        if (c->startedHere) started.push_back(std::make_pair(c->package, c->name));
+        refuse(c, code, why);
+    }
+    // None connects now, so what is not closed has a connection.
+    for (size_t i = 0; i < started.size(); ++i) {
+        if (count(started[i].first, started[i].second) == 0) endPrograms(started[i].first, started[i].second, why);
     }
 }
 
@@ -326,7 +389,7 @@ int Channels::addToSets(fd_set* readable, fd_set* writable, int top) const {
             FD_SET(fd, writable);
         } else {
             if (mayRead(c)) FD_SET(fd, readable);
-            if (!c->programClosed && (!c->out.empty() || !c->waiting.empty())) FD_SET(fd, writable);
+            if (!paused_ && !c->programClosed && (!c->out.empty() || !c->waiting.empty())) FD_SET(fd, writable);
         }
         if (fd > top) top = fd;
     }
@@ -359,7 +422,7 @@ void Channels::serve() {
 }
 
 void Channels::writeTo(Channel* c) {
-    for (;;) {
+    while (!paused_) {
         if (c->out.empty() && !c->waiting.empty()) {
             c->out = channelFrame(c->waiting.front());
             c->outIsMessage = true;
@@ -394,7 +457,7 @@ void Channels::grant(Channel* c) {
 }
 
 bool Channels::mayRead(const Channel* c) const {
-    return !c->closed && !c->connecting && !c->programClosed && c->toPhone > 0 && !wholeMessage(c->in) && c->peer->open() &&
+    return !paused_ && !c->closed && !c->connecting && !c->programClosed && c->toPhone > 0 && !wholeMessage(c->in) && c->peer->open() &&
            !c->peer->closing() && c->peer->queued() < 2 * (size_t)c->peer->maxFrame();
 }
 
@@ -416,13 +479,189 @@ void Channels::readFrom(Channel* c) {
 }
 
 bool Channels::sendOne(Channel* c) {
-    if (c->closed || c->connecting || c->toPhone == 0 || !wholeMessage(c->in)) return false;
+    if (paused_ || c->closed || c->connecting || c->toPhone == 0 || !wholeMessage(c->in)) return false;
     if (!c->peer->open() || c->peer->closing()) return false;
     size_t length = frontLength(c->in);
     c->peer->data(c->stream, c->in.data() + 2, length, true);
     c->in.erase(0, 2 + length);
     --c->toPhone;
     return true;
+}
+
+// ---- the programs the agent starts --------------------------------------------------------------------------------
+
+namespace {
+
+// How a process ended, from its status.
+std::string ended(int status) {
+    if (WIFEXITED(status)) return "it exited with " + number((uint64_t)WEXITSTATUS(status));
+    if (WIFSIGNALED(status)) return "it was ended by signal " + number((uint64_t)WTERMSIG(status));
+    return "it has gone";
+}
+
+// SIGTERM or SIGKILL to the process's group, which it has of its own, and to the process itself in case it left it.
+void signalProgram(long pid, int number) {
+    kill((pid_t)-pid, number);
+    kill((pid_t)pid, number);
+}
+
+}  // namespace
+
+void Channels::setPrograms(const std::string& runDir, const std::string& shell) {
+    runDir_ = runDir;
+    shell_ = shell;
+}
+
+std::string Channels::pidFile(const std::string& package, const std::string& name) const {
+    return runDir_ + "/channel-pid." + package + "." + name;
+}
+
+bool Channels::start(Channel* c, std::string* why) {
+    long pid = (long)startProgram(shell_, c->program, c->args, c->env, c->cwd, c->log, why);
+    if (pid < 0) return false;
+    Started s;
+    s.package = c->package;
+    s.name = c->name;
+    s.log = c->log;
+    s.pid = pid;
+    s.child = true;
+    started_.push_back(s);
+    // So that an agent that starts after this one still knows it; a power down takes the mark with the program.
+    std::string error;
+    if (!fs::writeFile(pidFile(c->package, c->name), number((uint64_t)pid) + "\n", 0600, &error)) {
+        host_->channelNote("the mark of the program of " + c->package + " " + c->name + " cannot be written: " + error);
+    }
+    host_->channelNote("started the program of " + c->package + " " + c->name + ", " + c->program + ": process " +
+                       number((uint64_t)pid) + ", its output in " + c->log);
+    return true;
+}
+
+void Channels::adoptProgram(const std::string& package, const std::string& name, long pid, const std::string& log) {
+    Started s;
+    s.package = package;
+    s.name = name;
+    s.log = log;
+    s.pid = pid;
+    started_.push_back(s);
+    host_->channelNote("the program of " + package + " " + name + ", process " + number((uint64_t)pid) +
+                       ", was started by an agent before this one and still runs");
+}
+
+bool Channels::programRunning(const std::string& package, const std::string& name) const {
+    for (size_t i = 0; i < started_.size(); ++i) {
+        if (started_[i].package == package && started_[i].name == name) return true;
+    }
+    return false;
+}
+
+bool Channels::programsRunning(const std::vector<std::string>& packages) const {
+    for (size_t i = 0; i < started_.size(); ++i) {
+        for (size_t k = 0; k < packages.size(); ++k) {
+            if (started_[i].package == packages[k]) return true;
+        }
+    }
+    return false;
+}
+
+void Channels::endPrograms(const std::string& package, const std::string& name, const std::string& why) {
+    for (size_t i = 0; i < started_.size(); ++i) {
+        Started& s = started_[i];
+        if (s.package != package || (!name.empty() && s.name != name) || s.endingSinceMs != 0) continue;
+        signalProgram(s.pid, SIGTERM);
+        int64_t now = host_->channelNowMs();
+        s.endingSinceMs = now > 0 ? now : 1;
+        host_->channelNote("the program of " + s.package + " " + s.name + ", process " + number((uint64_t)s.pid) +
+                           ", is told to end: " + why);
+    }
+}
+
+bool Channels::ending() const {
+    for (size_t i = 0; i < started_.size(); ++i) {
+        if (started_[i].endingSinceMs != 0) return true;
+    }
+    return false;
+}
+
+void Channels::tick() {
+    int64_t now = host_->channelNowMs();
+    for (size_t i = 0; i < started_.size();) {
+        Started& s = started_[i];
+        std::string how;
+        bool gone = false;
+        if (s.child) {
+            int status = 0;
+            pid_t done = waitpid((pid_t)s.pid, &status, WNOHANG);
+            if (done == (pid_t)s.pid) {
+                gone = true;
+                how = ended(status);
+            } else if (done < 0 && errno == ECHILD) {
+                gone = true;
+                how = "it has gone";
+            }
+        } else if (kill((pid_t)s.pid, 0) != 0 && errno == ESRCH) {
+            gone = true;
+            how = "it has gone";
+        }
+        if (gone) {
+            fs::removeFile(pidFile(s.package, s.name), 0);
+            std::string key = s.package + " " + s.name;
+            bool kept = false;
+            for (size_t k = 0; k < lastEnd_.size(); ++k) {
+                if (lastEnd_[k].first == key) {
+                    lastEnd_[k].second = how;
+                    kept = true;
+                }
+            }
+            if (!kept) lastEnd_.push_back(std::make_pair(key, how));
+            host_->channelNote("the program of " + key + ", process " + number((uint64_t)s.pid) + ", has ended: " + how);
+            started_.erase(started_.begin() + (long)i);
+            continue;
+        }
+        if (s.endingSinceMs != 0 && !s.killed && now - s.endingSinceMs >= kProgramKillAfterMs) {
+            signalProgram(s.pid, SIGKILL);
+            s.killed = true;
+            host_->channelNote("the program of " + s.package + " " + s.name + ", process " + number((uint64_t)s.pid) +
+                               ", did not end in " + number((uint64_t)(kProgramKillAfterMs / 1000)) + " s: SIGKILL");
+        }
+        capLog(&s);
+        ++i;
+    }
+}
+
+// Over the cap, the log is set aside over the one before and emptied. The program's own descriptor appends, so it
+// goes on at the new end. It is emptied even when it cannot be set aside: on a full RAM disk, losing what it held is
+// better than filling it further.
+void Channels::capLog(Started* s) {
+    struct stat st;
+    if (s->log.empty() || stat(s->log.c_str(), &st) != 0 || (uint64_t)st.st_size <= kChannelLogCapBytes) return;
+    std::string copyError, cutError;
+    bool copied = false, cut = false;
+    // Opened first: a log that cannot be opened for writing is not copied on every turn.
+    int fd = open(s->log.c_str(), O_WRONLY);
+    if (fd < 0) {
+        cutError = s->log + ": " + strerror(errno);
+    } else {
+        copied = fs::copyFile(s->log, s->log + ".1", 0644, &copyError);
+        cut = ftruncate(fd, 0) == 0;
+        if (!cut) cutError = s->log + ": " + strerror(errno);
+        ::close(fd);
+    }
+    std::string program = "the program of " + s->package + " " + s->name;
+    if (copied && cut) {
+        s->logTrouble = false;
+        host_->channelNote("the log of " + program + " had passed " + number(kChannelLogCapBytes / 1024) + " KB: what it held is in " +
+                           s->log + ".1");
+        return;
+    }
+    // Said once, until the log has been set aside again: not on every turn of the loop.
+    if (s->logTrouble) return;
+    s->logTrouble = true;
+    if (cut) {
+        host_->channelNote("the log of " + program + " had passed " + number(kChannelLogCapBytes / 1024) +
+                           " KB and is emptied, what it held lost: it could not be set aside: " + copyError);
+    } else {
+        host_->channelNote("the log of " + program + " cannot be kept short: it cannot be emptied: " + cutError);
+    }
 }
 
 void Channels::reap() {

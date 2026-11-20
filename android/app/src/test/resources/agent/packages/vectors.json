@@ -187,6 +187,21 @@
       "what": "built from tests/packages/chan-1.0.0"
     },
     {
+      "id": "org.nbtapp.chan",
+      "version": "1.1.0",
+      "name": "Channels",
+      "sha256": "48037c40436a4f5c945551c54a38e88a35ffa935f933ea63d52107801816170b",
+      "size": 1316,
+      "manifestSha256": "7ddd93c1a2316b454f41090a30add6a9a745fc35488701f93376613ab10b90de",
+      "flags": [
+        "starts-program"
+      ],
+      "signature": "844f07ed72a5ce16e25c2c69c453bcb83a1500bdc6fbb690ab831d9f285c713f967e14dabeb60ce42676d2460e148aee25f171d9e14e36cb9d75c02f7d2ad501",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.chan-1.1.0.nbtpkg",
+      "what": "built from tests/packages/chan-1.1.0"
+    },
+    {
       "id": "org.nbtapp.demoplugin",
       "version": "1.0.0",
       "name": "Demo plugin",
