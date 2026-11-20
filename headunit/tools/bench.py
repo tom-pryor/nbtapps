@@ -32,9 +32,13 @@ to this program then ends the agent and the container.
 
 `agent` and `client` give the container an /etc/passwd with a line for the user this program runs as (bench, its
 home /tmp, its shell /bin/sh): an SSH server, which the SSH package starts in the agent's container, logs in only a
-user it can look up, and an SSH client runs only as one. `client` runs a program of the image, with this
-program's standard input, in a container that may write each DIR, has no network, and has nothing else of this
-machine: the agent's socket is reached through a DIR that holds it.
+user it can look up, and an SSH client runs only as one. The file's second line names root with the same user and
+group ids, home and shell: the app logs in to a head unit as root, and the server, which runs as this program's user
+and not as root, logs in only a name with its own id, so a login as root gets a shell of the same user as bench does
+($LOGNAME root, `id -un` bench, the first line with that id). Nothing in a container is real root.
+
+`client` runs a program of the image, with this program's standard input, in a container that may write each DIR,
+has no network, and has nothing else of this machine: the agent's socket is reached through a DIR that holds it.
 
 `test` and `sh` run from the repo's top folder, which the container may read, and may write build/bench/work only:
 a test that takes a work folder has to be given one in there. They are handed the NBT_TEST_... variables of this
@@ -134,10 +138,10 @@ def inside(path, folder):
 
 
 def passwd():
-    """The options that give a container build/bench/passwd as its /etc/passwd: root, and the user this program
-    runs as."""
+    """The options that give a container build/bench/passwd as its /etc/passwd: the user this program runs as, as
+    bench and, for a login as root, as root (see the top of this file)."""
     path = os.path.join(REPO, "build", "bench", "passwd")
-    text = "root:x:0:0:root:/root:/bin/sh\nbench:x:%d:%d:bench:/tmp:/bin/sh\n" % (os.getuid(), os.getgid())
+    text = "bench:x:{0}:{1}:bench:/tmp:/bin/sh\nroot:x:{0}:{1}:root:/tmp:/bin/sh\n".format(os.getuid(), os.getgid())
     try:
         with open(path) as f:
             same = f.read() == text
