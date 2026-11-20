@@ -295,6 +295,23 @@ class FakeChecks {
 }
 
 /**
+ * A channel of an installed package that a [FakeAgent] has: its program sends back each message it is given, as
+ * the agent repo's `chan_echo` does, upper-cased with [upper]. With [switched] it is off until `channel.set` switches
+ * it on. With [readOnly] (the manifest's `access: read`) a message from the phone closes it with `protocol`.
+ */
+class FakeChannel(
+    val packageId: String,
+    val name: String,
+    val switched: Boolean = false,
+    val readOnly: Boolean = false,
+    val upper: Boolean = false,
+    val version: String = "1.0.0",
+) {
+    @Volatile
+    var on: Boolean = !switched
+}
+
+/**
  * A stand-in for the head-unit agent that answers what a test tells it to. It speaks real frames over a
  * [MemoryLink], so the app's whole stack runs against it; what it lacks is any behaviour of its own. Each
  * request is handled on a thread of its own, so a handler may itself fetch a blob from the phone.
@@ -309,6 +326,12 @@ class FakeChecks {
  * `files.error`, or come damaged.
  *
  * And it answers `serial.reset` as the agent does ([serialReset]), with the car ending the link after `sent`.
+ *
+ * With `channels` among its [capabilities] it has the channels a test adds to [channels], each an echo
+ * ([FakeChannel]): `channel.open`, `channel.get` and `channel.set` as the agent has them, a message of the phone's
+ * sent back within the credit the phone granted, and a grant back for each message its program took, as the real
+ * agent gives when its program keeps up. A test can close a channel ([closeChannel]) and pause them all
+ * ([pauseChannels]); what the phone said of its channels is in [channelEvents].
  */
 class FakeAgent(private val link: Link, val headUnitId: String) {
     /** See the class. Set before the phone's first byte arrives. */
@@ -400,6 +423,93 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
     /** How many `serial.reset` requests were taken, refusals among them. */
     val resets = AtomicInteger()
 
+    /** The channels it has, by "package name". See the class. */
+    val channels = ConcurrentHashMap<String, FakeChannel>()
+
+    /** Every `channel.credit` and `channel.close` the phone sent, as it came. */
+    val channelEvents = LinkedBlockingQueue<JsonObject>()
+
+    /** Every message the phone sent on a channel, by stream, as it came. */
+    val channelMessages = ConcurrentHashMap<Int, CopyOnWriteArrayList<ByteArray>>()
+
+    fun addChannel(channel: FakeChannel) {
+        channels["${channel.packageId} ${channel.name}"] = channel
+    }
+
+    /** One open channel: what its program has to send back, and what the phone has granted. Guarded by itself. */
+    private class OpenChannel(val spec: FakeChannel, val stream: Int, var phoneGranted: Int) {
+        val back = ArrayDeque<ByteArray>()
+        var closed = false
+    }
+
+    private val openChannels = ConcurrentHashMap<Int, OpenChannel>()
+    private val nextChannel = AtomicInteger(ProtocolConstants.CHANNEL_FIRST_STREAM)
+
+    /** The streams of the channels open now. */
+    fun openChannelStreams(): Set<Int> = openChannels.keys.toSet()
+
+    /** Closes the channel [stream] as the agent does, telling the phone [reason]. */
+    fun closeChannel(stream: Int, reason: String) {
+        val open = openChannels.remove(stream) ?: return
+        synchronized(open) { open.closed = true }
+        send("""{"event":"channel.close","params":{"stream":$stream,"reason":"$reason"}}""")
+    }
+
+    /** What a job does to every channel: `channel.paused`, or `channel.resumed`. */
+    fun pauseChannels(paused: Boolean) = send("""{"event":"${if (paused) "channel.paused" else "channel.resumed"}","params":{}}""")
+
+    private fun hasChannels() = "\"${ProtocolConstants.CAPABILITY_CHANNELS}\"" in capabilities
+
+    private fun channelOf(params: JsonObject): FakeChannel {
+        if (!hasChannels()) throw Refusal("unsupported")
+        val packageId = params["package"]?.jsonPrimitive?.content ?: throw Refusal("bad-request")
+        val name = params["channel"]?.jsonPrimitive?.content ?: throw Refusal("bad-request")
+        return channels["$packageId $name"] ?: throw Refusal("not-found")
+    }
+
+    private fun switchOf(channel: FakeChannel): String {
+        val open = openChannels.values.count { it.spec === channel }
+        return """{"switched":${channel.switched},"on":${channel.on},"open":$open}"""
+    }
+
+    /** A DATA frame of the phone's on a channel: sent back, as the program does, within what the phone granted. */
+    private fun channelData(frame: Frame) {
+        val open = openChannels[frame.stream] ?: return
+        channelMessages.getOrPut(frame.stream) { CopyOnWriteArrayList() } += frame.payload
+        if (open.spec.readOnly || !frame.last || frame.payload.isEmpty()) return closeChannel(frame.stream, "protocol")
+        val text = if (open.spec.upper) frame.payload.decodeToString().uppercase().encodeToByteArray() else frame.payload
+        synchronized(open) { open.back.addLast(text) }
+        // The program took it: the phone may send one more.
+        send("""{"event":"channel.credit","params":{"stream":${frame.stream},"messages":1}}""")
+        flushChannel(open)
+    }
+
+    private fun flushChannel(open: OpenChannel) = synchronized(open) {
+        while (!open.closed && open.phoneGranted > 0 && open.back.isNotEmpty()) {
+            open.phoneGranted--
+            val message = open.back.removeFirst()
+            synchronized(link) { link.output.write(FrameCodec.encode(FrameCodec.TYPE_DATA, FrameCodec.FLAG_LAST, open.stream, message)) }
+        }
+    }
+
+    /** The phone's `channel.credit` and `channel.close`. */
+    private fun channelEvent(message: JsonObject) {
+        channelEvents.put(message)
+        val params = message["params"] as? JsonObject ?: return
+        val stream = params["stream"]?.jsonPrimitive?.content?.toIntOrNull() ?: return
+        val open = openChannels[stream] ?: return
+        when (message["event"]?.jsonPrimitive?.content) {
+            "channel.credit" -> {
+                synchronized(open) { open.phoneGranted += params["messages"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0 }
+                flushChannel(open)
+            }
+            "channel.close" -> {
+                openChannels.remove(stream)
+                synchronized(open) { open.closed = true }
+            }
+        }
+    }
+
     /** A files stream that is being sent: its frames go out with its lock held, so a cancel comes after them all. */
     private class Outgoing {
         var cancelled = false
@@ -467,6 +577,23 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
                 else -> throw Refusal(serialReset)
             }
         }
+        handlers["channel.open"] = { params ->
+            val channel = channelOf(params)
+            if (!channel.on) throw Refusal("off")
+            if (openChannels.size >= ProtocolConstants.CHANNEL_PER_LINK) throw Refusal("too-many")
+            val credit = params["credit"]?.jsonPrimitive?.content?.toInt() ?: ProtocolConstants.CHANNEL_CREDIT
+            val stream = nextChannel.getAndIncrement()
+            openChannels[stream] = OpenChannel(channel, stream, credit)
+            """{"stream":$stream,"maxMessage":${ProtocolConstants.CHANNEL_MAX_MESSAGE},"credit":${ProtocolConstants.CHANNEL_CREDIT},"version":"${channel.version}"}"""
+        }
+        handlers["channel.get"] = { params -> switchOf(channelOf(params)) }
+        handlers["channel.set"] = { params ->
+            val channel = channelOf(params)
+            if (!channel.switched) throw Refusal("bad-request")
+            channel.on = params["on"]?.jsonPrimitive?.content == "true"
+            if (!channel.on) openChannels.values.filter { it.spec === channel }.forEach { closeChannel(it.stream, "off") }
+            switchOf(channel)
+        }
         thread(isDaemon = true, name = "fake-agent") { run() }
     }
 
@@ -523,12 +650,14 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
             while (true) {
                 val frame = reader.next() ?: return left.countDown()
                 if (frame.type == FrameCodec.TYPE_DATA) {
-                    streams.getOrPut(frame.stream) { LinkedBlockingQueue() }.put(frame)
+                    if (frame.stream >= ProtocolConstants.CHANNEL_FIRST_STREAM) channelData(frame) else streams.getOrPut(frame.stream) { LinkedBlockingQueue() }.put(frame)
                     continue
                 }
                 val message = StrictJson.parseObject(frame.payload)
                 val method = message["method"]?.toString()?.trim('"')
+                val event = message["event"]?.toString()?.trim('"')
                 when {
+                    event == "channel.credit" || event == "channel.close" -> channelEvent(message)
                     method != null -> {
                         val id = message.getValue("id").toString()
                         val params = message["params"] as? JsonObject ?: JsonObject(emptyMap())

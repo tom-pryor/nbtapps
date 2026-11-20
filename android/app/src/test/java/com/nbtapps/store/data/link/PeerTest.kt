@@ -3,6 +3,8 @@
 package com.nbtapps.store.data.link
 
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
@@ -251,6 +253,158 @@ class PeerTest {
         agent.raw(FrameCodec.encode(FrameCodec.TYPE_DATA, FrameCodec.FLAG_LAST, 1, byteArrayOf(1, 2, 3)))
         assertTrue(request.await().isNotEmpty())
         assertTrue(agent.closedByPhone())
+    }
+
+    /** What a channel's sink was given, in order: "data TEXT[ last]", "credit N", "closed REASON", "paused" and so on. */
+    private class RecordedChannel(private val wanted: Boolean = true) : ChannelSink {
+        val heard = LinkedBlockingQueue<String>()
+
+        @Volatile
+        var stream = 0
+
+        override fun opened(stream: Int): Boolean {
+            this.stream = stream
+            heard.put("opened $stream")
+            return wanted
+        }
+
+        override suspend fun onFrame(payload: ByteArray, last: Boolean) = heard.put("data ${payload.decodeToString()}${if (last) " last" else ""}")
+
+        override suspend fun onCredit(messages: Long) = heard.put("credit $messages")
+
+        override fun onClosed(reason: String) = heard.put("closed $reason")
+
+        override fun onPaused(paused: Boolean) = heard.put(if (paused) "paused" else "resumed")
+
+        override fun onLinkEnd(reason: String) = heard.put("link ended")
+
+        fun next(): String = heard.poll(10, TimeUnit.SECONDS) ?: "nothing"
+    }
+
+    private fun openParams() = buildJsonObject {
+        put("package", "org.example.a")
+        put("channel", "echo")
+    }
+
+    private val answer32768 = """{"id":1,"result":{"stream":32768,"maxMessage":4096,"credit":16,"version":"1.0.0"}}"""
+
+    /** Whether the link still serves the agent: a ping from it is answered. */
+    private fun AgentEnd.pingAnswered(id: Int = 900): Boolean {
+        send("""{"id":$id,"method":"ping","params":{}}""")
+        return message().toString() == """{"id":$id,"result":{}}"""
+    }
+
+    @Test
+    fun `a channel's frames and events go to its sink from the moment its answer is read, in their order`() = test {
+        val sink = RecordedChannel()
+        val open = async { session.peer.requestChannel(openParams(), sink) }
+        agent.expectMagic()
+        assertEquals("\"channel.open\"", agent.message()["method"].toString())
+        // The answer, two messages, a grant, a pause and the agent's close, all in one write: one read of the link.
+        agent.raw(
+            msg(answer32768) + data(32768, "one", last = true) + msg("""{"event":"channel.credit","params":{"stream":32768,"messages":3}}""") +
+                data(32768, "two", last = true) + msg("""{"event":"channel.paused","params":{}}""") +
+                msg("""{"event":"channel.close","params":{"stream":32768,"reason":"off"}}"""),
+        )
+        assertEquals("32768", open.await()["stream"].toString())
+        assertEquals(
+            listOf("opened 32768", "data one last", "credit 3", "data two last", "paused", "closed off"),
+            List(6) { sink.next() },
+        )
+        assertTrue(session.peer.channel(32768) === sink)
+        assertEquals(listOf(sink), session.peer.openChannels())
+        assertTrue(agent.pingAnswered())
+    }
+
+    @Test
+    fun `a DATA frame of a channel that is not open is dropped, and the link stays`() = test {
+        val sink = RecordedChannel()
+        val open = async { session.peer.requestChannel(openParams(), sink) }
+        agent.expectMagic()
+        agent.message()
+        agent.send(answer32768)
+        open.await()
+        assertEquals("opened 32768", sink.next())
+        assertTrue(session.peer.endChannel(32768, sink))
+        assertFalse("ended once", session.peer.endChannel(32768, sink))
+
+        // One that crossed the close, one of a number never opened, and an event of each: all dropped.
+        agent.raw(
+            data(32768, "late", last = true) + data(40000, "never", last = true) +
+                msg("""{"event":"channel.credit","params":{"stream":32768,"messages":1}}""") +
+                msg("""{"event":"channel.close","params":{"stream":40000,"reason":"closed"}}"""),
+        )
+        assertTrue(agent.pingAnswered())
+        assertTrue(session.peer.isOpen)
+        assertNull(sink.heard.poll())
+    }
+
+    @Test
+    fun `a DATA frame of an unknown stream below the channels' numbers still closes the link`() = test {
+        val request = async { closedReason { session.peer.request("info.get") } }
+        agent.expectMagic()
+        agent.message()
+        agent.raw(data(ProtocolConstants.STREAM_LAST, "files?", last = true))
+        assertTrue(request.await().isNotEmpty())
+        assertTrue(agent.closedByPhone())
+    }
+
+    @Test
+    fun `an answer to channel-open that names no channel's stream closes the link`() = test {
+        for (stream in listOf("7", "\"32768\"", "65536")) {
+            val (phone, other) = MemoryLink.pair()
+            val one = AgentSession(phone, scope)
+            val end = AgentEnd(other)
+            val sink = RecordedChannel()
+            val open = async { closedReason { one.peer.requestChannel(openParams(), sink) } }
+            end.expectMagic()
+            end.message()
+            end.send("""{"id":1,"result":{"stream":$stream,"maxMessage":4096,"credit":16,"version":"1.0.0"}}""")
+            assertTrue(stream, open.await().isNotEmpty())
+            assertTrue(stream, end.closedByPhone())
+            assertNull(stream, sink.heard.poll())
+        }
+    }
+
+    @Test
+    fun `a channel's message is one DATA frame with the last flag, and the link ending ends the channel`() = test {
+        val sink = RecordedChannel()
+        val open = async { session.peer.requestChannel(openParams(), sink) }
+        agent.expectMagic()
+        agent.message()
+        agent.send(answer32768)
+        open.await()
+        session.peer.channelMessage(32768, "hi".encodeToByteArray())
+        val frame = agent.frame()
+        assertEquals(FrameCodec.TYPE_DATA, frame.type)
+        assertEquals(FrameCodec.FLAG_LAST, frame.flags)
+        assertEquals(32768, frame.stream)
+        assertEquals("hi", frame.payload.decodeToString())
+        for (bad in listOf(ByteArray(0), ByteArray(ProtocolConstants.CHANNEL_MAX_MESSAGE + 1))) {
+            assertTrue(runCatching { session.peer.channelMessage(32768, bad) }.exceptionOrNull() is IllegalArgumentException)
+        }
+        assertTrue(runCatching { session.peer.channelMessage(7, byteArrayOf(1)) }.exceptionOrNull() is IllegalArgumentException)
+
+        assertEquals("opened 32768", sink.next())
+        agent.close()
+        assertEquals("link ended", sink.next())
+        assertTrue(session.peer.openChannels().isEmpty())
+    }
+
+    @Test
+    fun `a channel answered after its asker gave up is closed at once, and its frames are dropped`() = test {
+        val sink = RecordedChannel(wanted = false)
+        val open = async { session.peer.requestChannel(openParams(), sink) }
+        agent.expectMagic()
+        agent.message()
+        open.cancel()
+        open.join()
+        agent.raw(msg(answer32768) + data(32768, "unwanted", last = true))
+        assertEquals("""{"event":"channel.close","params":{"stream":32768,"reason":"closed"}}""", agent.message().toString())
+        assertTrue(agent.pingAnswered())
+        assertEquals("opened 32768", sink.next())
+        assertNull(sink.heard.poll())
+        assertTrue(session.peer.openChannels().isEmpty())
     }
 
     @Test

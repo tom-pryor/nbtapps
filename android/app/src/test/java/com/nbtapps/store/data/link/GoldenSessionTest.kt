@@ -4,11 +4,15 @@ package com.nbtapps.store.data.link
 
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.data.MemoryPairingKeys
+import com.nbtapps.store.data.channels.ChannelEnd
+import com.nbtapps.store.data.channels.ChannelState
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.json.StrictJson
 import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.VerifiedPackage
 import com.nbtapps.store.model.AgentText
+import com.nbtapps.store.model.ChannelError
+import com.nbtapps.store.model.ChannelSwitch
 import com.nbtapps.store.model.CheckState
 import com.nbtapps.store.model.FileCompress
 import com.nbtapps.store.model.InstallTarget
@@ -389,8 +393,7 @@ class GoldenSessionTest {
                 assertEquals(SettingValue.Number(25), rest.options.first().value)
 
                 // A package with channels: installed, with the flag of the programs the agent starts for them; its
-                // switched channel read, refused while off, and switched on and off. No channel is opened here: the
-                // DATA of a channel is the link layer's of a later step.
+                // switched channel read, refused while off, and switched on and off.
                 val (chanFile, chan) = verified("org.nbtapp.chan-1.0.0.nbtpkg")
                 session.blobs.offer(blobs(chanFile, chan))
                 val chanPlan = client.plan(PlanRequest(install = listOf(InstallTarget("org.nbtapp.chan", "1.0.0")), offers = listOf(offer(chan))))
@@ -399,15 +402,23 @@ class GoldenSessionTest {
                 assertEquals(JobState.FETCHING, client.start(chanPlan.planId!!).state)
                 assertEquals(JobState.SUCCEEDED, (session.eventsUntilDone().last() as JobEvent.Done).result.state)
                 session.blobs.jobEnded()
-                fun gated(on: Boolean? = null) = buildJsonObject {
-                    put("package", "org.nbtapp.chan")
-                    put("channel", "gated")
-                    if (on != null) put("on", on)
-                }
-                assertEquals("""{"switched":true,"on":false,"open":0}""", session.peer.request("channel.get", gated()).toString())
-                assertEquals("off", codeOf { session.peer.request("channel.open", gated()) })
-                assertEquals("""{"switched":true,"on":true,"open":0}""", session.peer.request("channel.set", gated(true)).toString())
-                assertEquals("""{"switched":true,"on":false,"open":0}""", session.peer.request("channel.set", gated(false)).toString())
+                assertEquals(ChannelSwitch(switched = true, on = false, open = 0), client.channelGet("org.nbtapp.chan", "gated"))
+                assertEquals(ChannelError.OFF, codeOf { session.openChannel("org.nbtapp.chan", "gated") })
+                assertEquals(ChannelSwitch(switched = true, on = true, open = 0), client.channelSet("org.nbtapp.chan", "gated", true))
+                assertEquals(ChannelSwitch(switched = true, on = false, open = 0), client.channelSet("org.nbtapp.chan", "gated", false))
+
+                // A channel opened, its program the agent's stand-in that sends back what it is given: a message each
+                // way, the agent's grant for the one it took, and the channel closed from here.
+                val echo = session.openChannel("org.nbtapp.chan", "echo")
+                assertEquals(ProtocolConstants.CHANNEL_FIRST_STREAM, echo.stream)
+                assertEquals(ProtocolConstants.CHANNEL_MAX_MESSAGE, echo.maxMessage)
+                assertEquals("1.0.0", echo.version)
+                echo.send("hello, channel".encodeToByteArray())
+                assertEquals("hello, channel", echo.receive()?.decodeToString())
+                assertEquals(ChannelState.Open, echo.state.value)
+                echo.close()
+                assertEquals(ChannelState.Closed(ChannelEnd.ByApp), echo.state.value)
+                assertNull(echo.receive())
 
                 client.restart("hmi")
 
