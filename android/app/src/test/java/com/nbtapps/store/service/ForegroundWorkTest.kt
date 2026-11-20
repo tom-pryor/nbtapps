@@ -4,6 +4,8 @@ package com.nbtapps.store.service
 
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.data.logs.LogPullState
+import com.nbtapps.store.data.ssh.PortOffReason
+import com.nbtapps.store.data.ssh.SshPortState
 import com.nbtapps.store.data.terminal.TerminalEnd
 import com.nbtapps.store.data.terminal.TerminalState
 import com.nbtapps.store.model.HeadUnit
@@ -29,8 +31,8 @@ class ForegroundWorkTest {
 
     private val pulling = LogPullState.Pulling("org.nbtapp.agent", file = 2, files = 3, bytes = 500, total = 1_000)
 
-    private fun notice(job: JobView? = null, pull: LogPullState? = null, terminal: TerminalState = TerminalState.Idle) =
-        ForegroundWork.notice(ForegroundWork.reasons(job, pull, terminal, units))
+    private fun notice(job: JobView? = null, pull: LogPullState? = null, terminal: TerminalState = TerminalState.Idle, port: SshPortState = SshPortState.Off()) =
+        ForegroundWork.notice(ForegroundWork.reasons(job, pull, terminal, units, port))
 
     @Test
     fun `nothing to run for stops it, with no job that needs the phone, no pull, no terminal being opened or open`() {
@@ -70,6 +72,41 @@ class ForegroundWorkTest {
         assertNull(ForegroundWork.terminalToOpen(TerminalState.Ended("car", TerminalEnd.ByUser)))
         assertNull(ForegroundWork.terminalToOpen(TerminalState.Failed("car", "No")))
         assertNull(ForegroundWork.terminalToOpen(TerminalState.Off("car")))
+    }
+
+    @Test
+    fun `the SSH port alone is the title, its port and connections the line, and its action is Turn off`() {
+        fun on(connections: Int, paused: Boolean = false) =
+            SshPortState.On("car", 2222, connections = connections, paused = paused, hostKey = "SHA256:x")
+        assertEquals(
+            ForegroundNotice("SSH access on for Living room bench", listOf("Port 2222 · no connections"), null, awake = false, portAction = "Turn off"),
+            notice(port = on(0)),
+        )
+        assertEquals(listOf("Port 2222 · 1 connection"), notice(port = on(1))?.lines)
+        assertEquals(listOf("Port 2222 · 2 connections"), notice(port = on(2))?.lines)
+        assertEquals(listOf("Port 2222 · paused"), notice(port = on(1, paused = true))?.lines)
+        assertEquals(
+            ForegroundNotice("SSH access on for Living room bench", listOf("Checking the way to the head unit…"), null, awake = false, portAction = "Turn off"),
+            notice(port = SshPortState.Checking("car")),
+        )
+        assertNull(notice(port = SshPortState.Off("car", reason = PortOffReason.IDLE)))
+    }
+
+    @Test
+    fun `beside a terminal or a job the SSH port is a line, and its action is Turn off SSH port`() {
+        val port = SshPortState.On("car", 2222, connections = 2, hostKey = "SHA256:x")
+        assertEquals(
+            ForegroundNotice("Terminal open on Living room bench", listOf("SSH access on · 2 connections"), null, awake = false, portAction = "Turn off SSH port"),
+            notice(terminal = TerminalState.Open("car"), port = port),
+        )
+        val installing = notice(job = fetching(), port = port.copy(paused = true))
+        // The install keeps its title, line and bar; the port is the line below.
+        assertEquals(notice(job = fetching())?.title, installing?.title)
+        assertEquals(notice(job = fetching())?.lines.orEmpty() + "SSH access on · paused", installing?.lines)
+        assertEquals(notice(job = fetching())?.progress, installing?.progress)
+        assertEquals("Turn off SSH port", installing?.portAction)
+        // With no port there is no action.
+        assertNull(notice(terminal = TerminalState.Open("car"))?.portAction)
     }
 
     @Test
