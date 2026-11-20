@@ -1605,6 +1605,7 @@ static void testDial() {
         d.config.dial.pollFirstMs = d.config.dial.pollLaterMs = 3600000;
         d.start();
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "no answer to ServiceDisconnect on the dialled instance in ", 3000));
+        CHECK(d.trace.logged(" ms; " + node.path + " is still there") && !d.trace.logged("before its answer"));
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "the car dials the phones afresh", 3000));
         CHECK(d.trace.count("gap disconnect") == 2 && d.trace.logged("the link left behind on " + node.path + " is ended"));
         CHECK(d.trace.logged("ServiceDisconnect on the dialled instance answered 0 OK"));
@@ -1672,10 +1673,34 @@ static void testDial() {
         CHECK(d.trace.count("gap disconnect") == 2);
         CHECK(d.gap.disconnect == buildServiceDisconnect("BtCtrl", "ExtBox1", "AABBCCDDEEFF", kCarSerialService));
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: no answer to ServiceDisconnect on the dialled instance in ", 2000));
+        CHECK(!d.trace.logged("before its answer"));
         first.hangUp();
         first.vanish();
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "serial.reset: " + first.path + " went ", 2000));
         CHECK(!d.trace.logged("AABBCCDDEEFF") && !d.trace.logged("00:11:22"));
+    }
+    {   // the node goes a moment before the car's answer to the clean-up's ServiceDisconnect comes: the log says the
+        // node went before the answer, not that there was none, and the answer that comes after is the car's own line
+        Dialler d("dial-gone-before-answer");
+        d.config.dial.disconnectWaitMs = 3000;
+        Node node(d.dir + "/nbtapp");
+        d.gap.dialNode = &node;
+        d.start();
+        d.dial();
+        // The app says nothing: the car is asked to end the link.
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "gap disconnect", 3000));
+        std::vector<uint8_t> cleanup = d.gap.disconnect;
+        double sentAt = monoNow();
+        d.gap.dialDown();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: " + node.path + " went ", 2000));
+        CHECK(monoNow() - sentAt < 2.5);
+        CHECK(d.trace.logged(" ms after ServiceDisconnect on the dialled instance, before its answer"));
+        CHECK(!d.trace.logged("no answer to ServiceDisconnect"));
+        d.gap.answerDisconnect(cleanup);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "ServiceDisconnect reply: 0 OK", 2000));
+        pause(300);
+        CHECK(!d.trace.logged("no answer to ServiceDisconnect") && d.trace.count("gap disconnect") == 1);
+        CHECK(!d.trace.logged("00:11:22") && !d.trace.logged("001122"));
     }
     {   // a dial answered 2 with the node there: a link left behind, ended for the dialled phone, which is then
         // dialled again, once
@@ -1714,6 +1739,7 @@ static void testDial() {
         d.ours.set(std::vector<std::string>(1, kDialled));   // polled from here on
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "after the car was asked to end its link", 4000));
         CHECK(d.trace.logged("no answer to ServiceDisconnect on the dialled instance in "));
+        CHECK(d.trace.logged(" ms; " + node.path + " is still there") && !d.trace.logged("before its answer"));
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 is not dialled again at once, and not by a poll for 30 s", 2000));
         pause(1200);
         CHECK_IN(d.trace.text(), d.trace.count("gap connect") == 1 && d.trace.count("gap disconnect") == 1);
@@ -1781,6 +1807,7 @@ static void testDial() {
         d.config.retryMs = 1000;
         d.start();
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: no answer to ServiceDisconnect on the dialled instance in ", 3000));
+        CHECK(d.trace.logged(" ms; " + node.path + " is still there") && !d.trace.logged("before its answer"));
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "did not take the registration: Bluetooth serial is off, and is set "
                                                     "up again in 1 s", 3000));
         CHECK(d.trace.logged(node.path + " is still there after the car was asked to end its link"));

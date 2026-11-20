@@ -2208,11 +2208,18 @@ void SerialListener::tendCleanup(int64_t now, bool afterReset) {
         pthread_mutex_lock(&mu_);
         unsigned n = rules_.number(discAddress_);
         pthread_mutex_unlock(&mu_);
-        std::string answer = !discAnswered_ ? std::string("no answer")
-                                            : (discError_ == kNoError ? std::string("a rejection")
-                                                                      : gapErrorText(discError_, ""));
+        // The node can go a moment before the answer comes, which is then logged on its own: that is no "no answer",
+        // which is said only where the wait ran out.
+        bool goneFirst = !discAnswered_ && !there && !timeUp;
+        std::string answer = goneFirst ? std::string("gone before an answer")
+                             : !discAnswered_ ? std::string("no answer")
+                                              : (discError_ == kNoError ? std::string("a rejection")
+                                                                        : gapErrorText(discError_, ""));
         char line[512];
-        if (!discAnswered_)
+        if (goneFirst)
+            snprintf(line, sizeof line, "phone %u: %s went %.0f ms after ServiceDisconnect on the dialled instance, before "
+                     "its answer", n, path.c_str(), ms);
+        else if (!discAnswered_)
             snprintf(line, sizeof line, "phone %u: no answer to ServiceDisconnect on the dialled instance in %.0f ms; %s is %s",
                      n, ms, path.c_str(), there ? "still there" : "gone");
         else
