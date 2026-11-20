@@ -85,6 +85,10 @@ class ChannelClosedException(val end: ChannelEnd) : IOException(
  * the session's scope, and a message that has taken credit goes out whole whatever happens to its caller.
  *
  * Meant for one caller of [receive] and any number of [send]; [close] from anywhere, as often as wanted.
+ *
+ * Once anything here tells a caller that the channel has ended ([receive] returning null, [send] throwing
+ * [ChannelClosedException], [close] returning), [state] says [ChannelState.Closed] already, with how it ended: a
+ * caller may read it then to learn why, and never finds it open.
  */
 class ChannelLink private constructor(
     private val peer: Peer,
@@ -118,7 +122,7 @@ class ChannelLink private constructor(
 
     private val _state = MutableStateFlow<ChannelState>(ChannelState.Open)
 
-    /** Open, paused, or closed and why. */
+    /** Open, paused, or closed and why; closed before anything else tells of the end, and closed for good. */
     val state: StateFlow<ChannelState> = _state.asStateFlow()
 
     /** The channel's stream on its link. */
@@ -186,7 +190,10 @@ class ChannelLink private constructor(
                 try {
                     peer.channelMessage(number, bytes)
                 } catch (e: LinkClosedException) {
-                    throw ChannelClosedException(endOrNull() ?: ChannelEnd.LinkLost(e.message.orEmpty()))
+                    // The link may not have told this channel yet: it ends here, so that [state] says so.
+                    val lost = ChannelEnd.LinkLost(e.message.orEmpty())
+                    finish(lost, discard = false)
+                    throw ChannelClosedException(endOrNull() ?: lost)
                 }
             }
         }
@@ -259,14 +266,19 @@ class ChannelLink private constructor(
      * what was held and not taken goes too. False if it had ended already.
      */
     private fun finish(end: ChannelEnd, discard: Boolean): Boolean {
+        // [state] first, and the one that sets it is the one that ends the channel: whatever learns of the end, from
+        // [receive], [send] or [close], finds it there already.
+        while (true) {
+            val now = _state.value
+            if (now is ChannelState.Closed) return false
+            if (_state.compareAndSet(now, ChannelState.Closed(end))) break
+        }
         val stream = synchronized(lock) {
-            if (ended) return false
             ended = true
             if (discard) held.clear()
             number
         }
         if (stream != 0) peer.endChannel(stream, this)
-        _state.value = ChannelState.Closed(end)
         changes.update { it + 1 }
         return true
     }
