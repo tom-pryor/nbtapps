@@ -48,7 +48,8 @@ import kotlinx.coroutines.launch
  *    without opening the app.
  *
  * The main reason's text is the notification's, and each other one adds a line below it. A tap on it brings the app up,
- * on the terminal while one is open or being opened ([ForegroundWork.terminalToOpen]). While archives or logs are
+ * on the terminal while one is open or being opened ([ForegroundWork.terminalToOpen]), else on "SSH from other apps"
+ * while the port is on ([ForegroundWork.sshAccessToOpen]). While archives or logs are
  * transferred it also holds a wake lock: the agent pulls, and a phone that dozes stops answering. Once the install has
  * begun the head unit finishes by itself, and the lock is let go. No lock is held for a terminal or the port.
  */
@@ -92,12 +93,14 @@ class JobService : Service() {
         // units' names come with the first look below.
         val shell = terminal.state.value
         val now = ForegroundWork.notice(ForegroundWork.reasons(jobs.job.value, jobs.logPull.value, shell, emptyList(), port.state.value))
-        startForeground(NOTIFICATION_ID, notification(now, ForegroundWork.terminalToOpen(shell)), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        val tap = Tap(ForegroundWork.terminalToOpen(shell), ForegroundWork.sshAccessToOpen(shell, port.state.value))
+        startForeground(NOTIFICATION_ID, notification(now, tap), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         if (!watching) {
             watching = true
             scope.launch {
                 combine(jobs.job, jobs.logPull, terminal.state, headUnits.headUnits, port.state) { view, pull, open, units, ssh ->
-                    ForegroundWork.notice(ForegroundWork.reasons(view, pull, open, units, ssh)) to ForegroundWork.terminalToOpen(open)
+                    ForegroundWork.notice(ForegroundWork.reasons(view, pull, open, units, ssh)) to
+                        Tap(ForegroundWork.terminalToOpen(open), ForegroundWork.sshAccessToOpen(open, ssh))
                 }.collect { (notice, toOpen) ->
                     if (notice == null) {
                         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -125,13 +128,17 @@ class JobService : Service() {
         if (hold && !lock.isHeld) lock.acquire(MAX_TRANSFER_MILLIS) else if (!hold && lock.isHeld) lock.release()
     }
 
+    /** Where a tap on the notification goes: a head unit's terminal, or else its "SSH from other apps", or the app. */
+    private data class Tap(val terminal: String?, val sshAccess: String?)
+
     /**
      * The notification for [notice]; with none yet, one that says only that the app works with the head unit. A tap
-     * brings the app up, on the terminal of the head unit [terminalOf] where a terminal is open or being opened.
+     * brings the app up, on the screen [tap] names, if any.
      */
-    private fun notification(notice: ForegroundNotice?, terminalOf: String?): Notification {
+    private fun notification(notice: ForegroundNotice?, tap: Tap): Notification {
         val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        terminalOf?.let { intent.putExtra(MainActivity.EXTRA_TERMINAL, it) }
+        tap.terminal?.let { intent.putExtra(MainActivity.EXTRA_TERMINAL, it) }
+        tap.sshAccess?.let { intent.putExtra(MainActivity.EXTRA_SSH_ACCESS, it) }
         val open = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_head_unit)

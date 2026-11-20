@@ -78,6 +78,7 @@ fun HeadUnitDetailScreen(
     onOpenLogs: (packageId: String) -> Unit,
     onOpenSettings: (packageId: String) -> Unit,
     onOpenTerminal: (headUnitId: String) -> Unit,
+    onOpenSshAccess: (headUnitId: String) -> Unit,
     viewModel: HeadUnitDetailViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -156,6 +157,7 @@ fun HeadUnitDetailScreen(
                     onInstall = { onOpenPackage(SshTunnel.PACKAGE) },
                     onSwitch = viewModel::switchSsh,
                     onOpenTerminal = { onOpenTerminal(unit.id) },
+                    onOpenPort = { onOpenSshAccess(unit.id) },
                 )
             }
         }

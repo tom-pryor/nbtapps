@@ -10,8 +10,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import com.nbtapps.store.data.jobs.AgentRefusal
+import com.nbtapps.store.data.ssh.SshPortState
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.ChannelError
+import com.nbtapps.store.service.connectionsText
 
 /**
  * The Debug card on a head unit's page: SSH access, the SSH package's switch, and the terminal. Shown where the agent
@@ -41,7 +43,23 @@ data class DebugCard(
     val error: String? = null,
     /** A terminal is open, or being opened, on this head unit: the second row goes back to it. */
     val terminalOpen: Boolean = false,
+    /** The SSH port for other apps, as it stands for this head unit: off where it is another's. */
+    val port: SshPortState = SshPortState.Off(),
 ) {
+    /** The third row's line: what the port is for, why it cannot be set up yet, or how it stands. */
+    val portLine: String
+        get() = when (val now = port) {
+            is SshPortState.On -> "${if (now.otherDevices) "On for other devices" else "On"} · port ${now.port} · ${connectionsText(now.connections)}"
+            is SshPortState.Checking -> "Checking the way to the head unit…"
+            is SshPortState.Off -> if (on == true) PORT_OFFER else SSH_FIRST
+        }
+
+    /** The third row's button: Manage while the port is on, or being switched on, here; Set up otherwise. */
+    val portButton: String get() = if (port.active) "Manage" else "Set up"
+
+    /** The third row's button may be pressed: always to manage the port; to set it up, with SSH access on. */
+    val canOpenPort: Boolean get() = port.active || on == true
+
     /** The switch may be thrown: how it stands is known, and nothing waits for the agent. */
     val canSwitch: Boolean get() = on != null && !switching
 
@@ -62,6 +80,8 @@ internal fun connectionsOpen(count: Int?): String? = when {
 internal const val SSH_ACCESS = "SSH access"
 internal const val SSH_OFFER = "A root shell on the head unit, for debugging"
 internal const val SSH_OFF_AFTER_RESTART = "Off again after the head unit restarts"
+internal const val PORT_OFFER = "For an SSH app on this phone, or a laptop"
+internal const val SSH_FIRST = "Switch on SSH access first"
 internal const val SSH_TURN_ON_TITLE = "Turn on SSH access?"
 internal const val SSH_TURN_ON_TEXT = "This gives this phone a root shell on the head unit. A wrong command can stop it working."
 
@@ -90,6 +110,7 @@ internal fun DebugCardSection(
     onInstall: () -> Unit,
     onSwitch: (Boolean) -> Unit,
     onOpenTerminal: () -> Unit,
+    onOpenPort: () -> Unit,
 ) {
     Section("Debug") {
         if (!card.installed) {
@@ -111,6 +132,11 @@ internal fun DebugCardSection(
             trailingContent = {
                 TextButton(onClick = onOpenTerminal, enabled = card.canOpenTerminal) { Text(if (card.terminalOpen) "Resume" else "Open") }
             },
+        )
+        ListItem(
+            headlineContent = { Text("SSH from other apps") },
+            supportingContent = { Text(card.portLine) },
+            trailingContent = { TextButton(onClick = onOpenPort, enabled = card.canOpenPort) { Text(card.portButton) } },
         )
     }
 }

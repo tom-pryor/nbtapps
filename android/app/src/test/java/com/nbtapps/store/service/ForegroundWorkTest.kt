@@ -75,6 +75,16 @@ class ForegroundWorkTest {
     }
 
     @Test
+    fun `a tap goes to the terminal while one is open, else to SSH from other apps while the port is on`() {
+        val port = SshPortState.On("car", 2222, hostKey = "SHA256:x")
+        assertEquals("car", ForegroundWork.sshAccessToOpen(TerminalState.Idle, port))
+        assertEquals("car", ForegroundWork.sshAccessToOpen(TerminalState.Ended("car", TerminalEnd.ByUser), SshPortState.Checking("car")))
+        assertNull(ForegroundWork.sshAccessToOpen(TerminalState.Open("car"), port))
+        assertEquals("car", ForegroundWork.terminalToOpen(TerminalState.Open("car")))
+        assertNull(ForegroundWork.sshAccessToOpen(TerminalState.Idle, SshPortState.Off("car", reason = PortOffReason.IDLE)))
+    }
+
+    @Test
     fun `the SSH port alone is the title, its port and connections the line, and its action is Turn off`() {
         fun on(connections: Int, paused: Boolean = false) =
             SshPortState.On("car", 2222, connections = connections, paused = paused, hostKey = "SHA256:x")

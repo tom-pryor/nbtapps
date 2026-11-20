@@ -8,6 +8,12 @@
     <!-- The link to a head unit's agent over Bluetooth serial (RFCOMM), and the serial test: both open a link to a paired car. -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!--
+        From Android 17, connections from the local network to the SSH port for other apps, once the user allows other
+        devices on its screen: asked for then, and only then. Android shows it as Nearby devices, with Bluetooth, and
+        does not ask again where Bluetooth is allowed already.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <!--
         A job on a head unit runs under a foreground service, so a long transfer survives the screen turning
         off. The connected-device type needs one of a list of permissions; CHANGE_NETWORK_STATE is the one in
         it that is granted without asking. The notification shows where the job stands, and the wake lock

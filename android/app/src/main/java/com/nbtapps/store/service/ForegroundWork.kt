@@ -135,6 +135,13 @@ object ForegroundWork {
     fun terminalToOpen(terminal: TerminalState): String? = terminal.headUnitId.takeIf { terminal.active }
 
     /**
+     * The head unit whose "SSH from other apps" a tap on the notification opens: the one the port is on, or being
+     * switched on, for, where no terminal is open or being opened ([terminalToOpen] comes first). Null otherwise.
+     */
+    fun sshAccessToOpen(terminal: TerminalState, port: SshPortState): String? =
+        port.headUnitId.takeIf { port.active && !terminal.active }
+
+    /**
      * The notification for [reasons]: the first one's title, line and bar, and below them a line for each of the
      * others; with the SSH port among them, the action that turns it off, "Turn off" where the port is the main reason
      * and "Turn off SSH port" beside another. Null where there is no reason: the service stops.
