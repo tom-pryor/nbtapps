@@ -22,9 +22,11 @@
     left alone; connections that wait for a late one; one that never appears, none there; one that goes by
     itself; one that ignores SIGTERM; pty false with no ptys, true with another driver's names
   - the limit: four connections, a fifth too-many with nothing made for it, a slot free again after an end
-  - the state file: a relay killed with SIGKILL, and the next start ending its servers, their leftovers and its
-    driver and removing the keys folders; unrelated processes named in it, and nonsense, signalling none; an older
-    relay still running ended before the new one listens, also one that does not end at SIGTERM, timed
+  - the state file, with start times of the size QNX gives (START_OFFSET): a relay killed with SIGKILL, and the
+    next start ending its servers, their leftovers and its driver and removing the keys folders; unrelated
+    processes named in it, and nonsense (also start times in any form but the one written), signalling none;
+    start times up to 2^64 - 1 read; an older relay still running ended before the new one listens, also one that
+    does not end at SIGTERM, timed
   - with this machine's Dropbear (build/ssh/host, make ssh-host) and its OpenSSH client, through ssh_proxy.py as
     the proxy command: a login with a command and its exit status, one on a pty, a wrong key refused, the host key
     of the answer the one the client sees, a wrong one refused. Skipped, and said so, when there is no ssh.
@@ -81,10 +83,21 @@ def alive(pid):
         return False
 
 
+# Added by every relay of the tests to the start times it reads (NBT_SSHRELAY_TEST_START_OFFSET), so that its state
+# file holds start times of the size QNX gives (nanoseconds since 1970: 19 digits, far above the 2^53 - 1 the JSON
+# reader takes as a number).
+START_OFFSET = 1700000000000000000
+
+
 def start_time(pid):
-    """A process's start time as the relay reads it on Linux: the 22nd field of /proc/<pid>/stat."""
+    """A process's start time as the relay reads it: the 22nd field of /proc/<pid>/stat, with START_OFFSET."""
     with open("/proc/%d/stat" % pid) as f:
-        return int(f.read().rsplit(")", 1)[1].split()[19])
+        return int(f.read().rsplit(")", 1)[1].split()[19]) + START_OFFSET
+
+
+def rec(pid, start):
+    """A process as the state file records it."""
+    return {"pid": pid, "start": str(start)}
 
 
 class Driver:
@@ -168,7 +181,7 @@ class Relay:
         """Started as the agent starts it, also over a relay that runs or died in the same folder: returns once
         this one says it listens."""
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "NBT_TMP_DIR": self.tmp, "NBT_DATA_DIR": self.data,
-               "NBT_APP_DIR": self.app, "NBT_CHANNEL": "ssh"}
+               "NBT_APP_DIR": self.app, "NBT_CHANNEL": "ssh", "NBT_SSHRELAY_TEST_START_OFFSET": str(START_OFFSET)}
         if self.server:
             env["NBT_SSHRELAY_TEST_SERVER"] = self.server
             env["NBT_SSHRELAY_TEST_SERVER_NAME"] = os.path.basename(os.path.realpath(sys.executable))
@@ -922,7 +935,9 @@ def test_tidy_after_kill():
                 s = r.state_file()
             except (OSError, ValueError):
                 return False
-            return (s["relay"]["pid"] == r.proc.pid and s.get("driver", {}).get("pid") == d and
+            # Start times of QNX's size (START_OFFSET), as strings of digits.
+            return (s["relay"] == rec(r.proc.pid, start_time(r.proc.pid)) and s.get("driver") == rec(d, start_time(d)) and
+                    all(x["start"] == str(start_time(x["pid"])) for x in s["servers"]) and
                     sorted(x["pid"] for x in s["servers"]) == servers and
                     all(left["leader"] in [l["pid"] for l in x["logins"]]
                         for x, left in zip(sorted(s["servers"], key=lambda x: x["pid"]), lefts)))
@@ -980,11 +995,10 @@ def test_state_strangers():
     try:
         # Each pid now someone else's: a wrong start time, or the right one with another program, or (p[3]) a
         # leader with the right start time named as a server, which runs another program.
-        write_state(r, {"v": 1, "relay": {"pid": p[0], "start": start_time(p[0])},
-                        "driver": {"pid": p[1], "start": start_time(p[1])},
-                        "servers": [{"pid": o, "start": start_time(o),
-                                     "logins": [{"pid": p[2], "start": start_time(p[2]) + 1}]},
-                                    {"pid": p[3], "start": start_time(p[3]) + 7, "logins": []}]})
+        write_state(r, {"v": 1, "relay": rec(p[0], start_time(p[0])),
+                        "driver": rec(p[1], start_time(p[1])),
+                        "servers": [dict(rec(o, start_time(o)), logins=[rec(p[2], start_time(p[2]) + 1)]),
+                                    dict(rec(p[3], start_time(p[3]) + 7), logins=[])]})
         r.start()
         r.wait_log("left by the relay before: 2 server(s) recorded, 0 still running; SIGHUP to 0 process group(s) "
                    "of 0 session(s)")
@@ -1006,16 +1020,26 @@ def test_state_strangers():
 def test_state_nonsense():
     victim = stranger()
     try:
-        good = {"v": 1, "relay": {"pid": 99999999, "start": 5}, "servers": [
-            {"pid": 99999998, "start": 5, "logins": [{"pid": victim.pid, "start": start_time(victim.pid)}]}]}
+        good = {"v": 1, "relay": rec(99999999, 5), "servers": [
+            dict(rec(99999998, 5), logins=[rec(victim.pid, start_time(victim.pid))])]}
+
+        def driver_start(text):
+            return json.dumps(dict(good, driver={"pid": 4242, "start": text}))
         cases = [
             ("not JSON", "pid 123\n"),
             ("half a file", json.dumps(good)[:40]),
-            ("no servers", json.dumps({"v": 1, "relay": {"pid": 99999999, "start": 5}})),
+            ("no servers", json.dumps({"v": 1, "relay": rec(99999999, 5)})),
             ("v 2", json.dumps(dict(good, v=2))),
-            ("a relay of pid 1", json.dumps(dict(good, relay={"pid": 1, "start": 5}))),
+            ("a relay of pid 1", json.dumps(dict(good, relay=rec(1, 5)))),
             ("a key too many", json.dumps(dict(good, more=1))),
-            ("a negative start", json.dumps(dict(good, driver={"pid": 4242, "start": -1}))),
+            ("a start as a number", driver_start(5)),
+            ("a negative start", driver_start("-1")),
+            ("a start with a sign", driver_start("+5")),
+            ("a start with a leading zero", driver_start("05")),
+            ("an empty start", driver_start("")),
+            ("a start with a space", driver_start("5 ")),
+            ("a start above 2^64 - 1", driver_start("18446744073709551616")),
+            ("a start of 21 digits", driver_start("100000000000000000000")),
         ]
         for i, (what, text) in enumerate(cases):
             r = Relay("nonsense%d" % i, "echo")
@@ -1027,6 +1051,14 @@ def test_state_nonsense():
             check(r.state_file()["relay"]["pid"] == r.proc.pid, "%s: the state file was not replaced" % what)
             c, a = keyed(r)
             check("hostKeys" in a, "%s: %r" % (what, a))
+            r.stop()
+        # Start times of every size up to 2^64 - 1, and 0, are read; none of these pids is there.
+        for i, text in enumerate(["0", "315500000000000000", "18446744073709551615"]):
+            r = Relay("startsize%d" % i, "echo")
+            write_state(r, {"v": 1, "relay": rec(99999999, text), "driver": {"pid": 4242, "start": text}, "servers": []})
+            r.start()
+            r.wait_log("its pty driver, pid 4242, is not there")
+            check("cannot be read" not in r.log() and alive(victim.pid), "a start of %s: %s" % (text, r.log()))
             r.stop()
         # The same file whole: that session leader, with its start time, is ended.
         r = Relay("nonsense-control", "echo")

@@ -4,9 +4,12 @@
 //
 // The file, ${tmp}/sshrelay.state, one line of JSON:
 //   { "v": 1, "relay": REC, "driver": REC, "servers": [ { "pid", "start", "logins": [ REC, ... ] }, ... ] }
-// where REC is { "pid": N, "start": T }: a pid above 1 and the process's start time as the process list gives it
-// (processes.hpp), 0 when it was not known. "driver" is left out when there is none. Anything else (another key,
-// another type, a pid of 1 or less, more than 64 servers or logins) and the whole file is ignored.
+// where REC is { "pid": N, "start": "T" }: a pid above 1 and the process's start time as the process list gives it
+// (processes.hpp), "0" when it was not known. The start time is a string of decimal digits, not a number: on QNX it
+// is in nanoseconds, 18 digits or more, and the JSON reader takes no integer above 2^53 - 1 (agent/json.hpp). It is
+// read back only in the form it is written in: 1 to 20 digits, no leading zero, at most 2^64 - 1. "driver" is left
+// out when there is none. Anything else (another key, another type, a pid of 1 or less, a start time in another
+// form, more than 64 servers or logins) and the whole file is ignored.
 //
 // What is checked before a recorded process or session is signalled at a start:
 //   - never pid 1 or below, the relay's own pid, group or session;
@@ -44,19 +47,42 @@ const size_t kMaxStateServers = 64;
 const size_t kMaxStateBytes = 65536;
 const long kStepMs = 20;
 
+std::string startText(unsigned long long start) {
+    char text[32];
+    snprintf(text, sizeof text, "%llu", start);
+    return text;
+}
+
+// A start time as startText writes it, and nothing else: 1 to 20 digits, no leading zero, at most 2^64 - 1.
+bool readStart(const nbt::json::Value& v, unsigned long long* out) {
+    if (!v.isString()) return false;
+    const std::string& text = v.string();
+    if (text.empty() || text.size() > 20 || (text[0] == '0' && text.size() > 1)) return false;
+    unsigned long long value = 0;
+    const unsigned long long max = ~0ULL;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] < '0' || text[i] > '9') return false;
+        unsigned digit = (unsigned)(text[i] - '0');
+        if (value > (max - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return true;
+}
+
+bool readPid(const nbt::json::Value& v, long* out) {
+    if (!v.isInteger() || v.integer() <= 1 || v.integer() > 0x7FFFFFFF) return false;
+    *out = (long)v.integer();
+    return true;
+}
+
 void writeRecorded(nbt::json::Writer& w, const Recorded& r) {
-    w.beginObject().key("pid").integer(r.pid).key("start").integer((int64_t)r.start).endObject();
+    w.beginObject().key("pid").integer(r.pid).key("start").string(startText(r.start)).endObject();
 }
 
 bool readRecorded(const nbt::json::Value& v, Recorded* out) {
     if (!v.isObject() || v.size() != 2) return false;
-    nbt::json::Value pid = v.find("pid"), start = v.find("start");
-    if (!pid.isInteger() || !start.isInteger() || pid.integer() <= 1 || pid.integer() > 0x7FFFFFFF || start.integer() < 0) {
-        return false;
-    }
-    out->pid = (long)pid.integer();
-    out->start = (unsigned long long)start.integer();
-    return true;
+    return readPid(v.find("pid"), &out->pid) && readStart(v.find("start"), &out->start);
 }
 
 const ProcessEntry* findEntry(const std::vector<ProcessEntry>& list, long pid) {
@@ -92,7 +118,7 @@ std::string stateText(const State& state) {
     w.key("servers").beginArray();
     for (size_t i = 0; i < state.servers.size(); ++i) {
         const State::Server& s = state.servers[i];
-        w.beginObject().key("pid").integer(s.server.pid).key("start").integer((int64_t)s.server.start);
+        w.beginObject().key("pid").integer(s.server.pid).key("start").string(startText(s.server.start));
         w.key("logins").beginArray();
         for (size_t k = 0; k < s.logins.size(); ++k) writeRecorded(w, s.logins[k]);
         w.endArray().endObject();
@@ -115,13 +141,11 @@ bool readState(const std::string& text, State* out) {
     for (size_t i = 0; i < servers.size(); ++i) {
         nbt::json::Value s = servers.at(i);
         if (!s.isObject() || s.size() != 3) return false;
-        nbt::json::Value pid = s.find("pid"), start = s.find("start"), logins = s.find("logins");
+        nbt::json::Value logins = s.find("logins");
         State::Server server;
-        if (!pid.isInteger() || !start.isInteger() || pid.integer() <= 1 || pid.integer() > 0x7FFFFFFF ||
-            start.integer() < 0) {
+        if (!readPid(s.find("pid"), &server.server.pid) || !readStart(s.find("start"), &server.server.start)) {
             return false;
         }
-        server.server = Recorded((long)pid.integer(), (unsigned long long)start.integer());
         if (!logins.isArray() || logins.size() > kMaxNoted) return false;
         for (size_t k = 0; k < logins.size(); ++k) {
             Recorded r;

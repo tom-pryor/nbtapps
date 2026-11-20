@@ -43,6 +43,12 @@ std::vector<long> groupsInSessions(const std::vector<ProcessEntry>& list, const 
 // a text cut short after the session gives a start of 0.
 bool parseStat(const std::string& text, ProcessEntry* out);
 
+#ifdef NBT_SSHRELAY_TEST_HOOK
+// Tests only: added to every start time that is not 0, so that the relay's tests on this machine meet start times
+// of the size QNX gives (nanoseconds, 18 digits and more).
+void setStartOffset(unsigned long long offset);
+#endif
+
 }  // namespace sshrelay
 
 #endif
