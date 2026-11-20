@@ -419,6 +419,7 @@ void Agent::adopt(Link* link) {
     s->openedMs = s->heardMs = s->pingedMs = clock_->nowMs();
     sessions_.push_back(s);
     note(linkName(s->number) + " opened (" + s->peer->linkKind() + (s->dialled ? ", dialled by the car" : "") + ")");
+    if (s->dialled) rememberDial(s);
 }
 
 // ---- the loop -----------------------------------------------------------------------------------------------------
@@ -1427,7 +1428,12 @@ void Agent::pairingIssue(Session* s, int64_t id, const json::Value& params) {
     // The link's address, where it has one: written with the pairing. A phone paired again over a link with no
     // address keeps the one it had.
     const PairedPhone* before = phones_.find(s->phoneId);
-    if (!colonAddress(s->peer->linkPhoneAddress(), &phone.address)) phone.address = before != 0 ? before->address : "";
+    bool fromLink = colonAddress(s->peer->linkPhoneAddress(), &phone.address);
+    if (!fromLink) phone.address = before != 0 ? before->address : "";
+    // A phone that pairs on a link the car dialled has been reached by the dial at that address; and what the dial
+    // has shown of an address holds for the phone paired again with it.
+    phone.dialled = (fromLink && s->dialled) ||
+                    (before != 0 && before->dialled && !phone.address.empty() && before->address == phone.address);
     std::string why;
     if (!random_->secret(phone.key, sizeof phone.key)) {
         refuse(s, id, "internal", "this head unit has no random bytes to make a key of");
@@ -1459,7 +1465,20 @@ void Agent::rememberAddress(Session* s) {
     shareAddresses();
 }
 
-void Agent::shareAddresses() { addresses_.set(phones_.addresses()); }
+void Agent::rememberDial(Session* s) {
+    std::string why;
+    bool changed = false;
+    if (!phones_.setDialled(s->peer->linkPhoneAddress(), &changed, &why)) {
+        note(linkName(s->number) + ": that the car's dial reached the phone could not be kept: " + why);
+        return;
+    }
+    if (!changed) return;
+    note(linkName(s->number) + ": the car's dial has reached this phone's app, which is kept: a link the phone opens "
+         "itself is now left to another program while one that is declared for a serial service runs, or may");
+    shareAddresses();
+}
+
+void Agent::shareAddresses() { addresses_.set(phones_.addresses(), phones_.dialledAddresses()); }
 
 // ---- the paired phones --------------------------------------------------------------------------------------------
 
@@ -1572,6 +1591,7 @@ void Agent::writeSerial(json::Writer& w) {
     w.key("asks").integer(st.asks).key("asksListed").integer(st.asksListed).key("asksNotListed").integer(st.asksNotListed);
     w.key("asksNoAnswer").integer(st.asksNoAnswer).key("askErrors").integer(st.askErrors);
     w.key("checks").integer(st.checks).key("checksRestored").integer(st.checksRestored).key("refusals").integer(st.refusals);
+    w.key("leftUnread").integer(st.leftUnread);
     w.endObject();
     w.key("problems").beginObject().key("recorded").integer(st.problemsRecorded);
     w.key("counted").integer(st.problemsCounted).endObject();

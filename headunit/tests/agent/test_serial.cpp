@@ -809,13 +809,16 @@ static void testListener() {
         link = dialled(listener, again, trace);
         exchange(again, link, "again", "wieder");
 
-        // Not ours: a request for another service, a link no phone asked for, one the car refused, and the node
-        // that was there at the start.
+        // Not ours: a node that comes with a request for another service only, which brings no serial node and is
+        // not kept for one, so the node came with no request; a link no phone asked for, one the car refused, and the
+        // node that was there at the start.
         Node foreign(dir + "/btspp", 2), unasked(dir + "/btspp", 3);
         gap.phone(kInfServiceRequest, "Another");
+        CHECK(trace.saw("a phone asked for a serial link (service 'Another'): another service's, left alone"));
         foreign.appear();
         CHECK(acceptWithin(listener, 500) == 0);
-        CHECK_IN(trace.text(), trace.saw("btspp2: the phone asked for another service with it"));
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp2: no request from a phone came with it, so it is not ours", 4000));
+        CHECK(!trace.saw("btspp2 opened"));
         gap.phone(kInfServiceRequest, kCarSerialService);
         gap.phone(kInfServiceRequestError, kCarSerialService);
         CHECK_IN(trace.text(), trace.saw("the car refused the phone's link (1 so far). The phone is not in the car's "
@@ -1139,6 +1142,65 @@ static void testListener() {
                                                 "log has nothing", 2000));
         listener.stop();
     }
+}
+
+// ---- requests for services that bring no serial node ----------------------------------------------------------------
+
+// A phone asks for audio or hands-free as well as for serial links. Only a request that may bring a serial node is
+// kept for the nodes: one for another service, within the tracker's window, does not have the next serial node left
+// alone, nor does its refusal take a serial request out.
+static void testOtherServices() {
+    std::string dir = freshFolder("other-services");
+    Trace trace;
+    LinksGone gone;
+    FakeGap gap(&trace);
+    FakeGate gate(&trace);
+    SerialListener listener(&gap, &gate, &trace, configFor(dir));
+    std::string why;
+    CHECK_IN(why, listener.start(&why));
+    gap.attach();
+    CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+
+    // A request for another service, then the agent's app's link on a new node, well within the window: taken.
+    Node first(dir + "/btspp", 0);
+    gap.phone(kInfServiceRequest, "AudioSink");
+    pause(100);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    first.appear();
+    Link* link = dialled(listener, first, trace);
+    CHECK(trace.saw("btspp0: it opened with the magic bytes, so the link is the agent's"));
+    CHECK(!trace.saw("btspp0: no request") && !trace.saw("another service with it"));
+    exchange(first, link, "ours", "unser");
+
+    // Another service's request, and a serial request's node after it: decided on as before, and let go for what
+    // the phone said, not left alone for the other request.
+    Node second(dir + "/btspp", 1);
+    gap.phone(kInfServiceRequest, "Handsfree");
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    second.appear();
+    second.say("\x10\x20\x30\x40 another app's opening");
+    CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
+    CHECK(trace.saw("btspp1 opened") && trace.saw("(it did not open with the magic bytes)"));
+    second.hangUp();
+    second.vanish();
+    pause(450);
+
+    // The car refuses the other service's request: the serial request is still there for its node.
+    Node third(dir + "/btspp", 2);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    gap.phone(kInfServiceRequestError, "AudioSink");
+    third.appear();
+    Link* other = dialled(listener, third, trace);
+    CHECK(trace.saw("btspp2: it opened with the magic bytes, so the link is the agent's"));
+    CHECK(listener.serialStatus().refusals == 0);   // not a refusal of a serial link
+    exchange(third, other, "still", "noch");
+
+    first.hangUp();
+    third.hangUp();
+    CHECK(endsWithin(link, 3000) && endsWithin(other, 3000));
+    delete link;
+    delete other;
+    listener.stop();
 }
 
 // ---- a refusal ------------------------------------------------------------------------------------------------
@@ -2315,11 +2377,14 @@ struct Car {
     Agent agent;
     SerialListener listener;
 
-    Car() : gap(&trace), gate(&trace), dir(freshFolder("agent")), platform(dir + "/root"),
-            agent(&platform, std::vector<TrustedKey>(), "1.0.0", &clock, &random),
-            listener(&gap, &gate, &trace, configFor(dir)) {
+    // `phones`: the record of paired phones the agent finds when it starts, if not empty.
+    explicit Car(const std::string& phones = std::string())
+        : gap(&trace), gate(&trace), dir(freshFolder("agent")), platform(dir + "/root"),
+          agent(&platform, std::vector<TrustedKey>(), "1.0.0", &clock, &random),
+          listener(&gap, &gate, &trace, configFor(dir)) {
         std::string why;
         CHECK_IN(why, platform.prepare(&why));
+        if (!phones.empty()) CHECK_IN(why, fs::writeFile(platform.stateDir() + "/phones.json", phones, 0600, &why));
         agent.setLog(0);
         CHECK_IN(why, agent.init(&why));
         CHECK_IN(why, listener.start(&why));
@@ -2612,6 +2677,57 @@ static void testAgentDials() {
         app.peer->close("done");
         CHECK(car.sessionsWithin(0, 3000));
         car.listener.stop();
+    }
+    {   // a link the car dialled that the agent takes marks its phone in the record of paired phones: on disk, shared
+        // with the listener, there for the next agent, and gone with the phone
+        const std::string id(32, '1');
+        Car car("{\"version\":1,\"phones\":[{\"phoneId\":\"" + id + "\",\"name\":\"Test phone\",\"key\":\"" +
+                std::string(64, '3') + "\",\"pairedAt\":3,\"address\":\"00:11:22:33:44:55\"}]}\n");
+        PhoneAddressList* ours = car.agent.phoneAddresses();
+        CHECK(ours->has(kDialled) && !ours->dialledBefore(kDialled) && !car.agent.phones().find(id)->dialled);
+        car.listener.stop();
+        SerialConfig config = configFor(car.dir);
+        config.dial.on = true;
+        config.dial.node = car.dir + "/nbtapp";
+        Node node(config.dial.node);
+        car.gap.dialNode = &node;
+        car.gap.phones.push_back(carPhone(kDialled, kConnConnected, 7));
+        SerialListener listener(&car.gap, &car.gate, &car.trace, config);
+        listener.setPhoneAddresses(ours);
+        car.agent.addListener(&listener);
+        car.agent.setSerialDial(&listener);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        car.gap.attach();
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "gap connect BtCtrl nbtapp 00:11:22:33:44:55 NBTApp", 3000));
+        PhoneApp dialled(node);
+        CHECK(car.sessionsWithin(1, 3000));
+        CHECK(ours->dialledBefore(kDialled) && car.agent.phones().find(id)->dialled);
+        std::string file = car.platform.stateDir() + "/phones.json";
+        CHECK_IN(testutil::readFile(file), testutil::readFile(file).find("\"dialled\":true") != std::string::npos);
+        dialled.peer->close("done");
+        node.vanish();
+        car.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+        CHECK(car.sessionsWithin(0, 3000));
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "phone 1: the dialled link has ended", 3000));
+        car.agent.setSerialDial(0);
+        listener.stop();
+        CHECK(waitForSerialLinks(3000));
+        // The agent started again has it.
+        {
+            Agent again(&car.platform, std::vector<TrustedKey>(), "1.0.0", &car.clock, &car.random);
+            again.setLog(0);
+            CHECK_IN(why, again.init(&why));
+            CHECK(again.phoneAddresses()->dialledBefore(kDialled));
+        }
+        // Forgotten: the mark goes with the phone's entry.
+        size_t count = 0;
+        CHECK_IN(why, car.agent.phones().forget(id, &count, &why) && count == 1);
+        Agent after(&car.platform, std::vector<TrustedKey>(), "1.0.0", &car.clock, &car.random);
+        after.setLog(0);
+        CHECK_IN(why, after.init(&why));
+        CHECK(!after.phoneAddresses()->has(kDialled) && !after.phoneAddresses()->dialledBefore(kDialled));
+        CHECK(testutil::readFile(file).find("dialled") == std::string::npos);
     }
 }
 
@@ -3144,6 +3260,159 @@ static void testHold() {
     }
 }
 
+// ---- a phone's own link left to another program ---------------------------------------------------------------------
+
+// A listener for the rule that leaves a phone's own link to another program unread, with its three conditions true
+// unless a case changes one: the car dials; a program declared for a serial service (radiod) runs; and the phone
+// kDialled is one of the agent's, whose app a link the car dialled has reached before. The phone's service list never
+// names the agent's service, so nothing is dialled, and polls come only once, at the start.
+struct Rule {
+    Trace trace;
+    LinksGone gone;
+    FakeGap gap;
+    FakeGate gate;
+    std::string dir;
+    Machine machine;
+    Store store;
+    SerialServices services;
+    PhoneAddressList ours;
+    SerialConfig config;
+    SerialListener* listener;
+
+    explicit Rule(const std::string& name)
+        : gap(&trace), gate(&trace), dir(freshFolder(name)), machine(dir + "/root"), store(&machine),
+          services(&machine, &store, &trace), listener(0) {
+        config = configFor(dir);
+        config.dial.on = true;
+        config.dial.node = dir + "/nbtapp";
+        config.dial.signalWaitMs = 300;
+        config.dial.pollFirstMs = config.dial.pollLaterMs = 3600000;
+        gap.queryLists = false;
+        gap.phones.push_back(carPhone(kDialled, kConnConnected, 7));
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        machine.running = "radiod";
+        std::vector<std::string> one(1, kDialled);
+        ours.set(one, one);
+    }
+    ~Rule() {
+        if (listener != 0) {
+            listener->stop();
+            services.setRemover(0);
+            delete listener;
+        }
+        if (getenv("NBT_TEST_TRACE") != 0) fprintf(stderr, "---- %s\n%s", dir.c_str(), trace.text().c_str());
+    }
+    void start() {
+        listener = new SerialListener(&gap, &gate, &trace, config);
+        services.setRemover(listener);
+        listener->setServices(&services);
+        listener->setPhoneAddresses(&ours);
+        std::string why;
+        CHECK_IN(why, listener->start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        // The poll at the start, with the dial on: its ask, and that it found the app not listening.
+        if (config.dial.on) CHECK_IN(trace.text(), sawWithin(trace, "its app is not listening", 3000));
+    }
+    // What the phone that has the near end of `node` would read now, as another program that opens the node does.
+    std::string otherReads(Node& node, size_t want) {
+        int fd = node.openNear();
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+        std::string got;
+        double end = monoNow() + 2.0;
+        while (got.size() < want && monoNow() < end) {
+            char buffer[256];
+            ssize_t n = read(fd, buffer, sizeof buffer);
+            if (n > 0) got.append(buffer, (size_t)n);
+            else pause(2);
+        }
+        close(fd);
+        return got;
+    }
+};
+
+// What the rule changes, and that it changes nothing in any other case.
+static void testLeftUnread() {
+    const std::string opening = "\x10\x20\x30\x40 another app's opening";
+    {   // all three hold: the node is never opened or read, no hold goes on, the other program reads the link whole
+        // from its first byte, and the phone's request still brings the ask that reaches the app by the dial
+        Rule r("left-unread");
+        r.start();
+        unsigned asks = r.trace.count("gap query 00:11:22:33:44:55");
+        Node node(r.dir + "/btspp", 0);
+        r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        node.appear();
+        node.say(opening);
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp0: left to another program, never opened or read: the car dials "
+                                                    "this phone of the agent's, whose app a dialled link has reached, and a "
+                                                    "program declared for a serial service is running, or whether one is "
+                                                    "cannot be told", 2000));
+        CHECK(r.otherReads(node, opening.size()) == opening);
+        CHECK_IN(r.trace.text(), countWithin(r.trace, "gap query 00:11:22:33:44:55", asks + 1, 3000));
+        CHECK(acceptWithin(*r.listener, 100) == 0);
+        CHECK_IN(r.trace.text(), !r.trace.saw("btspp0 opened") && !r.trace.saw("gate hold") && !r.trace.saw("btspp0 let go"));
+        CHECK(r.trace.loggedCount("left to another program") == 1 && r.listener->serialStatus().leftUnread == 1);
+        bool closed = false;
+        CHECK(node.hear(1, 100, &closed).empty());   // nothing written into it
+        node.hangUp();
+        node.vanish();
+        pause(450);
+
+        // The rule's cost: a link the agent's own app opens on such a phone, with the magic bytes, is left alone too.
+        // The app is reached by the dial.
+        Node app(r.dir + "/btspp", 1);
+        r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        app.appear();
+        app.say(kMagic);
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp1: left to another program, never opened or read", 2000));
+        CHECK(acceptWithin(*r.listener, 300) == 0 && !r.trace.saw("btspp1 opened") && !r.trace.saw("gate hold"));
+        CHECK(r.otherReads(app, kMagic.size()) == kMagic && r.listener->serialStatus().leftUnread == 2);
+        app.hangUp();
+        app.vanish();
+        CHECK(!r.trace.logged("00:11:22") && !r.trace.logged("001122"));
+    }
+    // Each of the three not so, and a request with no address: the link is decided on as ever, with the hold on
+    // from the request, and the agent's app's link is the agent's.
+    for (int c = 0; c < 5; ++c) {
+        Rule r("left-unread-not");
+        const char* address = "001122334455";
+        if (c == 0) r.config.dial.on = false;
+        if (c == 1) r.machine.running = "";
+        if (c == 2) address = "66:77:88:99:AA:BB";                       // not one of the agent's phones
+        if (c == 3) r.ours.set(std::vector<std::string>(1, kDialled));   // the agent's, never reached by a dial
+        if (c == 4) address = "";
+        r.start();
+        Node node(r.dir + "/btspp", 0);
+        r.gap.phone(kInfServiceRequest, kCarSerialService, address);
+        CHECK_IN(r.trace.text(), r.trace.saw("gate hold radiod"));
+        node.appear();
+        Link* link = dialled(*r.listener, node, r.trace);
+        CHECK_IN(r.trace.text(), r.trace.saw("btspp0 opened") && r.trace.saw("btspp0: it opened with the magic bytes"));
+        CHECK(!r.trace.saw("left to another program") && r.listener->serialStatus().leftUnread == 0);
+        node.hangUp();
+        CHECK(endsWithin(link, 3000));
+        delete link;
+    }
+    {   // the rule held at the request, and the program declared for a serial service is gone when the node comes:
+        // the link is decided on as any other
+        Rule r("left-unread-changed");
+        r.start();
+        Node node(r.dir + "/btspp", 0);
+        r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        CHECK(!r.trace.saw("gate hold"));
+        r.services.setDeclared(std::vector<SerialServiceOwner>());
+        node.appear();
+        Link* link = dialled(*r.listener, node, r.trace);
+        CHECK_IN(r.trace.text(), r.trace.saw("btspp0: the phone's request was to be left to another program, but no "
+                                             "program declared for a serial service is running now: the link is "
+                                             "decided on as any other"));
+        CHECK(r.listener->serialStatus().leftUnread == 0);
+        node.hangUp();
+        CHECK(endsWithin(link, 3000));
+        delete link;
+    }
+}
+
 // ---- the node's reader ----------------------------------------------------------------------------------------------
 
 // What a stand-in for the car's Bluetooth stack holds for a node: bytes the phone sent that wait ahead of the node,
@@ -3482,7 +3751,10 @@ static void testReset() {
     config.resetArmedMs = 1500;
     // The car answers each ServiceDisconnect, as it does: one at a time, so one with no answer would hold up the next.
     gap.answersDisconnect = true;
+    std::string file = dir + "/serial-problems.log";
+    ProblemLog problems(file, "1.0.0 (build test)");   // before the listener, which writes to it until it stops
     SerialListener listener(&gap, &gate, &trace, config);
+    listener.setProblemLog(&problems);
     std::string why;
     int64_t forMs = 0;
     // Not set up: nothing can be asked.
@@ -3572,6 +3844,41 @@ static void testReset() {
     fifth.vanish();
     CHECK(endsWithin(link, 3000));
     delete link;
+    pause(450);
+
+    // Sent, and the link ends before ServiceDisconnect is to go: nothing goes to the car, the log and the problem
+    // file say so, and the reset is done. ServiceDisconnect for a phone-opened link the car has no live link for can
+    // hold that instance up for well over a minute.
+    Node sixth(dir + "/btspp", 5);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    sixth.appear();
+    link = dialled(listener, sixth, trace);
+    CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetSent);
+    sixth.hangUp();
+    sixth.vanish();
+    CHECK_IN(trace.text(), sawWithin(trace, "serial.reset: no serial node of the listener's is there any more, ", 2000));
+    CHECK(trace.saw(" ms after it was asked for: the link has ended, so nothing is sent to the car"));
+    pause(300);
+    CHECK_IN(trace.text(), trace.count("gap disconnect") == before + 1 && !trace.saw("btspp5 went "));
+    CHECK(endsWithin(link, 3000));
+    delete link;
+    double end = monoNow() + 3.0;
+    while (testutil::readFile(file).find("nothing was sent") == std::string::npos && monoNow() < end) pause(10);
+    CHECK_IN(testutil::readFile(file), testutil::readFile(file).find(": serial.reset: the link had ended before "
+                                                                     "ServiceDisconnect was to go, so nothing was "
+                                                                     "sent\n") != std::string::npos);
+    pause(450);
+    // The next serial.reset with a node open is sent as ever.
+    Node seventh(dir + "/btspp", 6);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    seventh.appear();
+    link = dialled(listener, seventh, trace);
+    CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetSent);
+    CHECK_IN(trace.text(), countWithin(trace, "gap disconnect", before + 2, 2000));
+    seventh.hangUp();
+    seventh.vanish();
+    CHECK(endsWithin(link, 3000));
+    delete link;
 
     // Nothing of the phone's in the log.
     CHECK(!trace.saw("Test Phone") && !trace.saw("AABBCCDDEEFF"));
@@ -3639,13 +3946,17 @@ static void testOptions() {
           "whole frames left over from an earlier link. Any other is let go: its node is closed for the program it "
           "belongs to if a program declared for a serial service is running, the gate has seen another program open "
           "the node, or a program of software put on by hand is running, and otherwise read until the link ends or one of "
-          "those signs comes");
+          "those signs comes. A link that a phone of the agent's opens, whose app a link the car dialled has reached, is "
+          "not opened at all while a program declared for a serial service is running, or may be: it is left to that "
+          "program, and the app is reached by the dial");
     config.decideMs = 1200;
     config.letGoKeepsNode = true;
+    config.dial.on = false;
     CHECK(describeSerialDecide(config) ==
           "a link is the agent's if it opens with the magic bytes within 1200 ms (--decide; the protocol's time is "
           "500 ms) of the open of its node, after any whole frames left over from an earlier link. Any other is let "
           "go: its node stays open, unread, until the link ends (--decide-hold)");
+    config.dial.on = true;
     CHECK(config.lingerMs == (unsigned)kSerialLingerMs &&
           describeSerialLinger(config) == "a link the agent ends keeps its node, read and with what comes dropped, until "
                                           "the phone ends the link; the log says so if it is still up 5000 ms after the "
@@ -3781,6 +4092,7 @@ int main(int argc, char** argv) {
     testReader();   // first: the one line of the process on whether a read came back on time is its
     testLink();
     testListener();
+    testOtherServices();
     testRegistrationCheck();
     testPresence();
     testDial();
@@ -3793,6 +4105,7 @@ int main(int argc, char** argv) {
     testLeftOvers();
     testReset();
     testHold();
+    testLeftUnread();
     printf("test_serial: ok\n");
     return 0;
 }

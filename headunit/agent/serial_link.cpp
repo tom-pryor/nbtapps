@@ -889,8 +889,12 @@ void SerialListener::sppState(SppService::State) {
 
 void SerialListener::sppPhone(SppService::Phone what, const std::string& service, bool parsed,
                               const std::string& address) {
-    // The stack does not say more than this about whose link it will be: what the phone says first decides.
+    // The stack does not say more than this about whose link it will be: what the phone says first decides. A request
+    // that names neither never brings a serial node (audio, hands-free).
     bool maybeOurs = service == config_.name || service == config_.carService;
+    // Or the rule does, which leaves the link to another program without a look at it (leftToOther()).
+    std::string leaveWhy;
+    bool leave = what == SppService::kPhoneAsked && maybeOurs && leftToOther(address, &leaveWhy);
     pthread_mutex_lock(&mu_);
     double now = monoNow();
     // The car ends a phone's pending request when its own dial to the phone comes up, and says so just before the
@@ -911,22 +915,27 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
     pthread_mutex_lock(&mu_);
     unsigned refused = 0;
     if (overtaken) {
-        tracker_.onRefused(maybeOurs);
+        tracker_.onRefused(true);
         reqAt_ = 0;   // no link comes of the request: the dial's is the link
         holdWhy_ = "the phone's request ended as the car's own dial came up";
     } else if (what == SppService::kPhoneAsked) {
         askedAt_ = now;   // for any service: the registration check keeps out of the way of a phone that asks
-        tracker_.onPhoneRequest(monoSec(), maybeOurs, address);
-        if (maybeOurs) {
+        // Only a request that may bring a serial node is kept for the nodes: one for another service would stay for
+        // the tracker's window and have the next serial node, which may be the agent's, left alone.
+        if (maybeOurs) tracker_.onPhoneRequest(monoSec(), true, address, leave);
+        // A request whose link is left to another program is not one whose link may be the agent's: no hold, and
+        // nothing for the dial to wait for.
+        if (maybeOurs && !leave) {
             reqAt_ = now;
             holdWhy_ = "a phone has asked for a link";
         }
         // The car is dialled for that phone if no link of the agent's comes of it: the car names the same service
-        // for a link to the agent's UUID as for any other, so whose UUID it was for cannot be told.
+        // for a link to the agent's UUID as for any other, so whose UUID it was for cannot be told. That is how the
+        // app is reached when the phone's own link is left to another program.
         if (config_.dial.on) rules_.phoneAsked(address, (int64_t)(now * 1000.0));
     } else if (what == SppService::kPhoneRefused) {
-        tracker_.onRefused(maybeOurs);
         if (maybeOurs) {
+            tracker_.onRefused(true);
             refused = ++refused_;
             reqAt_ = 0;   // no link comes of it
             holdWhy_ = "the car refused the phone's link";
@@ -935,14 +944,15 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
             problem("refusal", text);
         }
     }
-    // The link's node appears some tens of milliseconds after the request, and has to be opened at once.
+    // The link's node appears some tens of milliseconds after the request, and has to be opened at once; or, left to
+    // another program, marked so before it would be taken.
     if (maybeOurs && what != SppService::kPhoneRefused) {
         hotUntil_ = now + config_.linkWaitMs / 1000.0;
         pthread_cond_signal(&wake_);
     }
     pthread_mutex_unlock(&mu_);
     // On, before the car accepts the link and its node is there; or off again, if the car has refused it.
-    if (maybeOurs && what != SppService::kPhoneLinked) updateHold();
+    if (maybeOurs && what != SppService::kPhoneLinked && !leave) updateHold();
     // What can be found out about it, for the first refusal and every 20th: the serial nodes there now, and what
     // the car's device list says of the phone, which the line waits for.
     if (refused == 1 || (refused && refused % 20 == 0)) {
@@ -1232,18 +1242,33 @@ void SerialListener::tendReset() {
         // The nodes this listener opened, that are there now. Someone else's are not watched.
         bool present[NodeTracker::kNodes];
         scanNodes(present);
+        bool any = false;
         pthread_mutex_lock(&mu_);
-        for (int i = 0; i < NodeTracker::kNodes; ++i) present[i] = present[i] && tracker_.state(i) == NodeTracker::kOurs;
+        for (int i = 0; i < NodeTracker::kNodes; ++i) {
+            present[i] = present[i] && tracker_.state(i) == NodeTracker::kOurs;
+            any = any || present[i];
+        }
         pthread_mutex_unlock(&mu_);
-        // One ServiceDisconnect at a time: while another waits for its answer, this one waits its turn, which comes
-        // within the time the other is given (SppService::setDisconnectReplyTime): the dial's clean-up sends no
-        // more while it waits (tendCleanup()), and this comes first at every pass.
-        bool waits = false;
-        bool sent = spp_.disconnectPhone(asked.device, asked.instance, asked.service, &waits);
+        // The node that was open when serial.reset was asked for has gone since, in the delay or while another
+        // ServiceDisconnect waited: the link has ended. Nothing is sent then, and the reset is done, with nothing to
+        // watch. A ServiceDisconnect for the phone-opened link when the car has no live link there can hold that
+        // instance up for well over a minute, which keeps phones' links out for as long.
+        bool waits = false, sent = false;
+        if (any) {
+            // One ServiceDisconnect at a time: while another waits for its answer, this one waits its turn, which
+            // comes within the time the other is given (SppService::setDisconnectReplyTime): the dial's clean-up sends
+            // no more while it waits (tendCleanup()), and this comes first at every pass.
+            sent = spp_.disconnectPhone(asked.device, asked.instance, asked.service, &waits);
+        }
         pthread_mutex_lock(&mu_);
         if (reset_.askedAt == asked.askedAt) reset_.waiting = waits;   // unless a later serial.reset took its place
         pthread_mutex_unlock(&mu_);
-        if (sent) {
+        if (!any) {
+            say("serial.reset: no serial node of the listener's is there any more, %.0f ms after it was asked for: the "
+                "link has ended, so nothing is sent to the car", (now - asked.askedAt) * 1000.0);
+            problem("reset-not-sent", "serial.reset: the link had ended before ServiceDisconnect was to go, so nothing "
+                                      "was sent");
+        } else if (sent) {
             say("serial.reset: ServiceDisconnect sent, %.0f ms after it was asked for%s", (now - asked.askedAt) * 1000.0,
                 waited ? ", once the one before it was answered or given up" : "");
             watchNodes(present, now);
@@ -1291,11 +1316,12 @@ std::string joined(const std::vector<std::string>& names) {
 }
 }  // namespace
 
-// Turns the gate's hold on or off, as things stand: it is on while a phone's request waits for its node, while a
-// link is being decided on, and while a link of the agent's is up. The programs it holds off are the ones declared
-// for a serial service at the moment it goes on; with none declared there is no hold. From the listener's thread
-// and the Bluetooth service's: whichever of them makes the change gives holdWhy_ as the reason in the log, which
-// is what was last put there together with a change of what the hold goes by.
+// Turns the gate's hold on or off, as things stand: it is on while a phone's request waits for its node (not one
+// whose link is left to another program: leftToOther()), while a link is being decided on, and while a link of the
+// agent's is up. The programs it holds off are the ones declared for a serial service at the moment it goes on; with
+// none declared there is no hold. From the listener's thread and the Bluetooth service's: whichever of them makes
+// the change gives holdWhy_ as the reason in the log, which is what was last put there together with a change of
+// what the hold goes by.
 void SerialListener::updateHold() {
     if (services_ == 0) return;
     // A link the car dialled is on a node of its own: the gate has nothing to hold off for it.
@@ -1706,25 +1732,68 @@ void SerialListener::lookForLinks() {
     scannedAt_ = monoNow();
     scanNodes(present);
     NodeTracker::State before[NodeTracker::kNodes], after[NodeTracker::kNodes];
-    bool other[NodeTracker::kNodes];
     pthread_mutex_lock(&mu_);
     for (int i = 0; i < NodeTracker::kNodes; ++i) before[i] = tracker_.state(i);
     int ours = tracker_.scan(present, monoSec(), false);
     std::string address = tracker_.takenAddress();
-    for (int i = 0; i < NodeTracker::kNodes; ++i) {
-        after[i] = tracker_.state(i);
-        other[i] = tracker_.otherService(i);
-    }
+    bool leave = ours >= 0 && tracker_.takenLeave();
+    for (int i = 0; i < NodeTracker::kNodes; ++i) after[i] = tracker_.state(i);
     pthread_mutex_unlock(&mu_);
     // A node that is new has appeared since the look before this one.
     for (int i = 0; i < NodeTracker::kNodes; ++i)
         if (present[i] && before[i] == NodeTracker::kAbsent) appeared_[i] = lastLook > 0 ? lastLook : scannedAt_;
+    // The request it came with was left to another program: so is the link, if the rule still holds now. Otherwise it
+    // is decided on as any other, which is the safe side for the agent's own app.
+    if (leave) {
+        std::string why;
+        if (leftToOther(address, &why)) {
+            pthread_mutex_lock(&mu_);
+            tracker_.leaveAlone(ours);
+            ++counts_.leftUnread;
+            pthread_mutex_unlock(&mu_);
+            say("%s: left to another program, never opened or read: %s", nodePath(ours).c_str(), why.c_str());
+            ours = -1;
+        } else {
+            say("%s: the phone's request was to be left to another program, but %s now: the link is decided on as any "
+                "other", nodePath(ours).c_str(), why.c_str());
+        }
+    }
     if (ours >= 0) take(ours, address);
+    // Only requests that may bring a serial node are kept (sppPhone()), so no node is another service's.
     for (int i = 0; i < NodeTracker::kNodes; ++i) {
         if (before[i] == after[i] || after[i] != NodeTracker::kForeign) continue;
-        say("%s: %s, so it is not ours: left alone", nodePath(i).c_str(),
-            other[i] ? "the phone asked for another service with it" : "no request from a phone came with it");
+        say("%s: no request from a phone came with it, so it is not ours: left alone", nodePath(i).c_str());
     }
+}
+
+// The rule for a link that a phone opens: it is left to another program, its node never opened or read and no hold
+// put on for it, when the car dials (SerialConfig::dial), a program declared for a serial service runs or may
+// (SerialServices::readers()), and the phone that asked is one of the agent's whose app a link the car dialled has
+// reached before (PhoneAddressList::dialledBefore()). The app is reached by the dial then, and the other program
+// gets the link whole, its first bytes too, which the decide step would have read. A link that the agent's app
+// opens on such a phone is left all the same: that is the rule's cost. Without a dial that has reached the phone,
+// the car may be one on which dialling does not work, and the phone's own link stays the way in. *why says, for the
+// log, why the rule holds, or which part of it does not. From either thread: the cheap parts are looked at first.
+bool SerialListener::leftToOther(const std::string& address, std::string* why) {
+    if (!config_.dial.on) {
+        *why = "the car does not dial phones in this run";
+        return false;
+    }
+    if (ours_ == 0 || !ours_->has(address)) {
+        *why = "the phone is not one of the agent's";
+        return false;
+    }
+    if (!ours_->dialledBefore(address)) {
+        *why = "no link the car dialled to the phone has been the agent's";
+        return false;
+    }
+    if (services_ == 0 || services_->readers() != SerialServices::kSomeMayRun) {
+        *why = "no program declared for a serial service is running";
+        return false;
+    }
+    *why = "the car dials this phone of the agent's, whose app a dialled link has reached, and a program declared for "
+           "a serial service is running, or whether one is cannot be told";
+    return true;
 }
 
 // After the listener has given up, on its thread: waits, then puts the gate in front and asks for the service

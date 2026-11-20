@@ -19,11 +19,14 @@ namespace btspp {
 // itself, and any other program that registered a UUID. The node name says nothing about who a link belongs to. So:
 //   * a node that exists at the start is someone else's until it disappears
 //   * the phone's requests (ServiceRequest informs) are kept in the order they came, each for our service or for
-//     another one, for the length of the window; a request the car refused is taken out again
+//     another one, for the length of the window; a request the car refused is taken out again. The listener
+//     (serial_link.hpp) gives only the requests that may bring a serial node: a request for a service that never
+//     does (audio, hands-free) would be matched to the next serial node, which may be a link of ours
 //   * a node that appears later belongs to the oldest request still kept: ours if that request named our service,
 //     someone else's if it named another. One request accounts for one link
 //   * a node with no request waits the grace time for one, and is then someone else's
-//   * anything that is not ours is left alone: never opened, never read
+//   * anything that is not ours is left alone: never opened, never read. A node that scan() took can be left alone
+//     after all (leaveAlone()): the caller's mark on its request (takenLeave()) says that it may be
 // `any` takes every new node, whatever was asked for.
 // A ServiceRequestComplete follows a request for the same link, sometimes after the node is there, so it is not
 // counted as a request of its own.
@@ -33,7 +36,7 @@ public:
     enum State { kAbsent, kForeign, kPending, kOurs };
 
     explicit NodeTracker(uint32_t windowS = 15, uint32_t graceS = 2)
-        : windowS_(windowS ? windowS : 1), graceS_(graceS), nReq_(0) {
+        : windowS_(windowS ? windowS : 1), graceS_(graceS), nReq_(0), takenLeave_(false) {
         for (int i = 0; i < kNodes; ++i) { state_[i] = kAbsent; since_[i] = 0; other_[i] = false; }
     }
 
@@ -43,12 +46,15 @@ public:
     }
 
     // A ServiceRequest inform arrived: the phone asked for a link to our service (`ours`) or to another one.
-    // `address` is the phone's, as the inform gave it: takenAddress() hands it on with the node.
-    void onPhoneRequest(uint32_t now, bool ours = true, const std::string& address = std::string()) {
+    // `address` is the phone's, as the inform gave it: takenAddress() hands it on with the node, and so does
+    // takenLeave() with `leave`, the caller's mark for a request whose link it means to leave alone.
+    void onPhoneRequest(uint32_t now, bool ours = true, const std::string& address = std::string(),
+                        bool leave = false) {
         if (nReq_ == kRequests) drop(0);
         req_[nReq_].at = now;
         req_[nReq_].ours = ours;
         req_[nReq_].address = address;
+        req_[nReq_].leave = leave;
         ++nReq_;
     }
 
@@ -70,6 +76,7 @@ public:
             if (any || (nReq_ && req_[0].ours)) {
                 if (take < 0) {
                     taken_ = nReq_ ? req_[0].address : std::string();
+                    takenLeave_ = nReq_ && req_[0].leave;
                     if (nReq_) drop(0);
                     state_[i] = kOurs;
                     take = i;
@@ -91,6 +98,12 @@ public:
     // The address of the request that the node scan() last took belongs to: that phone's link is on the node.
     // Empty for a node taken with no request, or a request that gave none.
     const std::string& takenAddress() const { return taken_; }
+    // The mark that request was given (onPhoneRequest()'s `leave`). False for a node taken with no request.
+    bool takenLeave() const { return takenLeave_; }
+    // Node i, which scan() has taken, is someone else's after all: left alone from now on, until it goes.
+    void leaveAlone(int i) {
+        if (i >= 0 && i < kNodes && state_[i] == kOurs) { state_[i] = kForeign; other_[i] = false; }
+    }
     // Whether node i is someone else's because the phone asked for another service with it.
     bool otherService(int i) const { return i >= 0 && i < kNodes && state_[i] == kForeign && other_[i]; }
 
@@ -99,6 +112,7 @@ private:
         uint32_t at;
         bool ours;
         std::string address;
+        bool leave;
     };
 
     bool fresh(const Request& r, uint32_t now) const {
@@ -116,6 +130,7 @@ private:
     uint32_t since_[kNodes];
     bool other_[kNodes];
     std::string taken_;
+    bool takenLeave_;
 };
 
 }  // namespace btspp

@@ -171,7 +171,7 @@
 //     "phonesPresent": 1, "phonesEligible": 1, "dial": "on", "dialState": "idle", "lastResult": "DEFAULT",
 //     "link": "none", "recordDoubtful": false, "counts": { "dials", "answeredOk", "notListening", "notInReach",
 //     "busy", "otherAnswers", "noAnswer", "notTheApp", "leftBehind", "asks", "asksListed", "asksNotListed",
-//     "asksNoAnswer", "askErrors", "checks", "checksRestored", "refusals" },
+//     "asksNoAnswer", "askErrors", "checks", "checksRestored", "refusals", "leftUnread" },
 //     "problems": { "recorded", "counted" } }
 //
 // checkedMsAgo is absent before the service has first been registered. dial is on or off (nbtagent --dial);
@@ -184,8 +184,9 @@
 // answered 5 (DEFAULT): since each dial follows an ask whose answer named the agent's service, such a dial means the
 // app stopped listening in between or something else went wrong, not that it was not listening; the name stays, for
 // the app's sake. asks counts the asks for a
-// phone's service list; asksListed, asksNotListed, asksNoAnswer and askErrors what they came to. problems: the lines
-// written to the problem file in this run, and the problems only counted (serial_link.hpp).
+// phone's service list; asksListed, asksNotListed, asksNoAnswer and askErrors what they came to. leftUnread counts
+// the links phones opened that the agent left to another program without opening them (serial_link.hpp). problems:
+// the lines written to the problem file in this run, and the problems only counted (serial_link.hpp).
 //
 // serial.dial, on the local socket only: a round of dials now, to each phone connected to the car and paired with
 // it; for trials (nbtctl serial dial). { "phones": N }, or `unsupported` without a listener that dials, `busy`
@@ -342,8 +343,9 @@ public:
     Engine& engine() { return engine_; }
     Job& job() { return job_; }
     PhoneStore& phones() { return phones_; }
-    // The Bluetooth addresses of the paired phones, kept up to date for the Bluetooth serial listener's thread,
-    // which dials them (serial_link.hpp).
+    // The Bluetooth addresses of the paired phones, and which of them a link the car dialled has reached (phones.hpp,
+    // `dialled`), kept up to date for the Bluetooth serial listener's thread, which dials them and leaves a link such
+    // a phone opens itself to another program while one may read it (serial_link.hpp).
     PhoneAddressList* phoneAddresses() { return &addresses_; }
     const std::string& headUnitId() const { return headUnitId_; }
     size_t sessions() const { return sessions_.size(); }
@@ -496,6 +498,9 @@ private:
     // The Bluetooth address of the link `s` is on, for the phone it has shown to be: kept in the record of paired
     // phones where it is new. Never logged, never in an answer.
     void rememberAddress(Session* s);
+    // A link the car dialled has come to the agent on `s`, which is to say that its phone's app opened it with the
+    // magic bytes: the phone with the link's address is marked `dialled` in the record of paired phones.
+    void rememberDial(Session* s);
     // phoneAddresses() as phones_ has them now.
     void shareAddresses();
     void infoGet(Session* s, int64_t id);

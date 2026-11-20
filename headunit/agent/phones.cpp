@@ -58,6 +58,7 @@ std::string PhoneStore::encode(const std::vector<PairedPhone>& phones) {
         w.beginObject().key("phoneId").string(p.id).key("name").string(p.name);
         w.key("key").string(toHex(p.key, sizeof p.key)).key("pairedAt").integer(p.pairedAt);
         if (!p.address.empty()) w.key("address").string(p.address);
+        if (p.dialled) w.key("dialled").boolean(true);
         w.endObject();
     }
     w.endArray().endObject();
@@ -80,7 +81,7 @@ bool PhoneStore::decode(const std::string& text, std::vector<PairedPhone>* phone
     for (size_t i = 0; i < list.size(); ++i) {
         json::Value one = list.at(i);
         json::Value id = one.find("phoneId"), name = one.find("name"), key = one.find("key"), pairedAt = one.find("pairedAt");
-        json::Value address = one.find("address");
+        json::Value address = one.find("address"), dialled = one.find("dialled");
         PairedPhone phone;
         uint8_t idBytes[kPhoneIdChars / 2];
         bool good = id.isString() && fromHex(id.string(), idBytes, sizeof idBytes) && name.isString() &&
@@ -90,16 +91,20 @@ bool PhoneStore::decode(const std::string& text, std::vector<PairedPhone>* phone
         std::string shown;
         good = good && (!address.present() ||
                         (address.isString() && colonAddress(address.string(), &shown) && shown == address.string()));
+        good = good && (!dialled.present() || dialled.isBool());
         for (size_t k = 0; good && k < phones->size(); ++k) good = (*phones)[k].id != id.string();
         if (!good) {
             phones->clear();
-            if (problem != 0) *problem = "one of its phones has no usable id, name, key, date or address, or is there twice";
+            if (problem != 0)
+                *problem = "one of its phones has no usable id, name, key, date, address or dial mark, or is there "
+                           "twice";
             return false;
         }
         phone.id = id.string();
         phone.name = name.string();
         phone.pairedAt = pairedAt.integer();
         if (address.present()) phone.address = address.string();
+        phone.dialled = dialled.present() && dialled.boolean();
         phones->push_back(phone);
     }
     return true;
@@ -171,6 +176,7 @@ bool PhoneStore::setAddress(const std::string& id, const std::string& address, b
         std::string want = next[i].id == id ? shown : (next[i].address == shown ? std::string() : next[i].address);
         if (want == next[i].address) continue;
         next[i].address = want;
+        next[i].dialled = false;   // it was for the address the phone had
         differs = true;
     }
     if (!differs) return true;
@@ -187,9 +193,37 @@ std::vector<std::string> PhoneStore::addresses() const {
     return all;
 }
 
-void PhoneAddressList::set(const std::vector<std::string>& addresses) {
+bool PhoneStore::setDialled(const std::string& address, bool* changed, std::string* error) {
+    if (changed != 0) *changed = false;
+    std::string shown;
+    if (!colonAddress(address, &shown)) return true;
+    std::vector<PairedPhone> next = phones_;
+    bool differs = false;
+    for (size_t i = 0; i < next.size(); ++i) {
+        if (next[i].address != shown || next[i].dialled) continue;
+        next[i].dialled = true;
+        differs = true;
+    }
+    if (!differs) return true;
+    if (!replace(next, error)) return false;
+    if (changed != 0) *changed = true;
+    return true;
+}
+
+std::vector<std::string> PhoneStore::dialledAddresses() const {
+    std::vector<std::string> all;
+    for (size_t i = 0; i < phones_.size(); ++i) {
+        if (!phones_[i].address.empty() && phones_[i].dialled) all.push_back(phones_[i].address);
+    }
+    return all;
+}
+
+void PhoneAddressList::set(const std::vector<std::string>& addresses) { set(addresses, std::vector<std::string>()); }
+
+void PhoneAddressList::set(const std::vector<std::string>& addresses, const std::vector<std::string>& dialled) {
     pthread_mutex_lock(&mu_);
     list_ = addresses;
+    dialled_ = dialled;
     pthread_mutex_unlock(&mu_);
 }
 
@@ -208,6 +242,18 @@ bool PhoneAddressList::has(const std::string& address) {
     for (size_t i = 0; i < list_.size() && !found; ++i) found = list_[i] == shown;
     pthread_mutex_unlock(&mu_);
     return found;
+}
+
+bool PhoneAddressList::dialledBefore(const std::string& address) {
+    std::string shown;
+    if (!colonAddress(address, &shown)) return false;
+    pthread_mutex_lock(&mu_);
+    bool found = false;
+    for (size_t i = 0; i < list_.size() && !found; ++i) found = list_[i] == shown;
+    bool dialled = false;
+    for (size_t i = 0; i < dialled_.size() && found && !dialled; ++i) dialled = dialled_[i] == shown;
+    pthread_mutex_unlock(&mu_);
+    return dialled;
 }
 
 }  // namespace nbt

@@ -199,6 +199,27 @@ int main() {
         p8[6] = true;
         CHECK(t.scan(p8, 1310, true) == 6 && t.takenAddress().empty());
     }
+    {   // the caller's mark on a request goes with its node; a node taken can be left alone after all, and stays so
+        NodeTracker t(15, 2);
+        none(p8);
+        t.baseline(p8);
+        t.onPhoneRequest(1400, true, "00:11:22:33:44:55", true);
+        t.onPhoneRequest(1400, true, "00:11:22:33:44:55");
+        p8[0] = true;
+        CHECK(t.scan(p8, 1400, false) == 0 && t.takenLeave() && t.state(0) == NodeTracker::kOurs);
+        t.leaveAlone(0);
+        CHECK(t.state(0) == NodeTracker::kForeign && !t.otherService(0));
+        CHECK(t.scan(p8, 1401, false) == -1 && t.state(0) == NodeTracker::kForeign);
+        p8[1] = true;
+        CHECK(t.scan(p8, 1401, false) == 1 && !t.takenLeave() && t.state(1) == NodeTracker::kOurs);
+        t.leaveAlone(5);   // not taken: nothing changes
+        CHECK(t.state(5) == NodeTracker::kAbsent);
+        // A refusal takes the oldest request of its kind out, marked or not.
+        t.onPhoneRequest(1410, true, "", true);
+        t.onRefused(true);
+        p8[2] = true;
+        CHECK(t.scan(p8, 1410, false) == -1 && t.state(2) == NodeTracker::kPending);
+    }
 
     printf("test_spp_nodes: ok\n");
     return 0;

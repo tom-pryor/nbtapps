@@ -35,14 +35,16 @@ struct SerialStatus {
     // The asks for a phone's service list before a dial: sent, and what they came to.
     unsigned asks, asksListed, asksNotListed, asksNoAnswer, askErrors;
     unsigned checks, checksRestored, refusals;
-    unsigned problemsRecorded;         // lines written to the problem file in this run (serial_link.hpp)
+    // The links phones opened that were left to another program unread, never opened (serial_link.hpp).
+    unsigned leftUnread;
+    unsigned problemsRecorded;        // lines written to the problem file in this run (serial_link.hpp)
     unsigned problemsCounted;          // problems that were not written, only counted
     SerialStatus()
         : registered(false), checkedMsAgo(-1), phonesPresent(0), phonesEligible(0), dialOn(false), dialState("idle"),
           lastResult("none"), link("none"), recordDoubtful(false), dials(0), answeredOk(0), notListening(0),
           notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0), leftBehind(0), asks(0), asksListed(0),
           asksNotListed(0), asksNoAnswer(0), askErrors(0), checks(0), checksRestored(0), refusals(0),
-          problemsRecorded(0), problemsCounted(0) {}
+          leftUnread(0), problemsRecorded(0), problemsCounted(0) {}
 };
 
 class SerialDial {

@@ -19,7 +19,8 @@ namespace nbt {
 class SerialReset {
 public:
     enum Outcome {
-        kResetSent,     // a serial node is open: the request goes to the car shortly
+        kResetSent,     // a serial node is open: the request goes to the car shortly, if the node is still there
+                        // then; if the link has ended meanwhile, nothing is sent
         kResetArmed,    // none is: the next serial link is ended at the open of its node, within *forMs
         kResetFailed,   // the car's Bluetooth service cannot be asked; *why says why
         kResetDialled   // a link the car dialled is up: the agent ends it as it ends a link, with link.closing, and the

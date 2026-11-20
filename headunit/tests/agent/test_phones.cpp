@@ -187,6 +187,74 @@ int main(int argc, char** argv) {
         list.set(std::vector<std::string>());
         CHECK(!list.has("00:11:22:33:44:55"));
     }
+    {   // The mark that the car's dial has reached a phone: absent in an older file, which reads as "not yet"; written
+        // only when true; kept across a load; gone with the phone's address and with the phone.
+        const char* key = "3131313131313131313131313131313131313131313131313131313131313131";
+        std::string old = std::string("{\"version\":1,\"phones\":[{\"phoneId\":\"11111111111111111111111111111111\",\"name\":\"n\","
+                                      "\"key\":\"") + key + "\",\"pairedAt\":3,\"address\":\"00:11:22:33:44:55\"}]}";
+        std::vector<PairedPhone> read;
+        CHECK_IN(why, PhoneStore::decode(old, &read, &why) && read.size() == 1 && !read[0].dialled);
+        CHECK(PhoneStore::encode(read).find("dialled") == std::string::npos);
+        read[0].dialled = true;
+        std::string text = PhoneStore::encode(read);
+        CHECK_IN(text, text.find("\"dialled\":true") != std::string::npos);
+        std::vector<PairedPhone> again;
+        CHECK(PhoneStore::decode(text, &again, &why) && again.size() == 1 && again[0].dialled);
+        std::string withFalse = std::string("{\"version\":1,\"phones\":[{\"phoneId\":\"11111111111111111111111111111111\","
+                                            "\"name\":\"n\",\"key\":\"") + key + "\",\"pairedAt\":3,\"dialled\":false}]}";
+        CHECK_IN(why, PhoneStore::decode(withFalse, &again, &why) && again.size() == 1 && !again[0].dialled);
+        // Of another type: the file cannot be read, as for any member that the store does not write.
+        const char* badMark[] = {"1", "\"true\"", "null"};
+        for (size_t i = 0; i < sizeof badMark / sizeof badMark[0]; ++i) {
+            std::string bad = std::string("{\"version\":1,\"phones\":[{\"phoneId\":\"11111111111111111111111111111111\","
+                                          "\"name\":\"n\",\"key\":\"") + key + "\",\"pairedAt\":3,\"dialled\":" + badMark[i] + "}]}";
+            why.clear();
+            CHECK_IN(bad, !PhoneStore::decode(bad, &again, &why) && again.empty() && !why.empty());
+        }
+
+        std::string file = work + "/dialled.json";
+        PhoneStore store;
+        CHECK(store.load(file, &why));
+        CHECK(store.put(phoneOf('1', "one", 1), &why) && store.put(phoneOf('2', "two", 2), &why));
+        bool changed = false;
+        // No phone has the address yet: nothing to mark, and nothing written.
+        CHECK_IN(why, store.setDialled("00:11:22:33:44:55", &changed, &why) && !changed && store.dialledAddresses().empty());
+        CHECK(store.setAddress(std::string(32, '1'), "00:11:22:33:44:55", &changed, &why) && changed);
+        CHECK(store.setAddress(std::string(32, '2'), "66:77:88:99:AA:BB", &changed, &why) && changed);
+        CHECK(store.setDialled("001122334455", &changed, &why) && changed);
+        CHECK(store.find(std::string(32, '1'))->dialled && !store.find(std::string(32, '2'))->dialled);
+        CHECK(store.setDialled("00:11:22:33:44:55", &changed, &why) && !changed);   // so already
+        CHECK(store.setDialled("not one", &changed, &why) && !changed);
+        CHECK(store.dialledAddresses().size() == 1 && store.dialledAddresses()[0] == "00:11:22:33:44:55");
+        // The next agent has it.
+        PhoneStore next;
+        CHECK(next.load(file, &why) && next.find(std::string(32, '1'))->dialled && next.dialledAddresses().size() == 1);
+        // The same address again keeps it; another takes it away, and so does the address going to another phone.
+        CHECK(store.setAddress(std::string(32, '1'), "00:11:22:33:44:55", &changed, &why) && !changed);
+        CHECK(store.find(std::string(32, '1'))->dialled);
+        CHECK(store.setAddress(std::string(32, '1'), "00:11:22:33:44:56", &changed, &why) && changed);
+        CHECK(!store.find(std::string(32, '1'))->dialled && store.dialledAddresses().empty());
+        CHECK(store.setDialled("00:11:22:33:44:56", &changed, &why) && changed);
+        CHECK(store.setAddress(std::string(32, '2'), "00:11:22:33:44:56", &changed, &why) && changed);
+        CHECK(!store.find(std::string(32, '1'))->dialled && !store.find(std::string(32, '2'))->dialled);
+        // Forgotten with the phone.
+        CHECK(store.setDialled("00:11:22:33:44:56", &changed, &why) && changed && store.find(std::string(32, '2'))->dialled);
+        size_t count = 0;
+        CHECK(store.forget(std::string(32, '2'), &count, &why) && count == 1 && store.dialledAddresses().empty());
+        CHECK(next.load(file, &why) && next.dialledAddresses().empty() && next.all().size() == 1);
+        CHECK(testutil::readFile(file).find("dialled") == std::string::npos);
+
+        // The list another thread reads: a phone is dialled before only if it is one of the addresses.
+        PhoneAddressList list;
+        std::vector<std::string> one(1, "00:11:22:33:44:55");
+        list.set(one, one);
+        CHECK(list.dialledBefore("00:11:22:33:44:55") && list.dialledBefore("001122334455"));
+        CHECK(!list.dialledBefore("66:77:88:99:AA:BB") && !list.dialledBefore(""));
+        list.set(one);
+        CHECK(list.has("00:11:22:33:44:55") && !list.dialledBefore("00:11:22:33:44:55"));
+        list.set(std::vector<std::string>(), one);
+        CHECK(!list.dialledBefore("00:11:22:33:44:55"));
+    }
     {   // A folder that cannot be written: the pairing fails, and the store is as it was.
         PhoneStore store;
         CHECK(store.load(work + "/no-such-folder/phones.json", &why));

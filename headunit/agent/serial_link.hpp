@@ -12,7 +12,8 @@
 // until the link has opened with the protocol's magic bytes (peer.hpp), and a link that opens otherwise is let go
 // without a byte sent. That matters because the stack does not say whose link a node holds. It names the car's own
 // serial service in every request, for a link to our UUID too, so every link a phone opens is looked at, and what
-// the phone says first decides whether it is ours.
+// the phone says first decides whether it is ours; but for a link that a rule leaves to another program unread
+// (below).
 //
 // What is understood about the node shapes the code (node_reader.hpp has the details):
 //
@@ -38,8 +39,21 @@
 //     holds the other end of the pair as an ordinary link of kind "serial".
 //
 // Another program on the car that takes serial links (a second service with a reader of its own) meets the same
-// node for the same links: the stack gives one node to whatever link comes. Two things keep the two apart:
+// node for the same links: the stack gives one node to whatever link comes. Three things keep the two apart:
 //
+//   * The rule. A link a phone opens is left to another program, its node never opened and never read by the agent,
+//     and no hold put on for the phone's request that brings it, when all three of these hold, at the request and
+//     again when its node appears: the car dials (SerialConfig::dial); a program declared for a serial service runs,
+//     or may (SerialServices::readers()); and the phone that asked is one of the agent's whose app a link the car
+//     dialled has been taken by before (phones.hpp, `dialled`, kept across restarts). The request still brings the
+//     car's dial, which is how the app is reached then, and the other program gets the link whole, with the first
+//     bytes the decide step would have read. A link of the agent's app on such a phone is left all the same: that is
+//     the rule's cost. Without such a dial the car may be one on which dialling does not work, and the phone's own
+//     link stays the way in. A request whose rule no longer holds when its node appears goes as any other. In every
+//     other case (no dial, no such program, a phone that is not the agent's or never reached by a dial, a request
+//     that gave no address, a node with no request) the two below decide. Only a request that may bring a serial
+//     node (one that names the agent's service or the car's serial service) is kept for the nodes at all: one for
+//     another service, audio or hands-free, never brings one, and would be matched to the next serial node.
 //   * The decide step. The listener's thread takes what the reader brings, for kSerialDecideMs from the open at
 //     most. Whole frames of this protocol at its start are what an earlier link of the agent's left: they are
 //     counted, dropped and said in the log, and the magic bytes are looked for after them. A link that opens with
@@ -56,6 +70,8 @@
 //   * The hold. From a phone's request until its link has been let go, and for as long as a link of the agent's is
 //     up, the gate also refuses the opens of the programs that are declared for a serial service, so that none of
 //     them takes a link's first bytes or writes into a link of the agent's. Their looks at the node are passed on.
+//     A request whose link the rule leaves to another program puts no hold on: that program's opens pass at once.
+//     The gate refuses the car's media process all the same.
 //
 // A link on which the phone says the magic bytes and nothing more would hold its node for as long as the phone
 // liked. The agent ends a serial link that has not done `hello` within 30 seconds, and one that has gone silent for
@@ -81,7 +97,9 @@
 //     counts in serialLinksOpen() until its node is closed;
 //   * the program waits a while before it ends for the links that are still up (waitForSerialLinks);
 //   * when the agent is asked to (serial.reset, serial_reset.hpp), the listener asks the car's Bluetooth service to
-//     end the phone's link (ServiceDisconnect, spp_service.hpp), which is the one way the agent has of ending one.
+//     end the phone's link (ServiceDisconnect, spp_service.hpp), which is the one way the agent has of ending one;
+//     only while a node of the listener's is there, since one for a phone-opened link the car has no live link for
+//     can hold that instance up for well over a minute.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <pthread.h>
@@ -377,7 +395,8 @@ inline std::string describeSerialCheck(const SerialConfig& config) {
            " by registering it again: switching Bluetooth off and on drops it, and the car says nothing";
 }
 
-// What the listener does with a link once it has opened its node.
+// What the listener does with a link once it has opened its node, and, while the car dials, which links a phone
+// opens it does not open at all.
 inline std::string describeSerialDecide(const SerialConfig& config) {
     char ms[96];
     if (config.decideMs == (unsigned)kSerialDecideMs) {
@@ -391,7 +410,11 @@ inline std::string describeSerialDecide(const SerialConfig& config) {
                                   : "its node is closed for the program it belongs to if a program declared for a "
                                     "serial service is running, the gate has seen another program open the node, "
                                     "or a program of software put on by hand is running, and otherwise read until "
-                                    "the link ends or one of those signs comes");
+                                    "the link ends or one of those signs comes") +
+           (config.dial.on ? ". A link that a phone of the agent's opens, whose app a link the car dialled has "
+                             "reached, is not opened at all while a program declared for a serial service is "
+                             "running, or may be: it is left to that program, and the app is reached by the dial"
+                           : "");
 }
 
 // What becomes of a link of the agent's when the agent ends it.
@@ -542,7 +565,9 @@ public:
     virtual Link* accept();
 
     // serial.reset (serial_reset.hpp). With a node open, the one being decided on, a link of the agent's or one
-    // that is read to its end, ServiceDisconnect goes to the car kSerialResetDelayMs later. With none, the next link
+    // that is read to its end, ServiceDisconnect goes to the car kSerialResetDelayMs later, if a node the listener
+    // opened is still there then: if none is, the link has ended meanwhile, nothing is sent, the log and the problem
+    // file say so, and the reset is done. With none, the next link
     // whose node opens within SerialConfig::resetArmedMs is ended at the open, with no decide step, and its node read
     // until the link ends; once. The log says how long after ServiceDisconnect a node that was open then went, or
     // that the link was still up kSerialResetWatchMs after it. One ServiceDisconnect is out at a time: while
@@ -592,6 +617,8 @@ private:
                    uint64_t* leftOver, std::string* why);
     void letGo(NodeReader* reader, int node, const std::string& path, double openedAt, const std::string& why);
     bool otherReader(int node, std::string* why);
+    // Whether the link the phone at `address` opens is left to another program, unread (the top of this file).
+    bool leftToOther(const std::string& address, std::string* why);
     void keep(int node, int fd, NodeReader* reader, const char* what);
     enum Closing { kEndedOnly, kAllButRead, kEvery };
     void closeKept(Closing which);
