@@ -306,13 +306,16 @@ ends it (SIGTERM to its group, SIGKILL 2 s later) when the channel is switched o
 The state file, $NBT_TMP_DIR/sshrelay.state, for a relay that dies without its cleanup (SIGKILL, a crash). One
 line of JSON, written whole whenever what it holds changes (a new file, renamed over the old one, so that a reader
 never sees half of one), and removed at a clean exit:
-  { "v": 1, "relay": REC, "driver": REC, "servers": [ { "pid": N, "start": T, "logins": [ REC, ... ] } ] }
-REC is { "pid": N, "start": T }, a pid and that process's start time as the process list gives it (QNX: ns, from
-DCMD_PROC_INFO; Linux: clock ticks since boot), 0 when it was not known; "driver" is there while the relay has
+  { "v": 1, "relay": REC, "driver": REC, "servers": [ { "pid": N, "start": "T", "logins": [ REC, ... ] } ] }
+REC is { "pid": N, "start": "T" }, a pid and that process's start time as the process list gives it (QNX: ns, from
+DCMD_PROC_INFO; Linux: clock ticks since boot), "0" when it was not known; "driver" is there while the relay has
 one; "servers" holds each connection's server whose cleanup is not done, with the login sessions noted for it.
+The start time is a string of decimal digits, not a JSON number: on QNX it has 18 digits or more, and the agent's
+JSON reader, which the relay uses, takes no integer above 2^53 - 1. It is read back only in the form it is written
+in: 1 to 20 digits, no leading zero, at most 2^64 - 1.
 At a start:
-  1. A file that cannot be read, or holds anything else (another key, another type, a pid of 1 or less, more than
-     64 entries), is ignored whole and replaced: nothing it names is signalled.
+  1. A file that cannot be read, or holds anything else (another key, another type, a pid of 1 or less, a start
+     time in another form, more than 64 entries), is ignored whole and replaced: nothing it names is signalled.
   2. Before listening: if the relay it names still runs (the same pid and start time, not ended, and a program of
      this relay's file name), it is sent SIGTERM and waited for 2 s, then sent SIGKILL and waited for 0.3 s at
      most; the file is read again after it. A relay that ends cleanly removes the socket file and the state file;
@@ -356,6 +359,8 @@ the head unit's build has none of them, which make ssh-check checks (no NBT_SSHR
                                  there are always ptys, as on any system but QNX
   NBT_SSHRELAY_TEST_DRIVER_MS    the driver's 30 s, both of them (with no connection, and after a start that
                                  found none), in milliseconds
+  NBT_SSHRELAY_TEST_START_OFFSET a number added to every start time the process list gives (that is not 0), so
+                                 that the state file holds start times of the size QNX's are
 
 The tests, make ssh-test (tests/ssh/run_relay.py), on this machine and not in the bench's container: the key-line
 rule (test_key_lines.cpp) and the walk of /proc with start times (test_processes.cpp); with stand-ins for the
@@ -369,9 +374,11 @@ its pid found, not started for a second, kept by a connection within its time, e
 started again, ended at the relay's end, and another of the same name left alone; connections that wait for a
 driver that comes late; one that never appears, and none there; one that goes by itself; one that ignores
 SIGTERM; "pty" false with no ptys and the connection served, true with another driver's names; four connections
-and a fifth too-many, and a slot free again after an end; a relay killed with two servers, their leftovers and a
-driver, and the next start ending them all and the keys folders, and serving; a state file naming unrelated
-processes, and one of nonsense, signalling none; an older relay still running ended before the new one listens,
+and a fifth too-many, and a slot free again after an end; with start times of the size QNX gives
+(NBT_SSHRELAY_TEST_START_OFFSET): a relay killed with two servers, their leftovers and a driver, and the next start
+ending them all and the keys folders, and serving; a state file naming unrelated processes, and one of nonsense
+(also a start time in any form but the one written), signalling none, and start times up to 2^64 - 1 read; an
+older relay still running ended before the new one listens,
 also one that ignores SIGTERM, with the start's time measured; and, with this machine's Dropbear (make ssh-host)
 and OpenSSH client, through tests/ssh/ssh_proxy.py as the client's proxy command: a login with a command and its
 exit status, one on a pty, a wrong key refused, and the host key of the answer the one the client checks. With no

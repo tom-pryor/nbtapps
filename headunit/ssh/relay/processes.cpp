@@ -63,6 +63,10 @@ bool readEntry(const char* procDir, long pid, ProcessEntry* out) {
     return true;
 }
 #else
+#ifdef NBT_SSHRELAY_TEST_HOOK
+unsigned long long gStartOffset = 0;
+#endif
+
 bool readEntry(const char* procDir, long pid, ProcessEntry* out) {
     char path[PATH_MAX];
     snprintf(path, sizeof path, "%s/%ld/stat", procDir, pid);
@@ -72,11 +76,19 @@ bool readEntry(const char* procDir, long pid, ProcessEntry* out) {
     ssize_t n = read(fd, text, sizeof text - 1);
     close(fd);
     if (n <= 0) return false;
-    return parseStat(std::string(text, (size_t)n), out) && out->pid == pid;
+    if (!parseStat(std::string(text, (size_t)n), out) || out->pid != pid) return false;
+#ifdef NBT_SSHRELAY_TEST_HOOK
+    if (out->start != 0) out->start += gStartOffset;
+#endif
+    return true;
 }
 #endif
 
 }  // namespace
+
+#if defined(NBT_SSHRELAY_TEST_HOOK) && !defined(__QNXNTO__)
+void setStartOffset(unsigned long long offset) { gStartOffset = offset; }
+#endif
 
 bool parseStat(const std::string& text, ProcessEntry* out) {
     // "pid (name) state parent group session ...": the name may hold spaces and parentheses, so the fields are
