@@ -208,6 +208,8 @@ fun NbtNavHost(
                     onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
                     onOpenLogs = { id -> navController.navigate(LogPullRoute(headUnitId, id)) },
                     onOpenSettings = { id -> navController.navigate(SettingsRoute(headUnitId, id)) },
+                    // The terminal's screen comes with the next change.
+                    onOpenTerminal = {},
                 )
             }
             composable<LogPullRoute> {
