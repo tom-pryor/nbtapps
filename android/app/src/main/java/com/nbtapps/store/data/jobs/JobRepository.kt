@@ -601,7 +601,7 @@ class JobRepository(
      * `auth`, and the state that follows, or the wait to be paired. Where the app no longer wants it, as when a link
      * came meanwhile or the user disconnected, it is closed. A failure is quiet: the state is left as it was before, and
      * listening goes on. One that succeeds while the app waited to connect again after the agent restarted is the
-     * reconnect, and the wait ends.
+     * reconnect, and the wait ends; where it is another head unit's link, the job waited for is one whose link was lost.
      */
     private suspend fun take(incoming: IncomingLink) {
         var spare: Link? = incoming.link
@@ -623,13 +623,15 @@ class JobRepository(
                 when {
                     result.isSuccess -> {
                         remembered = null
-                        // The job is followed over this link already.
+                        // The job is followed over this link already, where it is this head unit's.
                         rejoining.getAndSet(null)?.cancel()
+                        lostElsewhere(unit.id)
                     }
                     result.exceptionOrNull() is PairingNeeded -> {
                         remembered = null
                         rejoining.getAndSet(null)?.cancel()
                         lost(unit.id)
+                        lostElsewhere(unit.id)
                     }
                     connectionState.value == ConnectionState.Connecting(unit.id) -> connectionState.value = before
                 }
@@ -736,6 +738,14 @@ class JobRepository(
     /** The job the app was connecting again for, if any, is one whose link was lost. */
     private fun lost(headUnitId: String) = jobState.update { view ->
         if (view != null && view.reconnecting && view.headUnitId == headUnitId) view.copy(reconnecting = false, linkLost = true) else view
+    }
+
+    /**
+     * The job the app was connecting again for on another head unit than [headUnitId], if any, is one whose link was
+     * lost: the link is now to [headUnitId], and the wait for the other was ended with nothing to follow its job over.
+     */
+    private fun lostElsewhere(headUnitId: String) = jobState.update { view ->
+        if (view != null && view.reconnecting && view.headUnitId != headUnitId) view.copy(reconnecting = false, linkLost = true) else view
     }
 
     /**

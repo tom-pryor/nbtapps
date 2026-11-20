@@ -2162,6 +2162,35 @@ class JobRepositoryTest {
     }
 
     @Test
+    fun `after the agent restarts during a job, a link another saved car opens ends the wait, and the job's link is lost`() = test {
+        headUnits.add(HeadUnit("other", "Other car", listOf(SerialEndpoint("66:77:88:99:AA:BB", "BMW 2"))))
+        val jobs = listening()
+        val stored = stored()
+        dialler.onConnect = { planning(it, stored) }
+        assertTrue(jobs.connect("bt").isSuccess)
+        val plan = jobs.plan(listOf(InstallTarget("org.nbtapp.runtime", "2.1.0")), emptyList(), listOf(stored)).getOrThrow()
+        jobs.start(plan).getOrThrow()
+        dialler.unreachable = "Nothing listens there yet"
+
+        dialler.agent.closing(LinkClosing.RESTARTING)
+        await(jobs.job, "the wait") { it?.reconnecting == true }
+
+        // The other car opens the link, with no job of its own.
+        dialler.onConnect = {}
+        dialIn("66:77:88:99:AA:BB")
+
+        val other = await(jobs.connection, "the other car") { it is ConnectionState.Connected } as ConnectionState.Connected
+        assertEquals("other", other.headUnitId)
+        val lost = requireNotNull(await(jobs.job, "the job's link lost") { it?.linkLost == true })
+        assertEquals("bt", lost.headUnitId)
+        assertFalse(lost.reconnecting)
+        // The app's own wait to connect again is over: a try of its would have ended this link for one of its own.
+        delay(500)
+        assertEquals(other, jobs.connection.value)
+        assertEquals(2, dialler.agents.size)
+    }
+
+    @Test
     fun `a head unit removed while the app was away is not connected to on coming back`() = test {
         val jobs = watched()
         assertTrue(jobs.connect("car").isSuccess)
