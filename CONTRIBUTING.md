@@ -32,6 +32,8 @@ If you don't agree, please don't open a pull request.
   Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
   ```
 
+  An icon taken from Google's Material Icons carries an Apache-2.0 header naming Google LLC and the icon in place
+  of these two lines, as the app's drawables that hold one show.
   `reuse lint` must pass. Test data, signed files and JSON don't take headers; [REUSE.toml](REUSE.toml) covers them.
 - **Tests.**
   - `android/`: `./gradlew :app:testDebugUnitTest`.

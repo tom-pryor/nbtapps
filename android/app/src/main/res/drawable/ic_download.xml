@@ -1,5 +1,6 @@
-<!-- SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0 -->
-<!-- Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps) -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: Google LLC -->
+<!-- Material Icons "file_download" (filled, 24 dp) from https://github.com/google/material-design-icons, as a vector drawable. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
