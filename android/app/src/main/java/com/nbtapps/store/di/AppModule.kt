@@ -38,6 +38,11 @@ import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
+import com.nbtapps.store.data.ssh.AuthorizedClients
+import com.nbtapps.store.data.ssh.DataStoreAuthorizedClients
+import com.nbtapps.store.data.ssh.KeystoreSshIdentity
+import com.nbtapps.store.data.ssh.SshIdentity
+import com.nbtapps.store.data.ssh.authorizedClientsStore
 import com.nbtapps.store.data.update.ApkInstaller
 import com.nbtapps.store.data.update.AppUpdater
 import com.nbtapps.store.data.update.InstalledApp
@@ -171,6 +176,19 @@ abstract class AppModule {
         @Provides
         @Singleton
         fun providePairingKeys(): PairingKeys = KeystorePairingKeys()
+
+        /** The app's own SSH key, kept under a key of the Android Keystore, as the pairing keys are kept. */
+        @Provides
+        @Singleton
+        fun provideSshIdentity(@ApplicationContext context: Context): SshIdentity = KeystoreSshIdentity(File(context.filesDir, "ssh-key"))
+
+        /** The public keys of the other SSH clients the user added. */
+        @Provides
+        @Singleton
+        fun provideAuthorizedClients(@ApplicationContext context: Context): AuthorizedClients =
+            DataStoreAuthorizedClients(
+                authorizedClientsStore(context.dataStoreFile("ssh-clients.json"), CoroutineScope(SupervisorJob() + Dispatchers.IO)),
+            )
 
         /** The last tries at a Bluetooth serial link, in memory only, for the user to copy where a connect failed. */
         @Provides
