@@ -92,7 +92,7 @@ interface ApkInstaller {
  * An update ends the app: Android stops it as the new copy takes its place. So none is begun, and none is
  * handed to Android, while a job on a head unit needs the phone ([busy]); the job would lose its link in the
  * middle of a transfer. Nor while a terminal is open or being opened on a head unit ([terminalOpen]), whose shell
- * would end with the app.
+ * would end with the app, nor while the SSH port for other apps is on ([portOn]), whose connections would.
  *
  * The download is kept in [dir], which holds nothing else and is emptied when the app starts: a file there is
  * either this run's or left over from an update that is done with.
@@ -109,6 +109,8 @@ class AppUpdater(
     private val scope: CoroutineScope,
     /** Whether a terminal is open, or being opened, on a head unit right now. */
     private val terminalOpen: () -> Boolean = { false },
+    /** Whether the SSH port for other apps is on, or being switched on, right now. */
+    private val portOn: () -> Boolean = { false },
 ) {
     private val current = MutableStateFlow<UpdateState>(UpdateState.Idle)
 
@@ -186,10 +188,14 @@ class AppUpdater(
         installer.install(apk)
     }
 
-    /** Fails where a job needs the phone, or a terminal is open: the update would end either with the app. */
+    /**
+     * Fails where a job needs the phone, a terminal is open or the SSH port for other apps is on: the update would end
+     * each with the app.
+     */
     private fun checkIdle() {
         if (busy()) throw IOException(BUSY)
         if (terminalOpen()) throw IOException(TERMINAL_OPEN)
+        if (portOn()) throw IOException(PORT_ON)
     }
 
     /** The APK of [release] in [dir], whole and with the hash the catalogue gave. */
@@ -228,5 +234,6 @@ class AppUpdater(
     private companion object {
         const val BUSY = "A job is running on a head unit. Update the app once it has finished."
         const val TERMINAL_OPEN = "A terminal is open on a head unit. Close it, then update the app."
+        const val PORT_ON = "SSH access for other apps is on. Turn it off, then update the app."
     }
 }
