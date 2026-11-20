@@ -282,7 +282,7 @@ int Relay::run() {
     }
     connections_.clear();
     // A driver still looked for is looked for once more, and ended at once if it is there.
-    if (driverState_ == kDriverLooking) lookForDriver(nowMs());
+    if (driverState_ == kDriverLooking) lookForDriver(nowMs(), true);
     if (driverState_ == kDriverEnding) finishDriver(nowMs());
     if (tidyKillAt_ != 0) finishTidy();
     nbt::fs::removeEmptyDir(config_.authDir);
@@ -808,9 +808,11 @@ void Relay::reap(long long now) {
         std::string how = WIFEXITED(status) ? "exited with " + number(WEXITSTATUS(status))
                                             : "was ended by signal " + number(WIFSIGNALED(status) ? WTERMSIG(status) : 0);
         if (pid == driverCommand_) {
+            // While the driver is looked for: its command has ended, or has detached and runs on (driver.cpp). Once
+            // it has been taken as the driver, its end is told as the driver's.
             driverCommand_ = 0;
             driverCommandStatus_ = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
-            if (driverCommandStatus_ != 0) logLine("the pty driver's command " + how);
+            if (driverCommandStatus_ != 0 && driverState_ == kDriverLooking) logLine("the pty driver's command " + how);
             continue;
         }
         bool found = false;
