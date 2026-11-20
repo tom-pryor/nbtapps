@@ -1564,10 +1564,13 @@ void Agent::writeSerial(json::Writer& w) {
     w.key("phonesPresent").integer(st.phonesPresent).key("phonesEligible").integer(st.phonesEligible);
     w.key("dial").string(st.dialOn ? "on" : "off").key("dialState").string(st.dialState);
     w.key("lastResult").string(st.lastResult).key("link").string(st.link);
+    w.key("recordDoubtful").boolean(st.recordDoubtful);
     w.key("counts").beginObject();
     w.key("dials").integer(st.dials).key("answeredOk").integer(st.answeredOk).key("notListening").integer(st.notListening);
     w.key("notInReach").integer(st.notInReach).key("busy").integer(st.busy).key("otherAnswers").integer(st.otherAnswers);
     w.key("noAnswer").integer(st.noAnswer).key("notTheApp").integer(st.notTheApp).key("leftBehind").integer(st.leftBehind);
+    w.key("asks").integer(st.asks).key("asksListed").integer(st.asksListed).key("asksNotListed").integer(st.asksNotListed);
+    w.key("asksNoAnswer").integer(st.asksNoAnswer).key("askErrors").integer(st.askErrors);
     w.key("checks").integer(st.checks).key("checksRestored").integer(st.checksRestored).key("refusals").integer(st.refusals);
     w.endObject();
     w.key("problems").beginObject().key("recorded").integer(st.problemsRecorded);

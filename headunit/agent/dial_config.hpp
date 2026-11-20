@@ -21,6 +21,13 @@ struct DialConfig {
     unsigned pollLaterMs;        // and this often after that
     unsigned signalWaitMs;       // a phone asked for a serial link and no link of the agent's came in this time: a dial
                                  // of that phone at once
+    unsigned askLimitMs;         // the ask before a dial (ServiceListQuery): one with no answer for this long counts
+                                 // as one that did not list the agent's service. The car's answer BUSY to a query
+                                 // never reaches the client, so this is how such an ask ends
+    unsigned settleMs;           // no poll's ask and no ask a phone's request brings, for a phone, until this long
+                                 // after the device list first showed it connected: the car's own media component asks
+                                 // for the phone's services as its audio connects, and one ask at a time is answered
+    unsigned signalAskMs;        // a phone's requests for a serial link bring one ask of that phone this often at most
     unsigned pairingRoundMs;     // while the pairing window is open: every phone there is dialled in turn, a round this
                                  // often
     unsigned replyLimitMs;       // a dial with no answer for this long is given up, and its phone backed off
@@ -44,7 +51,8 @@ struct DialConfig {
 
     DialConfig()
         : on(true), pollFirstMs(10000), pollFirstForMs(120000), pollLaterMs(30000), signalWaitMs(1000),
-          pairingRoundMs(5000), replyLimitMs(95000), retryMs(15000), backOffMs(30000), backOffMostMs(300000), magicWaitMs(3000),
+          askLimitMs(6000), settleMs(8000), signalAskMs(10000), pairingRoundMs(5000), replyLimitMs(95000),
+          retryMs(15000), backOffMs(30000), backOffMostMs(300000), magicWaitMs(3000),
           disconnectWaitMs(3000), closeWaitMs(5000), overtakeMs(1000), listWaitMs(3000), registerCleanupMs(15000),
           node("/dev/nbtapp") {}
 };
@@ -82,12 +90,16 @@ inline std::string describeDial(const DialConfig& c) {
     if (!c.on)
         return "the car does not dial phones (--dial off): only the links phones open are taken, on the car's one node "
                "for them";
-    char text[1600];
+    char text[2400];
     snprintf(text, sizeof text,
              "the car dials a phone of the agent's that is connected to it and paired with it, on its instance "
              "'nbtapp' (%s): polls every %u s for %u s after such a phone connects or a link of the agent's ends, then "
              "every %u s; at once when the phone asks for a link and no link of the agent's comes in %u ms; every phone "
-             "there every %u s while the pairing window is open. The app's magic bytes are waited for %u ms; a dial with "
+             "there every %u s while the pairing window is open. Before each dial the car asks the phone for its "
+             "services, and dials it only if they name the agent's: an ask has %u ms to be answered, three in a row "
+             "with no answer or an error back the phone off as below, no poll and no request of the phone's asks it "
+             "within %u ms of its connecting to the car, and its requests bring one ask of it every %u ms at most. "
+             "The app's magic bytes are waited for %u ms; a dial with "
              "no answer is given up after %u s, and one answered with an error not understood is tried again after %u "
              "s; a phone on whose UUID something else answers, or whose link left behind the car does not end, is left "
              "alone by polls for %u s, twice as long each time up to %u s. A dialled link that the agent ends has %u ms "
@@ -97,7 +109,8 @@ inline std::string describeDial(const DialConfig& c) {
              "and the link ended for each phone there, %u s at most in all, and the service registered again at once if "
              "it has gone",
              c.node.c_str(), c.pollFirstMs / 1000, c.pollFirstForMs / 1000, c.pollLaterMs / 1000, c.signalWaitMs,
-             c.pairingRoundMs / 1000, c.magicWaitMs, c.replyLimitMs / 1000, c.retryMs / 1000, c.backOffMs / 1000,
+             c.pairingRoundMs / 1000, c.askLimitMs, c.settleMs, c.signalAskMs, c.magicWaitMs, c.replyLimitMs / 1000,
+             c.retryMs / 1000, c.backOffMs / 1000,
              c.backOffMostMs / 1000, c.closeWaitMs, c.disconnectWaitMs, c.overtakeMs, c.node.c_str(), c.listWaitMs,
              c.registerCleanupMs / 1000);
     return text;

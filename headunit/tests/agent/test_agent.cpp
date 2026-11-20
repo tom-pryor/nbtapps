@@ -3785,6 +3785,9 @@ public:
         status.lastResult = "DEFAULT";
         status.dials = 3;
         status.notListening = 3;
+        status.asks = 5;
+        status.asksNotListed = 2;
+        status.recordDoubtful = true;
         status.problemsCounted = 4;
     }
     virtual void pairingWindow(bool open) { said += open ? "open " : "closed "; }
@@ -3839,7 +3842,10 @@ static void testSerialDial() {
     CHECK(integer(st.result, "phonesPresent") == 2 && integer(st.result, "phonesEligible") == 1);
     CHECK(str(st.result, "dial") == "on" && str(st.result, "dialState") == "idle" && str(st.result, "lastResult") == "DEFAULT");
     CHECK(str(st.result, "link") == "none" && integer(st.result.find("counts"), "dials") == 3);
-    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 12);
+    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 17);
+    CHECK(integer(st.result.find("counts"), "asks") == 5 && integer(st.result.find("counts"), "asksNotListed") == 2);
+    CHECK(integer(st.result.find("counts"), "asksListed") == 0 && integer(st.result.find("counts"), "asksNoAnswer") == 0);
+    CHECK(integer(st.result.find("counts"), "askErrors") == 0 && st.result.find("recordDoubtful").boolean());
     CHECK(integer(st.result.find("problems"), "recorded") == 0 && integer(st.result.find("problems"), "counted") == 4);
     std::string status = ctl->lastHeard;
     std::string info = b.call(ctl, "info.get", "{}");

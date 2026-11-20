@@ -120,6 +120,7 @@ public:
     virtual void sppRefusedPhone(const PhoneInList& phone) { refused.push_back(phone); }
     virtual void sppConnectReply(const ServiceConnectReply& reply) { connects.push_back(reply); }
     virtual void sppDisconnectReply(const ServiceDisconnectReply& reply) { disconnects.push_back(reply); }
+    virtual void sppServiceList(const ServiceList& list) { lists.push_back(list); }
     virtual void sppPairing(uint32_t informId, const std::string& address) {
         pairings.push_back(std::make_pair(informId, address));
     }
@@ -158,6 +159,7 @@ public:
     std::vector<PhoneInList> refused;
     std::vector<ServiceConnectReply> connects;
     std::vector<ServiceDisconnectReply> disconnects;
+    std::vector<ServiceList> lists;
     std::vector<std::pair<uint32_t, std::string> > pairings;
     std::string others;
 };
@@ -969,6 +971,56 @@ int main() {
               sl.profiles[0] == "Profile" && sl.versions[0] == 0x0102 && sl.reason == 4);
         CHECK(!parseServiceListChanged(&s[0], (uint32_t)s.size() - 4).ok);
 
+        // ServiceListQuery: the address; its reply: error, address, services[], states[], profiles[], versions[].
+        CHECK(kReqServiceListQuery == 0x19 && kRspServiceListQuery == 0x8000002e && isResponseId(kRspServiceListQuery));
+        CHECK(buildServiceListQuery("00:11:22:33:44:55") == bytes("\x12\x00\x00\x00" "00:11:22:33:44:55\x00\x00\x00", 24));
+        std::vector<uint8_t> q = bytes("\x00\x00\x00\x00"
+                                       "\x12\x00\x00\x00" "00:11:22:33:44:55\x00\x5a\x5b"
+                                       "\x03\x00\x00\x00"
+                                       "\x05\x00\x00\x00" "GATT\x00\x61\x62\x63"
+                                       "\x0d\x00\x00\x00" "Test_Service\x00\x71\x72\x73"
+                                       "\x04\x00\x00\x00" "SPP\x00"
+                                       "\x03\x00\x00\x00" "\x00\x00\x00\x00" "\x00\x00\x00\x00" "\x01\x00\x00\x00"
+                                       "\x01\x00\x00\x00" "\x05\x00\x00\x00" "A2DP\x00\x44\x55\x66"
+                                       "\x01\x00\x00\x00" "\x04\x01\x00\x00", 112);
+        ServiceList ql = parseServiceList(&q[0], (uint32_t)q.size());
+        CHECK(ql.ok && ql.error == 0 && ql.address == "00:11:22:33:44:55" && ql.services.size() == 3);
+        CHECK(ql.services[1] == kName && ql.states.size() == 3 && ql.states[2] == 1 && ql.profiles.size() == 1 &&
+              ql.profiles[0] == "A2DP" && ql.versions.size() == 1 && ql.versions[0] == 0x104);
+        CHECK(listsService(ql, kName) && listsService(ql, "SPP") && !listsService(ql, "Test_Servic") &&
+              !listsService(ql, "Other_Service"));
+        CHECK(!parseServiceList(&q[0], (uint32_t)q.size() - 4).ok && !parseServiceList(&q[0], 30).ok);
+        // A last string with its padding left out reads whole.
+        std::vector<uint8_t> cut;
+        putU32(cut, 0);
+        putString(cut, "00:11:22:33:44:55");
+        putU32(cut, 1); putString(cut, kName);
+        putU32(cut, 1); putU32(cut, 0);
+        putU32(cut, 1); putString(cut, "HFP");
+        putU32(cut, 0);
+        ql = parseServiceList(&cut[0], (uint32_t)cut.size());
+        CHECK(ql.ok && listsService(ql, kName) && ql.profiles[0] == "HFP" && ql.versions.empty());
+        std::vector<uint8_t> empty;
+        putU32(empty, 0);
+        putString(empty, "00:11:22:33:44:55");
+        putU32(empty, 0); putU32(empty, 0); putU32(empty, 0); putU32(empty, 0);
+        ql = parseServiceList(&empty[0], (uint32_t)empty.size());
+        CHECK(ql.ok && ql.services.empty() && !listsService(ql, kName));
+        // An error with nothing after it: read whole, no address; with lists after it, as any other.
+        std::vector<uint8_t> busy;
+        putU32(busy, 2);
+        ql = parseServiceList(&busy[0], (uint32_t)busy.size());
+        CHECK(ql.ok && ql.error == 2 && ql.address.empty() && ql.services.empty());
+        busy.insert(busy.end(), empty.begin() + 4, empty.end());
+        ql = parseServiceList(&busy[0], (uint32_t)busy.size());
+        CHECK(ql.ok && ql.error == 2 && ql.address == "00:11:22:33:44:55");
+        // Too many elements is not a list.
+        std::vector<uint8_t> huge;
+        putU32(huge, 0);
+        putString(huge, "00:11:22:33:44:55");
+        putU32(huge, 100000);
+        CHECK(!parseServiceList(&huge[0], (uint32_t)huge.size()).ok);
+
         // VersionGet's reply: error, five strings, the last with no padding.
         std::vector<uint8_t> v;
         putU32(v, 0);
@@ -1571,6 +1623,83 @@ int main() {
         CHECK(r.spp.disconnectService("BtCtrl", "nbtapp", "00:11:22:33:44:55", kName));
         r.gap.took(kReqServiceDisconnect);
         CHECK(!r.spp.disconnectPhone("", "", "", &waits) && waits && r.gap.sent.empty());
+    }
+
+    // 25. ServiceListQuery: sent with the phone's address; every reply of its id is told, whoever's query it answers;
+    //     one that names no phone, cannot be read, or a rejection names the phone of ours that waits. Nothing is logged
+    //     but a rejection and the first reply that cannot be read, and never an address.
+    {
+        struct Reply {
+            static std::vector<uint8_t> of(const char* address, uint32_t error, const char* service) {
+                std::vector<uint8_t> p;
+                putU32(p, error);
+                putString(p, address);
+                putU32(p, service ? 1 : 0);
+                if (service) putString(p, service);
+                putU32(p, service ? 1 : 0);
+                if (service) putU32(p, 0);
+                putU32(p, 0);
+                putU32(p, 0);
+                return p;
+            }
+        };
+        Registered r;
+        size_t before = r.seen.lines.size();
+        CHECK(r.spp.queryServices("00:11:22:33:44:55"));
+        CHECK(r.gap.took(kReqServiceListQuery) == buildServiceListQuery("00:11:22:33:44:55"));
+        CHECK(r.seen.lines.size() == before);
+        // Another phone's, then ours with the address in another form: both told, as they came.
+        std::vector<uint8_t> p = Reply::of("66:77:88:99:AA:BB", 0, kName);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &p[0], (uint32_t)p.size());
+        p = Reply::of("001122334455", 0, kName);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &p[0], (uint32_t)p.size());
+        CHECK(r.seen.lists.size() == 2 && r.seen.lists[0].address == "66:77:88:99:AA:BB" && r.seen.lists[1].ok &&
+              r.seen.lists[1].error == 0 && listsService(r.seen.lists[1], kName));
+        // With none of ours out, one that names no phone names nobody.
+        std::vector<uint8_t> e;
+        putU32(e, 2);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &e[0], (uint32_t)e.size());
+        CHECK(r.seen.lists.size() == 3 && r.seen.lists[2].ok && r.seen.lists[2].error == 2 && r.seen.lists[2].address.empty());
+        // With ours out: an error with no address names ours.
+        CHECK(r.spp.queryServices("00:11:22:33:44:55"));
+        r.gap.took(kReqServiceListQuery);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &e[0], (uint32_t)e.size());
+        CHECK(r.seen.lists.size() == 4 && r.seen.lists[3].error == 2 && r.seen.lists[3].address == "00:11:22:33:44:55");
+        // One that cannot be read: kNoError, ours, said once.
+        CHECK(r.spp.queryServices("00:11:22:33:44:55"));
+        r.gap.took(kReqServiceListQuery);
+        p = Reply::of("00:11:22:33:44:55", 0, kName);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &p[0], 10);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &p[0], 10);
+        CHECK(r.seen.lists.size() == 6 && !r.seen.lists[4].ok && r.seen.lists[4].error == kNoError &&
+              r.seen.lists[4].address == "00:11:22:33:44:55" && r.seen.lists[4].services.empty());
+        CHECK(r.seen.lists[5].address.empty());   // ours was answered by the one before
+        CHECK(r.seen.said("ServiceListQuery's reply from the Bluetooth server could not be read"));
+        // A rejection: kNoError, ours.
+        CHECK(r.spp.queryServices("00:11:22:33:44:55"));
+        r.gap.took(kReqServiceListQuery);
+        r.gap.reject(kTypeRejectedA, kReqServiceListQuery);
+        CHECK(r.seen.lists.size() == 7 && r.seen.lists[6].error == kNoError && r.seen.lists[6].address == "00:11:22:33:44:55");
+        CHECK(r.seen.said("the Bluetooth server rejected ServiceListQuery (type 0x202)"));
+        // Not as an unknown answer after a ServiceDisconnect.
+        r.gap.inform(kInfServiceRequest, "SPP");
+        CHECK(r.spp.disconnectPhone("", "", ""));
+        r.gap.took(kReqServiceDisconnect);
+        p = Reply::of("66:77:88:99:AA:BB", 0, kName);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &p[0], (uint32_t)p.size());
+        CHECK(!r.seen.said("does not know") && r.seen.lists.size() == 8);
+        // The server goes: what was out goes with it; a request is not sent while it is away.
+        CHECK(r.spp.queryServices("00:11:22:33:44:55"));
+        r.gap.took(kReqServiceListQuery);
+        r.gap.detach();
+        CHECK(!r.spp.queryServices("00:11:22:33:44:55") && r.gap.sent.empty());
+        r.gap.up = true;
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &e[0], (uint32_t)e.size());
+        CHECK(r.seen.lists.size() == 9 && r.seen.lists[8].address.empty());
+        // A request the client does not take.
+        r.gap.takes = false;
+        CHECK(!r.spp.queryServices("00:11:22:33:44:55") && r.seen.said("DSI request 0x19 not sent"));
+        CHECK(!r.seen.said("00:11:22") && !r.seen.said("66:77:88") && !r.seen.said("001122"));
     }
 
     // 16. The real client is the head unit's: anywhere else it does not open, and nothing can be sent through it.

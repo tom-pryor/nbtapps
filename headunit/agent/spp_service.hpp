@@ -52,10 +52,18 @@ const char* const kDisconnectInstance = "ExtBox1";
 // The car opens a link to a service on a phone: the service's name, which the stack turns into its UUID, on an
 // instance of the device's (whose node is /dev/<instance>). The address is in the colon form, 00:11:22:33:44:55.
 const uint32_t kReqServiceConnect = 0x1a;            // device, instance, address, service
+// The car asks a phone for its services afresh (an SDP search over the phone's link), by the phone's address in the
+// colon form. The answer lists the services by name, the agent's own among them while the phone's app listens on
+// its UUID. One at a time in the car, for every client: a query that meets another client's is answered BUSY, and
+// that answer does not reach the client; the one good answer may reach both. Each query also sends every client
+// three ServiceListChanged informs. A query to a phone that has no link to the car pages it.
+const uint32_t kReqServiceListQuery = 0x19;          // address
 const uint32_t kReqVersionGet = 0x03;                // nothing
 const uint32_t kReqDeviceListGet = 0x13;             // nothing
 const uint32_t kRspVersionGet = 0x80000019;          // u32 GapErrorCode, five strings
 const uint32_t kRspDeviceListGet = 0x80000028;       // u32 GapErrorCode, then the device lists (DeviceList)
+// u32 GapErrorCode, address, services[], states u32[], profiles[], versions u32[] (ServiceList)
+const uint32_t kRspServiceListQuery = 0x8000002e;
 const uint32_t kRspServiceConnect = 0x8000002f;      // address, service, u32 GapErrorCode
 const uint32_t kRspServiceDisconnect = 0x80000030;   // address, service, u32 GapErrorCode, u32 reason
 const uint32_t kRspSppUuidRegister = 0x80000043;     // u32 GapErrorCode
@@ -179,6 +187,12 @@ inline std::vector<uint8_t> buildServiceDisconnect(const std::string& device, co
 inline std::vector<uint8_t> buildServiceConnect(const std::string& device, const std::string& instance,
                                                 const std::string& address, const std::string& service) {
     return buildServiceDisconnect(device, instance, address, service);
+}
+
+inline std::vector<uint8_t> buildServiceListQuery(const std::string& address) {
+    std::vector<uint8_t> p;
+    putString(p, address);
+    return p;
 }
 
 // ---- replies and informs -------------------------------------------------------------------------------------
@@ -496,6 +510,42 @@ inline ServiceListChanged parseServiceListChanged(const uint8_t* p, uint32_t n) 
     return c;
 }
 
+// kRspServiceListQuery: a phone's services, by name, and the state of each (0 for a service with no link up), as
+// the phone's SDP records gave them just now. The car names a service of a phone's that it knows by its registered
+// name, the agent's own among them, and another by its UUID.
+struct ServiceList {
+    uint32_t error;
+    std::string address;
+    std::vector<std::string> services, profiles;
+    std::vector<uint32_t> states, versions;
+    bool ok;
+    ServiceList() : error(0), ok(false) {}
+};
+
+// The same layout as ServiceListGet's reply (0x8000002d), which this reads as well. A reply with an error may hold
+// nothing after it: that is read whole, with no address.
+inline ServiceList parseServiceList(const uint8_t* p, uint32_t n) {
+    ServiceList l;
+    Reader r(p, n);
+    l.error = r.u32();
+    if (r.ok() && l.error != 0 && r.left() == 0) {
+        l.ok = true;
+        return l;
+    }
+    l.address = r.str();
+    bool lists = r.ok() && readStrings(r, &l.services) && readValues(r, &l.states) && readStrings(r, &l.profiles) &&
+                 readValues(r, &l.versions);
+    l.ok = lists && r.ok();
+    return l;
+}
+
+// Whether a service list names `name`, whatever its state.
+inline bool listsService(const ServiceList& list, const std::string& name) {
+    for (size_t i = 0; i < list.services.size(); ++i)
+        if (list.services[i] == name) return true;
+    return false;
+}
+
 // kRspVersionGet: the stack's version strings.
 struct StackVersion {
     uint32_t error;
@@ -672,6 +722,11 @@ public:
         virtual void sppConnectReply(const ServiceConnectReply& /*reply*/) {}
         // The answer to disconnectService(), the same way.
         virtual void sppDisconnectReply(const ServiceDisconnectReply& /*reply*/) {}
+        // Every ServiceListQuery reply that comes, whoever's query it answers: the car may give the one answer to
+        // two clients whose queries met. One that cannot be read, or a rejection of queryServices()'s request, has
+        // the error kNoError; it and an error reply with no address name the phone of queryServices() if that
+        // waits for its answer, and nobody otherwise. For the caller to keep, and never to log the address.
+        virtual void sppServiceList(const ServiceList& /*list*/) {}
         // The inform ServiceDisconnected: a link of the car's ended.
         virtual void sppLinkEnded(const ServiceDisconnected& /*ended*/) {}
         // A pairing inform that stops dials, PairingError or SimplePairingConfirmationRequired
@@ -735,6 +790,11 @@ public:
     // thread.
     bool connectService(const std::string& device, const std::string& instance, const std::string& address,
                         const std::string& service);
+    // ServiceListQuery: the car asks the phone at `address` (the colon form) for its services. False, with nothing
+    // sent, if the server is not attached or did not take the request. Its answer, and any other reply of that id,
+    // goes to sppServiceList(); one at a time is the caller's to keep to (dial_rules.hpp), since the car's answer
+    // may be another client's. Nothing is logged here: the caller says what it does. From any thread.
+    bool queryServices(const std::string& address);
     // ServiceDisconnect with all four values given: the answer goes to sppDisconnectReply() as well as to the log.
     // False, with nothing sent, while a ServiceDisconnect waits for its answer (this one's or disconnectPhone()'s),
     // or as connectService(). A reply that is read whole and names another phone or another service (the car's
@@ -774,7 +834,8 @@ public:
         std::vector<BtDevice> devices;
         unsigned deviceListChanges;        // DeviceListChanged informs
         unsigned linksEnded;               // ServiceDisconnected informs
-        unsigned serviceListChanges;       // ServiceListChanged informs
+        unsigned serviceListChanges;       // ServiceListChanged informs: only counted. Every ServiceListQuery, the
+                                           // agent's or another client's, brings three, and they change nothing
         std::vector<std::string> version;  // the stack's version strings, from VersionGet, as the log shows them
         unsigned othersConnectReplies;     // ServiceConnect replies for another client that came while ours waited
         unsigned othersDisconnectReplies;  // the same for ServiceDisconnect
@@ -868,6 +929,8 @@ private:
     double disconnectReplyS_;                 // see setDisconnectReplyTime()
     bool connectOut_;                         // a ServiceConnect of ours waits for its reply
     std::string connectAddress_, connectService_;
+    std::string queryAddress_;                // the phone of the last ServiceListQuery of ours, until a reply that
+                                              // names it, a rejection or the server's going; in memory only
     bool pairingInforms_;
     std::string refusedAddress_;              // the phone of the last refusal; in memory only
     bool refusalAsked_;                       // askAboutRefused() waits for the device list

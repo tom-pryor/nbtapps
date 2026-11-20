@@ -169,15 +169,20 @@
 //
 //   { "listener": true, "registered": true, "checkedMsAgo": 12000, "stack": [ "...", ... ],
 //     "phonesPresent": 1, "phonesEligible": 1, "dial": "on", "dialState": "idle", "lastResult": "DEFAULT",
-//     "link": "none", "counts": { "dials", "answeredOk", "notListening", "notInReach", "busy", "otherAnswers",
-//     "noAnswer", "notTheApp", "leftBehind", "checks", "checksRestored", "refusals" },
+//     "link": "none", "recordDoubtful": false, "counts": { "dials", "answeredOk", "notListening", "notInReach",
+//     "busy", "otherAnswers", "noAnswer", "notTheApp", "leftBehind", "asks", "asksListed", "asksNotListed",
+//     "asksNoAnswer", "askErrors", "checks", "checksRestored", "refusals" },
 //     "problems": { "recorded", "counted" } }
 //
 // checkedMsAgo is absent before the service has first been registered. dial is on or off (nbtagent --dial);
-// dialState is idle, dialling, up or ending; lastResult is the last dial's answer by the Bluetooth stack's own name
-// (OK, BUSY, DEFAULT, PAGE_TIMEOUT, ...), or rejected, no answer, not the app, or none; link is the agent's serial
-// links that are up: none, phone-opened, dialled or both. problems: the lines written to the problem file in this
-// run, and the problems only counted (serial_link.hpp).
+// dialState is idle, asking (the car asks the phone for its services before a dial), dialling, up or ending;
+// lastResult is the last dial's answer by the Bluetooth stack's own name (OK, BUSY, DEFAULT, PAGE_TIMEOUT, ...), or
+// rejected, no answer, not the app, or none; link is the agent's serial links that are up: none, phone-opened,
+// dialled or both. recordDoubtful is true from a dial that failed although the phone's service list named the
+// agent's service, which may leave the car's record of phone-opened serial links wrong, until a dial is answered
+// 0, the car says such a link ended, or its Bluetooth service goes (dial_rules.hpp). asks counts the asks for a
+// phone's service list; asksListed, asksNotListed, asksNoAnswer and askErrors what they came to. problems: the lines
+// written to the problem file in this run, and the problems only counted (serial_link.hpp).
 //
 // serial.dial, on the local socket only: a round of dials now, to each phone connected to the car and paired with
 // it; for trials (nbtctl serial dial). { "phones": N }, or `unsupported` without a listener that dials, `busy`

@@ -63,7 +63,9 @@
 //
 // The car can also dial the phone (dial_rules.hpp, SerialConfig::dial): the listener asks the car's Bluetooth service
 // to open a serial link to the agent's service on a phone of the agent's, on the car's instance kDialInstance, whose
-// node, /dev/nbtapp, no other link uses. The phone's app listens on the agent's UUID and accepts the link. The
+// node, /dev/nbtapp, no other link uses, once the phone's service list, which the car is asked for first, has named
+// that service. The phone's app listens on the agent's UUID and accepts the link. The ServiceListChanged informs
+// that each such ask brings change nothing here: they are only counted (spp_service.hpp). The
 // listener opens the node when the car answers 0, and a link whose phone says the magic bytes within
 // DialConfig::magicWaitMs of the open is the agent's, with no gate, no hold and no let-go: nobody else's link is on
 // that node. A link that does not open with them is ended at once by the car (ServiceDisconnect), and the phone is
@@ -569,6 +571,7 @@ private:
     virtual void sppRefusedPhone(const btspp::PhoneInList& phone);
     virtual void sppDevices(const std::vector<btspp::BtDevice>& devices);
     virtual void sppConnectReply(const btspp::ServiceConnectReply& reply);
+    virtual void sppServiceList(const btspp::ServiceList& list);
     virtual void sppDisconnectReply(const btspp::ServiceDisconnectReply& reply);
     virtual void sppLinkEnded(const btspp::ServiceDisconnected& ended);
     virtual void sppPairing(uint32_t informId, const std::string& address);
@@ -606,7 +609,14 @@ private:
     void watchAttach(bool registered);
     // The car dials the phone, on the listener's thread.
     void tendDial();
+    DialRules::Facts dialFacts();
     void maybeDial(int64_t now);
+    void tendAsk(const std::vector<std::pair<btspp::ServiceList, int64_t> >& lists, int64_t now);
+    enum AskEnd { kAskAnswered, kAskNoAnswer, kAskNotSent };
+    void listed(DialRules::Listing what, const btspp::ServiceList* list, AskEnd how, int64_t cameAt, int64_t now);
+    void askSay(const std::string& answer, const std::string& text);
+    void sendDial(int64_t now);
+    void doubtNow(bool before, const std::string& answer);
     void dialAnswered(const btspp::ServiceConnectReply& reply, int64_t now);
     void openDialled(int64_t now);
     void readMagic(int64_t now);
@@ -717,19 +727,21 @@ private:
     // has said for the listener's thread to act on.
     DialRules rules_;
     std::vector<std::pair<btspp::ServiceConnectReply, int64_t> > connectReplies_;   // with when each came
+    std::vector<std::pair<btspp::ServiceList, int64_t> > listReplies_;              // the same
     std::vector<btspp::ServiceDisconnectReply> disconnectReplies_;
     std::vector<btspp::ServiceDisconnected> dialEnds_;
     std::vector<std::string> pairingInforms_;   // the address each named, or empty
     // The listener's thread: where the dial is.
     enum DialPhase {
         kDialNone,
+        kDialAsk,        // ServiceListQuery is out
         kDialWait,       // ServiceConnect is out
         kDialMagic,      // the node is open, and the magic bytes are waited for
         kDialLinked,     // the dialled link is the agent's
         kDialCleanup     // ServiceDisconnect to end what is up on the instance, a phone at a time
     };
     DialPhase dialPhase_;
-    DialRules::Dial dial_;             // the dial of the phase, from kDialWait on
+    DialRules::Dial dial_;             // the ask or dial of the phase, from kDialAsk on
     NodeReader* dialReader_;           // kDialMagic, and kDialCleanup of a node that is read until it ends
     std::vector<uint8_t> dialGot_;     // what came first on the node
     double dialOpenedAt_;
@@ -765,7 +777,7 @@ private:
     unsigned lastLinks_;
     // The problem file, and on the listener's thread: the registration checks that found it dropped, as last seen,
     // whether a failed write of the file has been said, and for each phone the answer its last dial was given and
-    // how many times since it came again, which the log only counts.
+    // how many times since it came again, which the log only counts; the same for the asks of its service list.
     ProblemLog* problems_;
     unsigned restoredSeen_;
     bool problemsSaid_;
@@ -775,6 +787,7 @@ private:
         Repeat() : times(0) {}
     };
     std::map<unsigned, Repeat> repeats_;
+    std::map<unsigned, Repeat> askRepeats_;
 };
 
 }  // namespace nbt

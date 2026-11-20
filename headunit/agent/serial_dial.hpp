@@ -23,19 +23,24 @@ struct SerialStatus {
     unsigned phonesPresent;            // phones connected to the car, in its device list
     unsigned phonesEligible;           // of those, the ones the car may dial now: paired with it, and the agent's
     bool dialOn;                       // the car dials phones in this run (nbtagent --dial)
-    std::string dialState;             // idle, dialling, up, ending
+    std::string dialState;             // idle, asking, dialling, up, ending
     std::string lastResult;            // what the last dial came to: the car's answer by its name (OK, DEFAULT, BUSY,
                                        // PAGE_TIMEOUT, ...), "rejected", "no answer", "not the app"; "none" before one
     std::string link;                  // the agent's serial links up: none, phone-opened, dialled, both
+    bool recordDoubtful;               // a dial failed after the phone's service list named the agent's service, and
+                                       // the car's record of phone-opened links may be wrong since (dial_rules.hpp)
     // Counts since the agent started.
     unsigned dials, answeredOk, notListening, notInReach, busy, otherAnswers, noAnswer, notTheApp, leftBehind;
+    // The asks for a phone's service list before a dial: sent, and what they came to.
+    unsigned asks, asksListed, asksNotListed, asksNoAnswer, askErrors;
     unsigned checks, checksRestored, refusals;
     unsigned problemsRecorded;         // lines written to the problem file in this run (serial_link.hpp)
     unsigned problemsCounted;          // problems that were not written, only counted
     SerialStatus()
         : registered(false), checkedMsAgo(-1), phonesPresent(0), phonesEligible(0), dialOn(false), dialState("idle"),
-          lastResult("none"), link("none"), dials(0), answeredOk(0), notListening(0), notInReach(0), busy(0),
-          otherAnswers(0), noAnswer(0), notTheApp(0), leftBehind(0), checks(0), checksRestored(0), refusals(0),
+          lastResult("none"), link("none"), recordDoubtful(false), dials(0), answeredOk(0), notListening(0),
+          notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0), leftBehind(0), asks(0), asksListed(0),
+          asksNotListed(0), asksNoAnswer(0), askErrors(0), checks(0), checksRestored(0), refusals(0),
           problemsRecorded(0), problemsCounted(0) {}
 };
 

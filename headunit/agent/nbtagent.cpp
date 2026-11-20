@@ -82,7 +82,8 @@
 // the gate holds off a link meanwhile. Switching Bluetooth off and on in iDrive drops the registration, and the car
 // says nothing of it, so the agent checks it by registering it again while all is quiet: every 30 seconds, or as
 // often as --register-check S says (0: never). The car also dials a phone of the agent's that is connected to it and
-// paired with it (dial_rules.hpp), on its own node that no other program's link uses: --dial off turns that off, and
+// paired with it (dial_rules.hpp), on its own node that no other program's link uses, once the phone's service list,
+// which the car is asked for first, names the agent's service: --dial off turns that off, the ask with it, and
 // the agent then takes only the links phones open, as before; --dial-poll F,L,T sets how often it polls, every F
 // seconds for L seconds after a phone connects or a link ends, then every T seconds.
 // `nbtagent --look PATH` is how the gate is checked, by this program run again: one stat() of PATH, answered by

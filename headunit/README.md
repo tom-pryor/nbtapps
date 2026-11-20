@@ -195,10 +195,12 @@ format and the protocol.
   the service is registered and how long ago it was last checked, the Bluetooth stack's version strings, how many
   phones are connected to the car and how many of them the car may dial, whether the dial is on, where it is and
   what the last dial came to, which of the agent's serial links are up (`none`, `phone-opened`, `dialled` or
-  `both`), counts of the dials, their answers and the registration checks, and how many problems were written to
-  the problem file and how many only counted. Never a phone's address or name. An agent with no Bluetooth serial
-  listener answers `serial.status` with `unsupported`, and its `info.get` has `"serial": {"listener": false}`.
-  `serial.dial`, on the local socket only, has the car dial the phones connected to it now (`{"phones": N}`);
+  `both`), whether a failed dial may have left the car's record of phone-opened links wrong (`recordDoubtful`),
+  counts of the asks before the dials, of the dials, their answers and the registration checks, and how many
+  problems were written to the problem file and how many only counted. Never a phone's address or name. An agent
+  with no Bluetooth serial listener answers `serial.status` with `unsupported`, and its `info.get` has
+  `"serial": {"listener": false}`. `serial.dial`, on the local socket only, has the car dial the phones connected
+  to it now (`{"phones": N}`);
   `nbtctl serial status` and `nbtctl serial dial` send them. `agent/agent.hpp` has the members one by one.
 - The phone made a link, and the phone ends it. When the agent ends a link of its own accord it says so first,
   with the event `link.closing`, and closes its end once that is written out; nothing follows the event. Its
@@ -718,26 +720,48 @@ pairing key, and nothing on the link is trusted before that.
   car would start a new pairing, with a prompt on both screens. A phone that the car says is being paired anew or
   failed to pair, or whose security becomes 9, is not dialled until the device list shows it paired again after a
   change; a pairing that worked does not stop its dials.
-- **When.** One dial at a time, and none while a link of the agent's of either kind is up or being decided on, or
-  while the service is not registered. A poll of the agent's phones as soon as the car's device list has come, then
-  every 10 seconds for 2 minutes after a phone connects to the car or a link of the agent's ends, and every 30
-  seconds after that (`--dial-poll 10,120,30`). A phone that asked the car for a serial link and got no link of
-  the agent's within a second is dialled then, even while its request is still pending; that request holds back
-  every other dial until its node has come or its time is over. While the pairing window is open, a round of every
-  phone there every 5 seconds. `nbtctl serial dial`, over the local socket only, dials the phones connected to the
-  car and paired with it now, the agent's or not.
+- **Ask first.** Before every dial, whatever brings it, the car is asked for the phone's service list
+  (ServiceListQuery), and the phone is dialled at once only if the list names the agent's service, which the app
+  publishes only while it listens. A list without it means the app is not listening: no dial, nothing held against
+  the phone, and the next poll asks again. An error, or no answer within 6 seconds (the car's BUSY to a query never
+  reaches the client), counts as such a list; three in a row back the phone off as below. A phone whose connection
+  is below 2 is never asked: a query pages a phone that has no link to the car. Each ask takes the car about a
+  second and a half and brings every client of its Bluetooth service three ServiceListChanged informs, which the
+  agent only counts. A failed dial is what the ask is there to avoid: each one the car answers with a failure can
+  leave its record of phone-opened serial links wrong, and it then refuses such links (another program's too)
+  after one of them ends.
+- **When.** One ask or dial at a time, and none while a link of the agent's of either kind is up or being decided
+  on, or while the service is not registered; a link that comes, or a phone's request that becomes pending, ends an
+  ask, whose answer is then passed over, and the next ask waits for that answer or the 6 seconds. A poll of the
+  agent's phones as soon as the car's device list has come, then every 10 seconds for 2 minutes after a phone
+  connects to the car or a link of the agent's ends, and every 30 seconds after that (`--dial-poll 10,120,30`). A
+  phone that asked the car for a serial link and got no link of the agent's within a second is asked then, even
+  while its request is still pending; that request holds back every other ask until its node has come or its time
+  is over. A phone's requests bring one ask of it every 10 seconds at most. No poll's ask, retry and ask a request
+  brings comes within 8 seconds of a phone connecting to the car (or of the first device list, for a phone there
+  already): the car's own media component asks the phone for its services as its audio connects, and of two
+  queries that meet, one fails; a poll comes as soon as that time is over, and the request's ask waits for it.
+  While the pairing window is open, a round of every phone there every 5 seconds. `nbtctl serial dial`, over the
+  local socket only, asks and dials the phones connected to the car and paired with it now, the agent's or not;
+  neither it nor the pairing window waits for the 8 seconds.
 - **What the car answers.** 0: the link is up, and the agent opens `/dev/nbtapp` and waits 3 seconds for the
   app's magic bytes (the app accepts the link before it writes); with them the link is the agent's, a serial link
   like any other, with no gate, hold or let-go. Anything else on it, or nothing, is something that answered on the
   agent's UUID and is not the app: the car is asked to end the link (ServiceDisconnect), and polls leave that phone
   alone for 30 seconds, twice as long each time it happens again, up to 5 minutes, until a link works or the phone's
-  connection changes; its own request and the pairing window still dial it at once. 5: the phone's app is not
-  listening, which disturbs nothing: the next poll dials again. 14: the phone is not in reach, and polls leave it
+  connection changes; its own request and the pairing window still dial it at once. 5: the phone's app did not
+  take the link: the next poll asks again. 14: the phone is not in reach, and polls leave it
   alone until its connection changes. 2: a link on the instance is up already; with its node there, it is a link an
   agent that was killed left behind, which is ended and never taken, and the phone is dialled afresh; if the car
   does not end it, the phone is backed off as above instead, and is not dialled again at once. Any other
   answer: again in 15 seconds. No answer in 95 seconds: the dial is given up, the car is asked to end what may be
   up, and the phone is backed off.
+- **A dial that still fails.** A dial answered with anything but 0, 2 or 10, or not at all, although the phone's
+  list named the agent's service, may have left the car's record of phone-opened links wrong. The log says so once,
+  the problem file gets a line, and `serial.status` says `"recordDoubtful": true` until a dial is answered 0, the
+  car says that a phone-opened link (`ExtBox1`) ended, as it does when that record is right, or its Bluetooth service
+  goes. The agent sends nothing to mend it: a ServiceDisconnect for `ExtBox1` with no live link holds that instance
+  up for well over a minute.
 - **How it ends.** The phone ends it, or the car says it ended (ServiceDisconnected for `nbtapp`), and its node is
   closed at once. When the agent ends it, it says `link.closing` first as on any link, gives the phone 5 seconds to
   end it, and then has the car end it with ServiceDisconnect, waits up to 3 seconds for the answer, and closes the
@@ -753,7 +777,10 @@ pairing key, and nothing on the link is trusted before that.
 - **A request the dial overtakes.** The car ends a phone's pending request for a link when its own dial to the
   phone comes up, and says so just before the dial's answer. A request ended while the dial is out, or within a
   second of its answer 0, is logged as such and is not counted as a refusal.
-- **The log.** One line for each dial, when it is answered: the phone by its number, why it was dialled (poll,
+- **The log.** What an ask came to (the app not listening, no answer, an error) is said when it differs from that
+  phone's last ask, and otherwise only counted, and the next line that differs says how many came; a list that names
+  the service again after such asks is said once, with that count, and the dial follows. One line for each dial,
+  when it is answered: the phone by its number, why it was dialled (poll,
   the phone asked for a link, pairing window, asked for, again after an answer not understood, afresh), the car's
   answer by its name and how long it took. The same answer for the same phone again is only counted, and the next
   line that differs says how many times it came. A line each when the car's device list says a phone came, went,
@@ -770,7 +797,8 @@ nbtctl serial dial      # "dialling N phones": the agent's log says what came of
 Bluetooth serial is also put, a short line each, into `serial-problems.log` in the agent's state folder
 (`/var/opt/nbtapp`), which is on flash: a registration that switching Bluetooth off and on had dropped and the check
 restored, the car's Bluetooth service that never attached, the car refusing a phone's link, a dial that went wrong
-(an answer other than 0, 5 and 14, no answer, something that is not the app), the car asked to end a link left
+(an answer other than 0, 5 and 14, no answer, something that is not the app), a failed dial after the phone's list
+named the agent's service, the car asked to end a link left
 behind, and that link not ended, and
 `serial.reset`. Each line has the time, the agent's version and build, and what happened, never a phone's address
 or name. Only the first problem of each kind in a run of the agent is written, and 16 lines a run at most; the

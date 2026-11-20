@@ -451,6 +451,18 @@ bool SppService::connectService(const std::string& device, const std::string& in
     return false;
 }
 
+bool SppService::queryServices(const std::string& address) {
+    if (!gap_->attached()) return false;
+    pthread_mutex_lock(&mu_);
+    queryAddress_ = address;
+    pthread_mutex_unlock(&mu_);
+    if (send(kReqServiceListQuery, buildServiceListQuery(address))) return true;
+    pthread_mutex_lock(&mu_);
+    queryAddress_.clear();
+    pthread_mutex_unlock(&mu_);
+    return false;
+}
+
 bool SppService::disconnectService(const std::string& device, const std::string& instance, const std::string& address,
                                    const std::string& service, bool quiet) {
     if (!gap_->attached()) return false;
@@ -474,7 +486,7 @@ const unsigned kOthersConnectLogged = 4;
 const unsigned kOthersDisconnectLogged = 4;
 // unreadSaid_: which kind of message has been logged once as one that could not be read.
 enum { kUnreadDeviceList = 1, kUnreadEnded = 2, kUnreadServiceList = 4, kUnreadVersion = 8, kUnreadDisconnect = 16,
-       kUnreadConnect = 32 };
+       kUnreadConnect = 32, kUnreadQuery = 64 };
 }  // namespace
 
 // The replies and informs that are kept as state, or only logged: true if `id` is one of them. On the client's
@@ -496,6 +508,17 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
             pthread_mutex_unlock(&mu_);
             say("the Bluetooth server rejected DeviceListGet (type 0x%x)", type);
             if (refusal) events_->sppRefusedPhone(PhoneInList());
+            return true;
+        }
+        if (id == kReqServiceListQuery) {
+            pthread_mutex_lock(&mu_);
+            ServiceList l;
+            l.error = kNoError;
+            l.address = queryAddress_;
+            queryAddress_.clear();
+            pthread_mutex_unlock(&mu_);
+            say("the Bluetooth server rejected ServiceListQuery (type 0x%x)", type);
+            if (!l.address.empty()) events_->sppServiceList(l);
             return true;
         }
         return false;
@@ -638,6 +661,23 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
             what = "ServiceConnect's reply";
         }
         events_->sppConnectReply(c);
+    } else if (id == kRspServiceListQuery) {
+        // Told whoever's query it answers: which ask it is the answer to is for the caller to say. One that names no
+        // phone, or cannot be read, is taken as the answer to ours, if one waits.
+        ServiceList l = parseServiceList(payload, len);
+        pthread_mutex_lock(&mu_);
+        std::string asked = queryAddress_;
+        bool named = l.ok && !l.address.empty();
+        if (!named || addressKey(l.address) == addressKey(asked)) queryAddress_.clear();
+        pthread_mutex_unlock(&mu_);
+        if (!l.ok) {
+            l = ServiceList();
+            l.error = kNoError;
+            unread = kUnreadQuery;
+            what = "ServiceListQuery's reply";
+        }
+        if (!named) l.address = asked;
+        events_->sppServiceList(l);
     } else {
         return false;
     }
@@ -719,6 +759,7 @@ void SppService::gapDetached() {
     disconnectOut_ = false;
     disconnectTold_ = false;
     connectOut_ = false;
+    queryAddress_.clear();
     refusalAsked_ = false;
     versionAsked_ = false;
     heard_.devicesKnown = false;
