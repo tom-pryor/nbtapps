@@ -47,8 +47,13 @@ class AppUpdaterTest {
             busy = { busy[minOf(asked++, busy.size - 1)] },
             scope = scope,
             terminalOpen = { terminal[minOf(terminalAsked++, terminal.size - 1)] },
+            portOn = { portOn },
         )
     }
+
+    /** Whether the SSH port for other apps is on. */
+    @Volatile
+    private var portOn = false
 
     /** Whether a terminal is open, each time it is asked, as [busy] is. */
     private var terminal = listOf(false)
@@ -198,6 +203,18 @@ class AppUpdaterTest {
 
         // Once it is closed the update goes through.
         terminal = listOf(false)
+        updater.start(release)
+        handedOver()
+    }
+
+    @Test
+    fun `no update begins while the SSH port for other apps is on`() {
+        portOn = true
+        updater.start(release)
+        assertEquals("SSH access for other apps is on. Turn it off, then update the app.", failure())
+        assertEquals(emptyList<String>(), source.opened)
+
+        portOn = false
         updater.start(release)
         handedOver()
     }

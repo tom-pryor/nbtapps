@@ -29,8 +29,13 @@ import com.nbtapps.store.model.HeadUnit
 import com.nbtapps.store.model.InstallTarget
 import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.TcpEndpoint
+import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.JSch
 import java.io.File
 import java.io.InputStream
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.util.Base64
 import java.io.OutputStream
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
@@ -47,6 +52,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -326,6 +332,58 @@ class SshRealAgentTest {
         assertTrue(jobs.connection.value is ConnectionState.Connected)
         terminal.open("bench", 80, 24)
         assertEquals(TerminalState.Off("bench"), withTimeoutOrNull(20_000) { terminal.state.first { !it.active } })
+    }
+
+    @Test
+    fun `the port lets an outside SSH client in with a saved client key, shows the head unit's host key, and runs a command`() = test {
+        installed()
+        // The test's own link took the app's place: the app connects again, as the user does.
+        assertTrue(jobs.connect("bench").isSuccess)
+        val laptop = SshKey.generate()
+        val clients = InMemoryAuthorizedClients()
+        assertTrue(clients.add("Laptop", laptop.publicKeyLine("laptop")) is AddClientResult.Added)
+        val first = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        val port = SshPort(JobPortLink(jobs), SshChannel, clients, {}, scope, firstPort = first, lastPort = first + 9)
+        assertTrue(port.switchOn("bench"))
+        val on = withTimeoutOrNull(60_000) { port.state.first { it !is SshPortState.Checking } }
+        assertTrue("$on", on is SshPortState.On)
+        on as SshPortState.On
+
+        // JSch as the outside client, over a plain socket to the port, as an SSH app on the phone connects.
+        val output = withContext(Dispatchers.IO) {
+            val jsch = JSch()
+            jsch.addIdentity(OutsideKey(laptop), null)
+            val session = jsch.getSession(USER, "127.0.0.1", on.port)
+            session.setConfig("StrictHostKeyChecking", "no")
+            session.setConfig("PreferredAuthentications", "publickey")
+            session.connect(30_000)
+            try {
+                // The host key the client is shown is the one the port's state gives.
+                assertEquals(on.hostKey, SshKeyLines.fingerprint(Base64.getDecoder().decode(session.hostKey.key)))
+                val exec = session.openChannel("exec") as ChannelExec
+                exec.setCommand("echo port-$((6 * 7))")
+                val stream = exec.inputStream
+                exec.connect(30_000)
+                stream.readBytes().decodeToString().also { exec.disconnect() }
+            } finally {
+                session.disconnect()
+            }
+        }
+        assertEquals("port-42\n", output)
+        port.switchOff()
+        assertEquals(SshPortState.Off("bench"), withTimeoutOrNull(20_000) { port.state.first { it is SshPortState.Off } })
+    }
+
+    /** A key as JSch's [com.jcraft.jsch.Identity], signing with Bouncy Castle: the outside client's. */
+    private class OutsideKey(private val key: SshKey) : com.jcraft.jsch.Identity {
+        override fun setPassphrase(passphrase: ByteArray?): Boolean = true
+        override fun getPublicKeyBlob(): ByteArray = key.blob
+        override fun getSignature(data: ByteArray): ByteArray = key.sshSignature(data)
+        override fun getSignature(data: ByteArray, alg: String?): ByteArray = key.sshSignature(data)
+        override fun getAlgName(): String = SshKeyLines.ED25519
+        override fun getName(): String = "laptop"
+        override fun isEncrypted(): Boolean = false
+        override fun clear() = Unit
     }
 
     private companion object {

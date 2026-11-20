@@ -3,6 +3,7 @@
 package com.nbtapps.store.di
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import androidx.datastore.dataStoreFile
@@ -38,11 +39,16 @@ import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.data.packages.PackageDownloader
 import com.nbtapps.store.data.packages.PackageStore
+import com.nbtapps.store.data.ssh.ACCESS_LOCAL_NETWORK
 import com.nbtapps.store.data.ssh.AuthorizedClients
 import com.nbtapps.store.data.ssh.DataStoreAuthorizedClients
+import com.nbtapps.store.data.ssh.JobPortLink
 import com.nbtapps.store.data.ssh.KeystoreSshIdentity
+import com.nbtapps.store.data.ssh.SshChannel
 import com.nbtapps.store.data.ssh.SshIdentity
+import com.nbtapps.store.data.ssh.SshPort
 import com.nbtapps.store.data.ssh.authorizedClientsStore
+import com.nbtapps.store.data.ssh.localNetworkBlocked
 import com.nbtapps.store.data.terminal.JobTerminalLink
 import com.nbtapps.store.data.terminal.SshShellOpener
 import com.nbtapps.store.data.terminal.TerminalRepository
@@ -166,6 +172,7 @@ abstract class AppModule {
             installer: ApkInstaller,
             jobs: JobRepository,
             terminal: TerminalRepository,
+            port: SshPort,
             @ApplicationScope scope: CoroutineScope,
         ): AppUpdater = AppUpdater(
             source = source,
@@ -176,6 +183,34 @@ abstract class AppModule {
             busy = { jobs.job.value?.needsPhone == true },
             scope = scope,
             terminalOpen = { terminal.state.value.active },
+            portOn = { port.state.value.active },
+        )
+
+        /** The SSH port for other apps: its connections go on when the screen, or the app, is left. */
+        @Provides
+        @Singleton
+        fun provideSshPort(
+            @ApplicationContext context: Context,
+            jobs: JobRepository,
+            clients: AuthorizedClients,
+            keeper: JobKeeper,
+            @ApplicationScope scope: CoroutineScope,
+            clock: ElapsedClock,
+        ): SshPort = SshPort(
+            JobPortLink(jobs),
+            SshChannel,
+            clients,
+            keeper,
+            scope,
+            // The idle limit counts the time the phone slept.
+            clock = clock::millis,
+            otherDevicesBlocked = {
+                localNetworkBlocked(
+                    Build.VERSION.SDK_INT,
+                    context.applicationInfo.targetSdkVersion,
+                    context.checkSelfPermission(ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED,
+                )
+            },
         )
 
         /** The lines sent from the terminal's field, for Up and Down: in memory only, for as long as the process lives. */
