@@ -36,11 +36,11 @@ Nothing in HmiMain3D is patched.
 | `tools/nbtpkg.py` | Builds, signs and verifies `.nbtpkg` packages |
 | `tools/check_agent.py` | `make agent-check`: `release/agent/` is the head unit's kind of program, holds nothing of the test bench, and its `nbtagent` holds the official package key; and the agent's own package in `release/pkg/` is byte for byte what `tools/agent_pkg.py` makes of that folder |
 | `agent/package/manifest.json.in`, `tools/agent_pkg.py` | The agent's own package, `org.nbtapp.agent`: its manifest, with a placeholder for the version, and the script that makes the archive of `release/agent/` (`make agent-pkg`) and signs it for a release (`make agent-release KEY=FILE`); `tests/test_agent_pkg.py` tests the script |
-| `tests/` | Host tests of the Python tools: `test_nbtpkg.py` (`make test-pkg`), `test_agent_pkg.py` (`make test-agent-pkg`) and `test_plugin_pkg.py` (`make test-plugin-pkg`) |
+| `tests/` | Host tests of the Python tools: `test_nbtpkg.py` (`make test-pkg`), `test_agent_pkg.py` (`make test-agent-pkg`), `test_plugin_pkg.py` (`make test-plugin-pkg`) and `test_ssh_pkg.py` (`make test-ssh-pkg`) |
 | `tests/agent/` | Tests of `agent/` (`make agent-test`), run in a Docker container (`tools/bench.py`), and `chan_echo.cpp` and `chan_feed.cpp`, the programs of the test package chan's channels; `tests/compare_readers.py` holds the agent's package reader and the tool's together, `tests/test_protocol_vectors.py` reads `spec/protocol/` with a codec of its own, `tests/e2e/run_agent.py` runs `nbtagent` and `nbtctl` as two processes, and `tests/e2e/run_launcher.py` runs the starter, a version's launcher and the install script on folders |
 | `tests/packages/`, `tests/keys/` | Package sources and test keys for `tests/make_packages.py`, which builds good and deliberately broken packages (`make testdata`); `tests/test_nbtpkg.py` tests the tool against them (`make test-pkg`) |
-| `ssh/` | Third party: Dropbear's SSH server and OpenSSH's `sftp-server`, as git submodules pinned at release tags (`ssh/dropbear`, `ssh/openssh`), with our patch to Dropbear, its build options and the build scripts, for the head unit and for this machine; `tools/check_ssh.py` is `make ssh-check`. `ssh/README` says what each change is for and how the sources were checked against the signed releases. Ours: `ssh/relay/`, `sshrelay`, the program of the SSH package's channel, which starts a Dropbear server for each connection and carries its bytes (`ssh/README`, "The relay"); its tests are `tests/ssh/` (`make ssh-test`) |
-| `build/`, `release/` | Build products, not tracked. `release/NbtApp/` is the folder for the head unit; `release/agent/` holds the agent's programs for it, and `release/pkg/` the plugin's and the agent's own packages |
+| `ssh/` | Third party: Dropbear's SSH server and OpenSSH's `sftp-server`, as git submodules pinned at release tags (`ssh/dropbear`, `ssh/openssh`), with our patch to Dropbear, its build options and the build scripts, for the head unit and for this machine; `tools/check_ssh.py` is `make ssh-check`. `ssh/README` says what each change is for and how the sources were checked against the signed releases. Ours: `ssh/relay/`, `sshrelay`, the program of the SSH package's channel, which starts a Dropbear server for each connection and carries its bytes (`ssh/README`, "The relay"), and its `version.hpp`, the package's version; its tests are `tests/ssh/` (`make ssh-test`). `ssh/package/manifest.json.in` is the manifest of the SSH package, `org.nbtapp.ssh`, and `tools/ssh_pkg.py` makes it (`make ssh-pkg`) and signs it for a release (`make ssh-release KEY=FILE`); see [The SSH package](#the-ssh-package) |
+| `build/`, `release/` | Build products, not tracked. `release/NbtApp/` is the folder for the head unit; `release/agent/` holds the agent's programs for it, and `release/pkg/` the plugin's, the agent's own and the SSH package |
 
 Ids that must not collide with other apps on the car: the manifest's connector id (211; BMW's apps use 17 and 200,
 and 210 is known to be taken by another add-on app) and `entryButtonFocusID` (32754; 32752 and 32753 are taken the
@@ -81,7 +81,8 @@ make ssh-relay-host  # -> build/ssh/host/sshrelay: the relay for this machine, w
 make ssh-test     # the relay's tests on this machine (after make ssh-host); the last line says what was skipped
 make ssh-check    # the builds looked at; the head unit's are not run
 QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh ssh   # all of it: ssh-host, ssh-test, ssh, the relay for the head unit
-                                                      # (make ssh-relay, qcc, in the image) -> build/ssh/qnx/sshrelay, ssh-check
+                                                      # (make ssh-relay, qcc, in the image) -> build/ssh/qnx/sshrelay, ssh-check,
+                                                      # and the SSH package -> release/pkg/ (make ssh-pkg, not signed)
 ```
 
 ## Packages and the agent
@@ -555,7 +556,8 @@ run meanwhile from another controller prints nothing there, and a line on standa
 the channel and when it goes on. With `--raw`, `--skip-first` takes the first message that comes out of the stream
 and writes it to standard error as one line (each line end in it a space): with `--send`, that is how an SSH client's
 proxy command reaches the SSH package's relay, which answers the keys message with its host keys before the server's
-bytes begin. Without `--raw` it is refused: there the first message is a line already.
+bytes begin (see [The SSH package](#the-ssh-package)). Without `--raw` it is refused: there the first message is a
+line already.
 
 ## Installing
 
@@ -621,6 +623,54 @@ the HMI. The app then does not start the agent either (see "Starting with the he
 `Plugins/NbtApp` folder.
 
 Log: `sloginfo | grep NbtApp`.
+
+## The SSH package
+
+`org.nbtapp.ssh`, "SSH access", is a root shell and file copy on the head unit over SSH, reached only through a
+paired phone's link to the agent, and only while its switch is on. It is a package of its own, beside the agent's
+and the plugin's: nothing of it is in the agent, which knows nothing of SSH. It holds three programs in
+`${app}/bin/`: Dropbear's `dropbearmulti` (the server, its key tool and `scp`, with `${app}/bin/scp` a link to it),
+OpenSSH's `sftp-server`, and `sshrelay`, ours; and in `${app}/licenses/` the licence texts of the first two, with a
+README that says which program each belongs to. Its manifest is `ssh/package/manifest.json.in`; it runs no hook,
+places nothing outside its own folders and asks for no restart, so its one risk flag is `starts-program`.
+
+```sh
+QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh ssh    # also leaves release/pkg/org.nbtapp.ssh-<version>.nbtpkg, not signed
+make ssh-release KEY=/path/to/package.key              # -> release/pkg/signed/, and the SHA-256 the catalogue records
+```
+
+- **Its version** is the package's own, `NBT_SSH_VERSION` in `ssh/relay/version.hpp`, and is neither the agent's
+  nor the upstream versions. `sshrelay --version` prints it with the build, `git describe --always --dirty`, and
+  the relay's log begins with that line. It is raised whenever anything the package holds changes, Dropbear or
+  OpenSSH alone too: a version that has been released is never built again with other content.
+- **`requires`**: agent `>=1.7.0-beta.1`, the first with channels (a pre-release agent is outside `>=1.7.0`), and
+  app `>=0.9.0`.
+- **`make ssh-release`** refuses what `make plugin-release` refuses: a relay that was not built from the commit
+  checked out, or from a checkout with changes, or does not say it is the version of the package; a key that is
+  not built into the agent; a signed archive of that version that is there already with other bytes. Dropbear and
+  `sftp-server` hold no version of ours: they are tied to the checkout by what they are built from, the commits
+  the submodules are pinned at and our patch, options and build script, which `make ssh` records in
+  `build/ssh/qnx/sources`, and the release refuses programs whose record is not of the checkout.
+- **Its channel** is `ssh`: for NBTApps itself (`"apps": []`), both ways, switched, and started on demand with
+  `bin/sshrelay` as its program (see [A package's channels](#a-packages-channels)). The switch is off after every
+  power down, and the iDrive plugin may not turn it on. `nbtctl channel on org.nbtapp.ssh ssh` turns it on from the
+  head unit's shell or the bench.
+- **The relay.** For each connection the agent makes to it, it reads the phone's first message, the public keys
+  that may log in (`{"v":1,"keys":["ssh-ed25519 AAAA... comment", ...]}`, held to a strict rule: no options, two
+  key types), writes them to a keys folder of that connection's own, starts `dropbear -i` on a socket pair for it,
+  answers with the host key (`{"v":1,"hostKeys":["ssh-ed25519 AAAA..."],"pty":true}`, or `{"error":...}`), and
+  then carries the SSH stream both ways in messages. It starts the pty driver a shell needs when there is none
+  (`/bin/devc-pty`), serves four connections at once, and when a connection ends, ends what its server left
+  behind. Logins are by public key only, as root, with no port forwarding; 30 minutes without traffic ends one.
+  The whole of it is in `ssh/README`, "The relay".
+- **What it writes where.** The host key is made on the head unit the first time the relay starts, and kept in
+  `${data}/hostkey_ed25519`, on flash, until the package's data is removed (an upgrade keeps it; so does a removal
+  that keeps the data). Everything else is on the RAM disk, in `${tmp}`: the relay's socket, the keys folders, its
+  state file `sshrelay.state`, and the channel's logs `${tmp}/channels/ssh.log` and `ssh.log.1`, which the manifest
+  names for a phone to pull.
+- **An SSH client beside `nbtctl`** (on the bench, say) reaches the relay with `nbtctl` as its proxy command:
+  `nbtctl channel org.nbtapp.ssh ssh --raw --send KEYS --skip-first`, where `KEYS` is the keys message; the relay's
+  answer comes on `nbtctl`'s standard error, and the stream on its standard output.
 
 ## The agent on the head unit
 
