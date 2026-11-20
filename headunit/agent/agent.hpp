@@ -300,6 +300,7 @@
 #include <string>
 #include <vector>
 
+#include "channels.hpp"
 #include "checks.hpp"
 #include "engine.hpp"
 #include "job.hpp"
@@ -377,7 +378,7 @@ bool capLog(const std::string& path, uint64_t capBytes);
 // The file capLog took, or empty.
 std::string cappedLog();
 
-class Agent : public PeerHandler, public JobHost {
+class Agent : public PeerHandler, public JobHost, public ChannelHost {
 public:
     // Nothing passed in is owned; all of it must outlive the agent.
     Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std::string& agentVersion, Clock* clock,
@@ -401,6 +402,11 @@ public:
     }
     // A link on which a controller has connected: takes it over. The controller dialled, so it speaks first.
     void adopt(Link* link);
+    // What reaches a channel's program (channels.hpp): the program's local socket unless a test gives a stand-in; 0
+    // for none, and every channel.open is then answered `unavailable`. Not owned.
+    void setProgramEnds(ProgramEnds* ends) { channels_.setEnds(ends); }
+    // The channels that are open, for a test to look at.
+    const Channels& channels() const { return channels_; }
 
     // One turn of the loop: waits up to `timeoutMs` for a link to have something, serves every link, and runs at
     // most one install step.
@@ -458,6 +464,12 @@ public:
     virtual void jobIdle();
     virtual int64_t nowMs() { return clock_->nowMs(); }
 
+    // ChannelHost
+    virtual void channelConnected(Channel* channel);
+    virtual void channelUnavailable(Channel* channel, const std::string& why);
+    virtual void channelClosed(Channel* channel, const char* reason, const std::string& why);
+    virtual int64_t channelNowMs() { return clock_->nowMs(); }
+
 private:
     Agent(const Agent&);
     Agent& operator=(const Agent&);
@@ -505,10 +517,13 @@ private:
         std::map<int64_t, Asked> asked;
         Outgoing* outgoing;    // the files stream that is open, or 0
         uint16_t nextStream;   // the number the next files stream gets
+        uint16_t nextChannel;  // the number the next channel is given, if it is free
+        size_t turn;           // whose turn it is to send a frame: one of its channels, or its files stream
 
         Session()
             : peer(0), number(0), greeted(false), serial(false), dialled(false), local(false), trusted(false), challenged(false),
-              openedMs(0), heardMs(0), pingedMs(0), pings(0), ending(false), endingMs(0), outgoing(0), nextStream(1) {}
+              openedMs(0), heardMs(0), pingedMs(0), pings(0), ending(false), endingMs(0), outgoing(0), nextStream(1),
+              nextChannel(kChannelFirstStream), turn(0) {}
     };
     // The pairing window.
     struct Pairing {
@@ -615,8 +630,11 @@ private:
     void filesCancel(Session* s, int64_t id, const json::Value& params);
     // The log files of a package as they are now. False with the error's code and message if there is none such.
     bool logsOf(const std::string& package, std::vector<LogFile>* out, const char** code, std::string* message);
-    // Feeds the open files streams while their links take more.
+    // Feeds the open files streams and channels while their links take more: pumpLink for each link.
     void pumpStreams();
+    void pumpLink(Session* s);
+    // Queues the next DATA frame of a link's files stream, reading the file as far as that takes: true if one went.
+    bool sendFileFrame(Session* s);
     // True if a files stream could send more at once: the loop then does not wait.
     bool streamsWaiting() const;
     // Ends a session's files stream. `how` is for the log; with `error` the controller is told files.error.
@@ -637,6 +655,12 @@ private:
     void settingsSet(Session* s, int64_t id, const json::Value& params);
     // The installed record of a package that has settings. False with the error's code and message if there is none.
     bool settingsOf(const std::string& package, InstalledPackage* out, const char** code, std::string* message);
+    // Channels: see the top of this file, and channels.hpp.
+    void channelOpen(Session* s, int64_t id, const json::Value& params);
+    // The installed record of a package, and its channel of that name. False with the error's code and message if
+    // there is no such package or channel.
+    bool channelOf(const std::string& package, const std::string& name, InstalledPackage* out, const ManifestChannel** channel,
+                   const char** code, std::string* message);
     void autostartGet(Session* s, int64_t id);
     void autostartSet(Session* s, int64_t id, const json::Value& params);
     // Whether something would start the agent with the head unit here if it were asked to. If not: the error's
@@ -674,6 +698,8 @@ private:
     SerialDial* serialDial_;
     std::vector<Session*> sessions_;
     unsigned nextSession_;
+    SocketEnds socketEnds_;    // a program's end is its local socket, unless a test says otherwise
+    Channels channels_;
 
     PlanBuild* building_;
     bool havePlan_;
