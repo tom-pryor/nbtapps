@@ -318,6 +318,12 @@ std::string Job::doneParams() const {
     return w.text();
 }
 
+std::vector<std::string> Job::packages() const {
+    std::vector<std::string> ids;
+    for (size_t i = 0; i < steps_.size(); ++i) ids.push_back(steps_[i].plan.id);
+    return ids;
+}
+
 std::string Job::describe() const {
     json::Writer w;
     w.beginObject().key("planId").string(planId_).key("state").string(state_);

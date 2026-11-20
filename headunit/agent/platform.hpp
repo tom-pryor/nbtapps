@@ -74,8 +74,10 @@ public:
 
     // The shell hooks run under: /bin/ksh on the head unit.
     virtual std::string shell() const = 0;
-    // PATH for hooks.
+    // PATH for hooks, and for the programs the agent starts for channels.
     virtual std::string hookPath() const = 0;
+    // Whether the agent may start a channel's program here (channels.hpp): true on the head unit and on a build host.
+    virtual bool canStartPrograms() const { return true; }
 
     // Whether this machine has a way to do each restart. system.restart is answered before the restart is tried,
     // so what can be known beforehand is asked here; false with *error saying why.

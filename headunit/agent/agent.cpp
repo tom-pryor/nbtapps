@@ -36,6 +36,7 @@ const int64_t kRestartFlushMs = 2000;         // how long a restart waits for it
 const int64_t kClosingFlushMs = 2000;         // how long a link that is told link.closing has to take the event
 const size_t kMaxPhoneName = 64;
 const size_t kFileReadBytes = 16384;          // read from a file that is streamed, at a time
+const int64_t kProgramEndWaitMs = 3000;       // how long a job's first step waits for a channel's program to end
 
 std::string number(uint64_t value) {
     char text[32];
@@ -113,7 +114,10 @@ Agent::Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std:
       engine_(platform, keys, agentVersion), planner_(&engine_), job_(&engine_, this), serialReset_(0), serialDial_(0),
       nextSession_(1), channels_(this, &socketEnds_), building_(0),
       havePlan_(false), jobOwner_(0), jobAccounted_(true), inStep_(false), restartDeadlineMs_(0), onTrial_(false),
-      handOverDeadlineMs_(0), stopAsked_(false), stopDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), log_(stderr) {}
+      handOverDeadlineMs_(0), stopAsked_(false), stopDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), stepGate_(false),
+      stepHeld_(false), stepGateUntilMs_(0), log_(stderr) {
+    channels_.setPrograms(platform->runDir(), platform->shell());
+}
 
 Agent::~Agent() {
     delete building_;
@@ -397,8 +401,10 @@ bool Agent::init(std::string* error) {
                     note("the folder of the channels of " + m.id + " cannot be made: " + why);
                 }
             }
+            adoptPrograms(installed);
         }
     }
+    sweepChannelMarks();
 
     // A record of the paired phones that cannot be read stops no start: the phones pair again.
     std::string problem;
@@ -408,6 +414,34 @@ bool Agent::init(std::string* error) {
     note(countOf(phones_.all().size(), "phone") + " paired");
     shareAddresses();
     return true;
+}
+
+// The programs an agent before this one started for channels, by their marks in the run folder: one whose process
+// still runs that program is this agent's from now on; any other mark is stale, and goes.
+void Agent::adoptPrograms(const std::vector<InstalledPackage>& installed) {
+    std::vector<std::string> names;
+    if (!fs::listDir(platform_->runDir(), &names, 0)) return;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const std::string prefix = "channel-pid.";
+        if (names[i].compare(0, prefix.size(), prefix) != 0) continue;
+        std::string path = platform_->runDir() + "/" + names[i], text;
+        bool kept = false;
+        for (size_t k = 0; k < installed.size() && !kept; ++k) {
+            const Manifest& m = installed[k].manifest;
+            for (size_t c = 0; c < m.channels.size() && !kept; ++c) {
+                const ManifestChannel& channel = m.channels[c];
+                if (!channel.hasStart || channels_.pidFile(m.id, channel.name) != path) continue;
+                char* end = 0;
+                long pid = fs::readFile(path, 32, &text, 0) ? strtol(text.c_str(), &end, 10) : 0;
+                // Believed only while that process is still the channel's program, a script's by its interpreter: a
+                // pid can be given out again.
+                if (!runsProgram(pid, engine_.store().appDir(m) + "/" + channel.program)) continue;
+                channels_.adoptProgram(m.id, channel.name, pid, channelsDir(platform_->tmpDir(m.id)) + "/" + channel.name + ".log");
+                kept = true;
+            }
+        }
+        if (!kept) fs::removeFile(path, 0);
+    }
 }
 
 void Agent::addListener(Listener* listener) { listeners_.push_back(listener); }
@@ -615,12 +649,14 @@ void Agent::sessionClosed(Session* s) {
 }
 
 void Agent::turn(int timeoutMs) {
-    if (job_.installing() || streamsWaiting()) timeoutMs = 0;
+    if ((job_.installing() && !stepHeld_) || streamsWaiting()) timeoutMs = 0;
+    else if (stepHeld_ && timeoutMs > 50) timeoutMs = 50;
     else if ((!pendingRestart_.empty() || job_.handingOver() || stopAsked_) && timeoutMs > 20) timeoutMs = 20;
-    else if (channels_.connecting() && timeoutMs > (int)kChannelStartRetryMs) timeoutMs = (int)kChannelStartRetryMs;
+    else if ((channels_.connecting() || channels_.ending()) && timeoutMs > (int)kChannelStartRetryMs) timeoutMs = (int)kChannelStartRetryMs;
     serve(timeoutMs);
     forgetDials();
     channels_.serve();
+    channels_.tick();
     pumpStreams();
     keepAlive();
     endOverdue();
@@ -632,17 +668,20 @@ void Agent::turn(int timeoutMs) {
         reap();
     }
     if (job_.installing()) {
-        inStep_ = true;
-        job_.runStep();
-        inStep_ = false;
-        reap();
-        if (job_.handingOver()) handOverDeadlineMs_ = clock_->nowMs() + kRestartFlushMs;
+        if (stepMayBegin()) {
+            inStep_ = true;
+            job_.runStep();
+            inStep_ = false;
+            reap();
+            if (job_.handingOver()) handOverDeadlineMs_ = clock_->nowMs() + kRestartFlushMs;
+        }
     } else {
         driveJob();
     }
     // A plan that had to wait for a stream nobody wants any more to run out.
     if (building_ != 0 && !fetch_.active) advancePlan();
     afterJob();
+    holdChannels();
     if (!pendingRestart_.empty()) doRestart();
 }
 
@@ -650,6 +689,7 @@ void Agent::jobIdle() {
     serve(0);
     forgetDials();
     channels_.serve();
+    channels_.tick();
     pumpStreams();
     keepAlive();
     endOverdue();
@@ -672,7 +712,48 @@ void Agent::afterJob() {
     if (jobAccounted_ || !job_.ended()) return;
     jobAccounted_ = true;
     jobOwner_ = 0;
+    stepGate_ = false;
     raiseRestartNeeded(job_.restart());
+    sweepChannelMarks();
+}
+
+// See agent.hpp, "Channels". A job that is not over holds every channel: neither a program's socket nor a channel's
+// DATA moves, and nothing is opened. The links that have channels are told when that begins and when it ends.
+void Agent::holdChannels() {
+    bool hold = job_.exists() && !job_.ended();
+    // An open that is still connecting when a job starts is answered busy at once, and a program it started ends.
+    if (hold) channels_.closeConnecting("busy", "a job is running: nothing opens until it has ended");
+    if (hold == channels_.paused()) return;
+    channels_.setPaused(hold);
+    unsigned told = 0;
+    for (size_t i = 0; i < sessions_.size(); ++i) {
+        Session* s = sessions_[i];
+        if (!s->peer->open() || (hold ? channels_.on(s->peer).empty() : !s->toldPaused)) continue;
+        s->toldPaused = hold;
+        if (s->peer->event(hold ? "channel.paused" : "channel.resumed", -1, "{}")) ++told;
+    }
+    note(std::string(hold ? "channels are held while the job runs" : "the job is over: channels go on") + " (" +
+         countOf(told, "link") + " told)");
+}
+
+// Before the first step of a job, every channel of a package the job installs, upgrades or removes is closed. The
+// step waits until the programs the agent started for those packages have gone, or for kProgramEndWaitMs.
+bool Agent::stepMayBegin() {
+    std::vector<std::string> ids = job_.packages();
+    if (!stepGate_) {
+        stepGate_ = true;
+        stepGateUntilMs_ = clock_->nowMs() + kProgramEndWaitMs;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            channels_.closePackage(ids[i], "", "package-changed", "a job installs, upgrades or removes " + ids[i]);
+            channels_.endPrograms(ids[i], "", "a job installs, upgrades or removes " + ids[i]);
+        }
+    }
+    bool waited = stepHeld_;
+    stepHeld_ = channels_.programsRunning(ids) && clock_->nowMs() < stepGateUntilMs_;
+    if (waited && !stepHeld_ && channels_.programsRunning(ids)) {
+        note("the job's first step begins with a program of a channel still running");
+    }
+    return !stepHeld_;
 }
 
 // ---- the agent's own update ---------------------------------------------------------------------------------------
@@ -1139,6 +1220,8 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "settings.get") settingsGet(s, id, params);
     else if (method == "settings.set") settingsSet(s, id, params);
     else if (method == "channel.open") channelOpen(s, id, params);
+    else if (method == "channel.get") channelGet(s, id, params);
+    else if (method == "channel.set") channelSet(s, id, params);
     else refuse(s, id, "unsupported", "this agent has no method " + sanitizeUtf8(method.substr(0, 64), 0));
 }
 
@@ -2081,8 +2164,10 @@ void Agent::jobStart(Session* s, int64_t id, const json::Value& params) {
     havePlan_ = false;
     jobOwner_ = s;
     jobAccounted_ = false;
+    stepGate_ = false;
     note("job " + job_.planId() + " started, over " + linkName(s->number));
     answer(s, id, "{\"job\":" + job_.describe() + "}");
+    holdChannels();
 }
 
 void Agent::jobCancel(Session* s, int64_t id, const json::Value& params) {
@@ -2677,7 +2762,7 @@ void Agent::channelOpen(Session* s, int64_t id, const json::Value& params) {
         refuse(s, id, "unsupported", "channels need a link whose frame holds " + number(kChannelMaxMessage) + " bytes");
         return;
     }
-    if (job_.active() || inStep_ || onTrial_) {
+    if ((job_.exists() && !job_.ended()) || inStep_ || onTrial_) {
         refuse(s, id, "busy", onTrial_ ? "this version of the agent is on trial" : "a job is running");
         return;
     }
@@ -2687,6 +2772,11 @@ void Agent::channelOpen(Session* s, int64_t id, const json::Value& params) {
     std::string message;
     if (!channelOf(package.string(), name.string(), &installed, &channel, &code, &message)) {
         refuse(s, id, code, message);
+        return;
+    }
+    // Before anything is connected or started.
+    if (channel->switched && fs::kindOf(switchFile(platform_->runDir(), installed.manifest.id, channel->name)) != fs::kFile) {
+        refuse(s, id, "off", installed.manifest.id + " " + channel->name + " is switched off");
         return;
     }
     if (channels_.on(s->peer).size() >= kChannelPerLink) {
@@ -2704,6 +2794,22 @@ void Agent::channelOpen(Session* s, int64_t id, const json::Value& params) {
     c->socketPath = platform_->tmpDir(c->package) + "/channels/" + c->name;
     c->toPhone = credit.present() ? (unsigned)credit.integer() : kChannelCredit;
     c->fromPhone = kChannelCredit;
+    // What starts the program when nothing listens: in ${app}, with a hook's environment and the channel's name.
+    c->canStart = channel->hasStart && platform_->canStartPrograms();
+    if (c->canStart) {
+        const Manifest& m = installed.manifest;
+        c->cwd = engine_.store().appDir(m);
+        c->program = c->cwd + "/" + channel->program;
+        c->args = channel->args;
+        c->env.push_back("PATH=" + platform_->hookPath());
+        c->env.push_back("NBT_PKG_ID=" + m.id);
+        c->env.push_back("NBT_PKG_VERSION=" + m.version);
+        c->env.push_back("NBT_APP_DIR=" + c->cwd);
+        c->env.push_back("NBT_DATA_DIR=" + platform_->dataDir(m.id));
+        c->env.push_back("NBT_TMP_DIR=" + platform_->tmpDir(m.id));
+        c->env.push_back("NBT_CHANNEL=" + channel->name);
+        c->log = channelsDir(platform_->tmpDir(m.id)) + "/" + channel->name + ".log";
+    }
     // A number counting up from the last one given out on this link, and not one in use.
     for (unsigned tries = 0; tries <= 65535u - kChannelFirstStream; ++tries) {
         c->stream = s->nextChannel;
@@ -2720,6 +2826,105 @@ void Agent::channelOpen(Session* s, int64_t id, const json::Value& params) {
     channels_.add(c, line.text());
 }
 
+// What channel.get and channel.set answer.
+std::string Agent::channelState(const Manifest& m, const ManifestChannel& channel) const {
+    bool on = !channel.switched || fs::kindOf(switchFile(platform_->runDir(), m.id, channel.name)) == fs::kFile;
+    json::Writer w;
+    w.beginObject().key("switched").boolean(channel.switched).key("on").boolean(on);
+    w.key("open").integer(channels_.count(m.id, channel.name)).endObject();
+    return w.text();
+}
+
+void Agent::channelGet(Session* s, int64_t id, const json::Value& params) {
+    json::Value package = params.find("package"), name = params.find("channel");
+    if (!package.isString() || !validPackageId(package.string()) || !name.isString()) {
+        refuse(s, id, "bad-request", "channel.get takes a package id and a channel's name");
+        return;
+    }
+    if (inStep_) {
+        refuse(s, id, "busy", "a job is installing; the packages are changing");
+        return;
+    }
+    InstalledPackage installed;
+    const ManifestChannel* channel = 0;
+    const char* code = 0;
+    std::string message;
+    if (!channelOf(package.string(), name.string(), &installed, &channel, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    answer(s, id, channelState(installed.manifest, *channel));
+}
+
+void Agent::channelSet(Session* s, int64_t id, const json::Value& params) {
+    json::Value package = params.find("package"), name = params.find("channel"), on = params.find("on");
+    if (!package.isString() || !validPackageId(package.string()) || !name.isString() || !on.isBool()) {
+        refuse(s, id, "bad-request", "channel.set takes a package id, a channel's name and on: true or false");
+        return;
+    }
+    if (s->role == "plugin") {
+        refuse(s, id, "forbidden", "a channel is switched from a phone or with nbtctl, not from the car's screen");
+        return;
+    }
+    if ((job_.exists() && !job_.ended()) || inStep_ || onTrial_) {
+        refuse(s, id, "busy", onTrial_ ? "this version of the agent is on trial, and changes nothing until it is confirmed" : "a job is running");
+        return;
+    }
+    InstalledPackage installed;
+    const ManifestChannel* channel = 0;
+    const char* code = 0;
+    std::string message;
+    if (!channelOf(package.string(), name.string(), &installed, &channel, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    if (!channel->switched) {
+        refuse(s, id, "bad-request", installed.manifest.id + " " + channel->name + " has no switch: it is always on");
+        return;
+    }
+    const std::string& pkg = installed.manifest.id;
+    std::string file = switchFile(platform_->runDir(), pkg, channel->name), why;
+    if (on.boolean()) {
+        if (!fs::writeFile(file, "on\n", 0600, &why)) {
+            refuse(s, id, "io-error", "the switch could not be written: " + why);
+            return;
+        }
+    } else {
+        if (!fs::removeFile(file, &why)) {
+            refuse(s, id, "io-error", "the switch could not be removed: " + why);
+            return;
+        }
+        channels_.closePackage(pkg, channel->name, "off", "switched off");
+        channels_.endPrograms(pkg, channel->name, "its channel was switched off");
+    }
+    note(linkName(s->number) + ": " + pkg + " " + channel->name + " is switched " + (on.boolean() ? "on" : "off"));
+    answer(s, id, channelState(installed.manifest, *channel));
+}
+
+// The switches and the marks of programs in the run folder whose package or channel is no longer installed go: at a
+// start, and after a job.
+void Agent::sweepChannelMarks() {
+    std::vector<InstalledPackage> installed;
+    std::vector<std::string> names;
+    if (!engine_.store().loadAll(&installed, 0) || !fs::listDir(platform_->runDir(), &names, 0)) return;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const std::string prefix = "channel-on.";
+        if (names[i].compare(0, prefix.size(), prefix) != 0) continue;
+        std::string path = platform_->runDir() + "/" + names[i];
+        bool kept = false;
+        for (size_t k = 0; k < installed.size() && !kept; ++k) {
+            const Manifest& m = installed[k].manifest;
+            for (size_t c = 0; c < m.channels.size() && !kept; ++c) {
+                kept = m.channels[c].switched && switchFile(platform_->runDir(), m.id, m.channels[c].name) == path;
+            }
+        }
+        if (!kept) {
+            fs::removeFile(path, 0);
+            note("the switch " + names[i] + " goes with its channel");
+        }
+    }
+}
+
 void Agent::channelConnected(Channel* c) {
     Session* s = (Session*)c->peer->user;
     json::Writer w;
@@ -2728,14 +2933,19 @@ void Agent::channelConnected(Channel* c) {
     if (c->peer->open()) answer(s, c->requestId, w.text());
 }
 
-void Agent::channelUnavailable(Channel* c, const std::string& why) {
+void Agent::channelRefused(Channel* c, const char* code, const std::string& why) {
     Session* s = (Session*)c->peer->user;
-    if (c->peer->open()) refuse(s, c->requestId, "unavailable", c->package + " " + c->name + ": " + why);
+    if (c->peer->open()) refuse(s, c->requestId, code, c->package + " " + c->name + ": " + why);
 }
 
+void Agent::channelNote(const std::string& line) { note(line); }
+
 void Agent::channelClosed(Channel* c, const char* reason, const std::string& why) {
-    // One that never opened was answered, or its link has gone with the request.
-    if (c->connecting) return;
+    // One that never opened: its link has gone with the request, and nobody is left to answer.
+    if (c->connecting) {
+        note(linkName(c->link) + ": channel.open of " + channelText(c) + " goes unanswered: " + why);
+        return;
+    }
     note(linkName(c->link) + ": channel " + channelText(c) + " closed" + (reason != 0 ? std::string(", ") + reason : std::string()) +
          ": " + why);
 }
