@@ -104,6 +104,13 @@ data class ForegroundNotice(
 /** What [JobService] runs for, and what its notification says. */
 object ForegroundWork {
     /**
+     * Whether the notification is to be posted again now: it was last posted while notifications were not allowed
+     * ([unseen]), when Android drops it, and they are allowed now ([allowed]), as once Android's question has been
+     * answered Allow, or they were allowed in the phone's settings.
+     */
+    fun postAgain(unseen: Boolean, allowed: Boolean): Boolean = unseen && allowed
+
+    /**
      * The reasons to run now, the main one first: a job that needs the phone, a pull of logs, a terminal open or being
      * opened on a head unit, the SSH port on or being switched on; the head units' names are looked up in [headUnits].
      */

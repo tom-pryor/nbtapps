@@ -2,11 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.job
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.text.format.Formatter
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -50,6 +46,7 @@ import com.nbtapps.store.model.LATER_FEATURES_WARNING
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.ui.headunits.CONNECT_FROM_PHONE
+import com.nbtapps.store.ui.rememberNotificationAsk
 
 /** The words every plan and every running job carry: the head unit must stay powered until the job is done. */
 internal const val IGNITION_NOTICE =
@@ -68,16 +65,8 @@ fun JobScreen(
     viewModel: JobViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     // The job's notification is how it stays visible once the screen is left. The job starts either way.
-    val askToNotify = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { viewModel.start() }
-    val start = {
-        if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
-            viewModel.start()
-        } else {
-            askToNotify.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
+    val start = rememberNotificationAsk(viewModel::start)
     val job = uiState.job
 
     Scaffold(

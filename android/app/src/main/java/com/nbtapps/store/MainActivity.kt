@@ -19,6 +19,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.nbtapps.store.data.update.AppUpdater
 import com.nbtapps.store.data.update.SessionApkInstaller
+import com.nbtapps.store.service.JobService
 import com.nbtapps.store.ui.headunits.ConnectGate
 import com.nbtapps.store.ui.headunits.ConnectQuestionDialog
 import com.nbtapps.store.ui.navigation.NbtNavHost
@@ -105,6 +106,8 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // Back from Android's settings, perhaps: an update that waited to be allowed goes on.
         updater.permissionMayHaveChanged()
+        // Back from Android's question for notifications, or from its settings: a notification it dropped is posted now.
+        JobService.showAgain(this)
     }
 
     /**

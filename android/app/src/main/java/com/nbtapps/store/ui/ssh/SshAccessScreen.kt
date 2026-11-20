@@ -57,6 +57,7 @@ import com.nbtapps.store.R
 import com.nbtapps.store.data.ssh.ACCESS_LOCAL_NETWORK
 import com.nbtapps.store.data.ssh.SshPortState
 import com.nbtapps.store.ui.detail.Section
+import com.nbtapps.store.ui.rememberNotificationAsk
 
 /** A command or a fingerprint: the fixed-width face. */
 private val Mono = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 18.sp)
@@ -72,6 +73,8 @@ fun SshAccessScreen(onBack: () -> Unit, viewModel: SshAccessViewModel = hiltView
     val context = LocalContext.current
     val activity = LocalActivity.current
     // Android says whether it will still ask only right after a refusal, so that is when it is read.
+    // The port's notification is how it can be turned off once the app is left; the port goes on either way.
+    val switchOn = rememberNotificationAsk { viewModel.setPort(true) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         viewModel.localNetworkAnswered(granted, askAgain = activity?.shouldShowRequestPermissionRationale(ACCESS_LOCAL_NETWORK) == true)
     }
@@ -112,7 +115,7 @@ fun SshAccessScreen(onBack: () -> Unit, viewModel: SshAccessViewModel = hiltView
                 Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                PortCard(uiState, viewModel, openSettings)
+                PortCard(uiState, viewModel, openSettings, switchOn)
                 uiState.on?.let { on ->
                     Section("How to connect") {
                         uiState.commands.forEach { command ->
@@ -163,7 +166,7 @@ private fun PausedBanner() {
 }
 
 @Composable
-private fun PortCard(uiState: SshAccessUiState, viewModel: SshAccessViewModel, onOpenSettings: () -> Unit) {
+private fun PortCard(uiState: SshAccessUiState, viewModel: SshAccessViewModel, onOpenSettings: () -> Unit, onSwitchOn: () -> Unit) {
     Section("Port") {
         ListItem(
             headlineContent = { Text("Let other apps connect") },
@@ -177,7 +180,13 @@ private fun PortCard(uiState: SshAccessUiState, viewModel: SshAccessViewModel, o
                     Text(uiState.switchLine)
                 }
             },
-            trailingContent = { Switch(checked = uiState.switchOn, onCheckedChange = viewModel::setPort, enabled = uiState.switchEnabled) },
+            trailingContent = {
+                Switch(
+                    checked = uiState.switchOn,
+                    onCheckedChange = { on -> if (on) onSwitchOn() else viewModel.setPort(false) },
+                    enabled = uiState.switchEnabled,
+                )
+            },
         )
         uiState.offReason?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         uiState.failure?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }

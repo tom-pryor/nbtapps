@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,6 +10,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.os.IBinder
@@ -21,6 +23,7 @@ import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.JobView
 import com.nbtapps.store.data.ssh.SshPort
 import com.nbtapps.store.data.terminal.TerminalRepository
+import com.nbtapps.store.model.HeadUnit
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -90,23 +93,32 @@ class JobService : Service() {
         // The notification's action: the port goes off, and the look below then finds what is left to run for.
         if (intent?.action == ACTION_PORT_OFF) port.switchOff()
         // The promise made by startForegroundService is kept before anything else, whatever there is to show. The head
-        // units' names come with the first look below.
+        // units' names are the ones the look below saw last; on a first start they come with its first look.
         val shell = terminal.state.value
-        val now = ForegroundWork.notice(ForegroundWork.reasons(jobs.job.value, jobs.logPull.value, shell, emptyList(), port.state.value))
+        val now = ForegroundWork.notice(ForegroundWork.reasons(jobs.job.value, jobs.logPull.value, shell, names, port.state.value))
+        // Asked to post again ([showAgain]), which is no start for a foreground service: with nothing to show, nothing is.
+        if (intent?.action == ACTION_SHOW && now == null) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         val tap = Tap(ForegroundWork.terminalToOpen(shell), ForegroundWork.sshAccessToOpen(shell, port.state.value))
         startForeground(NOTIFICATION_ID, notification(now, tap), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        unseen = !notificationsAllowed(this)
         if (!watching) {
             watching = true
             scope.launch {
                 combine(jobs.job, jobs.logPull, terminal.state, headUnits.headUnits, port.state) { view, pull, open, units, ssh ->
+                    names = units
                     ForegroundWork.notice(ForegroundWork.reasons(view, pull, open, units, ssh)) to
                         Tap(ForegroundWork.terminalToOpen(open), ForegroundWork.sshAccessToOpen(open, ssh))
                 }.collect { (notice, toOpen) ->
                     if (notice == null) {
+                        unseen = false
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     } else {
                         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(notice, toOpen))
+                        unseen = !notificationsAllowed(this@JobService)
                         holdAwake(notice.awake)
                     }
                 }
@@ -117,7 +129,12 @@ class JobService : Service() {
 
     private var watching = false
 
+    /** The saved head units, as the look last saw them: the names a notification posted from [onStartCommand] uses. */
+    @Volatile
+    private var names: List<HeadUnit> = emptyList()
+
     override fun onDestroy() {
+        unseen = false
         scope.cancel()
         holdAwake(false)
         super.onDestroy()
@@ -174,6 +191,33 @@ class JobService : Service() {
 
         /** The notification's action that turns the SSH port off. */
         private const val ACTION_PORT_OFF = "com.nbtapps.store.action.PORT_OFF"
+
+        /** Posts the notification again: see [showAgain]. */
+        private const val ACTION_SHOW = "com.nbtapps.store.action.SHOW"
+
+        /**
+         * The notification was last posted while notifications were not allowed, and Android dropped it: as when a
+         * terminal opens while Android's question for them is still up.
+         */
+        @Volatile
+        private var unseen = false
+
+        private fun notificationsAllowed(context: Context): Boolean =
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+        /**
+         * Posts the notification again where Android dropped it and notifications are allowed now ([ForegroundWork.postAgain]):
+         * called as the app comes back in front, which it does once Android's question has been answered and once the
+         * user is back from the phone's settings. The app is in front then, so the service may be started for it.
+         */
+        fun showAgain(context: Context) {
+            if (!ForegroundWork.postAgain(unseen, notificationsAllowed(context))) return
+            try {
+                context.startService(Intent(context, JobService::class.java).setAction(ACTION_SHOW))
+            } catch (e: IllegalStateException) {
+                // Not in front after all: the next change of what it runs for posts it.
+            }
+        }
 
         /** A transfer that takes longer than this has stalled; the lock is not held for ever. */
         private const val MAX_TRANSFER_MILLIS = 2 * 60 * 60 * 1000L

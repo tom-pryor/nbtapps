@@ -35,6 +35,16 @@ class ForegroundWorkTest {
         ForegroundWork.notice(ForegroundWork.reasons(job, pull, terminal, units, port))
 
     @Test
+    fun `a notification Android dropped is posted again once notifications are allowed, and only then`() {
+        assertEquals(true, ForegroundWork.postAgain(unseen = true, allowed = true))
+        // Still not allowed: posting it again would be dropped too.
+        assertEquals(false, ForegroundWork.postAgain(unseen = true, allowed = false))
+        // Seen already, or nothing posted: nothing to do.
+        assertEquals(false, ForegroundWork.postAgain(unseen = false, allowed = true))
+        assertEquals(false, ForegroundWork.postAgain(unseen = false, allowed = false))
+    }
+
+    @Test
     fun `nothing to run for stops it, with no job that needs the phone, no pull, no terminal being opened or open`() {
         assertNull(notice())
         val ended = fetching().let { it.copy(job = it.job.copy(state = JobState.SUCCEEDED)) }
