@@ -341,8 +341,8 @@ rm /var/opt/nbtapp/disable
 
 ## Removing NBTApp
 
-1. In the app, uninstall every package from the head unit's page, the iDrive plugin last. The agent removes
-   what it installed and restarts iDrive.
+1. In the app, uninstall every package, the iDrive plugin last: each from its own page in the catalogue, or from
+   the head unit's page. The agent removes what it installed and restarts iDrive.
 2. Over SSH, stop the agent and remove it with its state (paired phones and records of installed packages):
 
    ```sh

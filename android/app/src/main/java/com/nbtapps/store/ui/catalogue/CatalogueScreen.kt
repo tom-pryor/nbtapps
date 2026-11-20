@@ -604,32 +604,44 @@ private fun RowStatus(status: PackageStatus) {
     Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when {
             installed != null && status.updateAvailable -> {
-                Text(
-                    "Update",
-                    Modifier
-                        .background(MaterialTheme.colorScheme.tertiary, RoundedCornerShape(10.dp))
-                        .padding(horizontal = 10.dp, vertical = 2.dp),
-                    color = MaterialTheme.colorScheme.onTertiary,
-                    style = MaterialTheme.typography.labelMedium,
-                )
+                UpdateMark("Update")
                 val to = status.offered.version
                 Text("$installed → $to", Modifier.semantics { contentDescription = "From $installed to $to" })
             }
             installed != null -> {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Icon(
-                        painterResource(R.drawable.ic_check),
-                        contentDescription = null,
-                        Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                    Text("Installed", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
-                }
+                InstalledMark("Installed")
                 Text(installed)
             }
             else -> Text(status.offered.version)
         }
         rowPrereleaseLabel(status)?.let { PrereleaseLabel(label = it) }
+    }
+}
+
+/** Amber, the app's colour for what is new: an update that waits, as a row and a package's page mark it. */
+@Composable
+internal fun UpdateMark(label: String, modifier: Modifier = Modifier) {
+    Text(
+        label,
+        modifier
+            .background(MaterialTheme.colorScheme.tertiary, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 2.dp),
+        color = MaterialTheme.colorScheme.onTertiary,
+        style = MaterialTheme.typography.labelMedium,
+    )
+}
+
+/** A tick and [label]: what is on the head unit, as a row and a package's page mark it. */
+@Composable
+internal fun InstalledMark(label: String, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Icon(
+            painterResource(R.drawable.ic_check),
+            contentDescription = null,
+            Modifier.size(14.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Text(label, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
     }
 }
 

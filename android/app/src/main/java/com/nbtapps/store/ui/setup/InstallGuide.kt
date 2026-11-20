@@ -36,6 +36,12 @@ internal fun sendInstallGuide(context: Context) {
 /** Opens the guide in the phone's browser. */
 internal fun openInstallGuide(context: Context) = start(context, Intent(Intent.ACTION_VIEW, INSTALL_GUIDE_URL.toUri()))
 
+/**
+ * Opens [address] in the phone's browser, as the guide is opened: a package's website, which its page has checked
+ * is an https one.
+ */
+internal fun openWebPage(context: Context, address: String) = start(context, Intent(Intent.ACTION_VIEW, address.toUri()))
+
 /** Starts [intent]. A phone with nothing to take it leaves the page as it is: the address is shown on it. */
 private fun start(context: Context, intent: Intent) {
     try {

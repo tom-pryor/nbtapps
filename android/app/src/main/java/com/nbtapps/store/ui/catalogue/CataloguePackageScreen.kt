@@ -9,10 +9,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,6 +26,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -37,13 +40,18 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
@@ -55,6 +63,7 @@ import com.nbtapps.store.model.CataloguePackage
 import com.nbtapps.store.model.LATER_FEATURES_WARNING
 import com.nbtapps.store.model.PackageVersion
 import com.nbtapps.store.ui.headunits.HeadUnitIndicator
+import com.nbtapps.store.ui.setup.openWebPage
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -105,7 +114,10 @@ fun CataloguePackageScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 val self = PrereleaseAsk(pkg.id, pkg.name, uiState.newest?.version.orEmpty())
-                Header(pkg)
+                val installed = uiState.get?.installedVersion
+                // The lists point to the website for what they leave out, where there is one.
+                val website = (uiState.details as? DetailsState.Loaded)?.details?.homepage?.let(::website)
+                Header(pkg, headerMarks(uiState.get))
                 if (pkg.community) CommunityCard(pkg, uiState.sourceName)
                 uiState.get?.let { get ->
                     GetCard(
@@ -131,9 +143,9 @@ fun CataloguePackageScreen(
                     if (newest.riskFlags.isNotEmpty() || newest.unknownFlags) RiskCard(newest)
                 }
                 if (uiState.dependencies.isNotEmpty()) DependenciesCard(uiState.dependencies, onOpenPackage)
-                DetailsSections(uiState.details, pkg, onRetry = viewModel::retryDetails)
-                val versions = allVersions(pkg)
-                if (versions.size > 1) VersionsCard(versions)
+                DetailsSections(uiState.details, pkg, installed, website, onRetry = viewModel::retryDetails)
+                val versions = allVersions(pkg, installed)
+                if (versions.size > 1) VersionsCard(versions, website != null)
                 Text(
                     listOfNotNull(pkg.id, uiState.sourceName).joinToString("\n"),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -215,8 +227,9 @@ private fun PrereleaseCard(agent: Boolean, on: Boolean, onSet: (Boolean) -> Unit
     }
 }
 
+/** The package's name and who made it, and under them, as the list's row marks it, its copy on the head unit. */
 @Composable
-private fun Header(pkg: CataloguePackage) {
+private fun Header(pkg: CataloguePackage, marks: HeaderMarks) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
         PackageIcon(pkg.name, 56.dp)
         Column {
@@ -228,24 +241,63 @@ private fun Header(pkg: CataloguePackage) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
             )
+            if (marks.installed != null || marks.update != null) {
+                FlowRow(
+                    Modifier.padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    itemVerticalAlignment = Alignment.CenterVertically,
+                ) {
+                    marks.installed?.let { InstalledMark(it) }
+                    marks.update?.let { UpdateMark(it) }
+                }
+            }
         }
     }
     if (pkg.summary.isNotEmpty()) Text(pkg.summary, style = MaterialTheme.typography.bodyLarge)
 }
 
-/** Who made a community package and what the catalogue vouches for: the file it reviewed, not the developer. */
+/**
+ * Who made a community package and what the catalogue vouches for: the file it reviewed, not the developer. That
+ * second part is behind the info icon beside the title, so that it does not stand in the way each time.
+ */
 @Composable
 private fun CommunityCard(pkg: CataloguePackage, sourceName: String?) {
     val source = sourceName ?: "the catalogue"
     val maker = pkg.author.ifEmpty { "an outside developer" }
-    Section("Community package") {
-        Text("Made by $maker, not by $source.", style = MaterialTheme.typography.bodyMedium)
-        Text(
-            "${source.replaceFirstChar { it.uppercase() }} reviewed each version listed here and signed it. It downloads from the developer's own " +
-                "release, and the phone and the head unit both check that it is the file that was signed.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    var open by rememberSaveable { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth()) {
+        // The title's row is the button, and taller than a title: the card's padding above it is less by as much.
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 40.dp)
+                    .clickable(role = Role.Button, onClickLabel = if (open) "Close" else "Open") { open = !open }
+                    .semantics { stateDescription = if (open) "Open" else "Closed" },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Community package", style = MaterialTheme.typography.titleMedium)
+                Icon(
+                    painterResource(R.drawable.ic_info),
+                    contentDescription = "About community packages",
+                    Modifier.size(20.dp),
+                    tint = if (open) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Made by $maker, not by $source.", style = MaterialTheme.typography.bodyMedium)
+                if (open) {
+                    Text(
+                        "${source.replaceFirstChar { it.uppercase() }} reviewed each version listed here and signed it. It downloads from the developer's own " +
+                            "release, and the phone and the head unit both check that it is the file that was signed.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -323,6 +375,7 @@ private fun ColumnScope.Offer(get: GetState, onDownload: () -> Unit, onInstall: 
     if (get.offeredPrerelease && !get.upToDate) PrereleaseLabel(detail = "Version ${get.version.version}")
     val downloading = get.downloading
     when {
+        !get.showsDownload -> Unit
         downloading != null -> {
             Text("Downloading…")
             LinearProgressIndicator(
@@ -436,7 +489,7 @@ internal fun jobLine(get: GetState): String? {
 
 @Composable
 private fun LatestVersionCard(version: PackageVersion, prerelease: Boolean) {
-    Section("Version ${version.version}") {
+    Section("Latest version: ${version.version}") {
         if (prerelease) PrereleaseLabel()
         Text(versionFacts(version))
         version.agentRange?.let { Text("Needs agent ${rangeLabel(it)}") }
@@ -482,8 +535,12 @@ private fun DependenciesCard(dependencies: List<DependencyRow>, onOpenPackage: (
     }
 }
 
+/**
+ * The cards made from the package's details: About, and what is new. [installed] is the version on the head unit,
+ * which what is new marks, and [website] the package's own address, checked ([website]), where it has one.
+ */
 @Composable
-private fun DetailsSections(state: DetailsState, pkg: CataloguePackage, onRetry: () -> Unit) {
+private fun DetailsSections(state: DetailsState, pkg: CataloguePackage, installed: String?, website: String?, onRetry: () -> Unit) {
     when (state) {
         DetailsState.Loading -> Section("About") { CircularProgressIndicator() }
         is DetailsState.Failed -> Section("About") {
@@ -492,43 +549,146 @@ private fun DetailsSections(state: DetailsState, pkg: CataloguePackage, onRetry:
         }
         is DetailsState.Loaded -> {
             val details = state.details
-            if (details.description.isNotBlank()) Section("About") { Text(details.description) }
-            val rows = changelog(details, pkg)
-            if (rows.isNotEmpty()) ChangelogCard(rows)
+            if (details.description.isNotBlank() || website != null) AboutCard(details.description, website)
+            val rows = changelog(details, pkg, installed)
+            if (rows.isNotEmpty()) ChangelogCard(rows, website != null)
         }
     }
 }
 
+/**
+ * The description, cut to [ABOUT_CLOSED_LINES] lines with Show more where it is longer than [ABOUT_LINES], and the
+ * Website button where the package has one, on the same row, so that it is there with the text cut.
+ */
 @Composable
-private fun ChangelogCard(rows: List<ChangelogRow>) {
+private fun AboutCard(description: String, website: String?) {
+    val context = LocalContext.current
+    var open by rememberSaveable { mutableStateOf(false) }
+    // Whether the text is longer than ABOUT_LINES, which only laying it out tells: unknown until then.
+    var long by remember(description) { mutableStateOf<Boolean?>(null) }
+    Section("About") {
+        if (description.isNotBlank()) {
+            Text(
+                description,
+                maxLines = aboutMaxLines(open, long),
+                overflow = TextOverflow.Ellipsis,
+                onTextLayout = { layout ->
+                    when {
+                        open -> long = layout.lineCount > ABOUT_LINES
+                        long == null -> long = layout.hasVisualOverflow
+                    }
+                },
+            )
+        }
+        val more = long == true
+        if (more || website != null) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (more) ShowMoreButton(if (open) "Show less" else "Show more", open) { open = !open }
+                Spacer(Modifier.weight(1f))
+                if (website != null) {
+                    TextButton(
+                        onClick = { openWebPage(context, website) },
+                        contentPadding = ButtonDefaults.TextButtonWithIconContentPadding,
+                    ) { IconLabel(R.drawable.ic_open_in_new, "Website") }
+                }
+            }
+        }
+    }
+}
+
+/** A description up to this many lines is shown whole. */
+internal const val ABOUT_LINES = 8
+
+/** A longer one is cut to this many until Show more. */
+internal const val ABOUT_CLOSED_LINES = 5
+
+/**
+ * How many lines of the description are laid out: all once [open]; [ABOUT_CLOSED_LINES] once it is known to be
+ * [long]; otherwise [ABOUT_LINES], which tells whether it is.
+ */
+internal fun aboutMaxLines(open: Boolean, long: Boolean?): Int = when {
+    open -> Int.MAX_VALUE
+    long == true -> ABOUT_CLOSED_LINES
+    else -> ABOUT_LINES
+}
+
+/** The text button that opens or closes a card's longer part: [label], and an arrow that turns while [open]. */
+@Composable
+private fun ShowMoreButton(label: String, open: Boolean, onClick: () -> Unit) {
+    TextButton(onClick = onClick) {
+        Text(label)
+        Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+        Icon(
+            painterResource(R.drawable.ic_expand_more),
+            contentDescription = null,
+            Modifier.size(ButtonDefaults.IconSize).rotate(if (open) 180f else 0f),
+        )
+    }
+}
+
+/** A line under a list that says what it leaves out. */
+@Composable
+private fun ListNotice(text: String) {
+    Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+private fun ChangelogCard(rows: List<ChangelogRow>, website: Boolean) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    val shown = shownChangelog(rows, open, website)
     Section("What's new") {
-        rows.forEach { row ->
+        shown.rows.forEach { row ->
             Column {
-                VersionTitle(row.entry.version, row.prerelease)
+                VersionTitle(row.entry.version, row.prerelease, released = row.released, installed = row.installed)
                 row.entry.notes.forEach { note -> Text("• $note", style = MaterialTheme.typography.bodyMedium) }
             }
         }
+        shown.notice?.let { ListNotice(it) }
+        shown.toggle?.let { ShowMoreButton(it, open) { open = !open } }
     }
 }
 
 @Composable
-private fun VersionsCard(versions: List<VersionRow>) {
+private fun VersionsCard(versions: List<VersionRow>, website: Boolean) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    val shown = shownVersions(versions, open, website)
     Section("All versions") {
-        versions.forEach { row ->
-            Column {
-                VersionTitle(row.version.version, row.prerelease)
-                Text(versionFacts(row.version), style = MaterialTheme.typography.bodyMedium)
-            }
+        shown.rows.forEach { VersionItem(it) }
+        shown.extra?.let { row ->
+            // The installed version, older than the rows above: set apart, as it is not next in the list.
+            HorizontalDivider()
+            VersionItem(row)
         }
+        shown.notice?.let { ListNotice(it) }
+        shown.toggle?.let { ShowMoreButton(it, open) { open = !open } }
     }
 }
 
-/** A version as a list's heading, with the pre-release label beside it where it is one. */
 @Composable
-private fun VersionTitle(version: String, prerelease: Boolean) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun VersionItem(row: VersionRow) {
+    Column {
+        VersionTitle(row.version.version, row.prerelease, installed = row.installed)
+        Text(versionFacts(row.version), style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+/**
+ * A version as a list's heading: with its release date where given, the pre-release label where it is one, and
+ * the mark of the version on the head unit where it is that one.
+ */
+@Composable
+private fun VersionTitle(version: String, prerelease: Boolean, released: String? = null, installed: Boolean = false) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(version, style = MaterialTheme.typography.titleSmall)
+        released?.let {
+            Text("· $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (prerelease) PrereleaseLabel()
+        if (installed) InstalledMark("Installed")
     }
 }
 
