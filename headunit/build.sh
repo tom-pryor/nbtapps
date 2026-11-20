@@ -10,7 +10,8 @@
 #                            # its own package -> release/pkg/ (not signed), and `make agent-check`
 #        ./build.sh ssh      # SSH: Dropbear and sftp-server for this machine and the relay's tests (make ssh-host,
 #                            # make ssh-test), then for the head unit: Dropbear and sftp-server (make ssh), the relay
-#                            # (make ssh-relay, with qcc) -> build/ssh/qnx/, and `make ssh-check`
+#                            # (make ssh-relay, with qcc) -> build/ssh/qnx/, `make ssh-check`, and the SSH package
+#                            # -> release/pkg/ (make ssh-pkg, not signed)
 #        ./build.sh clean    # remove build/ and release/
 #
 # Environment:
@@ -80,4 +81,5 @@ elif [ "$target" = agent ]; then
     make agent-check
 elif [ "$target" = ssh-relay ]; then
     make ssh-check
+    make ssh-pkg
 fi

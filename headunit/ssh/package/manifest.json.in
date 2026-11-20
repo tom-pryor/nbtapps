@@ -1,0 +1,23 @@
+{
+  "manifestVersion": 1,
+  "id": "org.nbtapp.ssh",
+  "name": "SSH access",
+  "version": "@VERSION@",
+  "requires": { "agent": ">=1.7.0-beta.1", "app": ">=0.9.0" },
+  "install": {
+    "files": [
+      { "src": "payload/bin/", "dest": "${app}/bin/", "mode": "0755" },
+      { "src": "payload/licenses/", "dest": "${app}/licenses/", "mode": "0644" }
+    ],
+    "links": [
+      { "path": "${app}/bin/scp", "target": "dropbearmulti" }
+    ]
+  },
+  "channels": [
+    { "name": "ssh", "apps": [], "access": "both", "switch": true, "start": { "program": "bin/sshrelay" } }
+  ],
+  "logs": [
+    { "path": "${tmp}/channels/ssh.log" },
+    { "path": "${tmp}/channels/ssh.log.1" }
+  ]
+}

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 // sshrelay: the program of the SSH package's channel (relay.hpp). The agent starts it, in ${app}, with a hook's
-// environment and NBT_CHANNEL, its standard error appended to the channel's log; it takes no arguments.
+// environment and NBT_CHANNEL, its standard error appended to the channel's log; it takes no arguments. The first
+// line of its log is its version (version.hpp) and the build's; `sshrelay --version` prints that line and exits.
 //
 //   NBT_TMP_DIR    the package's folder on the RAM disk: the socket is channels/$NBT_CHANNEL in it, the keys folders
 //                  are in auth/, the state file is sshrelay.state
@@ -15,6 +16,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -23,6 +25,7 @@
 #include <vector>
 
 #include "relay.hpp"
+#include "version.hpp"
 
 namespace {
 
@@ -48,7 +51,11 @@ void handle(int signal, void (*handler)(int)) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    (void)argv;
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        printf("%s\n", NBT_SSHRELAY_BUILD_LINE);
+        return 0;
+    }
+    sshrelay::logLine(NBT_SSHRELAY_BUILD_LINE);
     if (argc > 1) {
         sshrelay::logLine("cannot start: sshrelay takes no arguments");
         return 2;
