@@ -48,6 +48,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.JobView
+import com.nbtapps.store.data.ssh.SshTunnel
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.CheckProblem
@@ -75,6 +76,7 @@ fun HeadUnitDetailScreen(
     onOpenPackage: (packageId: String) -> Unit,
     onOpenLogs: (packageId: String) -> Unit,
     onOpenSettings: (packageId: String) -> Unit,
+    onOpenTerminal: (headUnitId: String) -> Unit,
     viewModel: HeadUnitDetailViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -147,8 +149,18 @@ fun HeadUnitDetailScreen(
             }
             InstalledCard(uiState, connected, onUninstall, onOpenLogs, onOpenSettings)
             TroubleshootingCard(uiState, viewModel::resetSerial)
+            uiState.debug?.let { card ->
+                DebugCardSection(
+                    card,
+                    onInstall = { onOpenPackage(SshTunnel.PACKAGE) },
+                    onSwitch = viewModel::switchSsh,
+                    onOpenTerminal = { onOpenTerminal(unit.id) },
+                )
+            }
         }
     }
+
+    if (uiState.confirmingSsh) TurnOnSshDialog(onConfirm = viewModel::confirmSsh, onDismiss = viewModel::cancelSsh)
 
     uiState.fix?.let { step ->
         CheckFixDialog(step, onConfirm = viewModel::confirmFix, onRetry = viewModel::retryFix, onClose = viewModel::closeFix)
@@ -548,7 +560,7 @@ private fun Working(text: String) {
 }
 
 @Composable
-private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)

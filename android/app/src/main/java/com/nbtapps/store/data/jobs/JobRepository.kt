@@ -34,6 +34,7 @@ import com.nbtapps.store.data.settings.SettingsFailure
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
+import com.nbtapps.store.model.ChannelSwitch
 import com.nbtapps.store.model.Check
 import com.nbtapps.store.model.CheckFixResult
 import com.nbtapps.store.model.CheckProblem
@@ -1666,6 +1667,24 @@ class JobRepository(
         if ((connectionState.value as? ConnectionState.Connected)?.headUnitId != headUnitId) throw IOException(NOT_CONNECTED)
         block(current)
     }
+
+    /**
+     * Whether the channel [channel] of the package [packageId] on the head unit [headUnitId] has a switch, whether it is
+     * on, and how many connections of it are open on every link (`channel.get`), over the link to that head unit
+     * ([usingSession]). A refusal is an [AgentRefusal]: `not-found`, `busy` while an install step runs, `unsupported`
+     * from an agent without channels.
+     */
+    suspend fun channelSwitch(headUnitId: String, packageId: String, channel: String): Result<ChannelSwitch> =
+        usingSession(headUnitId) { it.client.channelGet(packageId, channel) }
+
+    /**
+     * Switches the switched channel [channel] of the package [packageId] on the head unit [headUnitId] on or off
+     * (`channel.set`), and gives how it then stands, as [channelSwitch] does. Off closes its open connections. A refusal is
+     * an [AgentRefusal]: `busy` while a job runs or the agent is on trial, `bad-request` for a channel with no switch,
+     * `not-found`, `forbidden`, `unsupported`, `io-error`.
+     */
+    suspend fun setChannelSwitch(headUnitId: String, packageId: String, channel: String, on: Boolean): Result<ChannelSwitch> =
+        usingSession(headUnitId) { it.client.channelSet(packageId, channel, on) }
 
     /** [usingLink], for the repository's own calls: inline, so that a call returns from within it. */
     private inline fun <T> using(block: () -> T): T {
