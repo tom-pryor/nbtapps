@@ -1810,31 +1810,47 @@ class JobRepository(
 
     /** Publishes the end of a link that waited to be paired, if it ends still waiting. */
     private suspend fun attend(waiting: Unpaired) {
-        val reason = endReason(waiting.session, waiting.session.ended.await())
+        val ended = waiting.session.ended.await()
         val failed = connectLock.withLock {
             if (unpaired !== waiting) return@withLock null
             unpaired = null
-            ConnectionState.Failed(waiting.unit.id, reason).also { connectionState.value = it }
+            ConnectionState.Failed(waiting.unit.id, endReasonNow(waiting.session, ended)).also { connectionState.value = it }
         }
-        if (failed != null) offAfter(waiting.session, failed)
+        if (failed != null) settleEnd(waiting.session, ended, failed)
     }
 
     /**
-     * Why the end of [link] is shown: [reason], as the link has it, or, for a Bluetooth serial link that ended with
-     * the phone's Bluetooth off, that. The link's read fails as Bluetooth goes off, a moment before or after the
-     * phone says it is off: for the moment after, see [offAfter].
+     * Why [link] ended, as far as it can be told at once: [endReason] without its wait. The link's own [reason], or,
+     * for a Bluetooth serial link that ended with the phone's Bluetooth off already, [BLUETOOTH_OFF].
      */
-    private fun endReason(link: AgentSession, reason: String): String =
-        if (link.kind == Link.SERIAL && !bluetoothOn.value) BLUETOOTH_OFF else reason
+    private fun endReasonNow(link: AgentSession, reason: String): String = when {
+        // What the agent said of why it ended the link stands.
+        link.closing != null -> reason
+        link.kind == Link.SERIAL && !bluetoothOn.value -> BLUETOOTH_OFF
+        else -> reason
+    }
 
     /**
-     * Where the phone's Bluetooth goes off within [BLUETOOTH_OFF_WITHIN_MS] of the end of [link], a Bluetooth serial
-     * link, shown as [failed]: that is why it ended, and the reason shown becomes that, if nothing has been shown since.
+     * Why [link] ended, settled: the one reason for the end of a link, for the head unit's page and for whatever else
+     * ran over the link, such as a terminal ([com.nbtapps.store.data.terminal.JobTerminalLink]), so that the two cannot
+     * differ. [reason] is the link's own. What the agent said of why it ended the link stands. A Bluetooth serial link
+     * ended by the phone's Bluetooth going off says so ([BLUETOOTH_OFF]): its read fails as Bluetooth goes off, a
+     * moment before or after the phone says it is off, so where Bluetooth still looks on this waits up to
+     * [BLUETOOTH_OFF_WITHIN_MS] for it to go off. Every other end is answered at once.
      */
-    private suspend fun offAfter(link: AgentSession, failed: ConnectionState.Failed) {
-        if (link.kind != Link.SERIAL || failed.reason == BLUETOOTH_OFF) return
-        withTimeoutOrNull(BLUETOOTH_OFF_WITHIN_MS) { bluetoothOn.first { !it } } ?: return
-        connectionState.compareAndSet(failed, failed.copy(reason = BLUETOOTH_OFF))
+    suspend fun endReason(link: AgentSession, reason: String): String {
+        val now = endReasonNow(link, reason)
+        if (now != reason || link.closing != null || link.kind != Link.SERIAL) return now
+        return withTimeoutOrNull(BLUETOOTH_OFF_WITHIN_MS) { bluetoothOn.first { !it } }?.let { BLUETOOTH_OFF } ?: reason
+    }
+
+    /**
+     * The page's reason for the end of [link], shown at once as [failed], made the settled one ([endReason]) where that
+     * differs, if nothing has been shown since. [ended] is the link's own reason.
+     */
+    private suspend fun settleEnd(link: AgentSession, ended: String, failed: ConnectionState.Failed) {
+        val settled = endReason(link, ended)
+        if (settled != failed.reason) connectionState.compareAndSet(failed, failed.copy(reason = settled))
     }
 
     /**
@@ -1951,7 +1967,7 @@ class JobRepository(
         val ended = current.ended.await()
         val told = current.closing
         // What the agent said of why it ended the link stands; otherwise the phone's Bluetooth going off may be why.
-        val reason = if (told == null) endReason(current, ended) else ended
+        val reason = endReasonNow(current, ended)
         log.line("the link ended: $ended" + told?.let { " (link.closing $it)" }.orEmpty() + if (reason != ended) " ($reason)" else "")
         val failed = connectLock.withLock {
             // The app has moved on to another link: the end of this one, `other-link` too, is nothing to show.
@@ -1987,7 +2003,7 @@ class JobRepository(
             jobState.update { if (unfinished(it)) it?.copy(linkLost = true, waitedOut = false) else it }
             ConnectionState.Failed(headUnitId, reason).also { connectionState.value = it }
         }
-        if (failed != null && told == null) offAfter(current, failed)
+        if (failed != null) settleEnd(current, ended, failed)
     }
 
     private fun apply(headUnitId: String, event: JobEvent) = jobState.update { known ->

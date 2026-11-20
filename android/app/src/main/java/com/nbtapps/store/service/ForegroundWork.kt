@@ -93,6 +93,12 @@ object ForegroundWork {
     }
 
     /**
+     * The head unit whose terminal a tap on the notification opens: the one a terminal is open, or being opened, on,
+     * whatever else the notification is for. Null where there is none: the tap brings the app up as it was.
+     */
+    fun terminalToOpen(terminal: TerminalState): String? = terminal.headUnitId.takeIf { terminal.active }
+
+    /**
      * The notification for [reasons]: the first one's title, line and bar, and below them a line for each of the
      * others. Null where there is no reason: the service stops.
      */

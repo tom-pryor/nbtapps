@@ -62,6 +62,17 @@ class ForegroundWorkTest {
     }
 
     @Test
+    fun `a tap goes to the terminal of the head unit it is open or being opened on, and otherwise only to the app`() {
+        assertEquals("car", ForegroundWork.terminalToOpen(TerminalState.Open("car")))
+        assertEquals("car", ForegroundWork.terminalToOpen(TerminalState.Open("car", held = true)))
+        assertEquals("car", ForegroundWork.terminalToOpen(TerminalState.Connecting("car")))
+        assertNull(ForegroundWork.terminalToOpen(TerminalState.Idle))
+        assertNull(ForegroundWork.terminalToOpen(TerminalState.Ended("car", TerminalEnd.ByUser)))
+        assertNull(ForegroundWork.terminalToOpen(TerminalState.Failed("car", "No")))
+        assertNull(ForegroundWork.terminalToOpen(TerminalState.Off("car")))
+    }
+
+    @Test
     fun `a job or a pull stays the main text, and the terminal is a line below it`() {
         assertEquals(
             ForegroundNotice(
