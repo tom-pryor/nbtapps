@@ -1,0 +1,5 @@
+#!/bin/sh
+# Stands in for scp, which the real package places as a link to dropbearmulti: dropbearmulti acts as the program its
+# name says, or else as the one its first argument says. A link to the script beside this one would start it as
+# dropbearmulti, so this names scp itself.
+exec /opt/nbtagent/ssh/dropbearmulti scp "$@"

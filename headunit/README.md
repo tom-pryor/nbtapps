@@ -37,7 +37,7 @@ Nothing in HmiMain3D is patched.
 | `tools/check_agent.py` | `make agent-check`: `release/agent/` is the head unit's kind of program, holds nothing of the test bench, and its `nbtagent` holds the official package key; and the agent's own package in `release/pkg/` is byte for byte what `tools/agent_pkg.py` makes of that folder |
 | `agent/package/manifest.json.in`, `tools/agent_pkg.py` | The agent's own package, `org.nbtapp.agent`: its manifest, with a placeholder for the version, and the script that makes the archive of `release/agent/` (`make agent-pkg`) and signs it for a release (`make agent-release KEY=FILE`); `tests/test_agent_pkg.py` tests the script |
 | `tests/` | Host tests of the Python tools: `test_nbtpkg.py` (`make test-pkg`), `test_agent_pkg.py` (`make test-agent-pkg`), `test_plugin_pkg.py` (`make test-plugin-pkg`) and `test_ssh_pkg.py` (`make test-ssh-pkg`) |
-| `tests/agent/` | Tests of `agent/` (`make agent-test`), run in a Docker container (`tools/bench.py`), and `chan_echo.cpp` and `chan_feed.cpp`, the programs of the test package chan's channels; `tests/compare_readers.py` holds the agent's package reader and the tool's together, `tests/test_protocol_vectors.py` reads `spec/protocol/` with a codec of its own, `tests/e2e/run_agent.py` runs `nbtagent` and `nbtctl` as two processes, and `tests/e2e/run_launcher.py` runs the starter, a version's launcher and the install script on folders |
+| `tests/agent/` | Tests of `agent/` (`make agent-test`), run in a Docker container (`tools/bench.py`), and `chan_echo.cpp` and `chan_feed.cpp`, the programs of the test package chan's channels; `tests/compare_readers.py` holds the agent's package reader and the tool's together, `tests/test_protocol_vectors.py` reads `spec/protocol/` with a codec of its own, `tests/e2e/run_agent.py` runs `nbtagent` and `nbtctl` as two processes, `tests/e2e/run_ssh.py` logs in through the SSH package's bench form with an OpenSSH client, and `tests/e2e/run_launcher.py` runs the starter, a version's launcher and the install script on folders |
 | `tests/packages/`, `tests/keys/` | Package sources and test keys for `tests/make_packages.py`, which builds good and deliberately broken packages (`make testdata`); `tests/test_nbtpkg.py` tests the tool against them (`make test-pkg`) |
 | `ssh/` | Third party: Dropbear's SSH server and OpenSSH's `sftp-server`, as git submodules pinned at release tags (`ssh/dropbear`, `ssh/openssh`), with our patch to Dropbear, its build options and the build scripts, for the head unit and for this machine; `tools/check_ssh.py` is `make ssh-check`. `ssh/README` says what each change is for and how the sources were checked against the signed releases. Ours: `ssh/relay/`, `sshrelay`, the program of the SSH package's channel, which starts a Dropbear server for each connection and carries its bytes (`ssh/README`, "The relay"), and its `version.hpp`, the package's version; its tests are `tests/ssh/` (`make ssh-test`). `ssh/package/manifest.json.in` is the manifest of the SSH package, `org.nbtapp.ssh`, and `tools/ssh_pkg.py` makes it (`make ssh-pkg`) and signs it for a release (`make ssh-release KEY=FILE`); see [The SSH package](#the-ssh-package) |
 | `build/`, `release/` | Build products, not tracked. `release/NbtApp/` is the folder for the head unit; `release/agent/` holds the agent's programs for it, and `release/pkg/` the plugin's, the agent's own and the SSH package |
@@ -296,7 +296,9 @@ build/agent-host/nbtctl remove org.nbtapp.hello org.nbtapp.runtime
 its header lists the other commands. It runs on this machine and reaches the agent through the socket in the root
 folder. `make agent-host` also builds an `nbtagent` for this machine, which takes the same arguments and keeps no
 script from anything: leave it for when Docker is not to be had. After a change to `agent/`, `make bench-image`
-again; `make agent-test` does that itself.
+again; `make agent-test` does that itself. The image also holds the SSH package's programs and an OpenSSH client
+(see [The SSH package](#the-ssh-package)): `make bench-image` exports their sources first (`make ssh-src`), which
+fetches the two submodules the first time, so it needs git, patch and the network once.
 
 The agent writes what it does to standard error, a line at a time with the time of day: links that come and go,
 each request and how it was answered, the plans it makes, what it fetches, and every step, phase and log line of a
@@ -671,6 +673,16 @@ make ssh-release KEY=/path/to/package.key              # -> release/pkg/signed/,
 - **An SSH client beside `nbtctl`** (on the bench, say) reaches the relay with `nbtctl` as its proxy command:
   `nbtctl channel org.nbtapp.ssh ssh --raw --send KEYS --skip-first`, where `KEYS` is the keys message; the relay's
   answer comes on `nbtctl`'s standard error, and the stream on its standard output.
+- **The bench form.** The test bench's image holds the three programs built for it, in `/opt/nbtagent/ssh/`
+  (Dropbear and `sftp-server` from the same exported sources and options as the head unit's, the relay without its
+  test hooks), and Debian's OpenSSH client. `tests/packages/ssh-1.0.0` (and `ssh-1.0.1`, for an upgrade) is the
+  package as the bench has it: the same id, channel, switch, program, logs and requires, with scripts in `bin/`
+  that run the image's programs (`bin/scp` a script that runs `dropbearmulti` as `scp`, where the real package has
+  a link), signed with the test key. `make ssh-e2e` (`tests/e2e/run_ssh.py`, part of `make agent-test`) installs it
+  through the agent in its container and logs in with the image's `ssh`, `scp` and `sftp` through `nbtctl`: a
+  command, a shell on a pty, files both ways, a wrong key and a wrong host key refused, the switch off and an
+  upgrade with a session open, the agent started again while the relay runs, and removal. A phone's tests can
+  install the same package in the bench.
 
 ## The agent on the head unit
 
