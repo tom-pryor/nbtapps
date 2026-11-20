@@ -208,6 +208,16 @@ format and the protocol.
   `"serial": {"listener": false}`. `serial.dial`, on the local socket only, has the car dial the phones connected
   to it now (`{"phones": N}`);
   `nbtctl serial status` and `nbtctl serial dial` send them. `agent/agent.hpp` has the members one by one.
+- `agent.stop`, on the local socket only, stops the agent for a person who asked for that: `nbtctl stop` sends
+  it. It takes no params, is refused with `forbidden` on any other link, so no
+  phone can stop the agent it talks to, and with `busy` while a job runs or a restart is on its way. An agent on
+  trial may be stopped, and its try then ends unconfirmed. The answer is `{}`, and once it is written out (two
+  seconds at most) the agent ends as it does for SIGTERM: the phones are told `link.closing` with the reason
+  `stopping`, Bluetooth serial is taken away, and the exit status is 0, so its launcher and the starter end too.
+  On its way out it leaves the empty file `agent.stopped` in its run folder on the RAM disk (`/tmp/nbtapp`, or
+  `DIR/run` with `--root`), which keeps the iDrive plugin (1.3.0 and later) from starting it with the head unit
+  until the head unit has powered down; the next agent that starts removes it, and says so.
+  A signal leaves no such file.
 - The phone made a link, and the phone ends it. When the agent ends a link of its own accord it says so first,
   with the event `link.closing`, and closes its end once that is written out; nothing follows the event. Its
   `reason` is `stopping` (the agent's process ends), `restarting` (it ends for a newer version of itself, which
@@ -973,7 +983,8 @@ bluetooth: while a link is being decided on or is the agent's, the gate also ref
 bluetooth: the car dials a phone of the agent's that is connected to it and paired with it, on its instance 'nbtapp' (/dev/nbtapp): polls every 10 s for 120 s after such a phone connects or a link of the agent's ends, then every 30 s; at once when the phone asks for a link and no link of the agent's comes in 1000 ms; every phone there every 5 s while the pairing window is open. Before each dial the car asks the phone for its services, and dials it only if they name the agent's: an ask has 6000 ms to be answered, one with no answer or an error is as one that does not name it and holds nothing back, no poll and no request of the phone's asks it within 8000 ms of its connecting to the car, and its requests bring one ask of it every 10000 ms at most, and one more after an ask of theirs that was ended before its answer. The app's magic bytes are waited for 3000 ms; a dial with no answer is given up after 95 s, and one answered 10, or BUSY with no link left behind, or whose request the car's Bluetooth service did not take, is tried again after 15 s; a phone whose dial the car answered with another failure or did not answer, on whose UUID something else answers, or whose link left behind the car does not end, is left alone by polls and by its own requests for 30 s, twice as long each time up to 300 s, until a dialled link of the agent's comes up for it or its connection changes. After 3 dials of a phone in a row that gave the agent no link, a link the phone opens itself is no longer left to another program, until a dialled link of the agent's reaches it again. A dialled link that the agent ends has 5000 ms to be ended by the phone before the car is asked to, and the car's answer is waited for 3000 ms. A phone's request that the car ends while the agent's dial is out, or up to 1000 ms after it was answered, is not counted as a refusal. A registration refused while /dev/nbtapp is there: the car's device list is waited for 3000 ms and the link ended for each phone there, 15 s at most in all, and the service registered again at once if it has gone
 ```
 
-It ignores SIGHUP, so it goes on when the SSH session ends; `kill` with its process id stops it. Its log is its
+It ignores SIGHUP, so it goes on when the SSH session ends; `kill` with its process id stops it, and so does
+`nbtctl stop`, which also keeps the iDrive plugin from starting it again until the head unit powers down. Its log is its
 standard error and nothing else, so the file above grows in `/tmp`, which is memory, for as long as the agent runs.
 After a power down the programs are gone from `/tmp` and the agent has to be copied and started again.
 
@@ -995,6 +1006,7 @@ ksh /mnt/umassXXXXX/agent/hu_install.sh              # says what it did, and how
 /var/opt/nbtapp/agent/launcher --root /tmp/hu &      # the starter's arguments are nbtagent's
 cat /tmp/nbtapp/log/agent.log                        # the log of this start; a power down empties /tmp
 slay nbtagent                                        # SIGTERM to the agent: it ends, and its launcher and the starter with it
+nbtctl stop                                          # the same, asked over its socket (agent.stop), and it leaves agent.stopped
 ```
 
 With no arguments the starter has the agent started on the head unit itself. Nothing starts the starter when the
@@ -1039,7 +1051,7 @@ and what the starter does next on the status the launcher ends with:
 
 | Agent's exit status | Meaning | The version's launcher | The starter |
 |---|---|---|---|
-| 0 | The agent was stopped | Ends with 0 | Ends |
+| 0 | The agent was stopped: SIGTERM, or `agent.stop` | Ends with 0 | Ends |
 | 2 | It was started with arguments it does not take | Ends with 2 | Ends with 2 |
 | 3 | A new start would change nothing: another agent has the socket, or this build does not know the head unit | Ends with 3 | Ends with 3 |
 | 4 | The agent has placed a newer version of itself and asks to be started again | Ends with 4 | Looks at the files again at once, which starts that version |
@@ -1053,7 +1065,9 @@ the last line of `agent.log`: `launcher: version 1.5.1's launcher ended with sta
 same`, or, for a launcher that cannot be run at all, `... could not be run (status 126)` or `... was not found
 (status 127)`.
 
-To stop the agent, stop the agent: its launcher and the starter follow. A starter or a launcher that is killed
+To stop the agent, stop the agent (`slay nbtagent`, or `nbtctl stop`): its launcher and the starter follow. An
+agent on trial that is stopped ends its try: the starter finds `trial.started` at its next start and runs the
+version in `current`, which undoes the update. A starter or a launcher that is killed
 leaves the agent running with nothing to start it again.
 
 There is one starter to a head unit. A starter keeps its process id in `/tmp/nbtapp/log/launcher.pid` for as

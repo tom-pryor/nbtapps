@@ -13,7 +13,7 @@
 
 namespace nbt {
 
-const int kExitStopped = 0;     // asked to stop (SIGINT, SIGTERM): the launcher ends too
+const int kExitStopped = 0;     // asked to stop (SIGINT, SIGTERM, agent.stop): the launcher ends too
 const int kExitFailed = 1;      // could not start, or could not go on: the launcher tries again, a few times
 const int kExitUsage = 2;       // started with arguments it does not take: the launcher ends
 const int kExitNoRestart = 3;   // nothing a new start would change: another agent has the socket, or this build

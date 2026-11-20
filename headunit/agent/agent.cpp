@@ -113,7 +113,7 @@ Agent::Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std:
       engine_(platform, keys, agentVersion), planner_(&engine_), job_(&engine_, this), serialReset_(0), serialDial_(0),
       nextSession_(1), building_(0),
       havePlan_(false), jobOwner_(0), jobAccounted_(true), inStep_(false), restartDeadlineMs_(0), onTrial_(false),
-      handOverDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), log_(stderr) {}
+      handOverDeadlineMs_(0), stopAsked_(false), stopDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), log_(stderr) {}
 
 Agent::~Agent() {
     delete building_;
@@ -608,7 +608,7 @@ void Agent::sessionClosed(Session* s) {
 
 void Agent::turn(int timeoutMs) {
     if (job_.installing() || streamsWaiting()) timeoutMs = 0;
-    else if ((!pendingRestart_.empty() || job_.handingOver()) && timeoutMs > 20) timeoutMs = 20;
+    else if ((!pendingRestart_.empty() || job_.handingOver() || stopAsked_) && timeoutMs > 20) timeoutMs = 20;
     serve(timeoutMs);
     forgetDials();
     pumpStreams();
@@ -671,6 +671,14 @@ bool Agent::restartDue() {
     bool flushed = true;
     for (size_t i = 0; i < sessions_.size(); ++i) flushed = flushed && !sessions_[i]->peer->wantsWrite();
     return flushed || clock_->nowMs() >= handOverDeadlineMs_;
+}
+
+bool Agent::stopDue() {
+    if (!stopAsked_ || busy()) return false;
+    // The controller that asked has its answer before the process goes, as far as the links take it.
+    bool flushed = true;
+    for (size_t i = 0; i < sessions_.size(); ++i) flushed = flushed && !sessions_[i]->peer->wantsWrite();
+    return flushed || clock_->nowMs() >= stopDeadlineMs_;
 }
 
 void Agent::confirmTrial(Session* s) {
@@ -1103,6 +1111,7 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "job.cancel") jobCancel(s, id, params);
     else if (method == "job.status") jobStatus(s, id, params);
     else if (method == "system.restart") systemRestart(s, id, params);
+    else if (method == "agent.stop") agentStop(s, id, params);
     else if (method == "files.list") filesList(s, id, params);
     else if (method == "files.fetch") filesFetch(s, id, params);
     else if (method == "files.cancel") filesCancel(s, id, params);
@@ -2111,6 +2120,32 @@ void Agent::systemRestart(Session* s, int64_t id, const json::Value& params) {
     answer(s, id, "{}");
     pendingRestart_ = kind.string();
     restartDeadlineMs_ = clock_->nowMs() + kRestartFlushMs;
+}
+
+void Agent::agentStop(Session* s, int64_t id, const json::Value& params) {
+    if (params.size() != 0) {
+        refuse(s, id, "bad-request", "agent.stop takes no params");
+        return;
+    }
+    if (!s->local) {
+        refuse(s, id, "forbidden", "the agent is stopped on the head unit itself");
+        return;
+    }
+    if (stopAsked_) {
+        answer(s, id, "{}");
+        return;
+    }
+    // An agent on trial has the job that placed it, which waits for a controller to confirm this version: nothing of
+    // it runs, and a stop ends the try.
+    if ((job_.active() && !onTrial_) || inStep_ || !pendingRestart_.empty()) {
+        refuse(s, id, "busy", pendingRestart_.empty() ? "a job is running" : "a restart is on its way");
+        return;
+    }
+    answer(s, id, "{}");
+    note(linkName(s->number) + ": agent.stop: the agent ends once its answer is written out" +
+         (onTrial_ ? std::string(", and this version's try ends with it") : std::string()));
+    stopAsked_ = true;
+    stopDeadlineMs_ = clock_->nowMs() + kRestartFlushMs;
 }
 
 // ---- files --------------------------------------------------------------------------------------------------------
