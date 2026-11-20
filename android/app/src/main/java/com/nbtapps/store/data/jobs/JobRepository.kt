@@ -83,6 +83,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -208,7 +209,10 @@ class Greeting(
     val serialTries: Int = 3,
     /** The wait on a serial link that another may follow. The agent answers at once on a link it has taken. */
     val retryTimeoutMs: Long = 4_000,
-    /** The pause before the next link is opened, for the car to take the last one down. */
+    /**
+     * The pause before the next link is opened, for the car to take the last one down. A link the car opens to the
+     * phone meanwhile, for an agent that dials, ends it and is the next link: see `JobRepository.greet`.
+     */
     val pauseMs: Long = 700,
     /**
      * The wait for the answer to each request a connect makes after `hello`: `auth`, `info.get`, `packages.list`,
@@ -1344,44 +1348,71 @@ class JobRepository(
      *
      * Where the agent said that a link this phone opens itself is left to another program ([HeadUnit.phoneOpenedLeft]),
      * the connector only listens for the car's link. Where that has changed since the app last heard, a link the phone
-     * opens is never answered; so while one waits for its answer, from an agent that dials, a link the car opens to the
-     * phone is taken too ([helloOrCarLink]). If one comes first, the phone's link is closed and the greeting goes on
-     * over the car's, in the place of the phone's among the tries: it is not counted again, and no link of the car's is
-     * watched beside, so there are at most two links to a try.
+     * opens is never answered; so from the first wait for an answer on a link the phone opened to an agent that dials,
+     * the phone listens for the car's links until the greeting is over ([CarLinks]): through every wait for an answer
+     * and every pause between the links. One the car opens while a link of the phone's waits for its
+     * answer takes that link's place ([helloOrCarLink]): the phone's link is closed and the greeting goes on over the
+     * car's, which is not counted again among the tries. One that comes in a pause, or while a link of the car's own
+     * waits for its answer, is the next round's link, and is counted as the link it stands for would have been: it
+     * ends the pause, as there is no link of the phone's for the car to take down. So the tries stay as many as before.
+     * Nothing is left listening, and no link of the car's open, however the greeting ends.
      */
-    private suspend fun greet(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit, tries: Tries): Pair<AgentSession, Hello> {
+    private suspend fun greet(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit, tries: Tries): Pair<AgentSession, Hello> =
+        coroutineScope {
+            val carLinks = CarLinks(endpoint, this)
+            try {
+                rounds(unit, endpoint, first, holding, tries, carLinks)
+            } finally {
+                // Nothing listens, and no link of the car's that came is left open, however the greeting ends. The
+                // scope waits for the listening to have stopped.
+                carLinks.stop()
+            }
+        }
+
+    /** The rounds of [greet], each over one link, with [carLinks] listening from the first link of the phone's on. */
+    private suspend fun rounds(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit, tries: Tries, carLinks: CarLinks): Pair<AgentSession, Hello> {
         // A link the car opened in the place of a silent one of the phone's, for the next round.
         var carLink: Link? = null
-        while (true) {
-            val replacing = carLink
-            carLink = null
-            val link = replacing
-                ?: first.takeIf { tries.opened == 0 }
-                ?: connector.connect(endpoint, unit.serialDial, listenOnly = unit.serialDial && unit.phoneOpenedLeft)
-            if (replacing == null) tries.opened++
-            val next = AgentSession(link, scope, now = clock).also(holding)
-            val last = next.kind != Link.SERIAL || tries.opened >= greeting.serialTries
-            val watch = unit.serialDial && next.kind == Link.SERIAL && link !== first && !link.openedByCar && connector.accepts(endpoint)
-            val failure = try {
-                when (val got = withTimeoutOrNull(if (last) greeting.timeoutMs else greeting.retryTimeoutMs) { helloOrCarLink(next, endpoint, watch) }) {
-                    is Greeted.Answer -> return next to got.hello
-                    is Greeted.CarLink -> {
-                        log.line("the car's link came while the phone's waited for an answer: the phone's is closed, and the car's is used")
-                        carLink = got.link
-                        abandon(next, CAR_LINK_TAKEN)
-                        holding(null)
-                        continue
+        try {
+            while (true) {
+                val replacing = carLink
+                carLink = null
+                val came = if (replacing == null) carLinks.take() else null
+                if (came != null) log.line("the car's link came between two links of the phone's: it is used for the next")
+                val link = replacing
+                    ?: came
+                    ?: first.takeIf { tries.opened == 0 }
+                    ?: connector.connect(endpoint, unit.serialDial, listenOnly = unit.serialDial && unit.phoneOpenedLeft)
+                if (replacing == null) tries.opened++
+                val next = AgentSession(link, scope, now = clock).also(holding)
+                val last = next.kind != Link.SERIAL || tries.opened >= greeting.serialTries
+                val watch = unit.serialDial && next.kind == Link.SERIAL && link !== first && !link.openedByCar && connector.accepts(endpoint)
+                // From the first link of the phone's that waits for its answer, until the greeting is over.
+                if (watch) carLinks.listen()
+                val failure = try {
+                    when (val got = withTimeoutOrNull(if (last) greeting.timeoutMs else greeting.retryTimeoutMs) { helloOrCarLink(next, carLinks.takeIf { watch }) }) {
+                        is Greeted.Answer -> return next to got.hello
+                        is Greeted.CarLink -> {
+                            log.line("the car's link came while the phone's waited for an answer: the phone's is closed, and the car's is used")
+                            carLink = got.link
+                            abandon(next, CAR_LINK_TAKEN)
+                            holding(null)
+                            continue
+                        }
+                        null -> NO_ANSWER
                     }
-                    null -> NO_ANSWER
+                } catch (e: LinkClosedException) {
+                    e.message ?: "The link to the head unit was lost"
                 }
-            } catch (e: LinkClosedException) {
-                e.message ?: "The link to the head unit was lost"
+                // The words are the last link's; the ones before it failed in one of the same two ways.
+                if (last) throw IOException(tries.said(failure))
+                abandon(next, failure)
+                holding(null)
+                // For the car to take the last link down; a link the car opens meanwhile ends the pause.
+                if (carLinks.listening) carLinks.awaitFor(greeting.pauseMs) else delay(greeting.pauseMs)
             }
-            // The words are the last link's; the ones before it failed in one of the same two ways.
-            if (last) throw IOException(tries.said(failure))
-            abandon(next, failure)
-            holding(null)
-            delay(greeting.pauseMs)
+        } finally {
+            carLink?.close()
         }
     }
 
@@ -1394,15 +1425,81 @@ class JobRepository(
     }
 
     /**
-     * Says `hello` on [next] and waits for the answer; where [watch], also takes a link the car at [endpoint] opens to
-     * the phone meanwhile, and whichever comes first is what this comes to. Listening that cannot be had leaves the
-     * answer to be waited for alone. A caller that is cancelled leaves no link of the car's open.
+     * The links the car at [endpoint] opens to the phone while [greet] runs: from [listen] until [stop], one wait in
+     * [LinkConnector.accept] after another, in [within], so that the phone listens between the links as well as beside
+     * them, with no break but the moment from a link handed over to the next wait. The car keeps one such link up at a
+     * time: the latest that has come and that nobody has taken is held, and one it takes the place of is closed, as is
+     * the one held at [stop]. Listening that cannot be had ends the waits, until the next [listen].
+     */
+    private inner class CarLinks(private val endpoint: Endpoint, private val within: CoroutineScope) {
+        private val held = MutableStateFlow<Link?>(null)
+        private val lock = Any()
+
+        /** Set by [stop]: a link that comes after it is closed at once. Guarded by [lock]. */
+        private var stopped = false
+
+        private var waits: Job? = null
+
+        /** Whether it listens now. */
+        val listening: Boolean get() = waits?.isActive == true
+
+        /** Starts listening, where it does not already. */
+        fun listen() {
+            if (listening) return
+            waits = within.launch {
+                while (true) {
+                    val incoming = try {
+                        connector.accept(listOf(endpoint))
+                    } catch (e: IOException) {
+                        // The phone cannot listen now: the answers are waited for alone.
+                        return@launch
+                    }
+                    hold(incoming.link)
+                }
+            }
+        }
+
+        /** Keeps [link] for whoever takes the next; one held before it is closed. */
+        fun hold(link: Link) {
+            val before = synchronized(lock) { if (stopped) link else held.getAndUpdate { link } }
+            before?.close()
+        }
+
+        /** The link held, if there is one, which is the caller's from here. */
+        fun take(): Link? = held.getAndUpdate { null }
+
+        /** Waits for a link to be held, and takes it. */
+        suspend fun await(): Link {
+            while (true) {
+                held.first { it != null }
+                take()?.let { return it }
+            }
+        }
+
+        /** Waits [millis] at most for a link to be held, and leaves it held. */
+        suspend fun awaitFor(millis: Long) {
+            withTimeoutOrNull(millis) { held.first { it != null } }
+        }
+
+        /** Stops listening, and closes the link held, if there is one. */
+        fun stop() {
+            waits?.cancel()
+            synchronized(lock) { stopped = true }
+            take()?.close()
+        }
+    }
+
+    /**
+     * Says `hello` on [next] and waits for the answer; with [carLinks], also takes a link the car opens to the phone
+     * meanwhile, or one that came before and is held, and whichever comes first is what this comes to. Listening that
+     * cannot be had leaves the answer to be waited for alone. A caller that is cancelled leaves no link of the car's
+     * open.
      *
      * @throws LinkClosedException if [next] ends first.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    private suspend fun helloOrCarLink(next: AgentSession, endpoint: Endpoint, watch: Boolean): Greeted {
-        if (!watch) return Greeted.Answer(next.client.hello(identity.id(), identity.name))
+    private suspend fun helloOrCarLink(next: AgentSession, carLinks: CarLinks?): Greeted {
+        if (carLinks == null) return Greeted.Answer(next.client.hello(identity.id(), identity.name))
         val won = CompletableDeferred<Greeted>()
         return coroutineScope {
             val asking = launch {
@@ -1416,12 +1513,9 @@ class JobRepository(
                 }
             }
             val taking = launch {
-                try {
-                    val incoming = connector.accept(listOf(endpoint))
-                    if (!won.complete(Greeted.CarLink(incoming.link))) incoming.link.close()
-                } catch (e: IOException) {
-                    // The phone cannot listen now: the answer is waited for alone.
-                }
+                val link = carLinks.await()
+                // The answer came first: held again, for [CarLinks.stop] to close.
+                if (!won.complete(Greeted.CarLink(link))) carLinks.hold(link)
             }
             try {
                 won.await()

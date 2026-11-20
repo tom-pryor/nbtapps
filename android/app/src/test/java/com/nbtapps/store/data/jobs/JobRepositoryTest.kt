@@ -58,6 +58,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -2261,12 +2262,12 @@ class JobRepositoryTest {
      * phone's own links, with waits for `hello` of [waitMs], by default long enough for a test to bring the car's link
      * in. Out of sight, so that nothing listens but what a connect does.
      */
-    private suspend fun leftCar(left: Boolean, dials: Boolean = true, waitMs: Long = 3_000): JobRepository {
+    private suspend fun leftCar(left: Boolean, dials: Boolean = true, waitMs: Long = 3_000, pauseMs: Long = 10): JobRepository {
         shown.state.value = false
         headUnits.add(bluetoothCar.copy(serialDial = dials, phoneOpenedLeft = left))
         val jobs = JobRepository(
             headUnits, dialler, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L },
-            greeting = Greeting(timeoutMs = waitMs, retryTimeoutMs = waitMs, pauseMs = 10), foreground = shown, bluetoothOn = bluetoothOn,
+            greeting = Greeting(timeoutMs = waitMs, retryTimeoutMs = waitMs, pauseMs = pauseMs), foreground = shown, bluetoothOn = bluetoothOn,
         )
         // The app's leaving at the start, which ends a connect under way, is over before the test connects.
         delay(200)
@@ -2371,8 +2372,74 @@ class JobRepositoryTest {
         assertEquals("The head unit didn't answer (3 links were tried)", result.exceptionOrNull()?.message)
         assertEquals(3, dialler.agents.size)
         assertTrue("a link stayed open", dialler.agents.all { it.phoneLeft() })
-        assertEquals("listened beside each", listens + 3, dialler.listens.get())
+        // One wait, from the first link's on, through the others and the pauses between them.
+        assertEquals("listened without a break", listens + 1, dialler.listens.get())
         until("nothing listens") { dialler.listening.value == 0 }
+    }
+
+    @Test
+    fun `a link the car opens in the pause between two links of the phone's is the next, and nothing is left open or listening`() = test {
+        val jobs = leftCar(left = false, waitMs = 300, pauseMs = 10_000)
+        val calling = AtomicBoolean(false)
+        val listens = dialler.listens.get()
+        // The phone's own links are left unread on the car: they never answer.
+        dialler.onConnect = { agent -> if (!calling.get()) agent.silent += "hello" }
+
+        val connecting = async { jobs.connect("bt") }
+        until("the phone's link asked hello") { dialler.agents.firstOrNull()?.requestsOf("hello")?.isNotEmpty() == true }
+        val phones = dialler.agents.first()
+        // Given up after its wait: the pause before the next link has begun.
+        assertTrue("the phone's silent link stayed open", phones.phoneLeft())
+        assertTrue("nothing listens in the pause", dialler.listening.value > 0)
+        calling.set(true)
+        val car = dialIn()
+
+        // Well inside the pause, which the car's link ended.
+        assertTrue(withTimeout(5_000) { connecting.await() }.isSuccess)
+        assertEquals("a second link of the phone's was opened", listOf(false), dialler.listenOnly)
+        assertEquals(listOf(phones, car), dialler.agents)
+        assertEquals(listOf("hello", "info.get"), methods(car).take(2))
+        // One wait from the first link's on, until the car's link came, and the next at once, until the greeting ended.
+        assertEquals("listened without a break", listens + 2, dialler.listens.get())
+        until("nothing listens") { dialler.listening.value == 0 }
+        assertNull("a car's link was still taken", dialler.dialIn(carAddress))
+    }
+
+    @Test
+    fun `links the car opens in every pause, unanswered, take the places of the phone's among the tries, which stay as many`() = test {
+        val jobs = leftCar(left = false, waitMs = 300, pauseMs = 10_000)
+        dialler.onConnect = { it.silent += "hello" }
+
+        val connecting = async { jobs.connect("bt") }
+        for (round in 1..2) {
+            until("link $round asked hello") { dialler.agents.size == round && dialler.agents.last().requestsOf("hello").isNotEmpty() }
+            assertTrue("link $round stayed open", dialler.agents.last().phoneLeft())
+            dialIn()
+        }
+        val result = withTimeout(5_000) { connecting.await() }
+
+        assertEquals("The head unit didn't answer (3 links were tried)", result.exceptionOrNull()?.message)
+        assertEquals(3, dialler.agents.size)
+        assertEquals("a second link of the phone's was opened", listOf(false), dialler.listenOnly)
+        assertTrue("a link stayed open", dialler.agents.all { it.phoneLeft() })
+        until("nothing listens") { dialler.listening.value == 0 }
+    }
+
+    @Test
+    fun `a connect cancelled in the pause between two links of the phone's leaves nothing open or listening`() = test {
+        val jobs = leftCar(left = false, waitMs = 300, pauseMs = 10_000)
+        dialler.onConnect = { it.silent += "hello" }
+
+        val connecting = async { jobs.connect("bt") }
+        until("the phone's link asked hello") { dialler.agents.firstOrNull()?.requestsOf("hello")?.isNotEmpty() == true }
+        assertTrue("the phone's silent link stayed open", dialler.agent.phoneLeft())
+        assertTrue("nothing listens in the pause", dialler.listening.value > 0)
+        connecting.cancelAndJoin()
+
+        until("nothing listens") { dialler.listening.value == 0 }
+        assertEquals(ConnectionState.Disconnected, jobs.connection.value)
+        assertNull("a car's link was still taken", dialler.dialIn(carAddress))
+        assertEquals(1, dialler.agents.size)
     }
 
     @Test
