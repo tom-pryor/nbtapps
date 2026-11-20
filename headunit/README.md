@@ -543,6 +543,7 @@ nbtctl channel on org.nbtapp.ssh ssh          # and off
 nbtctl channel org.example.feed news          # each message as a line; --hex for its bytes in hex
 nbtctl channel org.example.echo echo --send hello
 nbtctl channel org.nbtapp.ssh ssh --raw       # standard input and output as the stream, for a proxy command
+nbtctl channel org.nbtapp.ssh ssh --raw --send '{"v":1,"keys":[...]}' --skip-first   # the answer to --send on standard error
 ```
 
 `nbtctl channel` ends when the channel closes, with 0 if its program closed it and 1 for another reason, with 3
@@ -551,7 +552,10 @@ the end of its input does not end it: it stops reading and goes on writing what 
 those ends (an SSH client ends its proxy command with SIGHUP). When its output cannot be written, because the
 reader has gone, it closes the channel and exits with 1. Its output is the channel's alone, in every mode: a job
 run meanwhile from another controller prints nothing there, and a line on standard error says when the job holds
-the channel and when it goes on.
+the channel and when it goes on. With `--raw`, `--skip-first` takes the first message that comes out of the stream
+and writes it to standard error as one line (each line end in it a space): with `--send`, that is how an SSH client's
+proxy command reaches the SSH package's relay, which answers the keys message with its host keys before the server's
+bytes begin. Without `--raw` it is refused: there the first message is a line already.
 
 ## Installing
 

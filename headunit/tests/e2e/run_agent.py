@@ -732,8 +732,8 @@ def run_channels():
     """The test package chan, on a head unit of its own in a short folder: a channel's program listens on a local
     socket in its ${tmp}, whose path has to fit a local socket's address, which one deep in a checkout passes. Its
     channels through `nbtctl channel`: the switch of gated, 1 MiB through echo with --raw whose answers come after its
-    input has ended, an answer long after that end, the ends by SIGHUP and by an output that has gone, a job of another
-    package while a channel is open, feed's messages printed and in hex, and a refusal."""
+    input has ended, an answer long after that end, the ends by SIGHUP and by an output that has gone, --skip-first, a
+    job of another package while a channel is open, feed's messages printed and in hex, and a refusal."""
     global SOCKET
     os.makedirs(WORK, exist_ok=True)
     root = tempfile.mkdtemp(prefix="nbt_ch_")
@@ -806,6 +806,15 @@ def run_channels():
               repr(received) + " " + echo.errors())
         check_closed_by_controller(closes, "--raw ended by SIGHUP")
 
+        # --skip-first, as the proxy command of an SSH client: the first message that comes (here echo's answer to
+        # --send) on standard error as one line, its line end a space, and the stream after it on standard output.
+        echo = Chan("echo", "--raw", "--send", "keys\nmessage", "--skip-first")
+        echo.send(b"the stream")
+        received = echo.wait_for(10)
+        code = echo.stop(signal.SIGHUP)
+        check(code == 0 and received == b"the stream" and echo.errors() == "keys message\n",
+              "--raw with --skip-first: exit status %d" % code, repr(received) + " " + repr(echo.errors()))
+
         # Its output closed before the answer comes: nbtctl closes the channel and says why.
         closes = closed_by_controller()
         echo = Chan("echo", "--raw", read=False)
@@ -853,7 +862,8 @@ def run_channels():
         check(out.splitlines()[0] == b"message 1 of 100".hex(), "feed's messages in hex", out[:200])
         code, out = ctl("channel", "org.nbtapp.chan", "none")
         check(code == 1 and "not-found" in out, "a channel there is not", out)
-        check(ctl("channel", "org.nbtapp.chan")[0] == 2 and ctl("channel", "org.nbtapp.chan", "echo", "--hex", "--raw")[0] == 2,
+        check(ctl("channel", "org.nbtapp.chan")[0] == 2 and ctl("channel", "org.nbtapp.chan", "echo", "--hex", "--raw")[0] == 2 and
+              ctl("channel", "org.nbtapp.chan", "echo", "--skip-first")[0] == 2,
               "nbtctl channel with what it does not take")
         check(ok("channel", "status", "org.nbtapp.chan", "echo") == "switched false\non true\nopen 0\n", "a channel with no switch")
     finally:
