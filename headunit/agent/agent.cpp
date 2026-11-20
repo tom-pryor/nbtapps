@@ -111,7 +111,7 @@ Agent::Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std:
              RandomSource* random)
     : platform_(platform), keys_(keys), agentVersion_(agentVersion), clock_(clock), random_(random),
       engine_(platform, keys, agentVersion), planner_(&engine_), job_(&engine_, this), serialReset_(0), serialDial_(0),
-      nextSession_(1), building_(0),
+      nextSession_(1), channels_(this, &socketEnds_), building_(0),
       havePlan_(false), jobOwner_(0), jobAccounted_(true), inStep_(false), restartDeadlineMs_(0), onTrial_(false),
       handOverDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), log_(stderr) {}
 
@@ -392,6 +392,10 @@ bool Agent::init(std::string* error) {
             for (size_t i = 0; i < installed.size(); ++i) {
                 const Manifest& m = installed[i].manifest;
                 if (namesTmp(m) && !fs::makeDirs(platform_->tmpDir(m.id), &why)) note("the folder ${tmp} of " + m.id + " cannot be made: " + why);
+                // Where the programs of its channels listen.
+                if (!m.channels.empty() && !makeChannelsDir(platform_->tmpDir(m.id), &why)) {
+                    note("the folder of the channels of " + m.id + " cannot be made: " + why);
+                }
             }
         }
     }
@@ -444,6 +448,9 @@ void Agent::serve(int timeoutMs) {
         if (peer->wantsWrite()) FD_SET(fd, &writable);
         if (fd > top) top = fd;
     }
+    // The programs' ends of the channels: what a program sends wakes the loop at once. They are served after the
+    // links, in turn() and jobIdle().
+    top = channels_.addToSets(&readable, &writable, top);
     struct timeval tv;
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
@@ -596,6 +603,7 @@ void Agent::sessionClosed(Session* s) {
     }
     if (fetch_.active && fetch_.session == s) fetch_ = Fetch();
     endOutgoing(s, "the link ended", "");
+    channels_.closeLink(s->peer, "the link ended");
     // Nobody shows the code any more.
     if (pairing_.open && pairing_.opener == s) closePairing(0);
     if (jobOwner_ == s) {
@@ -608,12 +616,15 @@ void Agent::sessionClosed(Session* s) {
 void Agent::turn(int timeoutMs) {
     if (job_.installing() || streamsWaiting()) timeoutMs = 0;
     else if ((!pendingRestart_.empty() || job_.handingOver()) && timeoutMs > 20) timeoutMs = 20;
+    else if (channels_.connecting() && timeoutMs > (int)kChannelStartRetryMs) timeoutMs = (int)kChannelStartRetryMs;
     serve(timeoutMs);
+    channels_.serve();
     pumpStreams();
     keepAlive();
     endOverdue();
     expirePairing();
     reap();
+    channels_.reap();
     if (fetch_.active && clock_->nowMs() - fetch_.lastActivityMs > fetchTimeoutMs_) {
         endLink(fetch_.session, kClosingSilent, "no answer to blob.fetch");
         reap();
@@ -635,6 +646,7 @@ void Agent::turn(int timeoutMs) {
 
 void Agent::jobIdle() {
     serve(0);
+    channels_.serve();
     pumpStreams();
     keepAlive();
     endOverdue();
@@ -1112,6 +1124,7 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "serial.dial") serialDialNow(s, id);
     else if (method == "settings.get") settingsGet(s, id, params);
     else if (method == "settings.set") settingsSet(s, id, params);
+    else if (method == "channel.open") channelOpen(s, id, params);
     else refuse(s, id, "unsupported", "this agent has no method " + sanitizeUtf8(method.substr(0, 64), 0));
 }
 
@@ -1173,9 +1186,10 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     w.key("role").string("agent").key("headUnitId").string(headUnitId_).key("agentVersion").string(agentVersion_);
     // What this agent has beyond the protocol's first version: autostart.get and autostart.set, installs checked
     // with the offer's signature, the files of a package, the compatibility checks, the settings of a package,
-    // and, with Bluetooth serial, serial.reset.
+    // channels, and, with Bluetooth serial, serial.reset.
     w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart);
     w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks).string(kCapabilitySettings);
+    w.string(kCapabilityChannels);
     if (serialReset_ != 0) w.string(kCapabilitySerialReset);
     if (serialDial_ != 0 && serialDial_->dialOn()) w.string(kCapabilitySerialDial);
     w.endArray().endObject();
@@ -1867,7 +1881,14 @@ void Agent::onResponse(Peer* peer, int64_t id, bool ok, const json::Value& resul
 
 void Agent::onData(Peer* peer, uint16_t stream, const std::string& bytes, bool last) {
     Session* s = (Session*)peer->user;
-    if (!fetch_.active || fetch_.session != s || !fetch_.streaming || fetch_.stream != stream) {
+    bool fetched = fetch_.active && fetch_.session == s && fetch_.streaming && fetch_.stream == stream;
+    // A channel's number: the table's, which drops what comes for one that is not open. The fetch's own stream goes
+    // first, for a controller that numbers its blob streams past kStreamLast as the ones before channels did.
+    if (!fetched && stream >= kChannelFirstStream) {
+        if (s->trusted) channels_.data(peer, stream, bytes, last);
+        return;
+    }
+    if (!fetched) {
         peer->close("a DATA frame for a stream that is not open");
         return;
     }
@@ -1891,7 +1912,16 @@ void Agent::onData(Peer* peer, uint16_t stream, const std::string& bytes, bool l
 
 void Agent::onEvent(Peer* peer, const std::string& event, int64_t, const json::Value& params) {
     Session* s = (Session*)peer->user;
-    if (event != "blob.error" || !s->trusted) return;   // unknown events are ignored
+    if (!s->trusted) return;
+    if (event == "channel.credit") {
+        channels_.credit(peer, params);
+        return;
+    }
+    if (event == "channel.close") {
+        channels_.closedByPhone(peer, params);
+        return;
+    }
+    if (event != "blob.error") return;   // unknown events are ignored
     json::Value stream = params.find("stream"), code = params.find("code");
     if (!fetch_.active || fetch_.session != s || !fetch_.streaming || !stream.isInteger() || stream.integer() != fetch_.stream) return;
     std::string why = code.isString() ? code.string() : std::string("io-error");
@@ -2216,7 +2246,8 @@ void Agent::filesFetch(Session* s, int64_t id, const json::Value& params) {
     Outgoing* o = new Outgoing();
     o->fd = fd;
     o->stream = s->nextStream;
-    s->nextStream = s->nextStream == 65535 ? 1 : (uint16_t)(s->nextStream + 1);
+    // The numbers above kStreamLast are the channels'.
+    s->nextStream = s->nextStream >= kStreamLast ? 1 : (uint16_t)(s->nextStream + 1);
     o->size = o->left = count;
     if (compress.string() == "deflate") o->deflater = new Deflater();
     o->package = package;
@@ -2253,43 +2284,59 @@ bool Agent::streamsWaiting() const {
 }
 
 void Agent::pumpStreams() {
-    for (size_t i = 0; i < sessions_.size(); ++i) {
-        Session* s = sessions_[i];
-        Peer* peer = s->peer;
-        // A link that is closing sends nothing more; its stream goes when the link does.
-        if (s->outgoing == 0 || !peer->open() || peer->closing()) continue;
-        size_t frame = peer->maxFrame();
-        while (s->outgoing != 0 && peer->open() && peer->queued() < 2 * frame) {
-            Outgoing* o = s->outgoing;
-            if (!o->pending.empty() && (o->pending.size() >= frame || o->read)) {
-                size_t n = o->pending.size() < frame ? o->pending.size() : frame;
-                bool last = o->read && n == o->pending.size();
-                peer->data(o->stream, o->pending.data(), n, last);
-                o->sent += n;
-                o->pending.erase(0, n);
-                if (last) endOutgoing(s, ratio(o->size, o->sent), "");
-                continue;
-            }
-            char buffer[kFileReadBytes];
-            size_t want = o->left < sizeof buffer ? (size_t)o->left : sizeof buffer;
-            ssize_t got = read(o->fd, buffer, want);
-            if (got < 0 && errno == EINTR) continue;
-            if (got <= 0) {
-                // The file was cut short since it was opened, or cannot be read.
-                std::string why = got == 0 ? "the file ended " + countOf(o->left, "byte") + " early" : std::string("read failed: ") + strerror(errno);
-                endOutgoing(s, "io-error: " + why, why);
-                break;
-            }
-            o->left -= (uint64_t)got;
-            if (o->left == 0) o->read = true;
-            if (o->deflater == 0) {
-                o->pending.append(buffer, (size_t)got);
-            } else if (!o->deflater->deflate(buffer, (size_t)got, o->read, &o->pending)) {
-                endOutgoing(s, "io-error: the compression failed", "the compression failed");
-                break;
-            }
+    for (size_t i = 0; i < sessions_.size(); ++i) pumpLink(sessions_[i]);
+}
+
+// The link's channels and its files stream take turns, a frame each, round and round, while less than two frames'
+// worth waits to be written on the link: the link's other messages, `ping` and its answer among them, wait behind
+// two frames at most, and a channel that floods holds up neither a quiet one nor the files stream.
+void Agent::pumpLink(Session* s) {
+    Peer* peer = s->peer;
+    // A link that is closing sends nothing more; its streams go when the link does.
+    if (!peer->open() || peer->closing()) return;
+    std::vector<Channel*> channels = channels_.on(peer);
+    size_t sources = channels.size() + 1, idle = 0, frame = peer->maxFrame();
+    while (idle < sources && peer->open() && !peer->closing() && peer->queued() < 2 * frame) {
+        size_t k = s->turn++ % sources;
+        bool sent = k < channels.size() ? channels_.sendOne(channels[k]) : sendFileFrame(s);
+        idle = sent ? 0 : idle + 1;
+    }
+}
+
+bool Agent::sendFileFrame(Session* s) {
+    Peer* peer = s->peer;
+    size_t frame = peer->maxFrame();
+    while (s->outgoing != 0) {
+        Outgoing* o = s->outgoing;
+        if (!o->pending.empty() && (o->pending.size() >= frame || o->read)) {
+            size_t n = o->pending.size() < frame ? o->pending.size() : frame;
+            bool last = o->read && n == o->pending.size();
+            peer->data(o->stream, o->pending.data(), n, last);
+            o->sent += n;
+            o->pending.erase(0, n);
+            if (last) endOutgoing(s, ratio(o->size, o->sent), "");
+            return true;
+        }
+        char buffer[kFileReadBytes];
+        size_t want = o->left < sizeof buffer ? (size_t)o->left : sizeof buffer;
+        ssize_t got = read(o->fd, buffer, want);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) {
+            // The file was cut short since it was opened, or cannot be read.
+            std::string why = got == 0 ? "the file ended " + countOf(o->left, "byte") + " early" : std::string("read failed: ") + strerror(errno);
+            endOutgoing(s, "io-error: " + why, why);
+            return false;
+        }
+        o->left -= (uint64_t)got;
+        if (o->left == 0) o->read = true;
+        if (o->deflater == 0) {
+            o->pending.append(buffer, (size_t)got);
+        } else if (!o->deflater->deflate(buffer, (size_t)got, o->read, &o->pending)) {
+            endOutgoing(s, "io-error: the compression failed", "the compression failed");
+            return false;
         }
     }
+    return false;
 }
 
 void Agent::endOutgoing(Session* s, const std::string& how, const std::string& error) {
@@ -2487,6 +2534,120 @@ void Agent::settingsSet(Session* s, int64_t id, const json::Value& params) {
     }
     note(linkName(s->number) + ": settings of " + m.id + ": " + changed + (after == before ? " (the file was so already)" : ""));
     answer(s, id, "{}");
+}
+
+// ---- channels -----------------------------------------------------------------------------------------------------
+
+namespace {
+
+// "org.nbtapp.ssh ssh, stream 32768": a channel, for the log.
+std::string channelText(const Channel* c) { return c->package + " " + c->name + ", stream " + number(c->stream); }
+
+}  // namespace
+
+bool Agent::channelOf(const std::string& package, const std::string& name, InstalledPackage* out, const ManifestChannel** channel,
+                      const char** code, std::string* message) {
+    std::string why;
+    if (!engine_.store().isInstalled(package)) {
+        *code = "not-found";
+        *message = "no such package is installed";
+        return false;
+    }
+    if (!engine_.store().load(package, out, &why)) {
+        *code = "internal";
+        *message = "the record of " + package + " cannot be read: " + why;
+        return false;
+    }
+    *channel = findChannel(out->manifest, name);
+    if (*channel == 0) {
+        *code = "not-found";
+        *message = package + " has no channel " + sanitizeUtf8(name.substr(0, 64), 0);
+        return false;
+    }
+    return true;
+}
+
+void Agent::channelOpen(Session* s, int64_t id, const json::Value& params) {
+    json::Value package = params.find("package"), name = params.find("channel"), credit = params.find("credit");
+    if (!package.isString() || !validPackageId(package.string()) || !name.isString() ||
+        (credit.present() && (!credit.isInteger() || credit.integer() < 1 || credit.integer() > 65535))) {
+        refuse(s, id, "bad-request", "channel.open takes a package id, a channel's name, and a credit from 1 to 65535");
+        return;
+    }
+    // The checks, in this order: who asks, for whom, whether the agent is free, what is installed, how many.
+    if (s->role == "plugin") {
+        refuse(s, id, "forbidden", "a channel is opened from a phone or with nbtctl, not by the iDrive plugin");
+        return;
+    }
+    if (params.find("app").present()) {
+        refuse(s, id, "unsupported", "this agent opens channels for NBTApps itself only, and for no other phone app");
+        return;
+    }
+    if (s->peer->maxFrame() < kChannelMaxMessage) {
+        refuse(s, id, "unsupported", "channels need a link whose frame holds " + number(kChannelMaxMessage) + " bytes");
+        return;
+    }
+    if (job_.active() || inStep_ || onTrial_) {
+        refuse(s, id, "busy", onTrial_ ? "this version of the agent is on trial" : "a job is running");
+        return;
+    }
+    InstalledPackage installed;
+    const ManifestChannel* channel = 0;
+    const char* code = 0;
+    std::string message;
+    if (!channelOf(package.string(), name.string(), &installed, &channel, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    if (channels_.on(s->peer).size() >= kChannelPerLink) {
+        refuse(s, id, "too-many", number(kChannelPerLink) + " channels are open on this link");
+        return;
+    }
+    Channel* c = new Channel();
+    c->peer = s->peer;
+    c->link = s->number;
+    c->package = installed.manifest.id;
+    c->name = channel->name;
+    c->access = channel->access;
+    c->version = installed.manifest.version;
+    c->requestId = id;
+    c->socketPath = platform_->tmpDir(c->package) + "/channels/" + c->name;
+    c->toPhone = credit.present() ? (unsigned)credit.integer() : kChannelCredit;
+    c->fromPhone = kChannelCredit;
+    // A number counting up from the last one given out on this link, and not one in use.
+    for (unsigned tries = 0; tries <= 65535u - kChannelFirstStream; ++tries) {
+        c->stream = s->nextChannel;
+        s->nextChannel = s->nextChannel == 65535 ? kChannelFirstStream : (uint16_t)(s->nextChannel + 1);
+        if (!channels_.inUse(s->peer, c->stream)) break;
+    }
+    // What the program is told first, on a line of its own.
+    json::Writer line;
+    line.beginObject().key("v").integer(1).key("channel").string(c->name).key("access").string(c->access);
+    line.key("caller").string(s->role == "phone" ? "nbtapps" : "cli");
+    if (s->role == "phone") line.key("phone").string(s->name);
+    line.key("maxMessage").integer((int64_t)kChannelMaxMessage).endObject();
+    note(linkName(s->number) + ": channel.open " + channelText(c) + ": connecting to " + c->socketPath);
+    channels_.add(c, line.text());
+}
+
+void Agent::channelConnected(Channel* c) {
+    Session* s = (Session*)c->peer->user;
+    json::Writer w;
+    w.beginObject().key("stream").integer(c->stream).key("maxMessage").integer((int64_t)kChannelMaxMessage);
+    w.key("credit").integer(c->fromPhone).key("version").string(c->version).endObject();
+    if (c->peer->open()) answer(s, c->requestId, w.text());
+}
+
+void Agent::channelUnavailable(Channel* c, const std::string& why) {
+    Session* s = (Session*)c->peer->user;
+    if (c->peer->open()) refuse(s, c->requestId, "unavailable", c->package + " " + c->name + ": " + why);
+}
+
+void Agent::channelClosed(Channel* c, const char* reason, const std::string& why) {
+    // One that never opened was answered, or its link has gone with the request.
+    if (c->connecting) return;
+    note(linkName(c->link) + ": channel " + channelText(c) + " closed" + (reason != 0 ? std::string(", ") + reason : std::string()) +
+         ": " + why);
 }
 
 }  // namespace nbt

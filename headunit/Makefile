@@ -140,6 +140,7 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 #   checks       the compatibility checks: what was put onto a head unit by hand, and its removal, a path at a time
 #   settings_file  the text of a package's settings file: the lines of the keys asked about, and every other line kept
 #   settings     a package's settings: the rules a value is read and checked by
+#   channels     the channels that are open: a controller's messages to a package's program and back
 # One static library, one test program per tests/agent/test_*.cpp, and two programs: nbtagent (the agent: on a
 # folder that stands in for the head unit, and in the build for the head unit also on the head unit itself) and
 # nbtctl (a command-line controller, and a package source from a folder). `make agent-test` builds all of it into a Docker image and runs it there: the engine runs packages'
@@ -154,7 +155,7 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/spp_service.cpp agent/spp_gate.cpp agent/node_reader.cpp agent/serial_link.cpp agent/programs.cpp \
                agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp agent/checks.cpp \
                agent/settings_file.cpp agent/settings.cpp agent/serial_report.cpp agent/presence.cpp \
-               agent/dial_rules.cpp agent/problem_log.cpp
+               agent/dial_rules.cpp agent/problem_log.cpp agent/channels.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 # src/*.hpp: test_plugin runs the plugin's screens about phones, which are headers, against an agent, and
@@ -266,6 +267,7 @@ run-agent-test_serial_report: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_programs: TEST_ARGS = $(BENCH_WORK)/programs
 run-agent-test_serial_services: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
 run-agent-test_checks: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
+run-agent-test_channels: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
 
 run-agent-%: bench-image
 	@echo [TEST] agent/$*
@@ -273,7 +275,7 @@ run-agent-%: bench-image
 
 # The package reader and the engine are tested against the packages the Python tool builds.
 run-agent-test_package run-agent-test_engine run-agent-test_agent run-agent-test_hu_platform \
-run-agent-test_serial_services run-agent-test_embedded_keys run-agent-test_checks: $(TESTDATA)
+run-agent-test_serial_services run-agent-test_embedded_keys run-agent-test_checks run-agent-test_channels: $(TESTDATA)
 
 $(TESTDATA): tests/make_packages.py tools/nbtpkg.py tools/plugin_pkg.py tools/agent_pkg.py spec/manifest.schema.json \
              plugin/NbtApp.manifest plugin/NbtApp.xml plugin/package/manifest.json.in \

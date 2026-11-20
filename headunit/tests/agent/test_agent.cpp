@@ -737,12 +737,13 @@ static void testHello() {
     Parsed r(b.call(p, "hello", "{\"protocolMin\":1,\"protocolMax\":7,\"role\":\"cli\",\"maxFrame\":4096,\"capabilities\":[\"zstd\"],\"extra\":{\"a\":[1]}}"));
     CHECK(integer(r.result, "protocolMin") == 1 && integer(r.result, "protocolMax") == 1 && str(r.result, "role") == "agent");
     CHECK(str(r.result, "headUnitId") == kHeadUnitId && str(r.result, "agentVersion") == "1.0.0");
-    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 5 &&
+    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 6 &&
           r.result.find("capabilities").at(0).string() == kCapabilityAutostart &&
           r.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature &&
           r.result.find("capabilities").at(2).string() == kCapabilityFiles &&
           r.result.find("capabilities").at(3).string() == kCapabilityChecks &&
-          r.result.find("capabilities").at(4).string() == kCapabilitySettings);
+          r.result.find("capabilities").at(4).string() == kCapabilitySettings &&
+          r.result.find("capabilities").at(5).string() == kCapabilityChannels);
     CHECK(Parsed(b.call(p, "hello", kGoodHello)).code() == "bad-state");
     // Methods that are not there.
     const char* missing[] = {"job.frobnicate", "pairing.frobnicate", ""};
@@ -3089,7 +3090,7 @@ static void testDetachedSignature() {
         Bench b("detached");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 5 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 6 &&
                                     hello.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature);
         // First the version before it, signed in the usual way: one key then verifies both, so the upgrade's key
         // matches the installed one.
@@ -3158,7 +3159,7 @@ static void testAutostart() {
         Bench b("autostart-nowhere", false, false, "1.1.0");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 5 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 6 &&
                                     hello.result.find("capabilities").at(0).string() == kCapabilityAutostart);
         Parsed state(b.call(p, "autostart.get", "{}"));
         CHECK(state.result.size() == 4 && !flag(state.result, "on") && !flag(state.result, "available"));
@@ -3908,7 +3909,7 @@ static void testSerialReset() {
         Bench b("serial-reset-none");
         Phone* p = b.connect();
         Parsed hello(b.call(p, "hello", kGoodHello));
-        CHECK(hello.result.find("capabilities").size() == 5 && !listsCapability(hello, kCapabilitySerialReset));
+        CHECK(hello.result.find("capabilities").size() == 6 && !listsCapability(hello, kCapabilitySerialReset));
         CHECK(Parsed(b.call(p, "serial.reset", "{}")).code() == "unsupported");
     }
     Bench b("serial-reset");
@@ -3916,8 +3917,8 @@ static void testSerialReset() {
     b.agent.setSerialReset(&reset);
     Phone* p = b.phone();
     Parsed hello(p->helloReply);
-    CHECK(hello.result.find("capabilities").size() == 6 && listsCapability(hello, kCapabilitySerialReset) &&
-          hello.result.find("capabilities").at(5).string() == kCapabilitySerialReset);
+    CHECK(hello.result.find("capabilities").size() == 7 && listsCapability(hello, kCapabilitySerialReset) &&
+          hello.result.find("capabilities").at(6).string() == kCapabilitySerialReset);
 
     // A node is open: sent. None is: armed, for as long as the listener says.
     Parsed sent(b.call(p, "serial.reset", "{}"));
