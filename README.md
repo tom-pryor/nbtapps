@@ -95,6 +95,9 @@ both. The license texts are in [LICENSES/](LICENSES/).
 
 Third-party code keeps its own terms: TweetNaCl in `headunit/agent/vendor/tweetnacl/` (public domain), the
 Gradle wrapper in `android/` (Apache-2.0), and Dropbear and OpenSSH, the submodules in `headunit/ssh/` (their own
-licence files; our patch to Dropbear and its build options are MIT, as Dropbear).
+licence files; our patch to Dropbear and its build options are MIT, as Dropbear). The app's APK carries the
+libraries it is built with, each under its own licence, with the licence files they give in its `META-INF/`: among
+them JSch, its SSH client (BSD, in `META-INF/com.github.mwiede/jsch/`), with the notices of the JZlib (BSD) and
+jBCrypt (ISC) code it holds.
 
 Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)

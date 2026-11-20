@@ -70,6 +70,7 @@ android {
         compose = true
     }
 
+
     // On CI (GitHub Actions sets CI), lint leaves out the checks that look up the newest Gradle and library
     // versions on the internet: their findings change whenever something is published, not when this repo does.
     // Dependabot proposes those updates instead. On this machine they still show.
@@ -100,9 +101,65 @@ dependencies {
 
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.datastore)
-    // Ed25519 verification only, through the lightweight API: no provider is registered.
+    // Through its lightweight API only, no provider registered: Ed25519 verification, and the SSH key's signatures.
     implementation(libs.bouncycastle.provider)
+    // The SSH client of the terminal (data/ssh/). It finds Bouncy Castle and uses its classes for Ed25519 and X25519.
+    implementation(libs.jsch)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+}
+
+// The libraries' licence files ship in the APK as the libraries give them, in META-INF/. JSch's own (BSD) is its
+// META-INF/LICENSE.txt, a name AGP leaves out of every APK, and another library has a file of that name too; so it
+// goes in under a path of its own, META-INF/com.github.mwiede/jsch/LICENSE.txt, copied byte for byte from the jar the
+// build uses. Its notices for JZlib (BSD) and jBCrypt (ISC), META-INF/LICENSE.JZlib.txt and LICENSE.jBCrypt.txt, go
+// in as they are.
+abstract class LibraryLicence : DefaultTask() {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val jar: ConfigurableFileCollection
+
+    @get:Input
+    abstract val file: Property<String>
+
+    @get:Input
+    abstract val to: Property<String>
+
+    @get:OutputDirectory
+    abstract val output: DirectoryProperty
+
+    @get:Inject
+    abstract val archives: ArchiveOperations
+
+    @get:Inject
+    abstract val files: FileSystemOperations
+
+    @TaskAction
+    fun copy() {
+        val from = file.get()
+        val dest = to.get()
+        files.sync {
+            from(archives.zipTree(jar.singleFile)) {
+                include(from)
+                eachFile { path = dest }
+            }
+            includeEmptyDirs = false
+            into(output)
+        }
+        check(output.file(dest).get().asFile.isFile) { "${jar.singleFile.name} has no $from" }
+    }
+}
+
+val jschLicence = tasks.register<LibraryLicence>("jschLicence") {
+    jar.from(configurations.detachedConfiguration(dependencies.create(libs.jsch.get())).apply { isTransitive = false })
+    file = "META-INF/LICENSE.txt"
+    to = "META-INF/com.github.mwiede/jsch/LICENSE.txt"
+    output = layout.buildDirectory.dir("generated/licences/jsch")
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.resources?.addGeneratedSourceDirectory(jschLicence, LibraryLicence::output)
+    }
 }

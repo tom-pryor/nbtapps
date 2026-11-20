@@ -19,8 +19,10 @@ There is no fixed response time. A fix goes out as a new release of the part aff
   on, which the iDrive plugin cannot. So a paired phone that installs a package whose program is a shell, such as
   an SSH server, and switches its channel on, has a root shell on the head unit: that is what such a package is
   for, and the pairing and the package's signature are what keep it to the phone's owner.
-- The Android app (`com.nbtapps.store`): the catalogue checks, pairing and the keys it keeps, the Bluetooth serial
-  links it accepts from a head unit, and what it sends to a head unit.
+- The Android app (`com.nbtapps.store`): the catalogue checks, pairing and the keys it keeps (the pairing keys, its
+  own SSH key, and the public keys of other SSH clients that it sends to a head unit), its SSH client's check of a
+  head unit's host key against the one the head unit gave over the paired link, the Bluetooth serial links it accepts
+  from a head unit, and what it sends to a head unit.
 - The iDrive plugin (NBTApp).
 
 ## What is not
