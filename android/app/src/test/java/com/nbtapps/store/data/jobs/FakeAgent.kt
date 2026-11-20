@@ -298,6 +298,10 @@ class FakeChecks {
  * A channel of an installed package that a [FakeAgent] has: its program sends back each message it is given, as
  * the agent repo's `chan_echo` does, upper-cased with [upper]. With [switched] it is off until `channel.set` switches
  * it on. With [readOnly] (the manifest's `access: read`) a message from the phone closes it with `protocol`.
+ *
+ * With a [program] the channel's program is that instead: given each of the phone's messages and the channel's
+ * stream, it gives what it sends back, as the SSH relay answers the keys message and then carries a stream. While
+ * [takes] is off the program reads nothing: the phone's messages wait, and the phone is granted no more.
  */
 class FakeChannel(
     val packageId: String,
@@ -306,9 +310,13 @@ class FakeChannel(
     val readOnly: Boolean = false,
     val upper: Boolean = false,
     val version: String = "1.0.0",
+    val program: ((stream: Int, message: ByteArray) -> List<ByteArray>)? = null,
 ) {
     @Volatile
     var on: Boolean = !switched
+
+    @Volatile
+    var takes: Boolean = true
 }
 
 /**
@@ -477,12 +485,28 @@ class FakeAgent(private val link: Link, val headUnitId: String) {
         val open = openChannels[frame.stream] ?: return
         channelMessages.getOrPut(frame.stream) { CopyOnWriteArrayList() } += frame.payload
         if (open.spec.readOnly || !frame.last || frame.payload.isEmpty()) return closeChannel(frame.stream, "protocol")
-        val text = if (open.spec.upper) frame.payload.decodeToString().uppercase().encodeToByteArray() else frame.payload
-        synchronized(open) { open.back.addLast(text) }
+        if (!open.spec.takes) return
+        val program = open.spec.program
+        val back = when {
+            program != null -> program(frame.stream, frame.payload)
+            open.spec.upper -> listOf(frame.payload.decodeToString().uppercase().encodeToByteArray())
+            else -> listOf(frame.payload)
+        }
+        synchronized(open) { back.forEach { open.back.addLast(it) } }
         // The program took it: the phone may send one more.
         send("""{"event":"channel.credit","params":{"stream":${frame.stream},"messages":1}}""")
         flushChannel(open)
     }
+
+    /** The channel [stream]'s program sends [message], within what the phone granted: held here until it may. */
+    fun programSends(stream: Int, message: ByteArray) {
+        val open = openChannels[stream] ?: return
+        synchronized(open) { open.back.addLast(message) }
+        flushChannel(open)
+    }
+
+    /** How many messages of the channel [stream]'s program wait for the phone to grant more. */
+    fun heldForPhone(stream: Int): Int = openChannels[stream]?.let { synchronized(it) { it.back.size } } ?: 0
 
     private fun flushChannel(open: OpenChannel) = synchronized(open) {
         while (!open.closed && open.phoneGranted > 0 && open.back.isNotEmpty()) {
