@@ -40,10 +40,11 @@
 //   serial  reset                          has the car end the phone's Bluetooth serial link (serial.reset)
 //   serial  status                         how Bluetooth serial stands (serial.status)
 //   serial  dial                           has the car dial the phones connected to it now, for trials (serial.dial)
-//   channel PACKAGE NAME [--send TEXT] [--hex | --raw]
+//   channel PACKAGE NAME [--send TEXT] [--hex | --raw [--skip-first]]
 //                                          opens a channel of an installed package and prints each message that
 //                                          comes, a line each; --hex prints its bytes in hex; --send writes one
-//                                          message first; --raw passes standard input and output through instead
+//                                          message first; --raw passes standard input and output through instead;
+//                                          --skip-first puts the first message that comes on standard error
 //   channel status|on|off PACKAGE NAME     whether a switched channel is on, and how many connections it has; switch
 //                                          it on or off
 //   settings ID                            the settings of an installed package, and how each stands in its file
@@ -100,8 +101,13 @@
 // Standard output is written without a buffer, in every mode: when it cannot be written (its reader has gone),
 // `channel` closes the channel, says why, and exits with 1. Standard output carries the channel and nothing else: a
 // job that another controller runs meanwhile is not printed, and while it holds the channel (channel.paused, then
-// channel.resumed) a line on standard error says so at its start and at its end. `channel status`, `on` and `off`
-// print "switched", "on" and "open", a line each.
+// channel.resumed) a line on standard error says so at its start and at its end. With --raw, --skip-first takes the
+// first message that comes out of that stream: it is written to standard error as one line (its bytes, each line end
+// in it a space, and a newline), and standard output carries what comes after it. With --send that makes nbtctl the
+// proxy command of an SSH client against a program that answers a first message before the stream begins, as the
+// SSH package's relay answers the keys message with its host keys: the client reads the stream and the caller
+// reads the answer. --skip-first without --raw is a usage error: there the first message is a line of its own.
+// `channel status`, `on` and `off` print "switched", "on" and "open", a line each.
 //
 // `pair` prints "code NNNNNN" as its first line, then one line when the window has closed: "paired", or
 // "not paired: " and the reason (wrong-code, expired, replaced). Its exit status is 0 only for "paired".
@@ -539,7 +545,8 @@ public:
     }
 
     // `channel`: opens it, and serves it until it ends. The exit status.
-    int channel(const std::string& package, const std::string& name, bool raw, bool hex, bool sendFirst, const std::string& first) {
+    int channel(const std::string& package, const std::string& name, bool raw, bool hex, bool sendFirst, const std::string& first,
+                bool skipFirst) {
         // Standard output is the channel's alone: a job that another controller runs meanwhile is not printed.
         quiet_ = true;
         json::Writer w;
@@ -574,6 +581,20 @@ public:
             std::string outputError;
             while (!chanIn_.empty() && outputError.empty() && !gStop) {
                 const std::string& m = chanIn_.front();
+                if (skipFirst) {
+                    // The first message, to standard error as one line; the stream on standard output begins after it.
+                    std::string line = m;
+                    for (size_t i = 0; i < line.size(); ++i) {
+                        if (line[i] == '\n' || line[i] == '\r') line[i] = ' ';
+                    }
+                    line += "\n";
+                    fwrite(line.data(), 1, line.size(), stderr);
+                    fflush(stderr);
+                    skipFirst = false;
+                    chanIn_.pop_front();
+                    ++taken;
+                    continue;
+                }
                 std::string line;
                 if (hex) line = toHex((const uint8_t*)m.data(), m.size()) + "\n";
                 else if (!raw) line = m + "\n";
@@ -823,8 +844,9 @@ int usage() {
             "  serial  reset            have the car end the phone's Bluetooth serial link\n"
             "  serial  status           how Bluetooth serial stands\n"
             "  serial  dial             have the car dial the phones connected to it now\n"
-            "  channel PACKAGE NAME [--send TEXT] [--hex | --raw]\n"
-            "                           open a channel: print what comes, or pass standard input and output through\n"
+            "  channel PACKAGE NAME [--send TEXT] [--hex | --raw [--skip-first]]\n"
+            "                           open a channel: print what comes, or pass standard input and output through;\n"
+            "                           --skip-first: the first message that comes to standard error, as a line\n"
             "  channel status|on|off PACKAGE NAME   whether a switched channel is on; switch it\n"
             "  settings ID              the settings of an installed package\n"
             "  set     ID KEY VALUE     change one of them\n"
@@ -1067,7 +1089,7 @@ int main(int argc, char** argv) {
     std::string from;
     std::vector<std::string> removes;
     bool deleteData = false, events = false, all = false, uncompressed = false, listPaths = false, hex = false, raw = false;
-    bool sendFirst = false;
+    bool sendFirst = false, skipFirst = false;
     std::string first;
     long long cancelAfter = -1, dropAfter = -1, offset = -1, length = -1;
     std::string out;
@@ -1112,6 +1134,8 @@ int main(int argc, char** argv) {
             hex = true;
         } else if (arg == "--raw") {
             raw = true;
+        } else if (arg == "--skip-first") {
+            skipFirst = true;
         } else if (arg == "--send" && value != 0) {
             sendFirst = true;
             first = value;
@@ -1164,7 +1188,8 @@ int main(int argc, char** argv) {
     }
 
     if (command == "channel") {
-        if (args.size() != 2 || !validPackageId(args[0]) || (hex && raw) || (sendFirst && (first.empty() || first.size() > kChannelMaxMessage))) {
+        if (args.size() != 2 || !validPackageId(args[0]) || (hex && raw) || (skipFirst && !raw) ||
+            (sendFirst && (first.empty() || first.size() > kChannelMaxMessage))) {
             return usage();
         }
         struct sigaction action;
@@ -1173,7 +1198,7 @@ int main(int argc, char** argv) {
         sigaction(SIGINT, &action, 0);
         sigaction(SIGTERM, &action, 0);
         sigaction(SIGHUP, &action, 0);
-        return c.channel(args[0], args[1], raw, hex, sendFirst, first);
+        return c.channel(args[0], args[1], raw, hex, sendFirst, first, skipFirst);
     }
 
     if (command == "list") {
