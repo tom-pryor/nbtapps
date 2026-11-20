@@ -14,6 +14,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.After
@@ -77,6 +78,19 @@ class BlobServerTest {
             assertTrue(frame.payload.size in 1..maxFrame)
             out += frame.payload
             if (frame.last) return out
+        }
+    }
+
+    @Test
+    fun `stream numbers go round after 32,767, below the channels' numbers`() = test {
+        val link = linked()
+        val blobs = BlobServer(scope, firstStream = ProtocolConstants.STREAM_LAST)
+        blobs.offer(mapOf(manifestHash to Blob.OfBytes(manifest)))
+        for ((id, stream) in listOf(1 to ProtocolConstants.STREAM_LAST, 2 to 1, 3 to 2)) {
+            val fetch = async { blobs.fetch(link.session.peer, id.toLong(), JsonObject(mapOf("sha256" to JsonPrimitive(manifestHash), "offset" to JsonPrimitive(0), "length" to JsonPrimitive(10)))) }
+            assertEquals("""{"id":$id,"result":{"stream":$stream,"size":10}}""", link.agent.message().toString())
+            fetch.await()
+            assertArrayEquals(manifest.copyOf(10), link.agent.stream(stream, 1024))
         }
     }
 

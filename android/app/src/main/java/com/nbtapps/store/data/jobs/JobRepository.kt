@@ -127,6 +127,9 @@ sealed interface ConnectionState {
 
         /** The agent gives and changes packages' settings: [JobRepository.loadSettings] and [JobRepository.saveSettings]. */
         val settings: Boolean get() = ProtocolConstants.CAPABILITY_SETTINGS in capabilities
+
+        /** The agent has channels to installed packages' programs: [com.nbtapps.store.data.link.AgentSession.openChannel]. */
+        val channels: Boolean get() = ProtocolConstants.CAPABILITY_CHANNELS in capabilities
     }
 
     /**
