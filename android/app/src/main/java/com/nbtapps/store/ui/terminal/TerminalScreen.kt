@@ -82,6 +82,7 @@ import com.nbtapps.store.R
 import com.nbtapps.store.data.ssh.SshTunnel
 import com.nbtapps.store.data.terminal.TerminalLine
 import com.nbtapps.store.ui.detail.TurnOnSshDialog
+import com.nbtapps.store.ui.rememberNotificationAsk
 import kotlinx.coroutines.launch
 
 /** The shell's lines: a fixed-width face, as the cell the pty's size is worked out from. */
@@ -115,6 +116,20 @@ fun TerminalScreen(
     val density = LocalDensity.current
     val activity = LocalActivity.current
 
+    // A shell's notification is how it stays in sight, and can be closed, once the app is left: the permission for it is
+    // asked for as a shell is opened here, as the job screen asks as a job starts. The shell opens whatever the answer.
+    val open = rememberNotificationAsk(viewModel::open)
+    val confirmOn = rememberNotificationAsk(viewModel::confirmOn)
+    val ask = rememberNotificationAsk {}
+    var asked by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        // The screen came up opening one ([TerminalViewModel]'s start).
+        if (!asked && uiState.view == TerminalView.Opening) {
+            asked = true
+            ask()
+        }
+    }
+
     // The keyboard reaches the layout only through its insets ([imePadding]): the window is not panned up to the field
     // as well, which with little room left pushed the lines and the field out of sight. As it was once the screen is left.
     DisposableEffect(activity) {
@@ -136,10 +151,10 @@ fun TerminalScreen(
                 imeDp = WindowInsets.ime.getBottom(density).toDp().value,
             )
         }
-        TerminalLayout(uiState, viewModel, compact, onBack, onOpenPackage, context)
+        TerminalLayout(uiState, viewModel, compact, onBack, onOpenPackage, context, open)
     }
 
-    if (uiState.confirmingOn) TurnOnSshDialog(onConfirm = viewModel::confirmOn, onDismiss = viewModel::cancelOn)
+    if (uiState.confirmingOn) TurnOnSshDialog(onConfirm = confirmOn, onDismiss = viewModel::cancelOn)
 }
 
 /**
@@ -155,6 +170,8 @@ private fun TerminalLayout(
     onBack: () -> Unit,
     onOpenPackage: (packageId: String) -> Unit,
     context: Context,
+    /** Opens a shell, from Open again, Try again and Open terminal: [TerminalViewModel.open] after the notification's ask. */
+    onOpen: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -205,8 +222,8 @@ private fun TerminalLayout(
                 .fillMaxSize(),
         ) {
             when (val view = uiState.view) {
-                TerminalView.Opening, is TerminalView.Open, TerminalView.Ended -> Shell(uiState, viewModel, compact)
-                is TerminalView.Failed -> NoShell(view.reason, compact, error = true, button = "Try again", onClick = viewModel::open)
+                TerminalView.Opening, is TerminalView.Open, TerminalView.Ended -> Shell(uiState, viewModel, compact, onOpen)
+                is TerminalView.Failed -> NoShell(view.reason, compact, error = true, button = "Try again", onClick = onOpen)
                 TerminalView.Off -> NoShell(
                     TERMINAL_OFF,
                     compact,
@@ -218,7 +235,7 @@ private fun TerminalLayout(
                 TerminalView.NoPackage -> NoShell(TERMINAL_NO_PACKAGE, compact, button = "Open in catalogue", onClick = { onOpenPackage(SshTunnel.PACKAGE) })
                 TerminalView.Unsupported -> NoShell(TERMINAL_UNSUPPORTED, compact)
                 TerminalView.Elsewhere -> NoShell(TERMINAL_ELSEWHERE, compact)
-                TerminalView.OtherClosed -> NoShell(TERMINAL_OTHER_CLOSED, compact, button = "Open terminal", onClick = viewModel::open)
+                TerminalView.OtherClosed -> NoShell(TERMINAL_OTHER_CLOSED, compact, button = "Open terminal", onClick = onOpen)
             }
         }
     }
@@ -229,7 +246,7 @@ private fun TerminalLayout(
  * Ctrl+C beside Send; Open again with less space around it.
  */
 @Composable
-private fun ColumnScope.Shell(uiState: TerminalUiState, viewModel: TerminalViewModel, compact: Boolean) {
+private fun ColumnScope.Shell(uiState: TerminalUiState, viewModel: TerminalViewModel, compact: Boolean, onOpen: () -> Unit) {
     val view = uiState.view
     if (view == TerminalView.Open(held = true)) HeldBanner()
     Lines(uiState, viewModel, Modifier.weight(1f).fillMaxWidth())
@@ -237,7 +254,7 @@ private fun ColumnScope.Shell(uiState: TerminalUiState, viewModel: TerminalViewM
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         val vertical = if (compact) 4.dp else 12.dp
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = vertical, bottom = if (compact) 8.dp else 16.dp)) {
-            Button(onClick = viewModel::open) { Text("Open again") }
+            Button(onClick = onOpen) { Text("Open again") }
         }
     } else {
         if (compact) {
