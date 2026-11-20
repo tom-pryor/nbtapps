@@ -26,8 +26,10 @@
 //
 // The answer counts only for the phone asked: a reply for another address is passed over, and one for the phone
 // asked is the answer whoever's query brought it (the car may give its one answer to two clients whose queries met).
-// A phone that was listed and has since gone below connection 2, out of the device list or into pairing trouble is
-// not dialled. A phone whose connection is below 2 is never asked: a query to a phone with no link to the car
+// A listed phone is dialled only if what brought the ask still holds when the answer comes: for a forced round (and
+// the afresh ask after a dial one brought) that it is still connected, paired and out of pairing trouble; for
+// anything else that it is still eligible(), so a phone the agent has forgotten, or one that is not the agent's once
+// the pairing window has closed, is not dialled. A phone whose connection is below 2 is never asked: a query to a phone with no link to the car
 // pages it. An ask is ended, and its answer passed over when it comes, by a link of the agent's that comes, by a
 // phone's request that becomes pending (all but the request of the phone asked, for the ask that request brought)
 // and by the registration's going, as a round is. The car answers one query at a time, so no other ask goes until
@@ -45,8 +47,8 @@
 //   2   BUSY: a link on the instance is up already. If its node is there, a link was left behind (an agent that was
 //       killed): the listener ends it and dials afresh. If the car does not end it, the phone is backed off instead,
 //       and is not dialled again at once. If no node is there, as for any other answer
-//   5   DEFAULT: the phone is there and its app is not listening, or anything else went wrong. The next poll asks
-//       again
+//   5   DEFAULT: the phone is there and did not take the link. Its service list named the agent's service just
+//       before, so its app stopped listening in between, or something else went wrong. The next poll asks again
 //   14  PAGE_TIMEOUT: the phone is not in reach. Not asked by a poll again until its connection changes in the car's
 //       device list
 //   any other answer, or a rejection: asked and dialled again kDial retryMs later
@@ -120,8 +122,10 @@ public:
         kNotListed,      // it is not: no dial
         kNoListing,      // an error, a reply not read, or no answer in askLimitMs: no dial
         kAskBackedOff,   // the same, the third in a row for the phone: no dial, and the phone is backed off
-        kNoLongerDue     // listed, and the phone has gone below connection 2, out of the list, or into pairing
-                         // trouble since the ask: no dial
+        kNoLongerDue     // listed, and what brought the ask no longer holds: the phone has gone below connection 2,
+                         // out of the list or into pairing trouble since the ask, or, for an ask that a forced round
+                         // did not bring, it is no longer one of the agent's phones and the pairing window is not
+                         // open: no dial
     };
     // What an answer to ServiceConnect asks of the listener.
     enum Reply {
@@ -212,8 +216,9 @@ public:
     // end it: kIdle, and its answer is passed over when it comes. next() does this too.
     bool keepAsking(const Facts& facts, int64_t now);
     // The answer to ServiceListQuery: `error` the car's (kNoError for a rejection or a reply not read), `listed`
-    // whether the services named the agent's own. It counts only while asking, for the phone asked.
-    Listing listing(const std::string& address, uint32_t error, bool listed, int64_t now);
+    // whether the services named the agent's own, `facts` as they are now. It counts only while asking, for the
+    // phone asked. A listed phone is dialled only if what brought the ask still holds (kNoLongerDue otherwise).
+    Listing listing(const std::string& address, uint32_t error, bool listed, const Facts& facts, int64_t now);
     // No answer in askLimitMs: listingLost() then, which is kNoListing or kAskBackedOff.
     bool askOverdue(int64_t now) const;
     Listing listingLost(int64_t now);
@@ -310,7 +315,9 @@ private:
     int64_t okAt_;                               // when the last dial was answered 0; 0: none
     std::vector<std::string> round_;             // the phones of a round still to be asked, by address
     Why roundWhy_;
-    std::string endedAsk_;                       // an ask that was ended, which may still be out in the car, until
+    bool forcedAsk_;                             // the ask that is out holds for any dialable phone: a forced round
+                                                 // brought it, or the dial it is the afresh ask after
+    std::string endedAsk_;                      // an ask that was ended, which may still be out in the car, until
     int64_t endedAskUntil_;                      // its answer comes or this time
     bool doubtful_;                              // recordDoubtful()
 };

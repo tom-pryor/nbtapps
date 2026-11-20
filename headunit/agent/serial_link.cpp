@@ -2003,7 +2003,7 @@ void SerialListener::maybeDial(int64_t now) {
     }
     // Not sent: as an ask answered with an error.
     pthread_mutex_lock(&mu_);
-    DialRules::Listing what = rules_.listing(d.address, kNoError, false, now);
+    DialRules::Listing what = rules_.listing(d.address, kNoError, false, facts, now);
     pthread_mutex_unlock(&mu_);
     listed(what, 0, kAskNotSent, now, now);
 }
@@ -2013,25 +2013,25 @@ void SerialListener::maybeDial(int64_t now) {
 // that was ended, or for another phone, is passed over (DialRules::listing()); it is fed to the rules all the same,
 // since it tells that the car is free for the next.
 void SerialListener::tendAsk(const std::vector<std::pair<ServiceList, int64_t> >& lists, int64_t now) {
+    if (dialPhase_ != kDialAsk && lists.empty()) return;
+    // The facts as they are now: what brought the ask must still hold for an answer that lists the service.
+    DialRules::Facts facts = dialFacts();
     if (dialPhase_ == kDialAsk) {
-        DialRules::Facts facts = dialFacts();
         pthread_mutex_lock(&mu_);
         bool still = rules_.keepAsking(facts, now);
         pthread_mutex_unlock(&mu_);
         if (!still) {
             dialPhase_ = kDialNone;
-            say("phone %u (%s): the ask for its service list is ended, and its answer will be passed over: %s",
-                dial_.number, whyName(dial_.why),
-                facts.linkOfOurs ? "a link of the agent's is up or being decided on"
-                                 : (facts.requestPending ? "a phone has asked the car for a link"
-                                                         : "the serial service is not registered"));
+            askEnded(facts.linkOfOurs ? "a link of the agent's is up or being decided on"
+                                      : (facts.requestPending ? "a phone has asked the car for a link"
+                                                              : "the serial service is not registered"));
         }
     }
     for (size_t i = 0; i < lists.size(); ++i) {
         const ServiceList& l = lists[i].first;
         bool listedOurs = l.ok && l.error == 0 && listsService(l, config_.name);
         pthread_mutex_lock(&mu_);
-        DialRules::Listing what = rules_.listing(l.address, l.ok ? l.error : kNoError, listedOurs, now);
+        DialRules::Listing what = rules_.listing(l.address, l.ok ? l.error : kNoError, listedOurs, facts, now);
         pthread_mutex_unlock(&mu_);
         if (what == DialRules::kNotThisAsk || dialPhase_ != kDialAsk) continue;
         listed(what, &l, kAskAnswered, lists[i].second, now);
@@ -2065,6 +2065,29 @@ void SerialListener::askSay(const std::string& answer, const std::string& text) 
         before.c_str());
 }
 
+// The line for an ask that is ended, by the same rule with a record of its own: said when its reason differs from
+// that phone's last ended ask, and otherwise only counted; the next line of this kind that differs says how many
+// came. The answers' record is not touched, so asks that are ended between answers that do not list the service
+// bring no line for either.
+void SerialListener::askEnded(const std::string& reason) {
+    Repeat& last = askEnds_[dial_.number];
+    if (last.answer == reason) {
+        ++last.times;
+        return;
+    }
+    std::string before;
+    if (last.times > 0) {
+        char times[200];
+        snprintf(times, sizeof times, " (ended %u more time%s before this: %s)", last.times, last.times == 1 ? "" : "s",
+                 last.answer.c_str());
+        before = times;
+    }
+    last.answer = reason;
+    last.times = 0;
+    say("phone %u (%s): the ask for its service list is ended, and its answer will be passed over: %s%s. The same "
+        "again is only counted", dial_.number, whyName(dial_.why), reason.c_str(), before.c_str());
+}
+
 // What an ask came to: `list` is the answer, which came at `cameAt`, or 0 for none (`how` says why). The dial goes
 // at once if the answer named the agent's service.
 void SerialListener::listed(DialRules::Listing what, const ServiceList* list, AskEnd how, int64_t cameAt, int64_t now) {
@@ -2092,9 +2115,10 @@ void SerialListener::listed(DialRules::Listing what, const ServiceList* list, As
         return;
     }
     case DialRules::kNoLongerDue:
-        snprintf(text, sizeof text, "its service list names the agent's service '%s', and the phone is no longer "
-                 "connected to the car and paired with it: it is not dialled", name);
-        askSay("no longer there", text);
+        snprintf(text, sizeof text, "its service list names the agent's service '%s', and what brought the ask no "
+                 "longer holds (since the ask the phone has left the car, lost its pairing or had pairing trouble, or "
+                 "it is not one of the agent's phones and the pairing window is not open): it is not dialled", name);
+        askSay("no longer due", text);
         return;
     case DialRules::kNotListed:
         snprintf(text, sizeof text, "its service list came in %.0f ms and does not name the agent's service '%s': its "
@@ -2188,7 +2212,11 @@ void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now)
         meaning = stale ? "a link on the instance is up already"
                         : "a link on the instance is up already, and its node is not there: again later";
         break;
-    case DialRules::kNotListening: meaning = "the phone's app is not listening"; break;
+    case DialRules::kNotListening:
+        // The ask before it listed the agent's service: the app stopped listening since, or something else failed.
+        meaning = "the phone did not take the link, although its service list named the agent's service just before: "
+                  "its app may have stopped listening since, or something else went wrong";
+        break;
     case DialRules::kUnreachable:
         meaning = "the phone is not in reach, and is not dialled by a poll until its connection changes";
         break;

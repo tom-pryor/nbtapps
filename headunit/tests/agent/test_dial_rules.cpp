@@ -68,7 +68,7 @@ static void present(DialRules& r, int64_t now, bool two = false, uint32_t connec
 static bool dialNext(DialRules& r, int64_t now, const DialRules::Facts& f, DialRules::Dial* d) {
     if (!r.next(now, f, d)) return false;
     CHECK(r.state() == DialRules::kAsking);
-    return r.listing(d->address, 0, true, now) == DialRules::kDialNow && r.state() == DialRules::kDialling;
+    return r.listing(d->address, 0, true, f, now) == DialRules::kDialNow && r.state() == DialRules::kDialling;
 }
 
 // A forced dial of phone one, out at `now`.
@@ -389,7 +389,7 @@ static void testPairingTrouble() {
     }
 }
 
-// Answers the dial that is out with 5, as a phone whose app is not listening.
+// Answers the dial that is out with 5, as a phone that does not take the link.
 static void notListening(DialRules& r, const DialRules::Dial& d, int64_t now) {
     CHECK(r.reply(d.address, kService, kService, 5, now) == DialRules::kNotListening);
 }
@@ -524,13 +524,13 @@ static void testAsk() {
         CHECK(r.force() == 1 && r.next(2000, facts(), &d));
         CHECK(r.state() == DialRules::kAsking && d.address == kOne && d.askedAt == 2000 && d.why == DialRules::kForced);
         // Not an answer to this ask: another phone, an empty address; a dial's answer is none either.
-        CHECK(r.listing(kTwo, 0, true, 2100) == DialRules::kNotThisAsk && r.listing("", 0, true, 2100) == DialRules::kNotThisAsk);
+        CHECK(r.listing(kTwo, 0, true, facts(), 2100) == DialRules::kNotThisAsk && r.listing("", 0, true, facts(), 2100) == DialRules::kNotThisAsk);
         CHECK(r.reply(kOne, kService, kService, 0, 2100) == DialRules::kNotThis && r.state() == DialRules::kAsking);
         CHECK(!r.overtakes(2100));   // only a dial overtakes a phone's request
         // The address in another form is the same phone; listed in any state.
-        CHECK(r.listing("001122334455", 0, true, 3400) == DialRules::kDialNow && r.state() == DialRules::kDialling);
+        CHECK(r.listing("001122334455", 0, true, facts(), 3400) == DialRules::kDialNow && r.state() == DialRules::kDialling);
         CHECK(r.current().askedAt == 2000 && r.current().at == 3400 && r.overtakes(3500));
-        CHECK(r.listing(kOne, 0, true, 3500) == DialRules::kNotThisAsk);   // once
+        CHECK(r.listing(kOne, 0, true, facts(), 3500) == DialRules::kNotThisAsk);   // once
         CHECK(r.reply(kOne, kService, kService, 5, 3600) == DialRules::kNotListening);
     }
     {   // not listed: no dial, nothing held against the phone, and the next poll asks again
@@ -539,7 +539,7 @@ static void testAsk() {
         present(r, 1000);
         DialRules::Dial d;
         CHECK(r.next(1000, facts(), &d) && d.why == DialRules::kPoll);
-        CHECK(r.listing(kOne, 0, false, 2400) == DialRules::kNotListed && r.state() == DialRules::kIdle);
+        CHECK(r.listing(kOne, 0, false, facts(), 2400) == DialRules::kNotListed && r.state() == DialRules::kIdle);
         CHECK(!r.heldBack(kOne, 2400) && r.backedOffUntil(kOne) == 0 && r.askMisses(kOne) == 0);
         CHECK(!r.next(30999, facts(), &d));
         CHECK(r.next(31000, facts(), &d) && d.why == DialRules::kPoll && r.state() == DialRules::kAsking);
@@ -553,16 +553,16 @@ static void testAsk() {
         uint32_t errors[] = {2, kNoError};
         for (int i = 0; i < 2; ++i) {
             CHECK(r.force() == 1 && r.next(now, facts(), &d));
-            CHECK(r.listing(kOne, errors[i], true, now + 100) == DialRules::kNoListing && r.state() == DialRules::kIdle);
+            CHECK(r.listing(kOne, errors[i], true, facts(), now + 100) == DialRules::kNoListing && r.state() == DialRules::kIdle);
             CHECK(r.askMisses(kOne) == (unsigned)i + 1 && !r.heldBack(kOne, now + 100));
             now += 1000;
         }
         CHECK(r.force() == 1 && r.next(now, facts(), &d));
-        CHECK(r.listing(kOne, 0, false, now + 100) == DialRules::kNotListed && r.askMisses(kOne) == 0);
+        CHECK(r.listing(kOne, 0, false, facts(), now + 100) == DialRules::kNotListed && r.askMisses(kOne) == 0);
         now += 1000;
         for (int i = 0; i < 2; ++i) {
             CHECK(r.force() == 1 && r.next(now, facts(), &d));
-            CHECK(r.listing(kOne, 1, true, now + 100) == DialRules::kNoListing);
+            CHECK(r.listing(kOne, 1, true, facts(), now + 100) == DialRules::kNoListing);
             now += 1000;
         }
         // No answer: overdue after askLimitMs; the third in a row.
@@ -572,7 +572,7 @@ static void testAsk() {
         CHECK(r.backedOffUntil(kOne) == now + 6000 + 30000 && r.heldBack(kOne, now + 6000) && r.askMisses(kOne) == 0);
         CHECK(r.nextBackOffMs(kOne) == 60000);
         // Its answer after that is too late.
-        CHECK(r.listing(kOne, 0, true, now + 6500) == DialRules::kNotThisAsk && r.state() == DialRules::kIdle);
+        CHECK(r.listing(kOne, 0, true, facts(), now + 6500) == DialRules::kNotThisAsk && r.state() == DialRules::kIdle);
         CHECK(r.listingLost(now + 6500) == DialRules::kNotThisAsk && !r.askOverdue(now + 100000));
         // A forced round still asks it; a change of its connection takes the run and the back-off away.
         CHECK(r.force() == 1 && r.next(now + 7000, facts(), &d));
@@ -591,7 +591,7 @@ static void testAsk() {
         busy.linkOfOurs = true;
         CHECK(!r.next(2200, busy, &d) && r.state() == DialRules::kIdle);
         CHECK(r.force() == 2 && !r.next(2300, facts(), &d));   // the first may still be out in the car
-        CHECK(r.listing(kOne, 0, true, 3300) == DialRules::kNotThisAsk && r.state() == DialRules::kIdle);
+        CHECK(r.listing(kOne, 0, true, facts(), 3300) == DialRules::kNotThisAsk && r.state() == DialRules::kIdle);
         CHECK(r.next(3400, facts(), &d) && d.address == kOne);   // its answer came: the car is free
         // keepAsking() does the same, and the time of the ask ends the wait.
         CHECK(!r.keepAsking(busy, 3500) && r.state() == DialRules::kIdle);
@@ -601,7 +601,7 @@ static void testAsk() {
         gone.registered = false;
         CHECK(r.keepAsking(facts(), 9500) && !r.keepAsking(gone, 9500) && r.state() == DialRules::kIdle);
         CHECK(!r.keepAsking(facts(), 9600));   // nothing out
-        CHECK(r.listing(kTwo, 0, true, 9700) == DialRules::kNotThisAsk);
+        CHECK(r.listing(kTwo, 0, true, facts(), 9700) == DialRules::kNotThisAsk);
     }
     {   // a phone's request that becomes pending ends the ask of a round; not the ask its own request brought,
         // unless another phone's request comes
@@ -614,7 +614,7 @@ static void testAsk() {
         CHECK(r.next(1000, f, &d) && d.why == DialRules::kPoll && d.address == kOne);
         r.phoneAsked(kTwo, 1100);
         CHECK(!r.next(1200, pending, &d) && r.state() == DialRules::kIdle);
-        CHECK(r.listing(kOne, 0, true, 1500) == DialRules::kNotThisAsk);
+        CHECK(r.listing(kOne, 0, true, facts(), 1500) == DialRules::kNotThisAsk);
         CHECK(r.next(2100, pending, &d) && d.why == DialRules::kSignal && d.address == kTwo);
         CHECK(r.keepAsking(pending, 2200) && !r.next(2300, pending, &d) && r.state() == DialRules::kAsking);
         r.phoneAsked(kTwo, 2400);   // the same phone again: the ask goes on
@@ -635,16 +635,66 @@ static void testAsk() {
         present(r, 6000);
         CHECK(r.force() == 1 && r.next(6000, facts(), &d));
         present(r, 6500, false, kConnInRange);
-        CHECK(r.listing(kOne, 0, true, 7000) == DialRules::kNoLongerDue && r.state() == DialRules::kIdle);
+        CHECK(r.listing(kOne, 0, true, facts(), 7000) == DialRules::kNoLongerDue && r.state() == DialRules::kIdle);
         r.devices(std::vector<BtDevice>(), 7100, 0, 0);
         present(r, 8000);
         CHECK(r.force() == 1 && r.next(8000, facts(), &d));
         r.devices(std::vector<BtDevice>(), 8100, 0, 0);
-        CHECK(r.listing(kOne, 0, true, 8200) == DialRules::kNoLongerDue);
+        CHECK(r.listing(kOne, 0, true, facts(), 8200) == DialRules::kNoLongerDue);
         present(r, 9000);
         CHECK(r.force() == 1 && r.next(9000, facts(), &d));
         CHECK(r.pairingTrouble("") == 1);   // stands for the phone being asked
-        CHECK(r.listing(kOne, 0, true, 9200) == DialRules::kNoLongerDue && r.force() == 0);
+        CHECK(r.listing(kOne, 0, true, facts(), 9200) == DialRules::kNoLongerDue && r.force() == 0);
+    }
+    {   // what brought the ask must still hold when its answer lists the service: a poll's phone that the agent has
+        // forgotten since is not dialled; one it still has is
+        DialRules r((plain()));
+        present(r, 1000);
+        DialRules::Dial d;
+        CHECK(r.next(1000, facts(), &d) && d.why == DialRules::kPoll);
+        CHECK(r.listing(kOne, 0, true, facts(0), 2000) == DialRules::kNoLongerDue && r.state() == DialRules::kIdle);
+        CHECK(!r.heldBack(kOne, 2000) && r.askMisses(kOne) == 0);   // nothing held against it
+        CHECK(r.next(31000, facts(), &d) && d.why == DialRules::kPoll);
+        CHECK(r.listing(kOne, 0, true, facts(), 32000) == DialRules::kDialNow);
+    }
+    {   // the pairing window closes between the ask and its answer, for a phone that is not the agent's: not dialled;
+        // while it is still open, dialled
+        Quiet r;
+        present(r, 1000);
+        DialRules::Facts open = facts(0);
+        open.pairingOpen = true;
+        DialRules::Dial d;
+        CHECK(r.next(2000, open, &d) && d.why == DialRules::kPairing && d.address == kOne);
+        CHECK(r.listing(kOne, 0, true, facts(0), 3000) == DialRules::kNoLongerDue && r.state() == DialRules::kIdle);
+        CHECK(r.next(7000, open, &d) && d.why == DialRules::kPairing);
+        CHECK(r.listing(kOne, 0, true, open, 8000) == DialRules::kDialNow);
+    }
+    {   // a forced round's phone is dialled whether or not it is the agent's, and so is the afresh ask after a link
+        // left behind by a dial a forced round brought; it still has to be connected and paired
+        Quiet r;
+        present(r, 1000);
+        DialRules::Dial d;
+        CHECK(r.force() == 1 && r.next(2000, facts(0), &d) && d.why == DialRules::kForced);
+        CHECK(r.listing(kOne, 0, true, facts(0), 3000) == DialRules::kDialNow && r.state() == DialRules::kDialling);
+        CHECK(r.reply(kOne, kService, kService, 2, 3100) == DialRules::kLookForNode);
+        r.stale();
+        r.ended(3500);
+        CHECK(r.next(3600, facts(0), &d) && d.why == DialRules::kAfresh);
+        CHECK(r.listing(kOne, 0, true, facts(0), 4000) == DialRules::kDialNow);
+        r.reply(kOne, kService, kService, 5, 4100);
+        CHECK(r.force() == 1 && r.next(5000, facts(0), &d) && d.why == DialRules::kForced);
+        present(r, 5500, false, kConnInRange);
+        CHECK(r.listing(kOne, 0, true, facts(0), 6000) == DialRules::kNoLongerDue);
+        // The afresh ask after the pairing window's dial is not: with the window closed since, not dialled.
+        present(r, 7000);
+        DialRules::Facts open = facts(0);
+        open.pairingOpen = true;
+        CHECK(dialNext(r, 7000, open, &d) && d.why == DialRules::kPairing);
+        CHECK(r.reply(kOne, kService, kService, 2, 7100) == DialRules::kLookForNode);
+        r.stale();
+        r.ended(7500);
+        CHECK(r.next(7600, facts(0), &d) && d.why == DialRules::kAfresh);
+        CHECK(r.listing(kOne, 0, true, facts(0), 8000) == DialRules::kNoLongerDue);
     }
     {   // the service goes while asking: nothing out, and a late answer passed over
         Quiet r;
@@ -652,7 +702,7 @@ static void testAsk() {
         DialRules::Dial d;
         CHECK(r.force() == 1 && r.next(2000, facts(), &d));
         r.serviceGone();
-        CHECK(r.state() == DialRules::kIdle && r.listing(kOne, 0, true, 2500) == DialRules::kNotThisAsk);
+        CHECK(r.state() == DialRules::kIdle && r.listing(kOne, 0, true, facts(), 2500) == DialRules::kNotThisAsk);
         present(r, 3000);
         CHECK(r.force() == 1 && r.next(3000, facts(), &d));   // no wait for the lost ask
         // The listener drops one as it stops: passed over, and waited for as one that was ended.
@@ -674,7 +724,7 @@ static void testSettle() {
         CHECK(!r.heldBack(kOne, 1000));   // the settle time is not a hold of its own
         CHECK(!r.next(1000, facts(), &d) && r.nextPollAt() == 9000 && !r.next(8999, facts(), &d));
         CHECK(r.next(9000, facts(), &d) && d.why == DialRules::kPoll);
-        CHECK(r.listing(kOne, 0, false, 10000) == DialRules::kNotListed);
+        CHECK(r.listing(kOne, 0, false, facts(), 10000) == DialRules::kNotListed);
         CHECK(r.nextPollAt() == 9000 + 30000);
         // It leaves and connects again: settling again, from that list; a change from 2 to 3 is no new connect.
         present(r, 50000, false, kConnInRange);
@@ -683,7 +733,7 @@ static void testSettle() {
         present(r, 60000, false, kConnServiceConnected);
         CHECK(!r.settling(kOne, 60000));
         CHECK(r.nextPollAt() == 51000 + 10000 && r.next(61000, facts(), &d) && d.why == DialRules::kPoll);
-        r.listing(kOne, 0, false, 61500);
+        r.listing(kOne, 0, false, facts(), 61500);
         // A phone that comes into a later list connected settles too.
         present(r, 70000, true);
         CHECK(r.settling(kTwo, 70000) && !r.settling(kOne, 70000));
@@ -691,7 +741,7 @@ static void testSettle() {
         present(r, 80000, false, kConnInRange);
         present(r, 81000);
         CHECK(r.force() == 1 && r.next(81000, facts(), &d) && d.why == DialRules::kForced);
-        r.listing(kOne, 0, false, 81500);
+        r.listing(kOne, 0, false, facts(), 81500);
         DialRules::Facts f = facts(0);
         f.pairingOpen = true;
         CHECK(r.next(81600, f, &d) && d.why == DialRules::kPairing && d.address == kOne);
@@ -719,7 +769,7 @@ static void testSettle() {
         present(r, 10000);   // settling until 18000; the retry was due at 16100
         CHECK(!r.next(16100, facts(), &d) && !r.next(17999, facts(), &d));
         CHECK(r.next(18000, facts(), &d) && d.why == DialRules::kRetry);
-        r.listing(kOne, 0, false, 18100);
+        r.listing(kOne, 0, false, facts(), 18100);
         present(r, 20000, false, kConnInRange);
         present(r, 21000);
         r.afresh();
@@ -736,12 +786,12 @@ static void testSignalAsks() {
     DialRules::Dial d;
     r.phoneAsked(kOne, 2000);
     CHECK(r.next(3000, facts(), &d) && d.why == DialRules::kSignal);
-    CHECK(r.listing(kOne, 0, false, 4400) == DialRules::kNotListed);
+    CHECK(r.listing(kOne, 0, false, facts(), 4400) == DialRules::kNotListed);
     r.phoneAsked(kOne, 5000);
     CHECK(!r.next(6000, facts(), &d) && !r.next(12999, facts(), &d));   // 3 s after the last: dropped
     r.phoneAsked(kOne, 12000);
     CHECK(r.next(13000, facts(), &d) && d.why == DialRules::kSignal);   // 10 s after the last
-    r.listing(kOne, 0, false, 13500);
+    r.listing(kOne, 0, false, facts(), 13500);
     // Polls, forced rounds and the pairing window are not held by it.
     CHECK(r.force() == 1 && r.next(13600, facts(), &d) && d.why == DialRules::kForced);
 }
@@ -769,8 +819,8 @@ static void testDoubt() {
     CHECK(r.recordDoubtful());
     // An ask that does not list the service, and one with an error, change nothing.
     DialRules::Dial d;
-    CHECK(r.force() == 1 && r.next(3000, facts(), &d) && r.listing(kOne, 0, false, 3100) == DialRules::kNotListed);
-    CHECK(r.force() == 1 && r.next(3200, facts(), &d) && r.listing(kOne, 2, false, 3300) == DialRules::kNoListing);
+    CHECK(r.force() == 1 && r.next(3000, facts(), &d) && r.listing(kOne, 0, false, facts(), 3100) == DialRules::kNotListed);
+    CHECK(r.force() == 1 && r.next(3200, facts(), &d) && r.listing(kOne, 2, false, facts(), 3300) == DialRules::kNoListing);
     CHECK(r.recordDoubtful());
     // A dial answered 2 neither.
     dialOne(r, 4000);

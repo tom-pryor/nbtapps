@@ -12,7 +12,8 @@ namespace nbt {
 
 DialRules::DialRules(const DialConfig& config)
     : config_(config), nextPollAt_(0), fastUntil_(0), signalAt_(0), pairingWasOpen_(false), nextPairingAt_(0),
-      state_(kIdle), stale_(false), okAt_(0), roundWhy_(kForced), endedAskUntil_(0), doubtful_(false) {}
+      state_(kIdle), stale_(false), okAt_(0), roundWhy_(kForced), forcedAsk_(false), endedAskUntil_(0),
+      doubtful_(false) {}
 
 void DialRules::fastPolls(int64_t now) {
     fastUntil_ = now + config_.pollFirstForMs;
@@ -130,6 +131,7 @@ void DialRules::start(const Presence::Phone& p, Why why, int64_t now, Dial* out)
     current_.why = why;
     current_.askedAt = now;
     current_.at = now;
+    forcedAsk_ = why == kForced;
     state_ = kAsking;
     // An ask of the phone, for whatever reason, is the retry that may have been due.
     phone(p.address).retryAt = 0;
@@ -206,9 +208,12 @@ bool DialRules::next(int64_t now, const Facts& facts, Dial* out) {
     if (stale_) {
         // A link that was left behind has just been ended: its phone at once, once, unless it is settling.
         stale_ = false;
+        // It holds what brought the dial before it: one a forced round brought is still one for any dialable phone.
         const Presence::Phone* p = presence_.find(current_.address);
         if (p != 0 && Presence::dialable(*p) && !troubled(p->address) && !settling(p->address, now)) {
+            bool forced = forcedAsk_;
             start(*p, kAfresh, now, out);
+            forcedAsk_ = forced;
             return true;
         }
     }
@@ -270,7 +275,8 @@ DialRules::Listing DialRules::missed(int64_t now) {
     return kAskBackedOff;
 }
 
-DialRules::Listing DialRules::listing(const std::string& address, uint32_t error, bool listed, int64_t now) {
+DialRules::Listing DialRules::listing(const std::string& address, uint32_t error, bool listed, const Facts& facts,
+                                      int64_t now) {
     if (state_ != kAsking || addressKey(address).empty() || addressKey(address) != addressKey(current_.address)) {
         // The answer to an ask that was ended: the car is free for the next.
         if (!endedAsk_.empty() && !addressKey(address).empty() && addressKey(address) == addressKey(endedAsk_))
@@ -281,8 +287,11 @@ DialRules::Listing DialRules::listing(const std::string& address, uint32_t error
     phone(current_.address).misses = 0;
     state_ = kIdle;
     if (!listed) return kNotListed;
+    // What brought the ask must still hold: for a forced round, that the phone is dialable; for anything else, that
+    // it is eligible as things are now (still one of the agent's phones, or the pairing window still open).
     const Presence::Phone* p = presence_.find(current_.address);
-    if (p == 0 || !Presence::dialable(*p) || troubled(current_.address)) return kNoLongerDue;
+    bool due = p != 0 && (forcedAsk_ ? Presence::dialable(*p) && !troubled(current_.address) : eligible(*p, facts));
+    if (!due) return kNoLongerDue;
     state_ = kDialling;
     current_.at = now;
     return kDialNow;

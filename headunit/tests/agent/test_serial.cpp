@@ -2125,6 +2125,39 @@ static void testDialAsk() {
                                                     "taken as not listening", 2000));
         CHECK(!d.trace.saw("gap connect") && d.listener->serialStatus().askErrors == 1);
     }
+    {   // an ask that is ended is said when its reason differs from that phone's last ended ask, and otherwise only
+        // counted, with a record apart from the answers': ended asks between lists without the service bring no line
+        // for either
+        Dialler d("ask-ended-again");
+        d.config.linkWaitMs = 300;
+        d.gap.answersQuery = false;
+        d.gap.queryLists = false;
+        d.start();
+        for (int i = 0; i < 4; ++i) {
+            // An ask that a phone's request ends; its answer comes after, is passed over, and frees the car.
+            d.dial();
+            CHECK_IN(d.trace.text(), countWithin(d.trace, "gap query", 2 * i + 1, 2000));
+            d.gap.phone(kInfServiceRequest, kCarSerialService);
+            double end = monoNow() + 2.0;
+            while (d.listener->serialStatus().dialState != "idle" && monoNow() < end) pause(5);
+            CHECK(d.listener->serialStatus().dialState == "idle");
+            d.gap.queryReply(kDialled, false);
+            pause(450);   // the request's time is over
+            // An ask answered without the service.
+            d.gap.answersQuery = true;
+            d.dial();
+            CHECK_IN(d.trace.text(), countWithin(d.trace, "gap query", 2 * i + 2, 2000));
+            end = monoNow() + 2.0;
+            while (d.listener->serialStatus().asksNotListed < (unsigned)i + 1 && monoNow() < end) pause(5);
+            d.gap.answersQuery = false;
+        }
+        CHECK_IN(d.trace.text(), d.trace.loggedCount("the ask for its service list is ended") == 1);
+        CHECK(d.trace.logged("phone 1 (asked for): the ask for its service list is ended, and its answer will be "
+                             "passed over: a phone has asked the car for a link. The same again is only counted"));
+        CHECK_IN(d.trace.text(), d.trace.loggedCount("does not name the agent's service") == 1);
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(st.asks == 8 && st.asksNotListed == 4 && st.dials == 0);
+    }
     {   // the settle time: a phone in the first device list is not asked by a poll until it is over
         Dialler d("ask-settle");
         d.ours.set(std::vector<std::string>(1, kDialled));

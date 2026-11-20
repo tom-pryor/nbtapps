@@ -615,6 +615,7 @@ private:
     enum AskEnd { kAskAnswered, kAskNoAnswer, kAskNotSent };
     void listed(DialRules::Listing what, const btspp::ServiceList* list, AskEnd how, int64_t cameAt, int64_t now);
     void askSay(const std::string& answer, const std::string& text);
+    void askEnded(const std::string& reason);
     void sendDial(int64_t now);
     void doubtNow(bool before, const std::string& answer);
     void dialAnswered(const btspp::ServiceConnectReply& reply, int64_t now);
@@ -788,6 +789,7 @@ private:
     };
     std::map<unsigned, Repeat> repeats_;
     std::map<unsigned, Repeat> askRepeats_;
+    std::map<unsigned, Repeat> askEnds_;   // the asks that were ended, by why: a record of their own (askEnded())
 };
 
 }  // namespace nbt

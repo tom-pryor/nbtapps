@@ -29,7 +29,8 @@ struct SerialStatus {
     std::string link;                  // the agent's serial links up: none, phone-opened, dialled, both
     bool recordDoubtful;               // a dial failed after the phone's service list named the agent's service, and
                                        // the car's record of phone-opened links may be wrong since (dial_rules.hpp)
-    // Counts since the agent started.
+    // Counts since the agent started. notListening: the dials answered 5, after an ask that listed the agent's
+    // service (agent.hpp says what that means now).
     unsigned dials, answeredOk, notListening, notInReach, busy, otherAnswers, noAnswer, notTheApp, leftBehind;
     // The asks for a phone's service list before a dial: sent, and what they came to.
     unsigned asks, asksListed, asksNotListed, asksNoAnswer, askErrors;

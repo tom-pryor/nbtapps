@@ -180,7 +180,10 @@
 // rejected, no answer, not the app, or none; link is the agent's serial links that are up: none, phone-opened,
 // dialled or both. recordDoubtful is true from a dial that failed although the phone's service list named the
 // agent's service, which may leave the car's record of phone-opened serial links wrong, until a dial is answered
-// 0, the car says such a link ended, or its Bluetooth service goes (dial_rules.hpp). asks counts the asks for a
+// 0, the car says such a link ended, or its Bluetooth service goes (dial_rules.hpp). notListening counts the dials
+// answered 5 (DEFAULT): since each dial follows an ask whose answer named the agent's service, such a dial means the
+// app stopped listening in between or something else went wrong, not that it was not listening; the name stays, for
+// the app's sake. asks counts the asks for a
 // phone's service list; asksListed, asksNotListed, asksNoAnswer and askErrors what they came to. problems: the lines
 // written to the problem file in this run, and the problems only counted (serial_link.hpp).
 //

@@ -197,7 +197,9 @@ format and the protocol.
   what the last dial came to, which of the agent's serial links are up (`none`, `phone-opened`, `dialled` or
   `both`), whether a failed dial may have left the car's record of phone-opened links wrong (`recordDoubtful`),
   counts of the asks before the dials, of the dials, their answers and the registration checks, and how many
-  problems were written to the problem file and how many only counted. Never a phone's address or name. An agent
+  problems were written to the problem file and how many only counted. The count `notListening` is of the dials
+  answered 5; every dial now follows an ask that listed the agent's service, so it no longer means the app was not
+  listening (the name is kept for the app's sake). Never a phone's address or name. An agent
   with no Bluetooth serial listener answers `serial.status` with `unsupported`, and its `info.get` has
   `"serial": {"listener": false}`. `serial.dial`, on the local socket only, has the car dial the phones connected
   to it now (`{"phones": N}`);
@@ -749,9 +751,10 @@ pairing key, and nothing on the link is trusted before that.
   like any other, with no gate, hold or let-go. Anything else on it, or nothing, is something that answered on the
   agent's UUID and is not the app: the car is asked to end the link (ServiceDisconnect), and polls leave that phone
   alone for 30 seconds, twice as long each time it happens again, up to 5 minutes, until a link works or the phone's
-  connection changes; its own request and the pairing window still dial it at once. 5: the phone's app did not
-  take the link: the next poll asks again. 14: the phone is not in reach, and polls leave it
-  alone until its connection changes. 2: a link on the instance is up already; with its node there, it is a link an
+  connection changes; its own request and the pairing window still dial it at once. 5: the phone did not take the
+  link although its list named the agent's service just before, so its app may have stopped listening since, or
+  something else went wrong: the next poll asks again. 14: the phone is not in reach, and polls leave it alone until
+  its connection changes. 2: a link on the instance is up already; with its node there, it is a link an
   agent that was killed left behind, which is ended and never taken, and the phone is dialled afresh; if the car
   does not end it, the phone is backed off as above instead, and is not dialled again at once. Any other
   answer: again in 15 seconds. No answer in 95 seconds: the dial is given up, the car is asked to end what may be
@@ -779,7 +782,9 @@ pairing key, and nothing on the link is trusted before that.
   second of its answer 0, is logged as such and is not counted as a refusal.
 - **The log.** What an ask came to (the app not listening, no answer, an error) is said when it differs from that
   phone's last ask, and otherwise only counted, and the next line that differs says how many came; a list that names
-  the service again after such asks is said once, with that count, and the dial follows. One line for each dial,
+  the service again after such asks is said once, with that count, and the dial follows. An ask that is ended (a
+  link came, a phone asked for one, or the service is not registered) is said the same way by its reason, apart from the answers, so
+  that ended asks between lists without the service bring no line for either. One line for each dial,
   when it is answered: the phone by its number, why it was dialled (poll,
   the phone asked for a link, pairing window, asked for, again after an answer not understood, afresh), the car's
   answer by its name and how long it took. The same answer for the same phone again is only counted, and the next
