@@ -20,7 +20,9 @@
 // with the magic bytes): the car's dial works for that phone, and the listener leaves a link the phone opens itself
 // to another program while one may read it (serial_link.hpp). It is written only when true; a file without it, an
 // older agent's among them, reads as "not yet". It goes with the address: a phone whose address changes, or that is
-// forgotten, has it no more. One that is not true or false makes the file one that cannot be read.
+// forgotten, has it no more. It goes too when the car's dials to the phone keep failing (dial_rules.hpp,
+// kDialFailsToUnmark), and comes back with the next dialled link that is the agent's. One that is not true or false
+// makes the file one that cannot be read.
 //
 // The file is in the state folder, which outlasts a new version of the agent, and is readable by the agent's user
 // only: a key in it is all it takes to be that phone. It is written whole, and appears under its name only when
@@ -95,6 +97,10 @@ public:
     // `dialled` from now on. Nothing is written if it is so already, or if no phone has that address. *changed: the
     // file was written. False with *error set if the file could not be written; nothing has changed then.
     bool setDialled(const std::string& address, bool* changed, std::string* error);
+    // The car's dials to `address` keep failing (serial_link.hpp): the phone with that address is not `dialled` from
+    // now on, until a dialled link is the agent's again. Nothing is written if it is not, or if no phone has that
+    // address. *changed and the answer as setDialled().
+    bool clearDialled(const std::string& address, bool* changed, std::string* error);
     // The addresses of the phones that are `dialled`, oldest pairing first.
     std::vector<std::string> dialledAddresses() const;
 
@@ -107,6 +113,7 @@ private:
     PhoneStore(const PhoneStore&);
     PhoneStore& operator=(const PhoneStore&);
     bool replace(const std::vector<PairedPhone>& phones, std::string* error);
+    bool markDialled(const std::string& address, bool dialled, bool* changed, std::string* error);
 
     std::string path_;
     std::vector<PairedPhone> phones_;

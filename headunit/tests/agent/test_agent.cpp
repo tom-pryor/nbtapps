@@ -3806,6 +3806,11 @@ public:
         askedFor.push_back(address);
         return left.count(address) != 0;
     }
+    virtual std::vector<std::string> takeUndialled() {
+        std::vector<std::string> taken;
+        taken.swap(undialled);
+        return taken;
+    }
     std::string said;
     bool on;
     unsigned phones;
@@ -3814,6 +3819,7 @@ public:
     SerialStatus status;
     std::set<std::string> left;           // the phones whose own links the rule leaves to another program
     std::vector<std::string> askedFor;    // the addresses phoneOpenedLeft() was asked for
+    std::vector<std::string> undialled;   // what takeUndialled() hands over next
 };
 
 static void testSerialDial() {

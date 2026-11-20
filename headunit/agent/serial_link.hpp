@@ -45,7 +45,10 @@
 //     and no hold put on for the phone's request that brings it, when all three of these hold, at the request and
 //     again when its node appears: the car dials (SerialConfig::dial); a program declared for a serial service runs,
 //     or may (SerialServices::readers()); and the phone that asked is one of the agent's whose app a link the car
-//     dialled has been taken by before (phones.hpp, `dialled`, kept across restarts). The request still brings the
+//     dialled has been taken by before (phones.hpp, `dialled`, kept across restarts). That mark is given up when
+//     kDialFailsToUnmark dials of the phone in a row have given the agent no link (dial_rules.hpp): the listener
+//     hands the phone to the agent, whose thread clears the mark in its record, through the pipe links go by
+//     (SerialDial::takeUndialled()), and the phone's own links are decided on again. The request still brings the
 //     car's dial, which is how the app is reached then, and the other program gets the link whole, with the first
 //     bytes the decide step would have read. A link of the agent's app on such a phone is left all the same: that is
 //     the rule's cost. Without such a dial the car may be one on which dialling does not work, and the phone's own
@@ -106,6 +109,7 @@
 #include <stdio.h>
 
 #include <map>
+#include <set>
 #include <utility>
 #include <string>
 #include <vector>
@@ -551,6 +555,7 @@ public:
     virtual unsigned dialNow(std::string* why, const char** code);
     virtual SerialStatus serialStatus();
     virtual bool phoneOpenedLeft(const std::string& address);
+    virtual std::vector<std::string> takeUndialled();
     virtual bool removeSerialService(const std::string& name) { return spp_.removeOther(name); }
 
     // Puts the gate in front and opens the client of the car's Bluetooth service. If either does not work, the
@@ -646,6 +651,9 @@ private:
     void askEnded(const std::string& reason);
     void sendDial(int64_t now);
     void doubtNow(bool before, const std::string& answer);
+    // After a dial of dial_'s phone that gave the agent no link: at kDialFailsToUnmark in a row, a phone that is
+    // `dialled` is handed to the agent to give that up (takeUndialled()).
+    void dialFailed();
     void dialAnswered(const btspp::ServiceConnectReply& reply, int64_t now);
     void openDialled(int64_t now);
     void readMagic(int64_t now);
@@ -760,6 +768,9 @@ private:
     std::vector<btspp::ServiceDisconnectReply> disconnectReplies_;
     std::vector<btspp::ServiceDisconnected> dialEnds_;
     std::vector<std::string> pairingInforms_;   // the address each named, or empty
+    // The phones whose `dialled` mark the agent is to give up, until it takes them (takeUndialled()); a wake byte
+    // went into the pipe for each, as for a link in ready_.
+    std::vector<std::string> undialled_;
     // The listener's thread: where the dial is.
     enum DialPhase {
         kDialNone,
@@ -818,6 +829,9 @@ private:
     std::map<unsigned, Repeat> repeats_;
     std::map<unsigned, Repeat> askRepeats_;
     std::map<unsigned, Repeat> askEnds_;   // the asks that were ended, by why: a record of their own (askEnded())
+    // The listener's thread: the phones, by addressKey(), whose mark the log has said is given up, until a dialled
+    // link of theirs is the agent's again.
+    std::set<std::string> undialSaid_;
 };
 
 }  // namespace nbt

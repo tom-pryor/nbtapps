@@ -519,7 +519,8 @@ struct ServiceList {
     std::vector<std::string> services, profiles;
     std::vector<uint32_t> states, versions;
     bool ok;
-    ServiceList() : error(0), ok(false) {}
+    bool rejected;   // no reply: the server rejected the request (SppService::Events::sppServiceList())
+    ServiceList() : error(0), ok(false), rejected(false) {}
 };
 
 // The same layout as ServiceListGet's reply (0x8000002d), which this reads as well. A reply with an error may hold
@@ -724,8 +725,9 @@ public:
         virtual void sppDisconnectReply(const ServiceDisconnectReply& /*reply*/) {}
         // Every ServiceListQuery reply that comes, whoever's query it answers: the car may give the one answer to
         // two clients whose queries met. One that cannot be read, or a rejection of queryServices()'s request, has
-        // the error kNoError; it and an error reply with no address name the phone of queryServices() if that
-        // waits for its answer, and nobody otherwise. For the caller to keep, and never to log the address.
+        // the error kNoError, and the rejection has `rejected` too; they and an error reply with no address name the
+        // phone of queryServices() if that waits for its answer, and nobody otherwise. For the caller to keep, and
+        // never to log the address.
         virtual void sppServiceList(const ServiceList& /*list*/) {}
         // The inform ServiceDisconnected: a link of the car's ended.
         virtual void sppLinkEnded(const ServiceDisconnected& /*ended*/) {}

@@ -21,7 +21,9 @@ void DialRules::fastPolls(int64_t now) {
 }
 
 void DialRules::phoneAsked(const std::string& address, int64_t now) {
-    if (addressKey(address).empty()) return;
+    // The request that is pending now, whoever's: one that names no phone is nobody's own.
+    askedBy_ = addressKey(address);
+    if (askedBy_.empty()) return;
     signal_ = address;
     signalAt_ = now;
 }
@@ -48,7 +50,6 @@ void DialRules::devices(const std::vector<BtDevice>& devices, int64_t now, std::
         if (c.connectionChanged && !c.added) {
             s.backOffMs = 0;
             s.backOffUntil = 0;
-            s.waitChange = false;
             s.misses = 0;
         }
         // A phone that has just connected to the car, or is connected in the list it first comes in: its settle time
@@ -186,8 +187,8 @@ void DialRules::endAsk(int64_t) {
 bool DialRules::keepAsking(const Facts& facts, int64_t now) {
     if (state_ != kAsking) return false;
     // The phone's own request that brought this ask may still be pending, or come again: that holds back the rest,
-    // not this one.
-    bool own = current_.why == kSignal && (signal_.empty() || addressKey(signal_) == addressKey(current_.address));
+    // not this one. Any other request, one that names no phone among them, ends it.
+    bool own = current_.why == kSignal && !askedBy_.empty() && askedBy_ == addressKey(current_.address);
     if (facts.registered && !facts.linkOfOurs && (!facts.requestPending || own)) return true;
     endAsk(now);
     return false;
@@ -237,7 +238,7 @@ bool DialRules::next(int64_t now, const Facts& facts, Dial* out) {
         if (it == phones_.end() || it->second.retryAt == 0 || now < it->second.retryAt) continue;
         if (now < it->second.settleUntil) continue;
         it->second.retryAt = 0;
-        if (!eligible(p, facts) || it->second.waitChange || now < it->second.backOffUntil) continue;
+        if (!eligible(p, facts) || now < it->second.backOffUntil) continue;
         start(p, kRetry, now, out);
         return true;
     }
@@ -264,15 +265,12 @@ bool DialRules::next(int64_t now, const Facts& facts, Dial* out) {
     return false;
 }
 
-// An ask with an error or no answer: as one that did not list the service, and the third in a row backs the phone
-// off.
-DialRules::Listing DialRules::missed(int64_t now) {
+// An ask with an error or no answer: as one that did not list the service, only counted. An ask does no harm, and the
+// next poll asks again.
+DialRules::Listing DialRules::missed(int64_t) {
     state_ = kIdle;
-    PhoneState& s = phone(current_.address);
-    if (++s.misses < kAskMissesToBackOff) return kNoListing;
-    s.misses = 0;
-    backOff(current_.address, now);
-    return kAskBackedOff;
+    ++phone(current_.address).misses;
+    return kNoListing;
 }
 
 DialRules::Listing DialRules::listing(const std::string& address, uint32_t error, bool listed, const Facts& facts,
@@ -330,24 +328,33 @@ DialRules::Reply DialRules::reply(const std::string& address, const std::string&
         return kOpenNode;
     }
     state_ = kIdle;
-    // A failure the car answered, after the phone listed the service: its record may be wrong from here on.
-    if (error != 2 && error != 10 && error != kNoError) doubtful_ = true;
     if (error == 2) return kLookForNode;
-    if (error == 5) return kNotListening;
-    if (error == 14) {
-        phone(current_.address).waitChange = true;
-        return kUnreachable;
+    // A rejection of the request was never the car's answer, and 10 does no harm: tried again a while later.
+    if (error == 10 || error == kNoError) {
+        phone(current_.address).retryAt = now + config_.retryMs;
+        return kRetryLater;
     }
-    phone(current_.address).retryAt = now + config_.retryMs;
-    return kRetryLater;
+    // A failure the car answered, after the phone listed the service: its record may be wrong from here on, and the
+    // phone is not dialled again soon.
+    doubtful_ = true;
+    dialFailed(now);
+    if (error == 5) return kNotListening;
+    if (error == 14) return kUnreachable;
+    return kFailed;
 }
 
 bool DialRules::overdue(int64_t now) const { return state_ == kDialling && now - current_.at >= (int64_t)config_.replyLimitMs; }
 
 void DialRules::gaveUp(int64_t now) {
-    backOff(current_.address, now);
+    dialFailed(now);
     state_ = kIdle;
     doubtful_ = true;
+}
+
+// A dial of the current phone that gave the agent no link: the phone is backed off, and the run is counted.
+void DialRules::dialFailed(int64_t now) {
+    backOff(current_.address, now);
+    ++phone(current_.address).dialFails;
 }
 
 void DialRules::notThere(int64_t now) {
@@ -374,12 +381,18 @@ void DialRules::linkUp(int64_t) {
     PhoneState& s = phone(current_.address);
     s.backOffMs = 0;
     s.backOffUntil = 0;
+    s.dialFails = 0;
     state_ = kUp;
 }
 
 void DialRules::notTheApp(int64_t now) {
-    backOff(current_.address, now);
+    dialFailed(now);
     state_ = kEnding;
+}
+
+unsigned DialRules::dialFailures(const std::string& address) const {
+    const PhoneState* s = find(address);
+    return s == 0 ? 0 : s->dialFails;
 }
 
 void DialRules::ending() {
@@ -412,7 +425,7 @@ int64_t DialRules::nextBackOffMs(const std::string& address) const {
 
 bool DialRules::heldBack(const std::string& address, int64_t now) const {
     const PhoneState* s = find(address);
-    return s != 0 && (now < s->backOffUntil || s->waitChange || (s->retryAt != 0 && now < s->retryAt));
+    return s != 0 && (now < s->backOffUntil || (s->retryAt != 0 && now < s->retryAt));
 }
 
 bool DialRules::troubled(const std::string& address) const {

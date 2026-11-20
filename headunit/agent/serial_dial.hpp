@@ -4,8 +4,9 @@
 #define NBT_AGENT_SERIAL_DIAL_HPP
 
 // What the agent tells the Bluetooth serial listener (serial_link.hpp) for the car dialling a phone of the agent's
-// (dial_rules.hpp), and asks of it: the pairing window, a dial now, and how Bluetooth serial stands, for the
-// method serial.status and info.get (agent.hpp). The agent's thread calls it; the listener's thread acts on it.
+// (dial_rules.hpp), and asks of it: the pairing window, a dial now, how Bluetooth serial stands, for the method
+// serial.status and info.get (agent.hpp), and which phones' `dialled` marks to give up. The agent's thread calls it;
+// the listener's thread acts on it.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdint.h>
@@ -63,6 +64,11 @@ public:
     // Whether a link the phone at `address` opens itself is left to another program now, unread (the rule of
     // serial_link.hpp): for that phone's app, which then only waits for the car's link. From the agent's thread.
     virtual bool phoneOpenedLeft(const std::string& address) = 0;
+    // The addresses of the phones whose `dialled` mark (phones.hpp) is to be given up, since the car's dials to them
+    // keep failing (dial_rules.hpp, kDialFailsToUnmark): each handed over once, and the agent clears the mark in its
+    // record of paired phones. The listener's thread puts them there and wakes the agent through the pipe it hands
+    // links over by (Listener::fd()); the agent's thread takes them, as it takes links.
+    virtual std::vector<std::string> takeUndialled() = 0;
 };
 
 }  // namespace nbt

@@ -16,13 +16,17 @@
 //
 // The ask. Before every dial, whatever brings it, the car is asked for the phone's services (ServiceListQuery,
 // spp_service.hpp), and the state is kAsking. The phone's app publishes the agent's service only while it listens,
-// so the answer says whether a dial would be taken. What it asks of the listener:
+// so the answer says whether a dial would be taken. An ask does no harm, and may be repeated as often as polls
+// come; a dial the car answers with a failure does harm (below), and is not repeated soon. What the ask's answer asks
+// of the listener:
 //
 //   the agent's service is listed, in any state   the dial goes at once: kDialling
 //   it is not listed                              no dial, and nothing is held against the phone: the next poll
 //                                                 asks again
-//   an error, or no answer in askLimitMs          as not listed; the third in a row for the phone backs it off, as a
-//                                                 dial with no answer does
+//   an error, or no answer in askLimitMs          the same. askMisses() counts them in a row, for the log to say
+//                                                 once when kAskMissesToSay have come; a phone whose app only
+//                                                 listens cannot ask for anything itself, so it is never held back
+//                                                 from polls for them
 //
 // The answer counts only for the phone asked: a reply for another address is passed over, and one for the phone
 // asked is the answer whoever's query brought it (the car may give its one answer to two clients whose queries met).
@@ -46,12 +50,13 @@
 //   0   PAGE answered, link up: the node is there; the listener opens it and waits for the magic bytes
 //   2   BUSY: a link on the instance is up already. If its node is there, a link was left behind (an agent that was
 //       killed): the listener ends it and dials afresh. If the car does not end it, the phone is backed off instead,
-//       and is not dialled again at once. If no node is there, as for any other answer
+//       and is not dialled again at once. If no node is there, as for 10
 //   5   DEFAULT: the phone is there and did not take the link. Its service list named the agent's service just
-//       before, so its app stopped listening in between, or something else went wrong. The next poll asks again
-//   14  PAGE_TIMEOUT: the phone is not in reach. Not asked by a poll again until its connection changes in the car's
-//       device list
-//   any other answer, or a rejection: asked and dialled again kDial retryMs later
+//       before, so its app stopped listening in between, or something else went wrong. The phone is backed off
+//   14  PAGE_TIMEOUT: the phone is not in reach. The phone is backed off
+//   10, or a rejection of the request (never sent to the car, or refused by its Bluetooth service): asked and
+//       dialled again retryMs later
+//   any other answer: the phone is backed off
 //   no answer in replyLimitMs: the listener looks for the node and ends what may be there, and the phone is backed off
 //
 // A dial that still fails. A dial that the car answers with anything but 0, 2 or 10, or does not answer at all, may
@@ -59,7 +64,15 @@
 // program's among them) after one of them ends. A rejection of the request is not an answer of the car's. From such
 // a dial recordDoubtful() is true, until a dial is answered 0, the car says that a phone-opened link on its instance
 // kDisconnectInstance has ended (phoneLinkEnded()), or the car's Bluetooth service goes. Nothing is sent to mend it:
-// a ServiceDisconnect for that instance with no live link holds the instance up for well over a minute.
+// a ServiceDisconnect for that instance with no live link holds the instance up for well over a minute. So such a
+// dial is not repeated soon: its phone is backed off, for backOffMs, twice as long each time up to backOffMostMs,
+// until a dialled link of the agent's comes up for it or its connection changes in the car's device list.
+//
+// A dial that keeps failing. dialFailures() counts, for each phone, the dials in a row that gave the agent no link:
+// an answer that sets the doubt above, no answer, or a link that came up and was not the app's (notTheApp()). A
+// dialled link that becomes the agent's (linkUp()) starts the count again; it is kept in memory only. At
+// kDialFailsToUnmark the listener gives up the phone's mark that a dialled link has reached its app (phones.hpp,
+// `dialled`), so that a link the phone opens itself is decided on again (serial_link.hpp).
 //
 // Only a phone that is connected to the car (connection 2 or more) and paired with it, with its key (security 7 or
 // 8), is asked and dialled: a dial to a phone that has lost its pairing makes the car start a new one, with a prompt
@@ -80,8 +93,10 @@
 //                                  holds it back from polls, and whether or not its request is still pending
 //   the pairing window             while it is open, every phone that is connected and paired with the car, whether or
 //                                  not it is the agent's, every pairingRoundMs: that is how a new phone's app is reached
-//   a retry                        retryMs after a dial's answer that was not understood
-//   a poll                         every phone of the agent's that is eligible, not held back and not settling: every
+//   a retry                        retryMs after a dial answered 10, or 2 with no node there, or whose request was
+//                                  rejected
+//   a poll                         every phone of the agent's that is eligible, not held back (backed off, or due for
+//                                  a retry later) and not settling: every
 //                                  pollFirstMs for pollFirstForMs after a phone connects to the car or a link of the
 //                                  agent's ends, and every pollLaterMs after that. The first comes as soon as the device
 //                                  list has come, and one comes as soon as a phone that a poll left out has settled
@@ -101,8 +116,9 @@ namespace nbt {
 // The device and the instance of the car's that every dial goes to, and so the dialled link's node, /dev/nbtapp.
 const char* const kDialDevice = "BtCtrl";
 const char* const kDialInstance = "nbtapp";
-// Asks of a phone in a row with an error or no answer that back it off.
-const unsigned kAskMissesToBackOff = 3;
+// Asks of a phone in a row with an error or no answer at which the log says so: once in each such run. When dials
+// that give the agent no link give up a phone's `dialled` mark: kDialFailsToUnmark, dial_config.hpp.
+const unsigned kAskMissesToSay = 3;
 
 class DialRules {
 public:
@@ -120,8 +136,8 @@ public:
         kNotThisAsk,     // not the answer to this ask (another phone, an ask that was ended, or none out): nothing
         kDialNow,        // the agent's service is listed: ServiceConnect for current() now
         kNotListed,      // it is not: no dial
-        kNoListing,      // an error, a reply not read, or no answer in askLimitMs: no dial
-        kAskBackedOff,   // the same, the third in a row for the phone: no dial, and the phone is backed off
+        kNoListing,      // an error, a reply not read, a rejection, or no answer in askLimitMs: no dial, and nothing
+                         // held against the phone (askMisses() counts it)
         kNoLongerDue     // listed, and what brought the ask no longer holds: the phone has gone below connection 2,
                          // out of the list or into pairing trouble since the ask, or, for an ask that a forced round
                          // did not bring, it is no longer one of the agent's phones and the pairing window is not
@@ -132,9 +148,10 @@ public:
         kNotThis,        // not the answer to this dial (another service, another phone, or no dial out): nothing
         kOpenNode,       // 0
         kLookForNode,    // 2: stale() if the node is there, notThere() if not
-        kNotListening,   // 5
-        kUnreachable,    // 14
-        kRetryLater      // anything else
+        kNotListening,   // 5: the phone is backed off
+        kUnreachable,    // 14: the same
+        kRetryLater,     // 10, or a rejection of the request: asked and dialled again DialConfig::retryMs later
+        kFailed          // any other answer: the phone is backed off
     };
     struct Dial {
         std::string address;   // 00:11:22:33:44:55: the car takes no other form
@@ -158,9 +175,9 @@ public:
 
     explicit DialRules(const DialConfig& config);
 
-    // A device list from the car. What changed for a phone counts: a connection that changed takes its back-off, its
-    // run of asks with no answer and its wait for a change away, a connection that rises to 2 or more starts its
-    // settle time, and security 9 stops its asks; 7 or 8 after a change lets them go on.
+    // A device list from the car. What changed for a phone counts: a connection that changed takes its back-off and
+    // its run of asks with no answer away, a connection that rises to 2 or more starts its settle time, and security
+    // 9 stops its asks; 7 or 8 after a change lets them go on.
     // *changes: as Presence::update(). *troubled: the numbers of the phones whose asks stop now.
     void devices(const std::vector<btspp::BtDevice>& devices, int64_t now, std::vector<btspp::Presence::Change>* changes,
                  std::vector<unsigned>* troubled);
@@ -190,7 +207,8 @@ public:
 
     // The triggers. A phone asked the car for a serial link, for any service (`address`, as the request gave it):
     // if no link of the agent's comes within DialConfig::signalWaitMs, and the phone is eligible, it is asked then
-    // (or once it has settled), whatever holds it back from polls.
+    // (or once it has settled), whatever holds it back from polls. One that names no phone brings no ask, and is no
+    // phone's own for keepAsking().
     void phoneAsked(const std::string& address, int64_t now);
     // A link of the agent's, of either kind, came: what a phone asked for is answered.
     void linkCame();
@@ -213,20 +231,21 @@ public:
 
     // While asking: whether the ask goes on as things stand. A link of the agent's, a phone's request that is
     // pending (unless it is the asked phone's, and the ask the one its request brought) and the registration's going
-    // end it: kIdle, and its answer is passed over when it comes. next() does this too.
+    // end it: kIdle, and its answer is passed over when it comes. The pending request is the last one phoneAsked()
+    // was told of: one that named another phone, or none, is not the asked phone's. next() does this too.
     bool keepAsking(const Facts& facts, int64_t now);
     // The answer to ServiceListQuery: `error` the car's (kNoError for a rejection or a reply not read), `listed`
     // whether the services named the agent's own, `facts` as they are now. It counts only while asking, for the
     // phone asked. A listed phone is dialled only if what brought the ask still holds (kNoLongerDue otherwise).
     Listing listing(const std::string& address, uint32_t error, bool listed, const Facts& facts, int64_t now);
-    // No answer in askLimitMs: listingLost() then, which is kNoListing or kAskBackedOff.
+    // No answer in askLimitMs: listingLost() then, which is kNoListing.
     bool askOverdue(int64_t now) const;
     Listing listingLost(int64_t now);
     // The listener drops the ask that is out, as it stops: kIdle, and its answer is passed over.
     void askDropped(int64_t now);
     // Whether polls leave the phone alone for its settle time now.
     bool settling(const std::string& address, int64_t now) const;
-    // How many asks of the phone in a row had an error or no answer.
+    // How many asks of the phone in a row had an error or no answer. A connection that changes starts it again.
     unsigned askMisses(const std::string& address) const;
 
     // The answer to ServiceConnect: it counts only for the dial that is out, its service ours and its address the
@@ -237,7 +256,7 @@ public:
     bool overdue(int64_t now) const;
     // The dial is given up: the phone is backed off. kIdle.
     void gaveUp(int64_t now);
-    // 2, and no node: as any other answer that is not understood.
+    // 2, and no node: as 10, asked and dialled again retryMs later.
     void notThere(int64_t now);
     // 2 with the node there: a link was left behind. The listener ends it (kEnding), and then dials the phone afresh.
     void stale();
@@ -248,11 +267,14 @@ public:
     // was answered 0 less than DialConfig::overtakeMs ago.
     bool overtakes(int64_t now) const;
 
-    // The magic bytes came on the dialled node: kUp, the phone's back-off is gone, and so is the rest of the round.
+    // The magic bytes came on the dialled node: kUp, the phone's back-off and its run of failed dials are gone, and so
+    // is the rest of the round.
     void linkUp(int64_t now);
     // They did not, or something else came: something answered on the agent's UUID that is not the app. The phone
     // is backed off, and the link is ended: kEnding.
     void notTheApp(int64_t now);
+    // How many dials of the phone in a row gave the agent no link (see the top of this file).
+    unsigned dialFailures(const std::string& address) const;
     // The agent ends the dialled link: kEnding.
     void ending();
     // The dialled link has ended, or what was ended is gone: kIdle. A stale link's phone is dialled again at once.
@@ -269,8 +291,7 @@ public:
     int64_t backedOffUntil(const std::string& address) const;
     // How long the next back-off of the phone will be.
     int64_t nextBackOffMs(const std::string& address) const;
-    // Whether polls leave the phone alone now: backed off, unreachable until a change, or due for a retry later. Its
-    // settle time is settling().
+    // Whether polls leave the phone alone now: backed off, or due for a retry later. Its settle time is settling().
     bool heldBack(const std::string& address, int64_t now) const;
     // Whether the phone's asks have stopped for pairing trouble.
     bool troubled(const std::string& address) const;
@@ -279,20 +300,21 @@ private:
     struct PhoneState {
         int64_t backOffMs;        // the next back-off; 0: none has been
         int64_t backOffUntil;
-        bool waitChange;          // 14: until its connection changes
-        int64_t retryAt;          // an answer not understood: asked and dialled again then; 0: none
+        int64_t retryAt;          // 10, 2 with no node, or a rejection: asked and dialled again then; 0: none
         bool trouble;             // pairing trouble: no ask until it is at 7 or 8 after a change
         unsigned misses;          // asks in a row with an error or no answer
+        unsigned dialFails;       // dials in a row that gave the agent no link
         int64_t settleUntil;      // its settle time ends then
         bool signalAsked;         // its request has brought an ask, at signalAskAt
         int64_t signalAskAt;
         PhoneState()
-            : backOffMs(0), backOffUntil(0), waitChange(false), retryAt(0), trouble(false), misses(0), settleUntil(0),
+            : backOffMs(0), backOffUntil(0), retryAt(0), trouble(false), misses(0), dialFails(0), settleUntil(0),
               signalAsked(false), signalAskAt(0) {}
     };
     PhoneState& phone(const std::string& address);
     const PhoneState* find(const std::string& address) const;
     void backOff(const std::string& address, int64_t now);
+    void dialFailed(int64_t now);
     bool takeFromRound(int64_t now, const Facts& facts, Dial* out);
     void start(const btspp::Presence::Phone& p, Why why, int64_t now, Dial* out);
     bool signalDue(int64_t now, const Facts& facts, Dial* out);
@@ -306,6 +328,8 @@ private:
     int64_t fastUntil_;                          // until then polls come every pollFirstMs
     std::string signal_;                         // the phone that asked for a link, while its time runs
     int64_t signalAt_;
+    std::string askedBy_;                        // the phone the last request named, by addressKey(); empty for a
+                                                 // request that named none (keepAsking())
     bool pairingWasOpen_;
     int64_t nextPairingAt_;
     std::map<std::string, PhoneState> phones_;   // by addressKey()

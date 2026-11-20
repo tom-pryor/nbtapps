@@ -229,6 +229,16 @@ int main(int argc, char** argv) {
         // The next agent has it.
         PhoneStore next;
         CHECK(next.load(file, &why) && next.find(std::string(32, '1'))->dialled && next.dialledAddresses().size() == 1);
+        // Given up, as when the car's dials to it keep failing: written, in either form of the address, and once.
+        CHECK(store.clearDialled("001122334455", &changed, &why) && changed && !store.find(std::string(32, '1'))->dialled);
+        CHECK(store.clearDialled("00:11:22:33:44:55", &changed, &why) && !changed);   // so already
+        CHECK(store.clearDialled("66:77:88:99:AA:BB", &changed, &why) && !changed);   // never was
+        CHECK(store.clearDialled("not one", &changed, &why) && !changed);
+        CHECK(store.dialledAddresses().empty() && testutil::readFile(file).find("dialled") == std::string::npos);
+        CHECK(next.load(file, &why) && !next.find(std::string(32, '1'))->dialled);
+        // And marked again by the next dialled link that is the agent's.
+        CHECK(store.setDialled("00:11:22:33:44:55", &changed, &why) && changed);
+        CHECK(next.load(file, &why) && next.find(std::string(32, '1'))->dialled && next.dialledAddresses().size() == 1);
         // The same address again keeps it; another takes it away, and so does the address going to another phone.
         CHECK(store.setAddress(std::string(32, '1'), "00:11:22:33:44:55", &changed, &why) && !changed);
         CHECK(store.find(std::string(32, '1'))->dialled);

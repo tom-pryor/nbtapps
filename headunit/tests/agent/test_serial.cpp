@@ -143,6 +143,7 @@ public:
         : canOpen(true), openFinal_(false), silent(false), registerError(0), deregisterError(0), refusesWhileDialled(false),
           answersList(true), listed(false),
           connection(0), security(0), answersQuery(true), queryLists(true), queryError(0), queryInforms(false),
+          queryRejected(false), queryUnread(false),
           answersConnect(true), connectError(0), dialNode(0), answersDisconnect(false),
           disconnectError(0), events_(0), up_(false), trace_(trace) {}
 
@@ -197,7 +198,14 @@ public:
             trace_->add("gap query " + address);
             // As the car does: a ServiceListChanged inform as the query starts, and two with its answer.
             if (queryInforms) serviceListChanged(address);
-            if (answersQuery) {
+            if (queryRejected) {
+                events_->gapMessage(kTypeRejectedA, kReqServiceListQuery, 0, 0);
+            } else if (queryUnread) {
+                std::vector<uint8_t> cut;
+                putU32(cut, 0);
+                putU32(cut, 40);   // an address longer than what follows
+                events_->gapMessage(kTypeResponse, kRspServiceListQuery, &cut[0], (uint32_t)cut.size());
+            } else if (answersQuery) {
                 queryReply(address, queryLists, queryError);
                 if (queryInforms) {
                     serviceListChanged(address);
@@ -345,6 +353,8 @@ public:
     bool queryLists;                   // agent's service among the phone's if queryLists
     uint32_t queryError;
     bool queryInforms;                 // each query brings three ServiceListChanged informs, as the car's do
+    bool queryRejected;                // a query is rejected by the server, at once, in place of an answer
+    bool queryUnread;                  // a query is answered, at once, with a reply that cannot be read
     std::vector<uint8_t> disconnect;   // the last ServiceDisconnect's payload
     bool answersConnect;               // ServiceConnect is answered, at once, with connectError; with 0 the
     uint32_t connectError;             // dialled node comes up first
@@ -1490,15 +1500,18 @@ static void testDial() {
         bool closed = false;
         CHECK(node.hear(1, 200, &closed).empty());   // not a byte was written into it
     }
-    {   // the answers that open no node
+    {   // the answers that open no node: a failure backs the phone off, which the line says
         struct Row {
             uint32_t error;
             const char* says;
+            const char* then;
         } rows[] = {
-            {5, "5 DEFAULT in "},
-            {14, "14 PAGE_TIMEOUT in "},
-            {1, "1 TIMEOUT in "},
-            {2, "2 BUSY in "},
+            {5, "5 DEFAULT in ", "its app may have stopped listening since, or something else went wrong; it is not "
+                                 "dialled by a poll for 30 s"},
+            {14, "14 PAGE_TIMEOUT in ", ": the phone is not in reach, and it is not dialled by a poll for 30 s"},
+            {1, "1 TIMEOUT in ", " ms: it is not dialled by a poll for 30 s"},
+            {10, "10 ", " ms: again in 15 s"},
+            {2, "2 BUSY in ", "its node is not there: again later"},
         };
         for (size_t i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
             Dialler d("dial-answers");
@@ -1507,6 +1520,7 @@ static void testDial() {
             d.start();
             d.dial();
             CHECK_IN(d.trace.text(), sawWithin(d.trace, std::string("phone 1 (asked for): the car's dial answered ") + rows[i].says, 2000));
+            CHECK_IN(d.trace.text(), d.trace.logged(rows[i].then));
             pause(200);
             CHECK(!d.trace.saw("nbtapp opened") && acceptWithin(*d.listener, 50) == 0 && !d.trace.saw("gap disconnect"));
         }
@@ -2130,7 +2144,8 @@ static void testDialAsk() {
         CHECK(d.trace.at("gap query") < d.trace.at("gap connect"));
         CHECK(!d.trace.logged("00:11:22") && !d.trace.logged("001122"));
     }
-    {   // no answer to an ask in its time: as not listed; the third in a row backs the phone off
+    {   // no answer to an ask in its time: as not listed, and nothing held against the phone: the next poll asks
+        // again, however many came. The third in a row is said, once
         Dialler d("ask-no-answer");
         d.ours.set(std::vector<std::string>(1, kDialled));
         d.config.dial.pollFirstMs = d.config.dial.pollLaterMs = 100;
@@ -2138,16 +2153,21 @@ static void testDialAsk() {
         d.gap.answersQuery = false;
         d.start();
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: 3 asks of its service list in a row had an error or no "
-                                                    "answer: polls leave it alone for 30 s", 3000));
+                                                    "answer; polls go on asking it", 3000));
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap query", 5, 3000));
         CHECK(d.trace.loggedCount("no answer to the ask for its service list in 500 ms") == 1);
-        CHECK(d.trace.count("gap query") == 3 && !d.trace.saw("gap connect"));
-        pause(600);
-        CHECK(d.trace.count("gap query") == 3);   // backed off
+        CHECK(d.trace.loggedCount("asks of its service list in a row") == 1 && !d.trace.saw("gap connect"));
+        CHECK(!d.trace.logged("polls leave it alone"));
         SerialStatus st = d.listener->serialStatus();
-        CHECK(st.asks == 3 && st.asksNoAnswer == 3 && st.dials == 0);
-        // A forced dial still asks; its answer comes late, as another client's would, and is taken.
+        CHECK(st.asks >= 5 && st.asksNoAnswer >= 4 && st.dials == 0);
+        // Not the agent's any more: polls stop asking it, and once the last ask's time is over a forced dial asks; its
+        // answer comes late, as another client's would, and is taken.
+        d.ours.set(std::vector<std::string>());
+        double end = monoNow() + 2.0;
+        while (d.listener->serialStatus().dialState != "idle" && monoNow() < end) pause(5);
+        unsigned asked = d.trace.count("gap query");
         d.dial();
-        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap query", 4, 2000));
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap query", asked + 1, 2000));
         d.gap.queryReply("66:77:88:99:AA:BB", true);   // another phone's: passed over
         pause(100);
         CHECK(!d.trace.saw("gap connect"));
@@ -2186,6 +2206,28 @@ static void testDialAsk() {
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "the car answered the ask for its service list with 1 TIMEOUT: "
                                                     "taken as not listening", 2000));
         CHECK(!d.trace.saw("gap connect") && d.listener->serialStatus().askErrors == 1);
+    }
+    {   // a rejection of the ask by the car's Bluetooth service, and a reply that cannot be read, are each said as what
+        // they are: as not listed, both, and counted as errors
+        Dialler d("ask-rejected");
+        d.gap.queryRejected = true;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (asked for): the car's Bluetooth service rejected the ask for "
+                                                    "its service list: taken as not listening, and it is not dialled", 2000));
+        CHECK(d.trace.logged("the Bluetooth server rejected ServiceListQuery (type 0x202)"));
+        CHECK(!d.trace.logged("a reply not read") && !d.trace.saw("gap connect"));
+        double end = monoNow() + 2.0;
+        while (d.listener->serialStatus().dialState != "idle" && monoNow() < end) pause(5);
+        d.gap.queryRejected = false;
+        d.gap.queryUnread = true;
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (asked for): the car answered the ask for its service list "
+                                                    "with a reply not read: taken as not listening, and it is not dialled",
+                                           2000));
+        CHECK(d.trace.loggedCount("rejected the ask") == 1 && !d.trace.saw("gap connect"));
+        CHECK(d.listener->serialStatus().askErrors == 2 && d.listener->serialStatus().asksNoAnswer == 0);
+        CHECK(!d.trace.logged("00:11:22") && !d.trace.logged("001122"));
     }
     {   // an ask that is ended is said when its reason differs from that phone's last ended ask, and otherwise only
         // counted, with a record apart from the answers': ended asks between lists without the service bring no line
@@ -3440,6 +3482,98 @@ static void testPhoneOpenedLeft() {
     }
 }
 
+// A dial that does not give the agent a link, kDialFailsToUnmark times in a row for a phone that a dialled link has
+// reached before: the mark goes from the record of paired phones, on the agent's thread, and the phone's own links
+// are decided on again; the next dialled link the app takes sets it again.
+static void testUndialled() {
+    const std::string id(32, '1');
+    Car car("{\"version\":1,\"phones\":[{\"phoneId\":\"" + id + "\",\"name\":\"Test phone\",\"key\":\"" +
+            std::string(64, '3') + "\",\"pairedAt\":3,\"address\":\"00:11:22:33:44:55\",\"dialled\":true}]}\n");
+    std::string file = car.platform.stateDir() + "/phones.json";
+    PhoneAddressList* ours = car.agent.phoneAddresses();
+    CHECK(ours->dialledBefore(kDialled));
+    car.listener.stop();
+    // A program declared for a serial service runs, so the rule leaves the phone's own links while the mark holds.
+    Machine machine(car.dir + "/machine");
+    Store store(&machine);
+    SerialServices services(&machine, &store, &car.trace);
+    services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+    machine.running = "radiod";
+    SerialConfig config = configFor(car.dir);
+    config.dial.on = true;
+    config.dial.node = car.dir + "/nbtapp";
+    config.dial.pollFirstMs = config.dial.pollLaterMs = 3600000;   // the first poll only, at the start
+    Node node(config.dial.node);
+    car.gap.dialNode = &node;
+    car.gap.connectError = 5;
+    car.gap.phones.push_back(carPhone(kDialled, kConnConnected, 7));
+    SerialListener listener(&car.gap, &car.gate, &car.trace, config);
+    services.setRemover(&listener);
+    listener.setServices(&services);
+    listener.setPhoneAddresses(ours);
+    car.agent.addListener(&listener);
+    car.agent.setSerialDial(&listener);
+    std::string why;
+    CHECK_IN(why, listener.start(&why));
+    car.gap.attach();
+    CHECK(listener.phoneOpenedLeft(kDialled));
+    // The poll at the start, then two forced dials: each answered 5.
+    for (unsigned i = 1; i <= kDialFailsToUnmark; ++i) {
+        if (i > 1) CHECK_IN(why, listener.dialNow(&why) == 1);
+        CHECK_IN(car.trace.text(), countWithin(car.trace, "gap connect BtCtrl nbtapp", i, 3000));
+        double end = monoNow() + 2.0;
+        while (listener.serialStatus().dialState != "idle" && monoNow() < end) pause(5);
+        if (i < kDialFailsToUnmark) CHECK(!car.trace.logged("dials in a row gave the agent no link"));
+    }
+    CHECK_IN(car.trace.text(), sawWithin(car.trace, "phone 1: 3 dials in a row gave the agent no link: the mark that a "
+                                                    "dialled link has reached its app is given up, and a link the phone "
+                                                    "opens itself is decided on again as any other", 2000));
+    // The agent's thread clears it, at its next turn.
+    double end = monoNow() + 3.0;
+    while (car.agent.phones().find(id)->dialled && monoNow() < end) car.agent.turn(10);
+    CHECK(!car.agent.phones().find(id)->dialled && !ours->dialledBefore(kDialled) && ours->has(kDialled));
+    CHECK_IN(testutil::readFile(file), testutil::readFile(file).find("dialled") == std::string::npos);
+    CHECK(!listener.phoneOpenedLeft(kDialled));
+    // A fourth failure says nothing more, and hands nothing more over.
+    CHECK_IN(why, listener.dialNow(&why) == 1);
+    CHECK_IN(car.trace.text(), countWithin(car.trace, "gap connect BtCtrl nbtapp", 4, 3000));
+    end = monoNow() + 2.0;
+    while (listener.serialStatus().dialState != "idle" && monoNow() < end) pause(5);
+    CHECK(car.trace.loggedCount("dials in a row gave the agent no link") == 1 && listener.takeUndialled().empty());
+
+    // The phone's own link is decided on, and is the agent's.
+    Node opened(car.dir + "/btspp", 0);
+    car.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+    opened.appear();
+    PhoneApp own(opened);
+    CHECK_IN(car.trace.text(), car.sessionsWithin(1, 3000));
+    CHECK(car.trace.logged("btspp0: it opened with the magic bytes, so the link is the agent's"));
+    CHECK(!car.trace.logged("left to another program") && listener.serialStatus().leftUnread == 0);
+    own.peer->close("done");
+    CHECK(car.sessionsWithin(0, 3000));
+    CHECK(waitForSerialLinks(3000));
+
+    // A dial the app takes marks the phone again.
+    car.gap.connectError = 0;
+    unsigned dials = car.trace.count("gap connect BtCtrl nbtapp");
+    end = monoNow() + 3.0;
+    while (listener.dialNow(&why) == 0 && monoNow() < end) pause(20);
+    CHECK_IN(car.trace.text(), countWithin(car.trace, "gap connect BtCtrl nbtapp", dials + 1, 3000));
+    PhoneApp dialled(node);
+    CHECK_IN(car.trace.text(), car.sessionsWithin(1, 3000));
+    CHECK(car.agent.phones().find(id)->dialled && ours->dialledBefore(kDialled) && listener.phoneOpenedLeft(kDialled));
+    CHECK_IN(testutil::readFile(file), testutil::readFile(file).find("\"dialled\":true") != std::string::npos);
+    dialled.peer->close("done");
+    node.vanish();
+    car.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+    CHECK(car.sessionsWithin(0, 3000));
+    CHECK(!car.trace.logged("00:11:22") && !car.trace.logged("001122") && !car.trace.logged("Test phone"));
+    car.agent.setSerialDial(0);
+    listener.stop();
+    services.setRemover(0);
+    CHECK(waitForSerialLinks(3000));
+}
+
 // ---- the node's reader ----------------------------------------------------------------------------------------------
 
 // What a stand-in for the car's Bluetooth stack holds for a node: bytes the phone sent that wait ahead of the node,
@@ -3942,6 +4076,11 @@ static void testDialOptions() {
         CHECK_IN(line, has(line, "or up to 1000 ms after it was answered, is not counted as a refusal") &&
                            has(line, "the car's device list is waited for 3000 ms") && has(line, "15 s at most in all") &&
                            has(line, "registered again at once if it has gone"));
+        // An ask that misses holds nothing back; a dial that fails backs the phone off; three take its mark away.
+        CHECK_IN(line, has(line, "one with no answer or an error is as one that does not name it and holds nothing back") &&
+                           has(line, "a phone whose dial the car answered with another failure or did not answer") &&
+                           has(line, "After 3 dials of a phone in a row that gave the agent no link") &&
+                           !has(line, "three in a row"));
         CHECK(parseDialPoll("5,60,20", &c));
         CHECK(has(describeDial(c), "polls every 5 s for 60 s after"));
         c.on = false;
@@ -4134,6 +4273,7 @@ int main(int argc, char** argv) {
     testHold();
     testLeftUnread();
     testPhoneOpenedLeft();
+    testUndialled();
     printf("test_serial: ok\n");
     return 0;
 }

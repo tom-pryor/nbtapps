@@ -1626,8 +1626,9 @@ int main() {
     }
 
     // 25. ServiceListQuery: sent with the phone's address; every reply of its id is told, whoever's query it answers;
-    //     one that names no phone, cannot be read, or a rejection names the phone of ours that waits. Nothing is logged
-    //     but a rejection and the first reply that cannot be read, and never an address.
+    //     one that names no phone, cannot be read, or a rejection names the phone of ours that waits, and a rejection
+    //     says that it is one. Nothing is logged but a rejection and the first reply that cannot be read, and never an
+    //     address.
     {
         struct Reply {
             static std::vector<uint8_t> of(const char* address, uint32_t error, const char* service) {
@@ -1672,14 +1673,17 @@ int main() {
         r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &p[0], 10);
         r.gap.events->gapMessage(kTypeResponse, kRspServiceListQuery, &p[0], 10);
         CHECK(r.seen.lists.size() == 6 && !r.seen.lists[4].ok && r.seen.lists[4].error == kNoError &&
-              r.seen.lists[4].address == "00:11:22:33:44:55" && r.seen.lists[4].services.empty());
+              r.seen.lists[4].address == "00:11:22:33:44:55" && r.seen.lists[4].services.empty() &&
+              !r.seen.lists[4].rejected);
         CHECK(r.seen.lists[5].address.empty());   // ours was answered by the one before
         CHECK(r.seen.said("ServiceListQuery's reply from the Bluetooth server could not be read"));
-        // A rejection: kNoError, ours.
+        // A rejection: kNoError, ours, and told apart from a reply that cannot be read.
         CHECK(r.spp.queryServices("00:11:22:33:44:55"));
         r.gap.took(kReqServiceListQuery);
         r.gap.reject(kTypeRejectedA, kReqServiceListQuery);
         CHECK(r.seen.lists.size() == 7 && r.seen.lists[6].error == kNoError && r.seen.lists[6].address == "00:11:22:33:44:55");
+        CHECK(r.seen.lists[6].rejected && !r.seen.lists[6].ok);
+        CHECK(!r.seen.lists[0].rejected && !r.seen.lists[2].rejected && !r.seen.lists[3].rejected);
         CHECK(r.seen.said("the Bluetooth server rejected ServiceListQuery (type 0x202)"));
         // Not as an unknown answer after a ServiceDisconnect.
         r.gap.inform(kInfServiceRequest, "SPP");

@@ -504,6 +504,10 @@ private:
     // A link the car dialled has come to the agent on `s`, which is to say that its phone's app opened it with the
     // magic bytes: the phone with the link's address is marked `dialled` in the record of paired phones.
     void rememberDial(Session* s);
+    // The phones whose `dialled` mark the Bluetooth serial listener gives up, since the car's dials to them keep
+    // failing (SerialDial::takeUndialled()): the mark is cleared in the record of paired phones, on this thread,
+    // which the record belongs to. At every turn of the loop; the listener's pipe wakes the loop for it.
+    void forgetDials();
     // phoneAddresses() as phones_ has them now.
     void shareAddresses();
     void infoGet(Session* s, int64_t id);

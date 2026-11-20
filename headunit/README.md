@@ -727,7 +727,10 @@ pairing key, and nothing on the link is trusted before that.
   in an answer, not in the log, which names phones as "phone 1", "phone 2" by the order the car's list first had
   them). Once a link the car dialled to a phone has been the agent's (its app opened it with the magic bytes), the
   phone's entry there also says `"dialled": true`, for the rule in "Other programs' links"; an entry without it reads
-  as not yet, and the mark goes when the phone's address changes or the phone is forgotten. While the pairing window
+  as not yet, and the mark goes when the phone's address changes or the phone is forgotten, and when 3 dials of the
+  phone in a row have given the agent no link (an answer that may leave the car's record wrong, below, no answer, or
+  something that was not the app): the log says so once, and the next dialled link the app takes marks it again.
+  That run is counted in memory only. While the pairing window
   is open, every phone connected and paired with the car is dialled, the agent's or not, for a new phone's app to be
   reached. A phone that has lost its pairing with the car is never dialled: the
   car would start a new pairing, with a prompt on both screens. A phone that the car says is being paired anew or
@@ -736,13 +739,15 @@ pairing key, and nothing on the link is trusted before that.
 - **Ask first.** Before every dial, whatever brings it, the car is asked for the phone's service list
   (ServiceListQuery), and the phone is dialled at once only if the list names the agent's service, which the app
   publishes only while it listens. A list without it means the app is not listening: no dial, nothing held against
-  the phone, and the next poll asks again. An error, or no answer within 6 seconds (the car's BUSY to a query never
-  reaches the client), counts as such a list; three in a row back the phone off as below. A phone whose connection
+  the phone, and the next poll asks again. An error, a rejection, or no answer within 6 seconds (the car's BUSY to a
+  query never reaches the client), counts as such a list, and holds nothing back either, however many come in a row:
+  a phone whose app only listens cannot ask for anything itself, so the polls are its only way in. The log says so
+  once when three have come in a row. A phone whose connection
   is below 2 is never asked: a query pages a phone that has no link to the car. Each ask takes the car about a
   second and a half and brings every client of its Bluetooth service three ServiceListChanged informs, which the
-  agent only counts. A failed dial is what the ask is there to avoid: each one the car answers with a failure can
-  leave its record of phone-opened serial links wrong, and it then refuses such links (another program's too)
-  after one of them ends.
+  agent only counts. An ask does no harm; a failed dial is what the ask is there to avoid: each one the car answers
+  with a failure can leave its record of phone-opened serial links wrong, and it then refuses such links (another
+  program's too) after one of them ends. So such a dial backs its phone off, below, and is not made again soon.
 - **When.** One ask or dial at a time, and none while a link of the agent's of either kind is up or being decided
   on, or while the service is not registered; a link that comes, or a phone's request that becomes pending, ends an
   ask, whose answer is then passed over, and the next ask waits for that answer or the 6 seconds. A poll of the
@@ -760,16 +765,17 @@ pairing key, and nothing on the link is trusted before that.
 - **What the car answers.** 0: the link is up, and the agent opens `/dev/nbtapp` and waits 3 seconds for the
   app's magic bytes (the app accepts the link before it writes); with them the link is the agent's, a serial link
   like any other, with no gate, hold or let-go. Anything else on it, or nothing, is something that answered on the
-  agent's UUID and is not the app: the car is asked to end the link (ServiceDisconnect), and polls leave that phone
-  alone for 30 seconds, twice as long each time it happens again, up to 5 minutes, until a link works or the phone's
-  connection changes; its own request and the pairing window still dial it at once. 5: the phone did not take the
-  link although its list named the agent's service just before, so its app may have stopped listening since, or
-  something else went wrong: the next poll asks again. 14: the phone is not in reach, and polls leave it alone until
-  its connection changes. 2: a link on the instance is up already; with its node there, it is a link an
-  agent that was killed left behind, which is ended and never taken, and the phone is dialled afresh; if the car
-  does not end it, the phone is backed off as above instead, and is not dialled again at once. Any other
-  answer: again in 15 seconds. No answer in 95 seconds: the dial is given up, the car is asked to end what may be
-  up, and the phone is backed off.
+  agent's UUID and is not the app: the car is asked to end the link (ServiceDisconnect), and the phone is backed
+  off: polls leave it alone for 30 seconds, twice as long each time it happens again, up to 5 minutes, until a
+  dialled link of the agent's comes up for it or its connection changes; its own request, the pairing window and
+  `nbtctl serial dial` still ask it at once. 5: the phone did not take the link although its list named the agent's
+  service just before, so its app may have stopped listening since, or something else went wrong: backed off. 14:
+  the phone is not in reach: backed off. 2: a link on the instance is up already; with its node there, it is a link
+  an agent that was killed left behind, which is ended and never taken, and the phone is dialled afresh; if the car
+  does not end it, the phone is backed off instead, and is not dialled again at once; with no node there, as 10. 10,
+  or a request the car's Bluetooth service did not take or that could not be sent: again in 15 seconds. Any other
+  answer: backed off. No answer in 95 seconds: the dial is given up, the car is asked to end what may be up, and the
+  phone is backed off.
 - **A dial that still fails.** A dial answered with anything but 0, 2 or 10, or not at all, although the phone's
   list named the agent's service, may have left the car's record of phone-opened links wrong. The log says so once,
   the problem file gets a line, and `serial.status` says `"recordDoubtful": true` until a dial is answered 0, the
@@ -791,13 +797,14 @@ pairing key, and nothing on the link is trusted before that.
 - **A request the dial overtakes.** The car ends a phone's pending request for a link when its own dial to the
   phone comes up, and says so just before the dial's answer. A request ended while the dial is out, or within a
   second of its answer 0, is logged as such and is not counted as a refusal.
-- **The log.** What an ask came to (the app not listening, no answer, an error) is said when it differs from that
+- **The log.** What an ask came to (the app not listening, no answer, an error, a rejection, a reply that could not
+  be read) is said when it differs from that
   phone's last ask, and otherwise only counted, and the next line that differs says how many came; a list that names
   the service again after such asks is said once, with that count, and the dial follows. An ask that is ended (a
   link came, a phone asked for one, or the service is not registered) is said the same way by its reason, apart from the answers, so
   that ended asks between lists without the service bring no line for either. One line for each dial,
   when it is answered: the phone by its number, why it was dialled (poll,
-  the phone asked for a link, pairing window, asked for, again after an answer not understood, afresh), the car's
+  the phone asked for a link, pairing window, asked for, retried, afresh), the car's
   answer by its name and how long it took. The same answer for the same phone again is only counted, and the next
   line that differs says how many times it came. A line each when the car's device list says a phone came, went,
   connected or changed its security. A clean-up of a link left behind that leaves its node there is logged in
@@ -863,6 +870,9 @@ Three things keep the two apart, all in the agent:
   which the decide step below would have read, and the agent's app is reached by the dial, which the request still
   brings. A link that the agent's app opens itself on such a phone is left all the same: that is the rule's cost.
   The mark is a safety net for a car on which dialling does not work: there the phone's own link stays the way in.
+  So it is also given up when dialling stops working for a phone that has it: after 3 dials of the phone in a row
+  that gave the agent no link, the agent clears it in `phones.json`, the log says so once, and the phone's own links
+  are decided on as before the mark, with `phoneOpenedLeft` false for it, until a dialled link is the agent's again.
   In every other case (dial off, no such program, a phone that is not the agent's or that no dial has reached, a
   request that gave no address, a node with no request) the agent goes on as below, and so it does when the rule
   held at the request and no longer does when the node appears. The log says once for each link that it was left
@@ -916,7 +926,7 @@ bluetooth: a link the agent ends keeps its node, read and with what comes droppe
 bluetooth: a serial service that the car's Bluetooth service does not take, or that is not registered for 20 s, is given up: the gate is taken away, and both are set up again 30 s later, for as long as it takes
 bluetooth: while the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, the registration is checked every 30 s by registering it again: switching Bluetooth off and on drops it, and the car says nothing
 bluetooth: while a link is being decided on or is the agent's, the gate also refuses opens by radiod
-bluetooth: the car dials a phone of the agent's that is connected to it and paired with it, on its instance 'nbtapp' (/dev/nbtapp): polls every 10 s for 120 s after such a phone connects or a link of the agent's ends, then every 30 s; at once when the phone asks for a link and no link of the agent's comes in 1000 ms; every phone there every 5 s while the pairing window is open. The app's magic bytes are waited for 3000 ms; a dial with no answer is given up after 95 s, and one answered with an error not understood is tried again after 15 s; a phone on whose UUID something else answers, or whose link left behind the car does not end, is left alone by polls for 30 s, twice as long each time up to 300 s. A dialled link that the agent ends has 5000 ms to be ended by the phone before the car is asked to, and the car's answer is waited for 3000 ms. A phone's request that the car ends while the agent's dial is out, or up to 1000 ms after it was answered, is not counted as a refusal. A registration refused while /dev/nbtapp is there: the car's device list is waited for 3000 ms and the link ended for each phone there, 15 s at most in all, and the service registered again at once if it has gone
+bluetooth: the car dials a phone of the agent's that is connected to it and paired with it, on its instance 'nbtapp' (/dev/nbtapp): polls every 10 s for 120 s after such a phone connects or a link of the agent's ends, then every 30 s; at once when the phone asks for a link and no link of the agent's comes in 1000 ms; every phone there every 5 s while the pairing window is open. Before each dial the car asks the phone for its services, and dials it only if they name the agent's: an ask has 6000 ms to be answered, one with no answer or an error is as one that does not name it and holds nothing back, no poll and no request of the phone's asks it within 8000 ms of its connecting to the car, and its requests bring one ask of it every 10000 ms at most. The app's magic bytes are waited for 3000 ms; a dial with no answer is given up after 95 s, and one answered 10, or BUSY with no link left behind, or whose request the car's Bluetooth service did not take, is tried again after 15 s; a phone whose dial the car answered with another failure or did not answer, on whose UUID something else answers, or whose link left behind the car does not end, is left alone by polls for 30 s, twice as long each time up to 300 s, until a dialled link of the agent's comes up for it or its connection changes. After 3 dials of a phone in a row that gave the agent no link, a link the phone opens itself is no longer left to another program, until a dialled link of the agent's reaches it again. A dialled link that the agent ends has 5000 ms to be ended by the phone before the car is asked to, and the car's answer is waited for 3000 ms. A phone's request that the car ends while the agent's dial is out, or up to 1000 ms after it was answered, is not counted as a refusal. A registration refused while /dev/nbtapp is there: the car's device list is waited for 3000 ms and the link ended for each phone there, 15 s at most in all, and the service registered again at once if it has gone
 ```
 
 It ignores SIGHUP, so it goes on when the SSH session ends; `kill` with its process id stops it. Its log is its

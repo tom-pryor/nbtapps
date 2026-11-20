@@ -514,6 +514,7 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
             pthread_mutex_lock(&mu_);
             ServiceList l;
             l.error = kNoError;
+            l.rejected = true;
             l.address = queryAddress_;
             queryAddress_.clear();
             pthread_mutex_unlock(&mu_);

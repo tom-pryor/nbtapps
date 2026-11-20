@@ -610,6 +610,7 @@ void Agent::turn(int timeoutMs) {
     if (job_.installing() || streamsWaiting()) timeoutMs = 0;
     else if ((!pendingRestart_.empty() || job_.handingOver()) && timeoutMs > 20) timeoutMs = 20;
     serve(timeoutMs);
+    forgetDials();
     pumpStreams();
     keepAlive();
     endOverdue();
@@ -636,6 +637,7 @@ void Agent::turn(int timeoutMs) {
 
 void Agent::jobIdle() {
     serve(0);
+    forgetDials();
     pumpStreams();
     keepAlive();
     endOverdue();
@@ -1476,6 +1478,23 @@ void Agent::rememberDial(Session* s) {
     note(linkName(s->number) + ": the car's dial has reached this phone's app, which is kept: a link the phone opens "
          "itself is now left to another program while one that is declared for a serial service runs, or may");
     shareAddresses();
+}
+
+void Agent::forgetDials() {
+    if (serialDial_ == 0) return;
+    std::vector<std::string> gone = serialDial_->takeUndialled();
+    bool any = false;
+    for (size_t i = 0; i < gone.size(); ++i) {
+        std::string why;
+        bool changed = false;
+        if (!phones_.clearDialled(gone[i], &changed, &why)) {
+            note("that the car's dials no longer reach a phone's app could not be kept: " + why);
+            continue;
+        }
+        any = any || changed;
+    }
+    // The listener's log has said it, with the phone's number.
+    if (any) shareAddresses();
 }
 
 void Agent::shareAddresses() { addresses_.set(phones_.addresses(), phones_.dialledAddresses()); }

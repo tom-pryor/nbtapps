@@ -14,6 +14,10 @@
 
 namespace nbt {
 
+// Dials of a phone in a row that gave the agent no link at which its `dialled` mark is given up
+// (DialRules::dialFailures()).
+const unsigned kDialFailsToUnmark = 3;
+
 struct DialConfig {
     bool on;                     // the car dials the agent's phones at all
     unsigned pollFirstMs;        // after a phone has connected to the car, or a link of the agent's has ended: a poll of
@@ -31,9 +35,11 @@ struct DialConfig {
     unsigned pairingRoundMs;     // while the pairing window is open: every phone there is dialled in turn, a round this
                                  // often
     unsigned replyLimitMs;       // a dial with no answer for this long is given up, and its phone backed off
-    unsigned retryMs;            // an answer that is not understood: the phone is dialled again this much later
-    unsigned backOffMs;          // something that is not the app answered on the agent's UUID: the phone is left
-    unsigned backOffMostMs;      // alone by polls this long, twice as long each time it happens again, up to this
+    unsigned retryMs;            // a dial answered 10, or 2 with no node, or whose request was rejected: the phone is
+                                 // asked and dialled again this much later
+    unsigned backOffMs;          // a dial that failed or had no answer, or on which something that is not the app
+    unsigned backOffMostMs;      // answered: the phone is left alone by polls this long, twice as long each time it
+                                 // happens again, up to this
     unsigned magicWaitMs;        // the dialled link: how long the app's magic bytes may take from the open of its node.
                                  // Longer than a phone-opened link's: the app has to accept the link before it writes
     unsigned disconnectWaitMs;   // how long the answer to a ServiceDisconnect of the dial's is waited for; one of any
@@ -96,13 +102,17 @@ inline std::string describeDial(const DialConfig& c) {
              "'nbtapp' (%s): polls every %u s for %u s after such a phone connects or a link of the agent's ends, then "
              "every %u s; at once when the phone asks for a link and no link of the agent's comes in %u ms; every phone "
              "there every %u s while the pairing window is open. Before each dial the car asks the phone for its "
-             "services, and dials it only if they name the agent's: an ask has %u ms to be answered, three in a row "
-             "with no answer or an error back the phone off as below, no poll and no request of the phone's asks it "
-             "within %u ms of its connecting to the car, and its requests bring one ask of it every %u ms at most. "
-             "The app's magic bytes are waited for %u ms; a dial with "
-             "no answer is given up after %u s, and one answered with an error not understood is tried again after %u "
-             "s; a phone on whose UUID something else answers, or whose link left behind the car does not end, is left "
-             "alone by polls for %u s, twice as long each time up to %u s. A dialled link that the agent ends has %u ms "
+             "services, and dials it only if they name the agent's: an ask has %u ms to be answered, one with no "
+             "answer or an error is as one that does not name it and holds nothing back, no poll and no request of "
+             "the phone's asks it within %u ms of its connecting to the car, and its requests bring one ask of it every "
+             "%u ms at most. The app's magic bytes are waited for %u ms; a dial with no answer is given up after %u s, "
+             "and one answered 10, or BUSY with no link left behind, or whose request the car's Bluetooth service did "
+             "not take, is tried again after %u s; a phone whose dial the car answered with another failure or did not "
+             "answer, on whose UUID something else answers, or whose link left behind the car does not end, is left "
+             "alone by polls for %u s, twice as long each time up to %u s, until a dialled link of the agent's comes "
+             "up for it or its connection changes. After %u dials of a phone in a row that gave the agent no link, a "
+             "link the phone opens itself is no longer left to another program, until a dialled link of the agent's "
+             "reaches it again. A dialled link that the agent ends has %u ms "
              "to be ended by the phone before the car is asked to, and the car's answer is waited for %u ms. A phone's "
              "request that the car ends while the agent's dial is out, or up to %u ms after it was answered, is not "
              "counted as a refusal. A registration refused while %s is there: the car's device list is waited for %u ms "
@@ -111,7 +121,7 @@ inline std::string describeDial(const DialConfig& c) {
              c.node.c_str(), c.pollFirstMs / 1000, c.pollFirstForMs / 1000, c.pollLaterMs / 1000, c.signalWaitMs,
              c.pairingRoundMs / 1000, c.askLimitMs, c.settleMs, c.signalAskMs, c.magicWaitMs, c.replyLimitMs / 1000,
              c.retryMs / 1000, c.backOffMs / 1000,
-             c.backOffMostMs / 1000, c.closeWaitMs, c.disconnectWaitMs, c.overtakeMs, c.node.c_str(), c.listWaitMs,
+             c.backOffMostMs / 1000, kDialFailsToUnmark, c.closeWaitMs, c.disconnectWaitMs, c.overtakeMs, c.node.c_str(), c.listWaitMs,
              c.registerCleanupMs / 1000);
     return text;
 }

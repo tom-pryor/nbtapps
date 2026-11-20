@@ -194,14 +194,22 @@ std::vector<std::string> PhoneStore::addresses() const {
 }
 
 bool PhoneStore::setDialled(const std::string& address, bool* changed, std::string* error) {
+    return markDialled(address, true, changed, error);
+}
+
+bool PhoneStore::clearDialled(const std::string& address, bool* changed, std::string* error) {
+    return markDialled(address, false, changed, error);
+}
+
+bool PhoneStore::markDialled(const std::string& address, bool dialled, bool* changed, std::string* error) {
     if (changed != 0) *changed = false;
     std::string shown;
     if (!colonAddress(address, &shown)) return true;
     std::vector<PairedPhone> next = phones_;
     bool differs = false;
     for (size_t i = 0; i < next.size(); ++i) {
-        if (next[i].address != shown || next[i].dialled) continue;
-        next[i].dialled = true;
+        if (next[i].address != shown || next[i].dialled == dialled) continue;
+        next[i].dialled = dialled;
         differs = true;
     }
     if (!differs) return true;
