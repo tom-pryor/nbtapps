@@ -19,6 +19,7 @@ import com.nbtapps.store.data.terminal.TerminalSnapshot
 import com.nbtapps.store.data.terminal.TerminalState
 import com.nbtapps.store.model.ChannelSwitch
 import com.nbtapps.store.ui.detail.sshSwitchError
+import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.navigation.TerminalRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -168,6 +169,11 @@ class TerminalViewModel internal constructor(
     private val terminal: TerminalRepository,
     private val history: CommandHistory,
     name: Flow<String?>,
+    /**
+     * What a shell opened from a button goes through first, as it connects where the app has no link to the head unit:
+     * [com.nbtapps.store.ui.headunits.ConnectGate].
+     */
+    private val guard: ConnectGuard = ConnectGuard.NONE,
     /** Switches SSH access on the head unit on or off, over the link to it: [JobRepository.setChannelSwitch]. */
     private val setSwitch: suspend (on: Boolean) -> Result<ChannelSwitch>,
 ) : ViewModel() {
@@ -179,11 +185,13 @@ class TerminalViewModel internal constructor(
         history: CommandHistory,
         headUnits: HeadUnitRepository,
         jobs: JobRepository,
+        guard: ConnectGuard,
     ) : this(
         savedStateHandle.toRoute<TerminalRoute>().headUnitId,
         terminal,
         history,
         headUnits.headUnit(savedStateHandle.toRoute<TerminalRoute>().headUnitId).map { it?.name },
+        guard,
         { on -> jobs.setChannelSwitch(savedStateHandle.toRoute<TerminalRoute>().headUnitId, SshTunnel.PACKAGE, SshTunnel.CHANNEL, on) },
     )
 
@@ -195,7 +203,7 @@ class TerminalViewModel internal constructor(
     // and never another's that has ended ([TerminalView.OtherClosed]).
     init {
         val now = terminal.state.value
-        if (!(now.active && now.headUnitId == headUnitId)) open()
+        if (!(now.active && now.headUnitId == headUnitId)) openNow()
     }
 
     val uiState: StateFlow<TerminalUiState> =
@@ -220,8 +228,16 @@ class TerminalViewModel internal constructor(
     var field by mutableStateOf(TextFieldValue(""))
         private set
 
-    /** Opens a shell: as the screen comes up, and from Open again and Try again. */
+    /**
+     * Opens a shell, from Open again, Try again and Open terminal: after the question where the connect it makes would
+     * end a terminal or the SSH port of another head unit ([ConnectGuard]).
+     */
     fun open() {
+        viewModelScope.launch { if (guard.mayConnect(headUnitId)) openNow() }
+    }
+
+    /** Opens a shell: as the screen comes up, and once [open] may. */
+    private fun openNow() {
         local.update { it.copy(switchError = null) }
         // The size is the last one the screen gave, or the repository's own until it gives one.
         terminal.open(headUnitId, 0, 0)

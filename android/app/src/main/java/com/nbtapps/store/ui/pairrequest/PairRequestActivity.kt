@@ -12,8 +12,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import com.nbtapps.store.MainActivity
+import com.nbtapps.store.ui.headunits.ConnectGate
+import com.nbtapps.store.ui.headunits.ConnectQuestionDialog
 import com.nbtapps.store.ui.theme.NbtAppTheme
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 /**
  * Where another app hands this one a pairing code: see docs/pairing-code-handover.md. An intent that is not such a
@@ -24,6 +27,10 @@ import dagger.hilt.android.AndroidEntryPoint
 @AndroidEntryPoint
 class PairRequestActivity : ComponentActivity() {
     private val viewModel: PairRequestViewModel by viewModels()
+
+    /** Asks before the connect for the code ends a terminal or the SSH port of another head unit. */
+    @Inject
+    lateinit var connectGate: ConnectGate
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +58,7 @@ class PairRequestActivity : ComponentActivity() {
                     onOpenHeadUnit = { id -> openApp(headUnitId = id) },
                     onClose = ::finish,
                 )
+                ConnectQuestionDialog(connectGate)
             }
         }
     }
