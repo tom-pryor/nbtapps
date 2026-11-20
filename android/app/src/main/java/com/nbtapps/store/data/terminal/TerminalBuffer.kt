@@ -132,14 +132,29 @@ class TerminalBuffer(
     fun text(): String = snapshot().text
 
     /**
-     * Empties it. A character or an escape sequence that the shell has begun is still taken whole from the next piece,
-     * as the shell goes on.
+     * Empties every finished line, and keeps the line being written as it stands, with the cursor where it is: the
+     * user's Clear, with a shell open, whose prompt stays and whose next output goes on in that line. A character or an
+     * escape sequence that the shell has begun is still taken whole from the next piece. With no line being written
+     * nothing is left. [reset] empties it all.
      */
     @Synchronized
     fun clear() {
         done.clear()
+        changed()
+    }
+
+    /**
+     * Empties it whole, the line being written too, and forgets a character or an escape sequence begun: as new, for
+     * the shells of another head unit.
+     */
+    @Synchronized
+    fun reset() {
+        done.clear()
         length = 0
         column = 0
+        resetDecoder()
+        escape = Escape.NONE
+        escapeLength = 0
         changed()
     }
 

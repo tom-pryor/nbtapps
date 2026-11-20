@@ -124,6 +124,12 @@ interface TerminalLink {
 
     /** [block] with the link to [headUnitId], as a use of it: [JobRepository.usingSession]. */
     suspend fun <T> usingSession(headUnitId: String, block: suspend (AgentSession) -> T): Result<T>
+
+    /**
+     * Why [session] ended, settled, where the link's own [reason] is what the shell was told: [JobRepository.endReason],
+     * what the head unit's page shows too. It may wait a moment.
+     */
+    suspend fun endReason(session: AgentSession, reason: String): String = reason
 }
 
 /** The app's link, [JobRepository]'s, as a terminal uses it. */
@@ -134,6 +140,8 @@ class JobTerminalLink(private val jobs: JobRepository) : TerminalLink {
 
     override suspend fun <T> usingSession(headUnitId: String, block: suspend (AgentSession) -> T): Result<T> =
         jobs.usingSession(headUnitId, block)
+
+    override suspend fun endReason(session: AgentSession, reason: String): String = jobs.endReason(session, reason)
 }
 
 /** A shell on a head unit as a terminal uses one: an [SshShell] over its [SshTunnel] ([SshShellOpener]), or a test's. */
@@ -209,7 +217,8 @@ class SshShellOpener(private val identity: SshIdentity, private val user: String
  *
  * However a shell ends, its lines stay, with a line of the app's own that says how ([TerminalText.ended]); the next
  * [open] on the same head unit opens a new shell below them, after another ([TerminalText.NEW_SHELL]). [clear] empties
- * them. An [open] on another head unit empties them first: the lines are of one head unit's shells.
+ * them but the line the shell is writing. An [open] on another head unit empties them whole first: the lines are of
+ * one head unit's shells.
  */
 class TerminalRepository(
     private val link: TerminalLink,
@@ -276,6 +285,10 @@ class TerminalRepository(
         @Volatile
         var heard = 0L
 
+        /** The link's own reason, where the shell, or its opening, ended with the link: settled once the use is over. */
+        @Volatile
+        var linkLost: String? = null
+
         val outgoing = Channel<Outgoing>(Channel.UNLIMITED)
     }
 
@@ -291,7 +304,7 @@ class TerminalRepository(
         synchronized(lock) {
             if (running != null) return
             if (boundTo != headUnitId) {
-                buffer.clear()
+                buffer.reset()
                 boundTo = headUnitId
             }
             if (columns > 0 && rows > 0) size.value = Size(columns, rows)
@@ -336,7 +349,10 @@ class TerminalRepository(
         scope.launch { shell.close() }
     }
 
-    /** Empties the lines. A shell that is open goes on writing below. */
+    /**
+     * Empties the lines but the one being written ([TerminalBuffer.clear]): an open shell's prompt stays, and what it
+     * writes next goes on in that line. With no shell open nothing is left.
+     */
     fun clear() {
         buffer.clear()
         changed()
@@ -381,8 +397,26 @@ class TerminalRepository(
         }
         val connected = connectedTo(id) ?: return TerminalState.Failed(id, NOT_CONNECTED)
         if (!connected.channels) return TerminalState.Unsupported(id)
-        return link.usingSession(id) { session -> over(run, session) }
-            .getOrElse { TerminalState.Failed(id, it.message ?: NOT_CONNECTED) }
+        var used: AgentSession? = null
+        val state = link.usingSession(id) { session ->
+            used = session
+            over(run, session)
+        }.getOrElse { TerminalState.Failed(id, it.message ?: NOT_CONNECTED) }
+        // A lost link's reason, settled as the head unit's page has it, once the link is no longer held for the shell.
+        val lost = run.linkLost ?: return state
+        val session = used ?: return state
+        val settled = link.endReason(session, lost)
+        return when {
+            settled == lost -> state
+            state is TerminalState.Ended && state.how is TerminalEnd.LinkLost -> TerminalState.Ended(id, TerminalEnd.LinkLost(settled))
+            state is TerminalState.Failed -> TerminalState.Failed(id, settled)
+            else -> state
+        }
+    }
+
+    /** Notes where the shell, or its opening, ended with the link ([end]): see [Run.linkLost]. */
+    private fun lostWith(run: Run, end: ChannelEnd?) {
+        if (end is ChannelEnd.LinkLost) run.linkLost = end.reason
     }
 
     private fun connectedTo(headUnitId: String): ConnectionState.Connected? =
@@ -395,8 +429,10 @@ class TerminalRepository(
         val shell = try {
             opener.open(session, opened.columns, opened.rows, scope)
         } catch (e: SshTunnelException) {
+            lostWith(run, (e.failure as? TunnelFailure.Closed)?.end)
             return refused(id, e.failure)
         } catch (e: SshShellException) {
+            lostWith(run, (e.end as? ShellEnd.TunnelCut)?.end)
             return notStarted(id, e.end)
         } catch (e: IOException) {
             return TerminalState.Failed(id, e.message ?: "The terminal couldn't be opened")
@@ -417,6 +453,7 @@ class TerminalRepository(
         }
         changed()
         val end = serve(run, shell, opened)
+        lostWith(run, (end as? ShellEnd.TunnelCut)?.end)
         return ended(id, end, synchronized(lock) { run.closing })
     }
 

@@ -87,6 +87,20 @@ class TerminalRepositoryTest {
         /** The uses of the link now. */
         val inUse = AtomicInteger()
 
+        /** What [endReason] answers, after how long: as the link's own reason where it is not set. */
+        @Volatile
+        var settles: Pair<String, Long>? = null
+
+        /** The reasons [endReason] was asked about, and the uses of the link there were then. */
+        val asked = CopyOnWriteArrayList<Pair<String, Int>>()
+
+        override suspend fun endReason(session: AgentSession, reason: String): String {
+            asked += reason to inUse.get()
+            val (settled, afterMs) = settles ?: return reason
+            delay(afterMs)
+            return settled
+        }
+
         override suspend fun connect(headUnitId: String): Result<Unit> {
             connects += headUnitId
             gate?.await()
@@ -391,6 +405,47 @@ class TerminalRepositoryTest {
     }
 
     @Test
+    fun `a lost link's end waits for the reason the head unit's page settles on, with the link no longer held`() = test { rig ->
+        val shell = rig.opened()
+        rig.link.settles = "This phone's Bluetooth was switched off" to 1_500L
+        shell.end(ShellEnd.TunnelCut(ChannelEnd.LinkLost("The head unit closed the link")))
+        advanceTimeBy(1_000)
+        runCurrent()
+        // Still waiting: nothing is said yet.
+        assertTrue(rig.terminal.state.value is TerminalState.Open)
+        advanceTimeBy(600)
+        rig.settle()
+        assertEquals(TerminalState.Ended(CAR, TerminalEnd.LinkLost("This phone's Bluetooth was switched off")), rig.terminal.state.value)
+        assertEquals(TerminalLine("The link to the head unit ended: This phone's Bluetooth was switched off", mark = true), rig.lines.last())
+        assertEquals(listOf("The head unit closed the link" to 0), rig.link.asked)
+
+        // Where the reason stays the link's own, so does the end.
+        rig.link.settles = null
+        rig.terminal.open(CAR, 80, 24)
+        rig.settle()
+        rig.shell.end(ShellEnd.TunnelCut(ChannelEnd.LinkLost("The head unit closed the link")))
+        rig.settle()
+        assertEquals(TerminalState.Ended(CAR, TerminalEnd.LinkLost("The head unit closed the link")), rig.terminal.state.value)
+
+        // A link lost while the shell opened, the same.
+        rig.link.settles = "This phone's Bluetooth was switched off" to 500L
+        rig.opener.failure = SshShellException(ShellEnd.TunnelCut(ChannelEnd.LinkLost("The head unit closed the link")))
+        rig.terminal.open(CAR, 80, 24)
+        advanceTimeBy(600)
+        rig.settle()
+        assertEquals(TerminalState.Failed(CAR, "This phone's Bluetooth was switched off"), rig.terminal.state.value)
+    }
+
+    @Test
+    fun `an end that is not the link's asks nothing and waits for nothing`() = test { rig ->
+        rig.link.settles = "This phone's Bluetooth was switched off" to 1_500L
+        rig.opened().end(ShellEnd.Exited(0))
+        runCurrent()
+        assertEquals(TerminalState.Ended(CAR, TerminalEnd.Exited(0)), rig.terminal.state.value)
+        assertTrue(rig.link.asked.isEmpty())
+    }
+
+    @Test
     fun `a lost link ends the shell, and the next open connects and opens a new shell below the old lines`() = test { rig ->
         val first = rig.opened()
         first.says("one\r\n")
@@ -568,21 +623,35 @@ class TerminalRepositoryTest {
     }
 
     @Test
-    fun `clear empties the lines, and an open on another head unit begins with none`() = test { rig ->
+    fun `clear empties the lines but the prompt, and an open on another head unit begins with none`() = test { rig ->
         val shell = rig.opened()
-        shell.says("one\ntwo")
+        shell.says("one\r\ntwo\r\n$ ")
         rig.settle()
         val before = rig.terminal.lines.value.revision
         rig.terminal.clear()
         rig.settle()
-        assertEquals(emptyList<TerminalLine>(), rig.lines)
+        // The prompt stays, and Copy all gives what is shown.
+        assertEquals(listOf("$ "), rig.texts)
+        assertEquals("$ ", rig.terminal.text())
         assertNotEquals(before, rig.terminal.lines.value.revision)
-        // The line being written went with the rest.
-        shell.says("\nthree")
+        // The echo goes on in the prompt's line.
+        shell.says("ls\r\nthree\r\n$ ")
         rig.settle()
-        assertEquals(listOf("", "three"), rig.texts)
+        assertEquals(listOf("$ ls", "three", "$ "), rig.texts)
 
+        // Once the shell has ended, its lines are all finished: Clear leaves nothing.
         rig.terminal.close()
+        rig.settle()
+        rig.terminal.clear()
+        rig.settle()
+        assertEquals(emptyList<TerminalLine>(), rig.lines)
+        assertEquals("", rig.terminal.text())
+
+        // An open on another head unit drops the line being written too.
+        rig.terminal.open(CAR, 80, 24)
+        rig.settle()
+        rig.shell.says("$ ")
+        rig.shell.end(ShellEnd.ServerClosed)
         rig.settle()
         assertTrue(rig.lines.isNotEmpty())
         rig.link.connection.value = connected("other")
@@ -590,6 +659,9 @@ class TerminalRepositoryTest {
         rig.settle()
         assertEquals(TerminalState.Open("other"), rig.terminal.state.value)
         assertEquals(emptyList<TerminalLine>(), rig.lines)
+        rig.shell.says("x")
+        rig.settle()
+        assertEquals(listOf("x"), rig.texts)
     }
 
     @Test

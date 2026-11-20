@@ -48,6 +48,7 @@ import com.nbtapps.store.data.terminal.SshShellOpener
 import com.nbtapps.store.data.terminal.TerminalRepository
 import com.nbtapps.store.data.update.ApkInstaller
 import com.nbtapps.store.data.update.AppUpdater
+import com.nbtapps.store.ui.terminal.CommandHistory
 import com.nbtapps.store.data.update.InstalledApp
 import com.nbtapps.store.data.update.PackageManagerApkInspector
 import com.nbtapps.store.data.update.SessionApkInstaller
@@ -164,6 +165,7 @@ abstract class AppModule {
             installed: InstalledApp,
             installer: ApkInstaller,
             jobs: JobRepository,
+            terminal: TerminalRepository,
             @ApplicationScope scope: CoroutineScope,
         ): AppUpdater = AppUpdater(
             source = source,
@@ -173,7 +175,13 @@ abstract class AppModule {
             installer = installer,
             busy = { jobs.job.value?.needsPhone == true },
             scope = scope,
+            terminalOpen = { terminal.state.value.active },
         )
+
+        /** The lines sent from the terminal's field, for Up and Down: in memory only, for as long as the process lives. */
+        @Provides
+        @Singleton
+        fun provideCommandHistory(): CommandHistory = CommandHistory()
 
         /** The keys head units issued this phone when it was paired with them, in the Android Keystore. */
         @Provides

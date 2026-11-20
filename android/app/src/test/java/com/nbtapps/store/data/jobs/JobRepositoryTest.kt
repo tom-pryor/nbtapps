@@ -2157,6 +2157,47 @@ class JobRepositoryTest {
     }
 
     @Test
+    fun `the settled reason for a link's end, the page's and a terminal's, waits only where Bluetooth may yet go off`() = test {
+        val closed = "The head unit closed the link"
+        val jobs = listening()
+        assertTrue(jobs.connect("bt").isSuccess)
+        val serial = jobs.usingSession("bt") { it }.getOrThrow()
+
+        // The phone's Bluetooth off before the end: said at once.
+        bluetoothOn.value = false
+        var began = System.nanoTime()
+        assertEquals(bluetoothOff.reason, jobs.endReason(serial, closed))
+        assertTrue(msSince(began) < 500)
+
+        // Off a moment after the end, within the window: that, as soon as it is off.
+        bluetoothOn.value = true
+        began = System.nanoTime()
+        val within = async { jobs.endReason(serial, closed) }
+        delay(300)
+        bluetoothOn.value = false
+        assertEquals(bluetoothOff.reason, within.await())
+        assertTrue(msSince(began) < 2_000L)
+
+        // Not off: the link's own reason, once the window is over, as after the agent is killed.
+        bluetoothOn.value = true
+        began = System.nanoTime()
+        assertEquals(closed, jobs.endReason(serial, closed))
+        assertTrue(msSince(began) >= 2_000L - 50)
+
+        // A link that is not Bluetooth serial: its own reason at once, Bluetooth off or not.
+        val overTcp = JobRepository(headUnits, connector, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L }, bluetoothOn = bluetoothOn)
+        assertTrue(overTcp.connect("car").isSuccess)
+        val tcp = overTcp.usingSession("car") { it }.getOrThrow()
+        began = System.nanoTime()
+        assertEquals(closed, overTcp.endReason(tcp, closed))
+        bluetoothOn.value = false
+        assertEquals(closed, overTcp.endReason(tcp, closed))
+        assertTrue(msSince(began) < 500)
+    }
+
+    private fun msSince(began: Long) = (System.nanoTime() - began) / 1_000_000
+
+    @Test
     fun `after the agent restarts during a job, a link the car opens is the reconnect`() = test {
         val jobs = listening(rejoin = Rejoin(firstAfterMs = 50, pauseMs = 100, giveUpAfterMs = 30_000))
         val stored = stored()

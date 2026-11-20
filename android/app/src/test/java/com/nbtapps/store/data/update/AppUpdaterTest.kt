@@ -46,8 +46,13 @@ class AppUpdaterTest {
             // Each asking takes the next answer, and the last one holds from then on.
             busy = { busy[minOf(asked++, busy.size - 1)] },
             scope = scope,
+            terminalOpen = { terminal[minOf(terminalAsked++, terminal.size - 1)] },
         )
     }
+
+    /** Whether a terminal is open, each time it is asked, as [busy] is. */
+    private var terminal = listOf(false)
+    private var terminalAsked = 0
 
     @After
     fun tearDown() = scope.cancel()
@@ -176,6 +181,25 @@ class AppUpdaterTest {
         updater.start(release)
         handedOver()
         assertArrayEquals(body, installer.handed.single())
+    }
+
+    @Test
+    fun `no update begins while a terminal is open, nor is one handed to Android that a terminal opened during`() {
+        terminal = listOf(true)
+        updater.start(release)
+        assertEquals("A terminal is open on a head unit. Close it, then update the app.", failure())
+        assertEquals(emptyList<String>(), source.opened)
+
+        terminal = listOf(false, true)
+        terminalAsked = 0
+        updater.start(release)
+        updater.state.await("the second refusal") { it is UpdateState.Failed && source.opened.isNotEmpty() }
+        assertTrue(installer.handed.isEmpty())
+
+        // Once it is closed the update goes through.
+        terminal = listOf(false)
+        updater.start(release)
+        handedOver()
     }
 
     @Test

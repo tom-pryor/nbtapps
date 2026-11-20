@@ -91,7 +91,8 @@ interface ApkInstaller {
  *
  * An update ends the app: Android stops it as the new copy takes its place. So none is begun, and none is
  * handed to Android, while a job on a head unit needs the phone ([busy]); the job would lose its link in the
- * middle of a transfer.
+ * middle of a transfer. Nor while a terminal is open or being opened on a head unit ([terminalOpen]), whose shell
+ * would end with the app.
  *
  * The download is kept in [dir], which holds nothing else and is emptied when the app starts: a file there is
  * either this run's or left over from an update that is done with.
@@ -106,6 +107,8 @@ class AppUpdater(
     private val busy: () -> Boolean,
     /** The update runs here, so it goes on when the screen that started it is left. */
     private val scope: CoroutineScope,
+    /** Whether a terminal is open, or being opened, on a head unit right now. */
+    private val terminalOpen: () -> Boolean = { false },
 ) {
     private val current = MutableStateFlow<UpdateState>(UpdateState.Idle)
 
@@ -164,7 +167,7 @@ class AppUpdater(
     }
 
     private suspend fun run(release: AppRelease) {
-        if (busy()) throw IOException(BUSY)
+        checkIdle()
         if (!installer.allowed()) {
             current.value = UpdateState.NeedsPermission
             return
@@ -177,10 +180,16 @@ class AppUpdater(
             }
             file
         }
-        // Asked again: the download took a while, and a job may have begun since.
-        if (busy()) throw IOException(BUSY)
+        // Asked again: the download took a while, and a job or a terminal may have begun since.
+        checkIdle()
         current.value = UpdateState.Installing
         installer.install(apk)
+    }
+
+    /** Fails where a job needs the phone, or a terminal is open: the update would end either with the app. */
+    private fun checkIdle() {
+        if (busy()) throw IOException(BUSY)
+        if (terminalOpen()) throw IOException(TERMINAL_OPEN)
     }
 
     /** The APK of [release] in [dir], whole and with the hash the catalogue gave. */
@@ -218,5 +227,6 @@ class AppUpdater(
 
     private companion object {
         const val BUSY = "A job is running on a head unit. Update the app once it has finished."
+        const val TERMINAL_OPEN = "A terminal is open on a head unit. Close it, then update the app."
     }
 }
