@@ -257,6 +257,7 @@ fun NbtNavHost(
                     onSetUp = setUp,
                     onPairHeadUnit = pairHeadUnit,
                     onOpenSettings = { headUnitId, id -> navController.navigate(SettingsRoute(headUnitId, id)) },
+                    onUninstall = { id -> navController.navigate(JobRoute(removeId = id)) },
                 )
             }
         }

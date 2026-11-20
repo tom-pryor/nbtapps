@@ -109,9 +109,56 @@ data class GetState(
      * one. Its settings are changed over a link to that head unit only ([connected]).
      */
     val settings: Boolean = false,
+    /**
+     * A job that needs the phone is running ([JobView.needsPhone][com.nbtapps.store.data.jobs.JobView.needsPhone]),
+     * on this head unit or another: nothing else is started on a head unit until it has finished.
+     */
+    val busy: Boolean = false,
+    /**
+     * The head unit has an older version than [version] and may take it: see
+     * [PackageStatus.updateAvailable][com.nbtapps.store.data.jobs.PackageStatus.updateAvailable], as the list's row has it.
+     */
+    val updateAvailable: Boolean = false,
+    /** Whether the package can be uninstalled from its page, and if not, why. */
+    val uninstall: UninstallState = UninstallState.None,
 ) {
-    val canInstall: Boolean
+    /** Everything is in place for Install or Update but a job that is running. */
+    val readyToInstall: Boolean
         get() = stored && toDownload.isEmpty() && connected && incompatible == null && asks.isEmpty() && !needsSwitch && !upToDate
+
+    val canInstall: Boolean get() = readyToInstall && !busy
+}
+
+/** Whether the package's page offers to uninstall it from the head unit. */
+sealed interface UninstallState {
+    /** It is not on the head unit: there is nothing to uninstall, and nothing is said of it. */
+    data object None : UninstallState
+
+    /** The Uninstall button is there and may be pressed. */
+    data object Ready : UninstallState
+
+    /** It is installed, and Uninstall cannot be pressed: see [Reason]. */
+    data class Blocked(val reason: Reason) : UninstallState
+
+    enum class Reason {
+        /** The agent: everything else on the head unit needs it, so the page has no button for it. */
+        AGENT,
+
+        /** The app has no link to the head unit: the button is there, greyed. */
+        NO_LINK,
+
+        /** A job that needs the phone is running: the button is there, greyed. */
+        BUSY,
+    }
+}
+
+/** What the page says of uninstalling a package that is [installed], in the order the rules apply. */
+internal fun uninstallState(id: String, installed: Boolean, connected: Boolean, busy: Boolean): UninstallState = when {
+    !installed -> UninstallState.None
+    id == AGENT_PACKAGE_ID -> UninstallState.Blocked(UninstallState.Reason.AGENT)
+    !connected -> UninstallState.Blocked(UninstallState.Reason.NO_LINK)
+    busy -> UninstallState.Blocked(UninstallState.Reason.BUSY)
+    else -> UninstallState.Ready
 }
 
 data class CataloguePackageUiState(
@@ -176,6 +223,7 @@ internal fun cataloguePackageUiState(
     downloads: Map<String, DownloadState>,
     head: Holdings?,
     switchedOn: Set<String>,
+    busy: Boolean = false,
 ): CataloguePackageUiState {
     val index = catalogue.index
     val pkg = index?.packages?.find { it.id == packageId }
@@ -190,7 +238,7 @@ internal fun cataloguePackageUiState(
             DependencyRow(dependency.id, target?.name ?: dependency.id, dependency.version, target != null)
         },
         details = details,
-        get = if (index != null && pkg != null) getState(index, pkg, stored, downloads, head, switchedOn) else null,
+        get = if (index != null && pkg != null) getState(index, pkg, stored, downloads, head, switchedOn, busy) else null,
         prereleaseOn = packageId in switchedOn,
     )
 }
@@ -202,6 +250,7 @@ private fun getState(
     downloads: Map<String, DownloadState>,
     head: Holdings?,
     switchedOn: Set<String>,
+    busy: Boolean,
 ): GetState? {
     // The status is the list's, so that its row says what this page does. With no link, what the head unit had the
     // last time decides what is worth downloading before the car.
@@ -246,6 +295,9 @@ private fun getState(
         needsNewerApp = status.heldBack?.version?.takeIf { status.heldBackByApp },
         headUnitId = head?.headUnitId,
         settings = status.installed != null && head?.installed?.firstOrNull { it.id == pkg.id }?.settings == true,
+        busy = busy,
+        updateAvailable = status.updateAvailable,
+        uninstall = uninstallState(pkg.id, installed = status.installed != null, connected = head?.live == true, busy = busy),
     )
 }
 
@@ -264,20 +316,24 @@ class CataloguePackageViewModel @Inject constructor(
 
     private val details = MutableStateFlow<DetailsState>(DetailsState.Loading)
 
-    /** What the phone holds, and what the head unit the app is working with does. */
+    /**
+     * What the phone holds, what the head unit the app is working with does, and whether a job that needs the phone
+     * is running, as the app's update card tells it.
+     */
     private class Sides(
         val stored: List<StoredPackage>,
         val downloads: Map<String, DownloadState>,
         val head: Holdings?,
+        val busy: Boolean,
     )
 
-    private val sides = combine(store.packages, downloader.downloads, jobs.connection, headUnits.headUnits) { stored, downloads, connection, units ->
-        Sides(stored, downloads, holdings(units, connection))
+    private val sides = combine(store.packages, downloader.downloads, jobs.connection, headUnits.headUnits, jobs.job) { stored, downloads, connection, units, job ->
+        Sides(stored, downloads, holdings(units, connection), busy = job?.needsPhone == true)
     }
 
     val uiState: StateFlow<CataloguePackageUiState> =
         combine(repository.catalogue, details, sides, prereleases.switchedOn) { catalogue, details, sides, switchedOn ->
-            cataloguePackageUiState(catalogue, packageId, details, sides.stored, sides.downloads, sides.head, switchedOn)
+            cataloguePackageUiState(catalogue, packageId, details, sides.stored, sides.downloads, sides.head, switchedOn, sides.busy)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CataloguePackageUiState())
 
     init {

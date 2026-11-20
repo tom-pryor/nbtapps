@@ -61,6 +61,7 @@ fun CataloguePackageScreen(
     onSetUp: () -> Unit,
     onPairHeadUnit: (String) -> Unit,
     onOpenSettings: (headUnitId: String, packageId: String) -> Unit,
+    onUninstall: (packageId: String) -> Unit,
     viewModel: CataloguePackageViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -109,6 +110,7 @@ fun CataloguePackageScreen(
                         onAskSwitch = { asking = self },
                         onAsk = { asking = it },
                         onSettings = { get.headUnitId?.let { onOpenSettings(it, pkg.id) } },
+                        onUninstall = { onUninstall(pkg.id) },
                     )
                 }
                 if (uiState.showsPrereleaseSwitch) {
@@ -246,7 +248,8 @@ private fun CommunityCard(pkg: CataloguePackage, sourceName: String?) {
  * The way from the catalogue to the head unit: download to the phone at home, install in the car. A package out
  * only in pre-releases asks for its switch first ([onAskSwitch]), and a version that needs another package's
  * pre-release asks for that one's ([onAsk]). An installed package with settings has Settings at the right of the
- * card's title, which needs a link to that head unit ([onSettings]).
+ * card's title, which needs a link to that head unit ([onSettings]). An installed package but the agent has
+ * Uninstall, which opens the job that removes it ([onUninstall]).
  */
 @Composable
 private fun GetCard(
@@ -256,8 +259,8 @@ private fun GetCard(
     onAskSwitch: () -> Unit,
     onAsk: (PrereleaseAsk) -> Unit,
     onSettings: () -> Unit,
+    onUninstall: () -> Unit,
 ) {
-    val context = LocalContext.current
     val settings: (@Composable () -> Unit)? = if (get.settings) {
         { TextButton(onClick = onSettings, enabled = get.connected) { Text("Settings") } }
     } else {
@@ -282,51 +285,124 @@ private fun GetCard(
                 )
                 Button(onClick = onAskSwitch) { Text("Install") }
             }
-            return@Section
+        } else {
+            Offer(get, onDownload, onInstall, onAsk)
         }
-        if (get.offeredPrerelease && !get.upToDate) PrereleaseLabel(detail = "Version ${get.version.version}")
-        val downloading = get.downloading
-        when {
-            downloading != null -> {
-                Text("Downloading…")
-                LinearProgressIndicator(
-                    progress = { if (downloading.total > 0) downloading.bytes.toFloat() / downloading.total else 0f },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            get.toDownload.isNotEmpty() -> {
-                val size = Formatter.formatShortFileSize(context, get.toDownload.sumOf { it.version.size })
-                val others = get.toDownload.filter { it.version.sha256 != get.version.sha256 }
-                if (others.isNotEmpty()) {
-                    Text("Also needs ${others.joinToString { "${it.pkg.name} ${it.version.version}" }}.", style = MaterialTheme.typography.bodyMedium)
-                }
-                get.downloadError?.let { Text("The download failed: $it", color = MaterialTheme.colorScheme.error) }
-                Button(onClick = onDownload) { Text(if (get.stored) "Download what it needs ($size)" else "Download ${get.version.version} ($size)") }
-            }
-            else -> Text("Version ${get.version.version} is on this phone, checked and ready to install.")
+        // An installed package can be taken off whatever is on offer, so this comes after either.
+        if (get.uninstall.showsButton) {
+            OutlinedButton(onClick = onUninstall, enabled = get.uninstall == UninstallState.Ready) { Text("Uninstall") }
         }
-        if (get.laterFormat) LaterFeatures()
-        get.needsNewerApp?.let { newer ->
-            Text("Version $newer ${NEEDS_NEWER_APP.lowercase()}.", style = MaterialTheme.typography.bodyMedium)
-        }
-        get.asks.forEach { ask ->
-            Text("Needs ${ask.name} ${ask.version}, which is a pre-release.", style = MaterialTheme.typography.bodyMedium)
-            OutlinedButton(onClick = { onAsk(ask) }) { Text("Turn on pre-releases of ${ask.name}") }
-        }
-        when {
-            get.incompatible != null -> Text(get.incompatible, color = MaterialTheme.colorScheme.error)
-            get.upToDate -> Text("${get.headUnitName} has this version or a newer one.")
-            !get.connected -> Text(
-                "Connect to ${get.headUnitName ?: "a head unit"} to ${if (get.installedVersion != null) "update" else "install"} it, " +
-                    "from its name at the top of this screen. The download needs no car.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            else -> Button(onClick = onInstall, enabled = get.canInstall) {
-                Text(if (get.installedVersion != null) "Update on ${get.headUnitName}" else "Install on ${get.headUnitName}")
-            }
+        listOfNotNull(uninstallLine(get), jobLine(get)).forEach { line ->
+            Text(line, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/**
+ * The part of [GetCard] for a package whose version on offer the user may download and install: the download, what
+ * stands in the way of the install, and the Install or Update button.
+ */
+@Composable
+private fun ColumnScope.Offer(get: GetState, onDownload: () -> Unit, onInstall: () -> Unit, onAsk: (PrereleaseAsk) -> Unit) {
+    val context = LocalContext.current
+    if (get.offeredPrerelease && !get.upToDate) PrereleaseLabel(detail = "Version ${get.version.version}")
+    val downloading = get.downloading
+    when {
+        downloading != null -> {
+            Text("Downloading…")
+            LinearProgressIndicator(
+                progress = { if (downloading.total > 0) downloading.bytes.toFloat() / downloading.total else 0f },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        get.toDownload.isNotEmpty() -> {
+            val size = Formatter.formatShortFileSize(context, get.toDownload.sumOf { it.version.size })
+            val others = get.toDownload.filter { it.version.sha256 != get.version.sha256 }
+            if (others.isNotEmpty()) {
+                Text("Also needs ${others.joinToString { "${it.pkg.name} ${it.version.version}" }}.", style = MaterialTheme.typography.bodyMedium)
+            }
+            get.downloadError?.let { Text("The download failed: $it", color = MaterialTheme.colorScheme.error) }
+            Button(onClick = onDownload) { Text(if (get.stored) "Download what it needs ($size)" else "Download ${get.version.version} ($size)") }
+        }
+        else -> Text("Version ${get.version.version} is on this phone, checked and ready to install.")
+    }
+    if (get.laterFormat) LaterFeatures()
+    get.needsNewerApp?.let { newer ->
+        Text("Version $newer ${NEEDS_NEWER_APP.lowercase()}.", style = MaterialTheme.typography.bodyMedium)
+    }
+    get.asks.forEach { ask ->
+        Text("Needs ${ask.name} ${ask.version}, which is a pre-release.", style = MaterialTheme.typography.bodyMedium)
+        OutlinedButton(onClick = { onAsk(ask) }) { Text("Turn on pre-releases of ${ask.name}") }
+    }
+    val connectLine = connectLine(get)
+    when {
+        get.incompatible != null -> Text(get.incompatible, color = MaterialTheme.colorScheme.error)
+        get.upToDate -> Text("${get.headUnitName} has this version or a newer one.")
+        connectLine != null -> Text(
+            connectLine,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        else -> Button(onClick = onInstall, enabled = get.canInstall) {
+            Text(if (get.installedVersion != null) "Update on ${get.headUnitName}" else "Install on ${get.headUnitName}")
+        }
+    }
+}
+
+/** The Uninstall button is on the card, pressed or greyed: for any package that is installed but the agent. */
+internal val UninstallState.showsButton: Boolean
+    get() = this == UninstallState.Ready ||
+        (this is UninstallState.Blocked && reason != UninstallState.Reason.AGENT)
+
+/**
+ * The line that says to connect, in place of Install or Update, where the version on offer could go on the head unit
+ * but there is no link to it. For an installed package it says that Uninstall needs the link too. Null where the
+ * card says something else there.
+ */
+internal fun connectLine(get: GetState): String? {
+    if (get.needsSwitch || get.incompatible != null || get.upToDate || get.connected) return null
+    val what = when {
+        get.uninstall.showsButton -> "update or uninstall"
+        get.installedVersion != null -> "update"
+        else -> "install"
+    }
+    return "Connect to ${get.headUnitName ?: "a head unit"} to $what it, from its name at the top of this screen. " +
+        "The download needs no car."
+}
+
+/**
+ * The line under Uninstall: why the agent has none, or that it needs a link. Null where there is nothing to say, or
+ * where [connectLine] says it already, or where it waits for a job ([jobLine] says so).
+ */
+internal fun uninstallLine(get: GetState): String? {
+    val blocked = get.uninstall as? UninstallState.Blocked ?: return null
+    return when (blocked.reason) {
+        UninstallState.Reason.AGENT -> AGENT_NOT_UNINSTALLED
+        UninstallState.Reason.NO_LINK -> if (connectLine(get) != null) {
+            null
+        } else {
+            "Connect to ${get.headUnitName ?: "a head unit"} to uninstall it, from its name at the top of this screen."
+        }
+        UninstallState.Reason.BUSY -> null
+    }
+}
+
+internal const val AGENT_NOT_UNINSTALLED = "The agent can't be uninstalled. Everything else on the head unit needs it."
+
+/**
+ * Why buttons that could otherwise be pressed are greyed while a job runs: one line for all of them, naming those
+ * it greys. Null when no job greys any. Install or Update counts only where nothing else stands in its way.
+ */
+internal fun jobLine(get: GetState): String? {
+    val install = get.busy && get.readyToInstall
+    val uninstall = get.uninstall == UninstallState.Blocked(UninstallState.Reason.BUSY)
+    val what = when {
+        install && uninstall -> "Update or uninstall"
+        install -> if (get.installedVersion != null) "Update" else "Install"
+        uninstall -> "Uninstall"
+        else -> return null
+    }
+    return "A job is running on a head unit. $what once it has finished."
 }
 
 @Composable
