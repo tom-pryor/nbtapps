@@ -255,7 +255,7 @@ class CatalogueListTest {
         offer: AppUpdateOffer? = AppUpdateOffer.Available(newer),
         update: UpdateState = UpdateState.Idle,
         jobNeedsPhone: Boolean = false,
-    ) = ui.withAppUpdate(offer, "0.1.0", update, jobNeedsPhone)
+    ) = ui.withAppUpdate(offer, "0.1.0", update, if (jobNeedsPhone) UpdateWait.JOB else null)
 
     private fun card(
         update: UpdateState = UpdateState.Idle,
@@ -265,7 +265,7 @@ class CatalogueListTest {
 
     @Test
     fun `the app's own update has its card while every package is shown`() {
-        assertEquals(AppUpdateView(AppUpdateOffer.Available(newer), "0.1.0", UpdateState.Idle, waitsForJob = false), withUpdate().appUpdate)
+        assertEquals(AppUpdateView(AppUpdateOffer.Available(newer), "0.1.0", UpdateState.Idle), withUpdate().appUpdate)
         assertNull(withUpdate(offer = null).appUpdate)
 
         // It gives way to a search and to a filter, as the agent's card does.
@@ -307,10 +307,26 @@ class CatalogueListTest {
     @Test
     fun `while a job needs the phone the app's card says why the update waits`() {
         val waiting = card(jobNeedsPhone = true)
-        assertTrue(waiting.waitsForJob)
+        assertEquals(UpdateWait.JOB, waiting.waitsFor)
         assertEquals("A job is running on a head unit. Update the app once it has finished.", appUpdateStatus(waiting))
         // The button is there, and the screen shows it switched off.
         assertEquals(AppUpdateAction.UPDATE, appUpdateAction(waiting))
+    }
+
+    @Test
+    fun `while a terminal is open or the SSH port is on the update waits too, a job's reason first`() {
+        assertNull(updateWait(jobNeedsPhone = false, terminalActive = false, portActive = false))
+        assertEquals(UpdateWait.JOB, updateWait(jobNeedsPhone = true, terminalActive = true, portActive = true))
+        assertEquals(UpdateWait.TERMINAL, updateWait(jobNeedsPhone = false, terminalActive = true, portActive = true))
+        assertEquals(UpdateWait.PORT, updateWait(jobNeedsPhone = false, terminalActive = false, portActive = true))
+
+        val terminal = requireNotNull(withUpdate().withAppUpdate(AppUpdateOffer.Available(newer), "0.1.0", UpdateState.Idle, UpdateWait.TERMINAL).appUpdate)
+        assertEquals("A terminal is open on a head unit. Close it, then update the app.", appUpdateStatus(terminal))
+        val port = terminal.copy(waitsFor = UpdateWait.PORT)
+        assertEquals("SSH access for other apps is on. Turn it off, then update the app.", appUpdateStatus(port))
+        assertEquals(AppUpdateAction.UPDATE, appUpdateAction(port))
+        // Once it is underway, the update says how it goes, not what it waits for.
+        assertEquals("Downloading…", appUpdateStatus(port.copy(state = UpdateState.Downloading(0, 1))))
     }
 
     @Test

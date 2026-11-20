@@ -38,6 +38,7 @@ import com.nbtapps.store.ui.pairing.PairingScreen
 import com.nbtapps.store.ui.settings.SettingsScreen
 import com.nbtapps.store.ui.setup.SetupScreen
 import com.nbtapps.store.ui.spptest.SppTestScreen
+import com.nbtapps.store.ui.ssh.SshAccessScreen
 import com.nbtapps.store.ui.terminal.TerminalScreen
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.Serializable
@@ -63,6 +64,10 @@ data class SettingsRoute(val headUnitId: String, val packageId: String)
 /** The terminal on the head unit [headUnitId]: a shell through the SSH package, held by the app when the screen is left. */
 @Serializable
 data class TerminalRoute(val headUnitId: String)
+
+/** "SSH from other apps" for the head unit [headUnitId]: the port on the phone for other SSH clients, and their keys. */
+@Serializable
+data class SshAccessRoute(val headUnitId: String)
 
 @Serializable
 object SppTestRoute
@@ -107,7 +112,8 @@ private val topLevelDestinations = listOf(
  *
  * [headUnitToOpen], when it is not null, is the head unit whose page another screen of the app asked to be shown, as
  * the screen for a handed-over pairing code does: the page is opened, and [onHeadUnitOpened] told. [terminalToOpen] is
- * likewise the head unit whose terminal the notification asked to be shown, and [onTerminalOpened] is told.
+ * likewise the head unit whose terminal the notification asked to be shown, and [onTerminalOpened] is told; and
+ * [sshAccessToOpen] the head unit whose "SSH from other apps" it asked for, with [onSshAccessOpened].
  */
 @Composable
 fun NbtNavHost(
@@ -118,6 +124,8 @@ fun NbtNavHost(
     onHeadUnitOpened: () -> Unit = {},
     terminalToOpen: String? = null,
     onTerminalOpened: () -> Unit = {},
+    sshAccessToOpen: String? = null,
+    onSshAccessOpened: () -> Unit = {},
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
@@ -165,6 +173,13 @@ fun NbtNavHost(
             val top = navController.currentBackStackEntry?.takeIf { it.destination.hasRoute(TerminalRoute::class) }
             if (top?.toRoute<TerminalRoute>()?.headUnitId != terminalToOpen) navController.navigate(TerminalRoute(terminalToOpen))
             onTerminalOpened()
+        }
+    }
+    LaunchedEffect(sshAccessToOpen) {
+        if (sshAccessToOpen != null) {
+            val top = navController.currentBackStackEntry?.takeIf { it.destination.hasRoute(SshAccessRoute::class) }
+            if (top?.toRoute<SshAccessRoute>()?.headUnitId != sshAccessToOpen) navController.navigate(SshAccessRoute(sshAccessToOpen))
+            onSshAccessOpened()
         }
     }
 
@@ -224,7 +239,11 @@ fun NbtNavHost(
                     onOpenLogs = { id -> navController.navigate(LogPullRoute(headUnitId, id)) },
                     onOpenSettings = { id -> navController.navigate(SettingsRoute(headUnitId, id)) },
                     onOpenTerminal = { id -> navController.navigate(TerminalRoute(id)) },
+                    onOpenSshAccess = { id -> navController.navigate(SshAccessRoute(id)) },
                 )
+            }
+            composable<SshAccessRoute> {
+                SshAccessScreen(onBack = { navController.popBackStack() })
             }
             composable<TerminalRoute> {
                 TerminalScreen(

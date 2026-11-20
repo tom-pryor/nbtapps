@@ -24,6 +24,8 @@ import com.nbtapps.store.data.link.SerialDiagnostics
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.data.serialUnavailable
+import com.nbtapps.store.data.ssh.SshPort
+import com.nbtapps.store.data.ssh.SshPortState
 import com.nbtapps.store.data.ssh.SshTunnel
 import com.nbtapps.store.data.terminal.TerminalRepository
 import com.nbtapps.store.data.terminal.TerminalState
@@ -190,7 +192,14 @@ data class HeadUnitDetailUiState(
  * package is installed or [offered]; with none, where the package was installed when the agent last said, and then
  * its switch is not known. [ssh] is what the agent said of the switch, [terminal] the app's terminal.
  */
-internal fun debugCard(page: HeadUnitDetailUiState, offered: Boolean, ssh: SshSwitchUi, terminal: TerminalState, headUnitId: String): DebugCard? {
+internal fun debugCard(
+    page: HeadUnitDetailUiState,
+    offered: Boolean,
+    ssh: SshSwitchUi,
+    terminal: TerminalState,
+    headUnitId: String,
+    port: SshPortState = SshPortState.Off(),
+): DebugCard? {
     val installed = page.installed.any { it.id == SshTunnel.PACKAGE }
     val connected = page.link is LinkState.Connected
     val shown = if (connected) page.channels && (installed || offered) else installed
@@ -202,6 +211,7 @@ internal fun debugCard(page: HeadUnitDetailUiState, offered: Boolean, ssh: SshSw
         switching = ssh.switching,
         error = ssh.error,
         terminalOpen = terminal.active && terminal.headUnitId == headUnitId,
+        port = port.takeIf { it.headUnitId == headUnitId } ?: SshPortState.Off(),
     )
 }
 
@@ -245,6 +255,10 @@ class HeadUnitDetailViewModel internal constructor(
     private val catalogue: Flow<CatalogueState> = flowOf(CatalogueState()),
     /** The packages whose pre-releases are offered. */
     private val switchedOn: Flow<Set<String>> = flowOf(emptySet()),
+    /** The SSH port for other apps, which the Debug card's third row follows. */
+    private val port: Flow<SshPortState> = flowOf(SshPortState.Off()),
+    /** Told when SSH access was switched on or off from the card: [SshPort.noteSwitch] for this head unit. */
+    private val sshSwitched: (Boolean) -> Unit = {},
 ) : ViewModel() {
 
     @Inject
@@ -261,9 +275,11 @@ class HeadUnitDetailViewModel internal constructor(
         terminal: TerminalRepository,
         catalogue: CatalogueRepository,
         prereleases: PrereleaseRepository,
+        port: SshPort,
     ) : this(
         savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope, store.packages,
-        diagnostics, terminal.state, catalogue.catalogue, prereleases.switchedOn,
+        diagnostics, terminal.state, catalogue.catalogue, prereleases.switchedOn, port.state,
+        { on -> port.noteSwitch(savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, on) },
     )
 
     private data class Local(
@@ -325,9 +341,15 @@ class HeadUnitDetailViewModel internal constructor(
         }
 
     /** What the Debug card is made of besides the page: the catalogue, the pre-release switches, the SSH switch, the terminal. */
-    private val debugSide = combine(catalogue, switchedOn, ssh, terminal, ::DebugSide)
+    private val debugSide = combine(combine(catalogue, switchedOn, ssh, terminal, ::DebugSide), port) { side, port -> side.copy(port = port) }
 
-    private data class DebugSide(val catalogue: CatalogueState, val switchedOn: Set<String>, val ssh: SshSwitchUi, val terminal: TerminalState)
+    private data class DebugSide(
+        val catalogue: CatalogueState,
+        val switchedOn: Set<String>,
+        val ssh: SshSwitchUi,
+        val terminal: TerminalState,
+        val port: SshPortState = SshPortState.Off(),
+    )
 
     val uiState: StateFlow<HeadUnitDetailUiState> =
         combine(page, fixes.state, stored, debugSide) { page, fix, stored, side ->
@@ -335,7 +357,7 @@ class HeadUnitDetailViewModel internal constructor(
             page.copy(
                 fix = fix,
                 laterFormat = laterFormat(page.installed, stored),
-                debug = debugCard(page, offered, side.ssh, side.terminal, headUnitId),
+                debug = debugCard(page, offered, side.ssh, side.terminal, headUnitId, side.port),
                 confirmingSsh = side.ssh.confirming,
             )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HeadUnitDetailUiState())
@@ -348,14 +370,19 @@ class HeadUnitDetailViewModel internal constructor(
 
     /**
      * Reads the SSH package's switch whenever a link to this head unit comes up whose agent has channels and the package,
-     * and again when the package's version, whether a job runs on this head unit, or the terminal's state on it changes.
-     * With no such link what the agent said is forgotten.
+     * and again when the package's version, whether a job runs on this head unit, or the terminal's or the SSH port's
+     * state on it changes. With no such link what the agent said is forgotten.
      */
     private suspend fun followSsh() {
-        combine(jobs.connection, jobs.job, terminal) { connection, job, terminal ->
+        combine(jobs.connection, jobs.job, terminal, port) { connection, job, terminal, port ->
             val connected = (connection as? ConnectionState.Connected)?.takeIf { it.headUnitId == headUnitId && it.channels }
             connected?.installed?.find { it.id == SshTunnel.PACKAGE }?.let { pkg ->
-                SshLook(pkg.version, job?.headUnitId == headUnitId && !job.ended, terminal.takeIf { it.headUnitId == headUnitId })
+                SshLook(
+                    pkg.version,
+                    job?.headUnitId == headUnitId && !job.ended,
+                    terminal.takeIf { it.headUnitId == headUnitId },
+                    port.takeIf { it.headUnitId == headUnitId },
+                )
             }
         }.distinctUntilChanged().collectLatest { look ->
             if (look == null) ssh.update { it.copy(on = null, connections = null, error = null) } else readSsh()
@@ -363,7 +390,7 @@ class HeadUnitDetailViewModel internal constructor(
     }
 
     /** What a reading of the switch follows: see [followSsh]. */
-    private data class SshLook(val version: String, val jobRunning: Boolean, val terminal: TerminalState?)
+    private data class SshLook(val version: String, val jobRunning: Boolean, val terminal: TerminalState?, val port: SshPortState?)
 
     /**
      * Reads the switch, for [followSsh]: an answer also puts away the line of a refusal, which was of a moment that has
@@ -407,7 +434,11 @@ class HeadUnitDetailViewModel internal constructor(
         viewModelScope.launch {
             sshLock.withLock {
                 jobs.setChannelSwitch(headUnitId, SshTunnel.PACKAGE, SshTunnel.CHANNEL, on)
-                    .onSuccess(::tookSsh)
+                    .onSuccess { answer ->
+                        tookSsh(answer)
+                        // The port for other apps goes off at once with it.
+                        sshSwitched(answer.on)
+                    }
                     .onFailure { failure ->
                         ssh.update { it.copy(error = sshSwitchError(failure)) }
                         jobs.channelSwitch(headUnitId, SshTunnel.PACKAGE, SshTunnel.CHANNEL).onSuccess(::tookSsh)

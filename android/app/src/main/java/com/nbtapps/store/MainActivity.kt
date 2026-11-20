@@ -43,12 +43,16 @@ class MainActivity : ComponentActivity() {
     /** The head unit whose terminal the intent asked for ([EXTRA_TERMINAL]), until it has been opened. */
     private val terminalToOpen = MutableStateFlow<String?>(null)
 
+    /** The head unit whose "SSH from other apps" the intent asked for ([EXTRA_SSH_ACCESS]), until it has been opened. */
+    private val sshAccessToOpen = MutableStateFlow<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // A page that was opened stays open across a rotation: the intent is not taken again.
         if (savedInstanceState == null) {
             headUnitToOpen.value = intent.getStringExtra(EXTRA_HEAD_UNIT)
             terminalToOpen.value = intent.getStringExtra(EXTRA_TERMINAL)
+            sshAccessToOpen.value = intent.getStringExtra(EXTRA_SSH_ACCESS)
         }
         // The theme is dark on every phone, so the bars' icons are light even when the phone is in light mode.
         enableEdgeToEdge(
@@ -60,6 +64,7 @@ class MainActivity : ComponentActivity() {
                 val openSetup by start.openSetup.collectAsStateWithLifecycle()
                 val toOpen by headUnitToOpen.collectAsStateWithLifecycle()
                 val terminal by terminalToOpen.collectAsStateWithLifecycle()
+                val sshAccess by sshAccessToOpen.collectAsStateWithLifecycle()
                 openSetup?.let {
                     NbtNavHost(
                         openSetupAtStart = it,
@@ -68,6 +73,8 @@ class MainActivity : ComponentActivity() {
                         onHeadUnitOpened = { headUnitToOpen.value = null },
                         terminalToOpen = terminal,
                         onTerminalOpened = { terminalToOpen.value = null },
+                        sshAccessToOpen = sshAccess,
+                        onSshAccessOpened = { sshAccessToOpen.value = null },
                     )
                 }
             }
@@ -84,6 +91,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         intent.getStringExtra(EXTRA_HEAD_UNIT)?.let { headUnitToOpen.value = it }
         intent.getStringExtra(EXTRA_TERMINAL)?.let { terminalToOpen.value = it }
+        intent.getStringExtra(EXTRA_SSH_ACCESS)?.let { sshAccessToOpen.value = it }
     }
 
     override fun onResume() {
@@ -116,6 +124,9 @@ class MainActivity : ComponentActivity() {
 
         /** This app's id of a head unit whose terminal is opened, over whatever screen shows: from the notification. */
         const val EXTRA_TERMINAL = "com.nbtapps.store.extra.TERMINAL"
+
+        /** This app's id of a head unit whose "SSH from other apps" is opened: from the notification, while its port is on. */
+        const val EXTRA_SSH_ACCESS = "com.nbtapps.store.extra.SSH_ACCESS"
     }
 
     /**
