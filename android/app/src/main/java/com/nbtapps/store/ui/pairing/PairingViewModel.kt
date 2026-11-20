@@ -17,6 +17,7 @@ import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.ui.headunits.CheckFixFlow
 import com.nbtapps.store.ui.headunits.CheckFixStep
+import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.navigation.PairingRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -121,6 +122,8 @@ class PairingViewModel @Inject constructor(
     private val setup: AutostartSetup,
     @ApplicationScope private val appScope: CoroutineScope,
     private val diagnostics: SerialDiagnostics,
+    /** What the user's connect goes through first: [com.nbtapps.store.ui.headunits.ConnectGate]. */
+    private val guard: ConnectGuard,
 ) : ViewModel() {
 
     /** This app's id of the head unit being paired with. */
@@ -175,12 +178,12 @@ class PairingViewModel @Inject constructor(
 
     /** Opens the app's link to the head unit, for the code to go over. As in the top bar's menu, the attempt is the app's. */
     fun connect() {
-        appScope.launch { jobs.connect(headUnitId) }
+        appScope.launch { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId) }
     }
 
-    /** One connect with the phone dialling the car as well: see [JobRepository.connectFromPhone]. */
+    /** One connect with the phone dialling the car as well, see [JobRepository.connectFromPhone]: after the same question. */
     fun connectFromPhone() {
-        appScope.launch { jobs.connectFromPhone(headUnitId) }
+        appScope.launch { if (guard.mayConnect(headUnitId)) jobs.connectFromPhone(headUnitId) }
     }
 
     /** Runs the set-up again from the top, after it stopped short. */

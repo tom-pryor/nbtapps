@@ -26,6 +26,8 @@ import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.ui.headunits.CheckFixFlow
 import com.nbtapps.store.ui.headunits.CheckFixStep
+import com.nbtapps.store.ui.headunits.ConnectGate
+import com.nbtapps.store.ui.headunits.ConnectGuard
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.io.IOException
 import javax.inject.Inject
@@ -209,6 +211,8 @@ class PairRequestViewModel @Inject constructor(
     connector: LinkConnector,
     @ApplicationScope private val appScope: CoroutineScope,
     private val clock: ElapsedClock,
+    /** What the user's connect goes through first: [ConnectGate]. */
+    private val guard: ConnectGuard = ConnectGuard.NONE,
 ) : ViewModel() {
 
     /** The saved head units, read from the start: Pair and an added car look at them at once. Null until read. */
@@ -467,8 +471,10 @@ class PairRequestViewModel @Inject constructor(
             connection is ConnectionState.Connected && connection.headUnitId == unit.id -> paired(PairRequestStep.AlreadyPaired(unit.name), unit)
             connection is ConnectionState.NeedsPairing && connection.headUnitId == unit.id -> send(unit, mine)
             else -> {
-                step.value = PairRequestStep.Connecting
                 viewModelScope.launch {
+                    // A terminal or the SSH port of another head unit is not ended unasked; on Cancel nothing changes.
+                    if (!guard.mayConnect(unit.id) || mine != request) return@launch
+                    step.value = PairRequestStep.Connecting
                     val result = if (fromPhone) jobs.connectFromPhone(unit.id) else jobs.connect(unit.id)
                     if (mine != request) return@launch
                     val failure = result.exceptionOrNull()

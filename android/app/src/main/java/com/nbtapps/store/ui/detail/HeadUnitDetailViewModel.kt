@@ -40,6 +40,7 @@ import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.ui.headunits.CheckFixFlow
 import com.nbtapps.store.ui.headunits.CheckFixStep
+import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.navigation.HeadUnitDetailRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -260,6 +261,8 @@ class HeadUnitDetailViewModel internal constructor(
     private val port: Flow<SshPortState> = flowOf(SshPortState.Off()),
     /** Told when SSH access was switched on or off from the card: [SshPort.noteSwitch] for this head unit. */
     private val sshSwitched: (Boolean) -> Unit = {},
+    /** What the user's connect goes through first: [com.nbtapps.store.ui.headunits.ConnectGate]. */
+    private val guard: ConnectGuard = ConnectGuard.NONE,
 ) : ViewModel() {
 
     @Inject
@@ -277,10 +280,12 @@ class HeadUnitDetailViewModel internal constructor(
         catalogue: CatalogueRepository,
         prereleases: PrereleaseRepository,
         port: SshPort,
+        guard: ConnectGuard,
     ) : this(
         savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope, store.packages,
         diagnostics, terminal.state, catalogue.catalogue, prereleases.switchedOn, port.state,
         { on -> port.noteSwitch(savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, on) },
+        guard,
     )
 
     private data class Local(
@@ -465,13 +470,14 @@ class HeadUnitDetailViewModel internal constructor(
         local.update { it.copy(serial = status) }
     }
 
+    /** Connect, after the question where a terminal or the SSH port of another head unit would end ([ConnectGuard]). */
     fun connect() {
-        viewModelScope.launch { jobs.connect(headUnitId) }
+        viewModelScope.launch { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId) }
     }
 
-    /** One connect with the phone dialling the car as well: see [JobRepository.connectFromPhone]. */
+    /** One connect with the phone dialling the car as well, see [JobRepository.connectFromPhone]: after the same question. */
     fun connectFromPhone() {
-        viewModelScope.launch { jobs.connectFromPhone(headUnitId) }
+        viewModelScope.launch { if (guard.mayConnect(headUnitId)) jobs.connectFromPhone(headUnitId) }
     }
 
     /** What "Copy diagnostics" copies, where the connect failed: see [SerialDiagnostics.report]. */

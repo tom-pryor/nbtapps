@@ -21,6 +21,7 @@ import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.model.InstallTarget
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RemoveTarget
+import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.navigation.JobRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -98,6 +99,8 @@ class JobViewModel @Inject constructor(
     private val store: PackageStore,
     private val downloader: PackageDownloader,
     private val prereleases: PrereleaseRepository,
+    /** What the user's connect goes through first: [com.nbtapps.store.ui.headunits.ConnectGate]. */
+    private val guard: ConnectGuard,
 ) : ViewModel() {
 
     private val route = savedStateHandle.toRoute<JobRoute>()
@@ -208,13 +211,15 @@ class JobViewModel @Inject constructor(
     /** Opens the link again after it dropped. A job that paused goes on by itself once the link is back. */
     fun reconnect() {
         val headUnitId = uiState.value.job?.headUnitId ?: return
-        act { jobs.connect(headUnitId) }
+        // On Cancel at the question nothing is done, and nothing is said.
+        act { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId) else Result.success(Unit) }
     }
 
     /** One connect with the phone dialling the car as well: see [JobRepository.connectFromPhone]. */
     fun connectFromPhone() {
         val headUnitId = uiState.value.job?.headUnitId ?: return
-        act { jobs.connectFromPhone(headUnitId) }
+        // After the same question as [reconnect]; on Cancel nothing is done, and nothing is said.
+        act { if (guard.mayConnect(headUnitId)) jobs.connectFromPhone(headUnitId) else Result.success(Unit) }
     }
 
     /** [kind] is `hmi` or `reboot`. */
