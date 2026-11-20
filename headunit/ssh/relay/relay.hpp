@@ -33,14 +33,17 @@
 // slot (step 3) is free once it has ended: its server's end closed and the SIGHUP sent, not when the SIGKILL is.
 //
 // The pty driver (QNX: /bin/devc-pty, which may not be there; elsewhere none, for ptys are always there). At a keys
-// message, with no driver of the relay's own running, it runs `devc-pty -n 4`, which returns at once while the
-// driver runs on under a new pid that is not the relay's child. So the process list is taken first, and every
-// kDriverLookEveryMs for kDriverLookMs the relay looks for a process that was not in it and runs a program of the
-// driver's file name; connections whose keys come meanwhile wait with the first, and all go on when it is found or
-// the time is over. The relay signals only a driver it found so, and only while that pid still has the start time
-// and the program name it had. kDriverIdleMs after the last connection has ended (no connection is left that has
-// not ended) it sends the driver SIGTERM, and SIGKILL kKillAfterMs later if it is still there; a connection
-// meanwhile keeps it, and one whose keys come while it is being ended sends the SIGKILL at once and starts another.
+// message, with no driver of the relay's own running, it runs `devc-pty -n 4`. On QNX that detaches: the relay is
+// told its child has ended while the driver runs on under the same pid. A driver could as well run on under a new
+// pid that its command starts. So the process list is taken first, and every kDriverLookEveryMs for kDriverLookMs
+// the relay looks for a process that was not in it, has not ended and runs a program of the driver's file name:
+// the command's own process once it is told ended and still runs (or at the end of the look if it still runs), or
+// the one other such process while the command's own does not run beside it (driver.cpp, lookForDriver).
+// Connections whose keys come meanwhile wait with the first, and all go on when it is found or the time is over.
+// The relay signals only a driver it found so, and only while that pid still has the start time and the program
+// name it had. kDriverIdleMs after the last connection has ended (no connection is left that has not ended) it
+// sends the driver SIGTERM, and SIGKILL kKillAfterMs later if it is still there; a connection meanwhile keeps it,
+// and one whose keys come while it is being ended sends the SIGKILL at once and starts another.
 // A driver that has gone by itself is noticed (at a keys message, and with the notes of the sessions) and started
 // again at the next connection. A start that found none is not tried again for kDriverRetryMs.
 //
@@ -199,7 +202,7 @@ private:
     // The pty driver (driver.cpp).
     bool driverWait(long long now);
     void startDriver(long long now);
-    void lookForDriver(long long now);
+    void lookForDriver(long long now, bool last);
     void driverDecided(long long now);
     bool driverAlive();
     bool isOurDriver(const Recorded& r);
@@ -234,6 +237,7 @@ private:
     Recorded driver_;
     pid_t driverCommand_;        // the command's process, the relay's child, while it has not been collected
     int driverCommandStatus_;    // -1 while it runs or was not run
+    Recorded driverStarted_;     // the command's process with its start time, read as it was started
     std::vector<long> driverBefore_;   // sorted: the pids there before the command
     long long driverLookUntil_, driverNextLook_, driverKillAt_, driverFailedAt_, idleSince_;
 
