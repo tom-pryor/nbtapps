@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 
+#include "channels.hpp"
 #include "ed25519.hpp"
 #include "fsutil.hpp"
 #include "hex.hpp"
@@ -1100,6 +1101,15 @@ bool InstallStep::unpack() {
 bool InstallStep::plan() {
     if (self_ && !checkSelf()) return false;
     if (!checkVarPluginsParent()) return false;
+    // A channel's program listens at ${tmp}/channels/<name>, which has to fit a local socket's address. The id and the
+    // name are bounded, but not so far that every pair fits.
+    for (size_t i = 0; i < m().channels.size(); ++i) {
+        std::string path = channelsDir(platform()->tmpDir(m().id)) + "/" + m().channels[i].name;
+        if (!fitsSocketAddress(path)) {
+            return fail("bad-manifest", "the channel " + m().channels[i].name + " would listen at " + path +
+                                            ", which is too long for a local socket on this head unit");
+        }
+    }
     // Every path another package owns, and every path the old version of this one owns.
     std::map<std::string, std::string> others;
     std::map<std::string, size_t> oldFiles;
@@ -1713,6 +1723,8 @@ bool InstallStep::apply() {
     // on the RAM disk, so an undo leaves it, and the agent makes it again at every start (Agent::init).
     if (!ensureDir("${app}") || !ensureDir("${data}")) return false;
     if (namesTmp(m()) && !fs::makeDirs(platform()->tmpDir(m().id), &why)) return ioFail(why);
+    // The folder the programs of its channels listen in, ${tmp}/channels: on the RAM disk too.
+    if (!m().channels.empty() && !makeChannelsDir(platform()->tmpDir(m().id), &why)) return ioFail(why);
     for (size_t i = 0; i < files_.size(); ++i) {
         const FileAction& a = files_[i];
         if (a.what != FileAction::kPlace) continue;
