@@ -272,15 +272,23 @@ internal fun shownChangelog(rows: List<ChangelogRow>, open: Boolean, website: Bo
 }
 
 /**
- * Every version as it is shown. Closed, one: the installed version where it is in the list, otherwise the newest.
- * [open], the newest [LIST_CAP], and the installed version after them where it is older than those. A package with
- * a [website] is pointed to for the rest.
+ * Every version as it is shown. Closed, one: the installed version where it is in the list, otherwise the newest
+ * version on offer, [newest], which the page's latest version card names. A pre-release the user is not offered is
+ * then not the one row, though the list has it. Where [newest] is not among the rows, the first row stands in.
+ * [open], the newest [LIST_CAP], pre-releases among them, and the installed version after them where it is older
+ * than those. A package with a [website] is pointed to for the rest.
  */
-internal fun shownVersions(rows: List<VersionRow>, open: Boolean, website: Boolean): ShownList<VersionRow> {
+internal fun shownVersions(
+    rows: List<VersionRow>,
+    open: Boolean,
+    website: Boolean,
+    newest: PackageVersion? = null,
+): ShownList<VersionRow> {
     val count = rows.size
     val installed = rows.indexOfFirst { it.installed }
     if (!open) {
-        val one = listOfNotNull(rows.getOrNull(installed) ?: rows.firstOrNull())
+        val offered = newest?.let { version -> rows.firstOrNull { sameVersion(it.version.version, version.version) } }
+        val one = listOfNotNull(rows.getOrNull(installed) ?: offered ?: rows.firstOrNull())
         val toggle = when {
             count <= one.size -> null
             count <= LIST_CAP -> "Show all $count versions"

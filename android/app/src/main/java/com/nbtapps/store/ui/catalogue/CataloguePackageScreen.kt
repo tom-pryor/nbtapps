@@ -145,7 +145,7 @@ fun CataloguePackageScreen(
                 if (uiState.dependencies.isNotEmpty()) DependenciesCard(uiState.dependencies, onOpenPackage)
                 DetailsSections(uiState.details, pkg, installed, website, onRetry = viewModel::retryDetails)
                 val versions = allVersions(pkg, installed)
-                if (versions.size > 1) VersionsCard(versions, website != null)
+                if (versions.size > 1) VersionsCard(versions, website != null, uiState.newest)
                 Text(
                     listOfNotNull(pkg.id, uiState.sourceName).joinToString("\n"),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -356,6 +356,9 @@ private fun GetCard(
             OutlinedButton(
                 onClick = onUninstall,
                 enabled = get.uninstall == UninstallState.Ready,
+                // In the primary colour while it may be pressed: the outlined button's own grey would look
+                // greyed out beside the card's other buttons. Greyed, it keeps the default look.
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
                 contentPadding = ButtonDefaults.ButtonWithIconContentPadding,
             ) { IconLabel(R.drawable.ic_delete, "Uninstall") }
         }
@@ -648,10 +651,14 @@ private fun ChangelogCard(rows: List<ChangelogRow>, website: Boolean) {
     }
 }
 
+/**
+ * Every version, closed to one row: the installed one, or the newest on offer ([newest], the version the latest
+ * version card names).
+ */
 @Composable
-private fun VersionsCard(versions: List<VersionRow>, website: Boolean) {
+private fun VersionsCard(versions: List<VersionRow>, website: Boolean, newest: PackageVersion?) {
     var open by rememberSaveable { mutableStateOf(false) }
-    val shown = shownVersions(versions, open, website)
+    val shown = shownVersions(versions, open, website, newest)
     Section("All versions") {
         shown.rows.forEach { VersionItem(it) }
         shown.extra?.let { row ->

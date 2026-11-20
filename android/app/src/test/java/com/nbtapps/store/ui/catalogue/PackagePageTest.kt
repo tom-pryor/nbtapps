@@ -50,6 +50,8 @@ class PackagePageTest {
             pkg("early", "Early Bird", emptyList(), listOf(version("0.1.0-beta.1"))),
             // Its only version needs an agent newer than the head unit's.
             pkg("later", "Later", listOf(version("1.0.0", ">=2.0.0"))),
+            pkg("both", "Both Kinds", listOf(version("1.0.0"), version("0.9.0")), listOf(version("1.1.0-rc.1"))),
+            pkg("trial", "Trial", emptyList(), listOf(version("0.2.0-beta.1"), version("0.1.0-beta.1"))),
         ),
     )
 
@@ -393,6 +395,48 @@ class PackagePageTest {
         assertEquals("Showing the newest 10 of 14 versions, and the installed one.", shownVersions(outside, open = true, website = false).notice)
     }
 
+    /** Every version of the package [id] as its page shows it, closed or [open], from what the page knows. */
+    private fun versionsOnPage(id: String, switchedOn: Set<String> = emptySet(), head: Holdings? = held("1.1.0"), open: Boolean = false): ShownList<VersionRow> {
+        val page = cataloguePackageUiState(CatalogueState(index = index), id, DetailsState.Loading, emptyList(), emptyMap(), head, switchedOn)
+        val rows = allVersions(requireNotNull(page.pkg), page.get?.installedVersion)
+        return shownVersions(rows, open, website = false, newest = page.newest)
+    }
+
+    @Test
+    fun `closed, every version shows the newest on offer, as the latest version card does, not a pre-release that is not`() {
+        // The switch off: the stable version, though the list has a newer pre-release.
+        val off = versionsOnPage("both")
+        assertEquals(listOf("1.0.0"), off.rows.map { it.version.version })
+        assertFalse(off.rows.single().prerelease)
+        assertEquals("Show all 3 versions", off.toggle)
+
+        // The switch on: the pre-release.
+        val on = versionsOnPage("both", setOf("both"))
+        assertEquals(listOf("1.1.0-rc.1"), on.rows.map { it.version.version })
+        assertTrue(on.rows.single().prerelease)
+        assertEquals("Show all 3 versions", on.toggle)
+
+        // Out only in pre-releases: its newest pre-release.
+        val trial = versionsOnPage("trial")
+        assertEquals(listOf("0.2.0-beta.1"), trial.rows.map { it.version.version })
+        assertEquals("Show all 2 versions", trial.toggle)
+
+        // With no head unit known, the same.
+        assertEquals(listOf("1.0.0"), versionsOnPage("both", head = null).rows.map { it.version.version })
+    }
+
+    @Test
+    fun `closed, the installed version still wins, and open, every version is listed whatever the switch says`() {
+        val installed = versionsOnPage("both", setOf("both"), head = held("1.1.0", has("both", "0.9.0")))
+        assertEquals(listOf("0.9.0"), installed.rows.map { it.version.version })
+        assertTrue(installed.rows.single().installed)
+        assertEquals("Show all 3 versions", installed.toggle)
+
+        val open = versionsOnPage("both", open = true)
+        assertEquals(listOf("1.1.0-rc.1" to true, "1.0.0" to false, "0.9.0" to false), open.rows.map { it.version.version to it.prerelease })
+        assertEquals("Show fewer", open.toggle)
+    }
+
     @Test
     fun `an installed version the catalogue does not list, or none, leaves every version as it is`() {
         for (installed in listOf(null, "0.1.0", "not a version")) {
@@ -404,6 +448,9 @@ class PackagePageTest {
             assertEquals(10, open.rows.size)
             assertEquals("Showing the newest 10 of 14 versions. For the rest, see the package's website.", open.notice)
         }
+        // A newest version that is not among the rows: the first row stands in.
+        assertEquals(listOf("1.14.0"), shownVersions(allVersions(many(14)), open = false, website = true, newest = version("9.9.9")).rows.map { it.version.version })
+
         // Stable and pre-release versions alike are marked.
         val pre = CataloguePackage(id = "p", name = "P", versions = listOf(version("1.0.0")), prereleases = listOf(version("1.1.0-rc.1")))
         assertEquals(listOf("1.1.0-rc.1" to false, "1.0.0" to true), allVersions(pre, installed = "1.0.0").map { it.version.version to it.installed })
