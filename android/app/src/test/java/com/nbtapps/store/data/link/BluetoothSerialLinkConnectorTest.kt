@@ -391,6 +391,8 @@ class BluetoothSerialLinkConnectorTest {
         val connecting = async { live.connector.connect(car, dials = true) }
         val server = radio.nextServer()
         assertTrue(server.awaitAccepting())
+        // The dial runs beside the listener, and may not have made its socket yet.
+        until("the phone's dial made its socket") { radio.sockets.isNotEmpty() }
         assertTrue(radio.fakeSockets.single().connecting.await(10, TimeUnit.SECONDS))
 
         val incoming = FakeSocket()
@@ -452,6 +454,8 @@ class BluetoothSerialLinkConnectorTest {
         val connecting = async { live.connector.connect(car, dials = true) }
         val server = radio.nextServer()
         assertTrue(server.awaitAccepting())
+        // The dial runs beside the listener, and may not have made its socket yet.
+        until("the phone's dial made its socket") { radio.sockets.isNotEmpty() }
         assertTrue(radio.fakeSockets.single().connecting.await(10, TimeUnit.SECONDS))
 
         connecting.cancel()
