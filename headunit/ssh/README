@@ -146,9 +146,10 @@ and Dropbear and sftp-server built from other sources than that commit pins (bui
 version is raised whenever anything the package holds changes, also when only Dropbear or OpenSSH does: a version
 that has been released is never built again with other content.
 
-What it writes on a head unit: the host key, once, in ${data} (hostkey_ed25519, kept until the package's data is
-removed); everything else on the RAM disk, in ${tmp}: the socket, the keys folders, the state file and, by the
-agent, the channel's logs.
+What it writes on a head unit: the host key, once, in ${data} (hostkey_ed25519, and beside it hostkey_ed25519.pub,
+the key tool's copy of the public line, which nothing reads; both kept until the package's data is removed);
+everything else on the RAM disk, in ${tmp}: the socket, the keys folders, the state file and, by the agent, the
+channel's logs.
 
 
 The relay
@@ -176,8 +177,9 @@ $NBT_TMP_DIR/channels/$NBT_CHANNEL (removing a file an earlier run left there; a
 connect to a full queue is refused), writes the state file, begins to end what the state file of a relay that died
 names, and removes every keys folder left in $NBT_TMP_DIR/auth (the folder auth itself, made again at once,
 0700). Then the host key, $NBT_DATA_DIR/hostkey_ed25519: when it is not there it is made with the key tool
-($NBT_APP_DIR/bin/dropbearmulti dropbearkey -t ed25519 -f FILE) and set to 0600; its public line is read with the
-key tool (dropbearkey -y -f FILE), without the tool's comment. Apart from the end of an older relay, this is the
+($NBT_APP_DIR/bin/dropbearmulti dropbearkey -t ed25519 -f FILE) and set to 0600 (the tool also writes the public
+line to FILE.pub, which the relay leaves where it is); its public line is read with the key tool
+(dropbearkey -y -f FILE), without the tool's comment. Apart from the end of an older relay, this is the
 one thing the relay waits for (at most 20 s for each run of the tool), and it comes after the socket is listened
 on, so the
 agent's 5 s for the socket to appear are not spent on it; connections meanwhile wait in the queue. When the key
