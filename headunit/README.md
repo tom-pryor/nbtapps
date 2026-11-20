@@ -694,7 +694,8 @@ make ssh-release KEY=/path/to/package.key              # -> release/pkg/signed/,
   The whole of it is in `ssh/README`, "The relay".
 - **What it writes where.** The host key is made on the head unit the first time the relay starts, and kept in
   `${data}/hostkey_ed25519`, on flash, until the package's data is removed (an upgrade keeps it; so does a removal
-  that keeps the data). Everything else is on the RAM disk, in `${tmp}`: the relay's socket, the keys folders, its
+  that keeps the data), with `hostkey_ed25519.pub` beside it, the key tool's copy of the public line, which nothing
+  reads. Everything else is on the RAM disk, in `${tmp}`: the relay's socket, the keys folders, its
   state file `sshrelay.state`, and the channel's logs `${tmp}/channels/ssh.log` and `ssh.log.1`, which the manifest
   names for a phone to pull.
 - **An SSH client beside `nbtctl`** (on the bench, say) reaches the relay with `nbtctl` as its proxy command:
