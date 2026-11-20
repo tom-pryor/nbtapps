@@ -11,6 +11,10 @@
 //   --no-listen      listens on nothing, and waits to be ended: a program that never takes a connection
 //   --ignore-term    ignores SIGTERM, so that only SIGKILL ends it
 //
+// While a file is at its socket's path with ".hold" added (the socket in $NBT_TMP_DIR/channels/echo: echo.hold), it
+// goes on taking messages and sends nothing back: what it would send waits, and goes once the file has been removed.
+// So a test makes a program whose answers come long after it has taken the messages, with no option in the manifest.
+//
 // It runs until it is ended. It exits with 2 when it cannot listen.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
@@ -46,6 +50,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     say("chan_echo", "listening at " + path);
+    const std::string holdPath = path + ".hold";
     std::vector<Connection> connections;
     std::vector<long long> readAfter;   // per connection: no read before this time
     for (;;) {
@@ -55,11 +60,14 @@ int main(int argc, char** argv) {
         FD_SET(listener, &readable);
         int top = listener;
         long long now = nowMs(), wait = 1000;
+        bool held = access(holdPath.c_str(), F_OK) == 0;
         for (size_t i = 0; i < connections.size(); ++i) {
             Connection& c = connections[i];
             if (!c.closing && now >= readAfter[i]) FD_SET(c.fd, &readable);
             if (!c.closing && now < readAfter[i] && readAfter[i] - now < wait) wait = readAfter[i] - now;
-            if (!c.out.empty()) FD_SET(c.fd, &writable);
+            if (!c.out.empty() && !held) FD_SET(c.fd, &writable);
+            // Answers that wait: the file is looked for again soon.
+            if (!c.out.empty() && held && wait > 50) wait = 50;
             if (c.fd > top) top = c.fd;
         }
         struct timeval tv;

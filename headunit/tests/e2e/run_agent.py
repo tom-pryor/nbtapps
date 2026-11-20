@@ -21,12 +21,13 @@ agent removes, and after each looks at what the agent says and at what is on dis
 answers `nbtctl stop` and closes the link before nbtctl reads, which nbtctl has to take as the answer. It also is a phone on the
 agent's debug TCP link, which the phone app on an emulator uses:
 refused until it is paired, paired by the code `nbtctl pair` prints, let in by `auth`, and forgotten again, and
-told with link.closing why its link closes when it is forgotten and when the agent stops.
+told with link.closing why its link closes when it is forgotten and when the agent stops. Last, on a head unit of
+its own, the test package chan's channels through `nbtctl channel`.
 
 One package is made here: 2.5 MiB that do not compress, so that its archive takes three ranges of the 1 MiB the
 agent asks for at a time and many frames. The others come from tests/make_packages.py.
 """
-import hashlib, hmac, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time, zlib
+import hashlib, hmac, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time, zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
@@ -61,15 +62,16 @@ def check(condition, what, detail=""):
 
 
 class Agent:
-    def __init__(self):
+    def __init__(self, root=None, socket_path=None):
         self.log = open(os.path.join(WORK, "agent.log"), "ab")
         self.log_start = self.log.tell()
+        socket_path = socket_path or SOCKET
         self.process = subprocess.Popen(
-            BENCH + ["--root", HU, "--socket", SOCKET, "--debug-tcp", "0",
+            BENCH + ["--root", root or HU, "--socket", socket_path, "--debug-tcp", "0",
                      "--test-key", os.path.join(ROOT, "tests", "keys", "test-package.pub")],
             stdout=self.log, stderr=self.log)
         for _ in range(400):    # a container takes a moment longer to start than a program
-            if os.path.exists(SOCKET):
+            if os.path.exists(socket_path):
                 return
             if self.process.poll() is not None:
                 break
@@ -764,9 +766,230 @@ def run():
     shutil.rmtree(WORK, ignore_errors=True)
 
 
+class Chan:
+    """`nbtctl channel org.nbtapp.chan CHANNEL ARGS...` as a process, the way an SSH client runs its proxy command: what
+    is written to it goes to its input, its output and its standard error are read as they come, and it is ended with
+    a signal once all that was wanted has come. With read=False its output is closed here at once: a reader that has
+    gone."""
+    running = []    # ended by run_channels() if a check fails first
+
+    def __init__(self, channel, *args, read=True):
+        self.process = subprocess.Popen([os.path.join(BIN, "nbtctl"), "--socket", SOCKET, "channel", "org.nbtapp.chan", channel] +
+                                        list(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        Chan.running.append(self)
+        self.got, self.said = [], []
+        self.readers = [threading.Thread(target=self._read, args=(self.process.stderr, self.said))]
+        if read:
+            self.readers.append(threading.Thread(target=self._read, args=(self.process.stdout, self.got)))
+        else:
+            self.process.stdout.close()
+        for reader in self.readers:
+            reader.start()
+
+    @staticmethod
+    def _read(stream, into):
+        while True:
+            chunk = stream.read1(65536)
+            if not chunk:
+                return
+            into.append(chunk)
+
+    def send(self, data):
+        for at in range(0, len(data), 10000):
+            self.process.stdin.write(data[at:at + 10000])
+        self.process.stdin.flush()
+
+    def end_input(self):
+        self.process.stdin.close()
+
+    def output(self):
+        return b"".join(self.got)
+
+    def errors(self):
+        return b"".join(self.said).decode("utf-8", "replace")
+
+    def wait_for(self, count, seconds=60):
+        """Until `count` bytes have come out, or the time is up, or it has ended. What came."""
+        until = time.time() + seconds
+        while len(self.output()) < count and time.time() < until and self.process.poll() is None:
+            time.sleep(0.02)
+        time.sleep(0.1)    # anything more that would come
+        return self.output()
+
+    def wait(self, seconds=30):
+        """Its exit status, once it has ended by itself."""
+        code = self.process.wait(timeout=seconds)
+        for reader in self.readers:
+            reader.join(timeout=10)
+        Chan.running.remove(self)
+        return code
+
+    def stop(self, number=signal.SIGTERM):
+        """Ends it with a signal; its exit status."""
+        self.process.send_signal(number)
+        return self.wait()
+
+
+def closed_by_controller():
+    """How many times the agent's log says a channel of chan was closed by the controller at its other end."""
+    with open(os.path.join(WORK, "agent.log"), "rb") as f:
+        return len(re.findall(rb": channel org\.nbtapp\.chan [a-z]+, stream \d+ closed: the phone closed it", f.read()))
+
+
+def check_closed_by_controller(before, what):
+    """The agent's log has one more channel closed by the controller than `before`: nbtctl closed it."""
+    for _ in range(100):
+        if closed_by_controller() > before:
+            return
+        time.sleep(0.05)
+    raise Failed(what + ": the agent's log does not say that nbtctl closed the channel")
+
+
+def run_channels():
+    """The test package chan, on a head unit of its own in a short folder: a channel's program listens on a local
+    socket in its ${tmp}, whose path has to fit a local socket's address, which one deep in a checkout passes. Its
+    channels through `nbtctl channel`: the switch of gated, 1 MiB through echo with --raw whose answers come after its
+    input has ended, an answer long after that end, the ends by SIGHUP and by an output that has gone, a job of another
+    package while a channel is open, feed's messages printed and in hex, and a refusal."""
+    global SOCKET
+    os.makedirs(WORK, exist_ok=True)
+    root = tempfile.mkdtemp(prefix="nbt_ch_")
+    stick = os.path.join(root, "stick")
+    os.makedirs(stick)
+    shutil.copy(os.path.join(DATA, "good", "org.nbtapp.chan-1.0.0.nbtpkg"), stick)
+    shutil.copy(os.path.join(DATA, "good", "org.nbtapp.runtime-2.1.0.nbtpkg"), stick)
+    SOCKET = os.path.join(root, "agent.sock")
+    agent = Agent(os.path.join(root, "hu"), SOCKET)
+    try:
+        out = ok("install", "--from", stick, "org.nbtapp.chan")
+        check("job succeeded" in out, "the install of chan", out)
+
+        # The switch: off, so the channel is refused before anything starts; on; off again.
+        check(ok("channel", "status", "org.nbtapp.chan", "gated") == "switched true\non false\nopen 0\n", "a switch that is off")
+        code, out = ctl("channel", "org.nbtapp.chan", "gated")
+        check(code == 1 and "off" in out, "a channel that is switched off", out)
+        check(ok("channel", "on", "org.nbtapp.chan", "gated") == "switched true\non true\nopen 0\n", "switched on")
+        closes = closed_by_controller()
+        gated = Chan("gated", "--raw", "--send", "first, ")
+        gated.send(b"then the rest")
+        gated.end_input()
+        received = gated.wait_for(20)
+        code = gated.stop()
+        check(code == 0 and received == b"FIRST, THEN THE REST", "gated, with --send and --raw", repr(received) + " " + gated.errors())
+        check_closed_by_controller(closes, "gated, with --send and --raw")
+        check(ok("channel", "off", "org.nbtapp.chan", "gated") == "switched true\non false\nopen 0\n", "switched off")
+
+        # 1 MiB through echo, as an SSH client would pass its bytes, its input ended at once, and compared. echo takes
+        # it all and holds its answers (chan_echo.cpp): the end of the input and the credit back do not end nbtctl,
+        # which is still there for the answers once they come, and is ended by a signal, closing the channel.
+        hold = os.path.join(root, "hu", "tmp", "org.nbtapp.chan", "channels", "echo.hold")
+        with open(hold, "wb"):
+            pass
+        sent = os.urandom(1 << 20)
+        closes = closed_by_controller()
+        echo = Chan("echo", "--raw")
+        echo.send(sent)
+        echo.end_input()
+        time.sleep(3)
+        check(echo.process.poll() is None and echo.output() == b"", "1 MiB through echo with --raw: it ended, or wrote, before the answers",
+              "exit status %s, %d bytes, %s" % (echo.process.poll(), len(echo.output()), echo.errors()))
+        os.remove(hold)
+        received = echo.wait_for(len(sent))
+        code = echo.stop()
+        check(code == 0 and received == sent, "1 MiB through echo with --raw: exit status %d, %d bytes back" % (code, len(received)),
+              echo.errors())
+        check_closed_by_controller(closes, "1 MiB through echo with --raw")
+
+        # The end of the input, and the answer a long while after it.
+        with open(hold, "wb"):
+            pass
+        echo = Chan("echo", "--raw")
+        echo.send(b"later")
+        echo.end_input()
+        time.sleep(5)
+        check(echo.process.poll() is None, "an answer long after the end of the input: nbtctl ended first", echo.errors())
+        os.remove(hold)
+        received = echo.wait_for(5)
+        code = echo.stop()
+        check(code == 0 and received == b"later", "an answer long after the end of the input", repr(received) + " " + echo.errors())
+
+        # A hang-up, as an SSH client ends its proxy command: the channel is closed, and the exit status is 0.
+        closes = closed_by_controller()
+        echo = Chan("echo", "--raw")
+        echo.send(b"hang up")
+        received = echo.wait_for(7)
+        code = echo.stop(signal.SIGHUP)
+        check(code == 0 and received == b"hang up" and echo.errors() == "", "--raw ended by SIGHUP: exit status %d" % code,
+              repr(received) + " " + echo.errors())
+        check_closed_by_controller(closes, "--raw ended by SIGHUP")
+
+        # Its output closed before the answer comes: nbtctl closes the channel and says why.
+        closes = closed_by_controller()
+        echo = Chan("echo", "--raw", read=False)
+        echo.send(b"nobody reads this")
+        code = echo.wait()
+        check(code == 1 and "nbtctl: standard output: " in echo.errors(), "--raw with its output closed: exit status %d" % code,
+              echo.errors())
+        check_closed_by_controller(closes, "--raw with its output closed")
+
+        # A job of another package, run from a second controller while the channel is open: its output is the channel's
+        # bytes alone, a line on standard error says the channel is held and another that it goes on, and messages pass
+        # again after the job. With --raw, and the text of a message as a line, whose answer is held until the job is over.
+        held_lines = "nbtctl: the channel is held while a job runs\nnbtctl: the job is over: the channel goes on\n"
+        echo = Chan("echo", "--raw")
+        echo.send(b"before ")
+        check(echo.wait_for(7) == b"before ", "--raw before a job", echo.errors())
+        out = ok("install", "--from", stick, "org.nbtapp.runtime")
+        check("job succeeded" in out and "[1/1] org.nbtapp.runtime" in out, "the install of runtime with a channel open", out)
+        echo.send(b"after")
+        received = echo.wait_for(12)
+        echo.end_input()
+        code = echo.stop()
+        check(code == 0 and received == b"before after" and echo.errors() == held_lines, "--raw through a job of another package",
+              "exit status %d, %r, %s" % (code, received, echo.errors()))
+        with open(hold, "wb"):
+            pass
+        echo = Chan("echo", "--send", "held")
+        for _ in range(100):
+            if ok("channel", "status", "org.nbtapp.chan", "echo") == "switched false\non true\nopen 1\n":
+                break
+            time.sleep(0.05)
+        out = ok("remove", "org.nbtapp.runtime")
+        check("job succeeded" in out, "the removal of runtime with a channel open", out)
+        os.remove(hold)
+        received = echo.wait_for(5)
+        code = echo.stop()
+        check(code == 0 and received == b"held\n" and echo.errors() == held_lines, "a message as a line through a job of another package",
+              "exit status %d, %r, %s" % (code, received, echo.errors()))
+
+        # feed: read only, its messages a line each, then closed by the program.
+        out = ok("channel", "org.nbtapp.chan", "feed")
+        lines = out.splitlines()
+        check(len(lines) == 100 and lines[0] == "message 1 of 100" and lines[-1] == "message 100 of 100", "feed's messages", out[:400])
+        out = ok("channel", "org.nbtapp.chan", "feed", "--hex")
+        check(out.splitlines()[0] == b"message 1 of 100".hex(), "feed's messages in hex", out[:200])
+        code, out = ctl("channel", "org.nbtapp.chan", "none")
+        check(code == 1 and "not-found" in out, "a channel there is not", out)
+        check(ctl("channel", "org.nbtapp.chan")[0] == 2 and ctl("channel", "org.nbtapp.chan", "echo", "--hex", "--raw")[0] == 2,
+              "nbtctl channel with what it does not take")
+        check(ok("channel", "status", "org.nbtapp.chan", "echo") == "switched false\non true\nopen 0\n", "a channel with no switch")
+    finally:
+        for left in list(Chan.running):
+            left.process.kill()
+            left.wait()
+        if agent.process.poll() is None:
+            agent.stop()
+    with open(os.path.join(WORK, "agent.log"), "rb") as f:
+        log = f.read().decode("utf-8", "replace")
+    check("started the program of org.nbtapp.chan echo" in log, "the agent's log has no line for a program it started")
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(WORK, ignore_errors=True)
+
+
 if __name__ == "__main__":
     try:
         run()
+        run_channels()
     except Failed as failure:
         print("agent e2e: FAILED: %s" % failure, file=sys.stderr)
         log = os.path.join(WORK, "agent.log")
