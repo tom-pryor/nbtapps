@@ -267,15 +267,22 @@ How a connection ends:
 The pty driver. A shell needs a pty. On the head unit ptys come from /bin/devc-pty, a program of the car's own
 debug set-up, which may not be installed, and may already run with ptys of its own. At a keys message, when the
 relay has no driver of its own running and /bin/devc-pty is there and can be run, it runs `/bin/devc-pty -n 4`
-(in a session of its own, its output to /dev/null, its errors to the relay's log). That command returns at once
-and the driver runs on under a new pid, as a process of its own, not the relay's child. So the relay takes the
-process list before it runs the command, and then looks every 100 ms, for 2 s at most, for a process that was not
-in it, is not the command's own, and runs a program of the file name devc-pty (or of the file /bin/devc-pty leads
-to through links); the process's start time is kept with its pid. Connections whose keys come meanwhile wait for
-the same look, and when the driver is found, or the 2 s are over, or the command failed and none appeared, they
-all go on. The relay never signals a devc-pty it did not find so: another one, the debug set-up's, is left alone
-whenever it started. Two new ones at once are both left alone. A start that found none is not tried again for
-30 s; the connections meanwhile go on at once.
+(in a session of its own, its output to /dev/null, its errors to the relay's log). On QNX devc-pty detaches: the
+relay is told its child has ended (waitpid gives an exit with 0) while the driver runs on under the pid it was
+started with, in session 1, its parent still the relay; when it is ended later it leaves nothing to collect. A
+devc-pty of another build could as well run on under a new pid that its command starts, so the relay takes
+either. It takes the process list before it runs the command, reads the start time of the command's own process,
+and then looks every 100 ms, for 2 s at most, at the processes that were not in that list, have not ended, have a
+start time and run a program of the file name devc-pty (or of the file /bin/devc-pty leads to through links):
+  - the command's own process (its pid with the start time it had) is taken once the relay has been told it ended
+    and it still runs, or at the end of the 2 s when it still runs;
+  - another such process is taken when it is the only one and the command's own process does not run beside it.
+    While two or more are there (a starter that has not gone yet beside its driver) the look goes on, and at the
+    end of the 2 s none of them is taken: they are left alone.
+The driver's start time is kept with its pid. Connections whose keys come meanwhile wait for the same look, and
+when the driver is found, or the 2 s are over, or the command failed and none appeared, they all go on. The relay
+never signals a devc-pty it did not find so: another one, the debug set-up's, is left alone whenever it started.
+A start that found none is not tried again for 30 s; the connections meanwhile go on at once.
   - 30 s after the last connection has ended (when no connection is left that has not ended, also one still
     waiting for its keys message), the relay sends its driver SIGTERM, which removes the driver's names, and
     SIGKILL 2 s later if it is still there. A connection within the 30 s keeps it, and the 30 s start again
@@ -369,16 +376,17 @@ the answer, the keys file, the modes, the server's arguments, files, session and
 made once), the bridge (1 MiB each way in messages of every size, compared; a slow reader on either side, with the
 relay's memory looked at), and the ends (the client goes away; the server exits with bytes still to come; what a
 server leaves in its session and in a session of its own ended, and a process of another session left; SIGTERM
-with two connections open); with a stand-in for the driver too: the driver started at the first connection and
-its pid found, not started for a second, kept by a connection within its time, ended after it and not before,
-started again, ended at the relay's end, and another of the same name left alone; connections that wait for a
-driver that comes late; one that never appears, and none there; one that goes by itself; one that ignores
-SIGTERM; "pty" false with no ptys and the connection served, true with another driver's names; four connections
-and a fifth too-many, and a slot free again after an end; with start times of the size QNX gives
-(NBT_SSHRELAY_TEST_START_OFFSET): a relay killed with two servers, their leftovers and a driver, and the next start
-ending them all and the keys folders, and serving; a state file naming unrelated processes, and one of nonsense
-(also a start time in any form but the one written), signalling none, and start times up to 2^64 - 1 read; an
-older relay still running ended before the new one listens,
+with two connections open); with a stand-in for the driver too, in both forms (one that runs on under a new pid,
+and one that is the process the relay started): the driver started at the first connection and its pid found,
+not started for a second, kept by a connection within its time, ended after it and not before, started again,
+ended at the relay's end, and another of the same name left alone; connections that wait for a driver that comes
+late; a starter that stays beside its driver for a moment, not taken; one that never appears, and none there; one
+that goes by itself; one that ignores SIGTERM; "pty" false with no ptys and the connection served, true with
+another driver's names; four connections and a fifth too-many, and a slot free again after an end; with start
+times of the size QNX gives (NBT_SSHRELAY_TEST_START_OFFSET): a relay killed with two servers, their leftovers and
+a driver, and the next start ending them all and the keys folders, and serving; a state file naming unrelated
+processes, and one of nonsense (also a start time in any form but the one written), signalling none, and start
+times up to 2^64 - 1 read; an older relay still running ended before the new one listens,
 also one that ignores SIGTERM, with the start's time measured; and, with this machine's Dropbear (make ssh-host)
 and OpenSSH client, through tests/ssh/ssh_proxy.py as the client's proxy command: a login with a command and its
 exit status, one on a pty, a wrong key refused, and the host key of the answer the one the client checks. With no

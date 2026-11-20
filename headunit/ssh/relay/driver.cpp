@@ -3,9 +3,12 @@
 // The pty driver, started on demand: see relay.hpp, "The pty driver".
 //
 // On QNX ptys come from the driver devc-pty, a program of the car's own debug set-up, which may not be installed and
-// may already run with ptys of its own. `devc-pty -n 4` returns at once and the driver runs on under a new pid, as
-// a process of its own: so the relay knows its driver by the process list before and after, never as its child,
-// and signals no devc-pty it did not find that way. Elsewhere there is no such driver and ptys are always there.
+// may already run with ptys of its own. Started, devc-pty detaches: its starter is told it has ended (waitpid gives
+// an exit with 0) while it runs on under the pid it was started with, in session 1, its parent still the relay, and
+// at its end it leaves nothing to collect. A devc-pty of another build could as well run on under a new pid, a
+// process its command starts before it exits. So the relay takes either, by the process list taken before the
+// start and its looks after it (lookForDriver), and signals no devc-pty it did not find that way.
+// Elsewhere there is no such driver and ptys are always there.
 
 #include <algorithm>
 
@@ -87,9 +90,11 @@ void Relay::startDriver(long long now) {
         driverFailedAt_ = now;
         return;
     }
-    // The command's own process is not the driver, whatever its name.
-    driverBefore_.push_back((long)pid);
     std::sort(driverBefore_.begin(), driverBefore_.end());
+    // The command's own process, with its start time read while it is the relay's child not yet collected, so that
+    // its pid is still its own: it may be the driver itself (lookForDriver).
+    ProcessEntry entry;
+    driverStarted_ = Recorded((long)pid, readProcess((long)pid, &entry) ? entry.start : 0);
     driverCommand_ = pid;
     driverCommandStatus_ = -1;
     driverState_ = kDriverLooking;
@@ -98,32 +103,59 @@ void Relay::startDriver(long long now) {
     logLine("starting the pty driver: " + path + " -n 4");
 }
 
-void Relay::lookForDriver(long long now) {
-    std::vector<ProcessEntry> list, found;
+// One look. What may be the driver is a process that was not in the list taken before the start, has not ended,
+// has a start time, and runs a program of the driver's file name. Of those:
+//   - the command's own process (its pid, with the start time it had at the start) is taken once the relay has been
+//     told that it ended while it still runs, which is how a driver that detaches in place shows; or at the end of
+//     the look, when it still runs, since then it is the driver whatever else is new;
+//   - another is taken when it is the only one and the command's own process does not run beside it: a driver
+//     under a new pid, whose starter has gone. While two or more are there, a starter that has not gone yet beside
+//     the driver, the look goes on; at its end none of them is taken.
+// `last`: the look is the last one (the relay is ending), as if its time were over.
+void Relay::lookForDriver(long long now, bool last) {
+    std::vector<ProcessEntry> list, others;
+    bool own = false;
     if (listProcesses(&list)) {
         for (size_t i = 0; i < list.size(); ++i) {
             const ProcessEntry& e = list[i];
-            if (e.zombie || std::binary_search(driverBefore_.begin(), driverBefore_.end(), e.pid)) continue;
-            if (isDriverName(nbt::programName(nbt::exePathOf(e.pid).c_str()))) found.push_back(e);
+            if (e.zombie || e.start == 0 || std::binary_search(driverBefore_.begin(), driverBefore_.end(), e.pid)) continue;
+            if (!isDriverName(nbt::programName(nbt::exePathOf(e.pid).c_str()))) continue;
+            if (e.pid == driverStarted_.pid && e.start == driverStarted_.start) {
+                own = true;
+            } else {
+                others.push_back(e);
+            }
         }
     }
-    if (found.size() == 1 && found[0].start != 0) {
-        driver_ = Recorded(found[0].pid, found[0].start);
+    bool over = last || now >= driverLookUntil_;
+    bool told = driverCommandStatus_ >= 0;   // the relay has collected the command's process as ended
+    Recorded taken;
+    std::string how;
+    if (own && ((told && others.empty()) || over)) {
+        taken = driverStarted_;
+        how = told ? "the process it was started as, which detached" : "the process it was started as";
+    } else if (!own && others.size() == 1) {
+        taken = Recorded(others[0].pid, others[0].start);
+        how = "a process its command started";
+    }
+    if (taken.pid != 0) {
+        driver_ = taken;
         driverState_ = kDriverRunning;
         stateDirty_ = true;
-        logLine("pty driver started, pid " + number(driver_.pid));
+        logLine("pty driver started, pid " + number(driver_.pid) + ": " + how);
         driverDecided(now);
         return;
     }
-    if (found.size() > 1) {
-        logLine("no pty driver taken: " + number((long long)found.size()) + " new processes run it");
-    } else if (driverCommandStatus_ > 0) {
-        logLine("no pty driver: its command failed and none appeared");
-    } else if (now >= driverLookUntil_) {
-        logLine("no pty driver: none appeared within " + number(kDriverLookMs / 1000) + " s");
-    } else {
+    if (!over && !(driverCommandStatus_ > 0 && others.empty())) {
         driverNextLook_ = now + kDriverLookEveryMs;
         return;
+    }
+    if (others.size() > 1) {
+        logLine("no pty driver taken: " + number((long long)others.size()) + " new processes run it");
+    } else if (driverCommandStatus_ > 0) {
+        logLine("no pty driver: its command failed and none appeared");
+    } else {
+        logLine("no pty driver: none appeared within " + number(kDriverLookMs / 1000) + " s");
     }
     driverState_ = kDriverNone;
     driverFailedAt_ = now;
@@ -179,7 +211,7 @@ void Relay::finishDriver(long long now) {
 // them.
 void Relay::serveDriver(long long now, long long* wait) {
     if (driverState_ == kDriverLooking) {
-        if (now >= driverNextLook_) lookForDriver(now);
+        if (now >= driverNextLook_) lookForDriver(now, false);
         if (driverState_ == kDriverLooking && driverNextLook_ - now < *wait) *wait = driverNextLook_ - now;
     }
     if (driverState_ == kDriverEnding) {

@@ -5,11 +5,14 @@
 //
 //   devc-pty ARGS...
 //
-// As the driver does, it returns at once and runs on under a new pid, as a process of its own: it forks, and the
-// child leads a session of its own while the first process exits with 0. Files beside its own path P:
-//   P.mode          read at its start, one word: run (the default), none (exits with nothing left running), late
-//                   (the first process waits 0.5 s before it forks), die (the driver ends by itself after 1 s),
-//                   stubborn (the driver ignores SIGTERM)
+// In the forms a driver may have: it runs on under a new pid, as a process of its own (it forks, and the child leads
+// a session of its own while the first process exits with 0); or the first process is the driver and keeps its pid
+// (QNX's devc-pty does that, and tells its starter it has ended, which nothing on Linux can; here the first process
+// just runs on). Files beside its own path P:
+//   P.mode          read at its start, one word: run (the default: forks), keep (does not fork: the first process is
+//                   the driver), none (exits with nothing left running), late (the first process waits 0.5 s before
+//                   it forks), linger (the first process stays 0.5 s after it forks, beside the driver, and exits
+//                   with 0 then), die (the driver ends by itself after 1 s), stubborn (the driver ignores SIGTERM)
 //   P.pid-<pid>     made by the driver, holding its arguments; removed when it ends by SIGTERM or by itself
 //   P.log           a line for each event: "start <pid> <args>", "TERM <pid>", "TERM-ignored <pid>", "gone <pid>",
 //                   "none <pid>"
@@ -75,11 +78,15 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (mode == "late") nap(500);
-    pid_t child = fork();
-    if (child < 0) return 1;
-    if (child > 0) return 0;
-
-    setsid();
+    if (mode != "keep") {
+        pid_t child = fork();
+        if (child < 0) return 1;
+        if (child > 0) {
+            if (mode == "linger") nap(500);
+            return 0;
+        }
+        setsid();
+    }
     int null = open("/dev/null", O_RDWR);
     if (null >= 0) {
         dup2(null, 0);

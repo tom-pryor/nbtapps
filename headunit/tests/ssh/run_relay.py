@@ -17,10 +17,12 @@
     session, ignoring SIGHUP; in a session of its own that it started) is ended, and what is not of its sessions
     is left; SIGTERM with two connections open
   - the pty driver, with a stand-in (standin_pty.cpp, copied as devc-pty, through the relay's test hooks, its 30 s
-    shortened): started at the first connection and its pid found, not for a second, kept by a connection within
-    its time, ended after it and not before, started again, ended at the relay's end, another of the same name
-    left alone; connections that wait for a late one; one that never appears, none there; one that goes by
-    itself; one that ignores SIGTERM; pty false with no ptys, true with another driver's names
+    shortened), in both forms, one that runs on under a new pid and one that is the process the relay started:
+    started at the first connection and its pid found, not for a second, kept by a connection within its time,
+    ended after it and not before, started again, ended at the relay's end, another of the same name left alone;
+    connections that wait for a late one; a starter that stays beside the driver for a moment, not taken; one
+    that never appears, none there; one that goes by itself; one that ignores SIGTERM; pty false with no ptys,
+    true with another driver's names
   - the limit: four connections, a fifth too-many with nothing made for it, a slot free again after an end
   - the state file, with start times of the size QNX gives (START_OFFSET): a relay killed with SIGKILL, and the
     next start ending its servers, their leftovers and its driver and removing the keys folders; unrelated
@@ -732,17 +734,21 @@ def new_driver(relay, besides=()):
     return others()[0]
 
 
-def test_driver_lifecycle():
-    r = Relay("driver", "echo", driver="run", dev=True, driver_ms=1500)
+def test_driver_lifecycle(form):
+    # form "run": the driver runs on under a new pid; "keep": the process the relay started is the driver.
+    r = Relay("driver-" + form, "echo", driver=form, dev=True, driver_ms=1500)
     other = Driver(os.path.join(r.dir, "other"))
     o = other.run_directly()   # another driver of the same name, there before the relay
+    how = "a process its command started" if form == "run" else "the process it was started as"
     try:
         r.start()
         c1, a = keyed(r)
         check(a == {"v": 1, "hostKeys": [host_key_line(r)], "pty": True}, "the first answer: %r" % a)
         d = new_driver(r)
         check(d != o and r.driver.args(d) == "-n 4", "the driver %d (the other is %d) has %r" % (d, o, r.driver.args(d)))
-        r.wait_log("pty driver started, pid %d" % d)
+        r.wait_log("pty driver started, pid %d: %s" % (d, how))
+        check(wait_for(lambda: r.state_file().get("driver") == rec(d, start_time(d)), 2),
+              "the state file's driver: %r" % r.state_file())
         works(c1, "the first")
         c2, a = keyed(r)
         check(a.get("pty") is True, "the second answer: %r" % a)
@@ -769,6 +775,7 @@ def test_driver_lifecycle():
         check(a.get("pty") is True and r.log().count("starting the pty driver") == 2, "the fourth: %r" % a)
         d2 = new_driver(r, [d])
         check(d2 != d, "the same pid again")
+        r.wait_log("pty driver started, pid %d: %s" % (d2, how))
         works(c4, "the fourth")
         r.stop()
         check(r.proc.returncode == 0, "the relay exited with %r" % r.proc.returncode)
@@ -799,6 +806,22 @@ def test_driver_waits():
     d = new_driver(r)
     r.stop()
     check(not alive(d), "the driver is still there after the relay's end")
+
+
+def test_driver_starter_lingers():
+    # The command's own process stays 0.5 s beside the driver it started: two new processes of the name, then one.
+    # The driver is taken once the starter has gone, and the starter is never signalled.
+    r = Relay("driverlinger", "echo", driver="linger", dev=True).start()
+    started = time.monotonic()
+    c, a = keyed(r)
+    took = time.monotonic() - started
+    check(a.get("pty") is True and 0.4 <= took <= 1.5, "answered after %.2f s: %r" % (took, a))
+    d = new_driver(r)
+    r.wait_log("pty driver started, pid %d: a process its command started" % d)
+    check("no pty driver" not in r.log(), "a look gave up:\n" + r.log())
+    works(c, "beside a starter")
+    r.stop()
+    check(not alive(d) and r.driver.events("TERM") == [d], "the driver was not ended alone: %r" % r.driver.events("TERM"))
 
 
 def test_driver_never_appears():
@@ -1269,8 +1292,12 @@ def main():
         run("leftovers, the client closes", test_leftovers_client_closes)
         run("leftovers, the server exits", test_leftovers_server_exits)
         run("SIGTERM with two connections", test_sigterm)
-        run("the pty driver: started, kept, ended, started again", test_driver_lifecycle)
+        run("the pty driver under a new pid: started, kept, ended, started again",
+            lambda: test_driver_lifecycle("run"))
+        run("the pty driver under the pid it was started with: started, kept, ended, started again",
+            lambda: test_driver_lifecycle("keep"))
         run("the pty driver: connections wait for it", test_driver_waits)
+        run("the pty driver: its starter stays beside it for a moment", test_driver_starter_lingers)
         run("the pty driver: none appears, or none is there", test_driver_never_appears)
         run("the pty driver: one that goes by itself", test_driver_dies)
         run("the pty driver: one that ignores SIGTERM", test_driver_stubborn)
