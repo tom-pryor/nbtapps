@@ -40,10 +40,16 @@ class MainActivity : ComponentActivity() {
     /** The head unit whose page the intent asked for ([EXTRA_HEAD_UNIT]), until it has been opened. */
     private val headUnitToOpen = MutableStateFlow<String?>(null)
 
+    /** The head unit whose terminal the intent asked for ([EXTRA_TERMINAL]), until it has been opened. */
+    private val terminalToOpen = MutableStateFlow<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // A page that was opened stays open across a rotation: the intent is not taken again.
-        if (savedInstanceState == null) headUnitToOpen.value = intent.getStringExtra(EXTRA_HEAD_UNIT)
+        if (savedInstanceState == null) {
+            headUnitToOpen.value = intent.getStringExtra(EXTRA_HEAD_UNIT)
+            terminalToOpen.value = intent.getStringExtra(EXTRA_TERMINAL)
+        }
         // The theme is dark on every phone, so the bars' icons are light even when the phone is in light mode.
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
@@ -53,12 +59,15 @@ class MainActivity : ComponentActivity() {
             NbtAppTheme {
                 val openSetup by start.openSetup.collectAsStateWithLifecycle()
                 val toOpen by headUnitToOpen.collectAsStateWithLifecycle()
+                val terminal by terminalToOpen.collectAsStateWithLifecycle()
                 openSetup?.let {
                     NbtNavHost(
                         openSetupAtStart = it,
                         onSetupOpened = start::setupOpened,
                         headUnitToOpen = toOpen,
                         onHeadUnitOpened = { headUnitToOpen.value = null },
+                        terminalToOpen = terminal,
+                        onTerminalOpened = { terminalToOpen.value = null },
                     )
                 }
             }
@@ -67,10 +76,14 @@ class MainActivity : ComponentActivity() {
         openUpdateConfirmations()
     }
 
-    /** The app's screens brought up again, as the screen for a handed-over pairing code does: maybe for a head unit's page. */
+    /**
+     * The app's screens brought up again, as the screen for a handed-over pairing code does, maybe for a head unit's
+     * page; or as the notification does, maybe for a head unit's terminal.
+     */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         intent.getStringExtra(EXTRA_HEAD_UNIT)?.let { headUnitToOpen.value = it }
+        intent.getStringExtra(EXTRA_TERMINAL)?.let { terminalToOpen.value = it }
     }
 
     override fun onResume() {
@@ -100,6 +113,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** This app's id of a head unit whose page is opened, over whatever screen shows. */
         const val EXTRA_HEAD_UNIT = "com.nbtapps.store.extra.HEAD_UNIT"
+
+        /** This app's id of a head unit whose terminal is opened, over whatever screen shows: from the notification. */
+        const val EXTRA_TERMINAL = "com.nbtapps.store.extra.TERMINAL"
     }
 
     /**

@@ -43,7 +43,8 @@ import kotlinx.coroutines.launch
  *    serial.
  *  - a terminal being opened or open ([TerminalRepository.state]).
  *
- * The main reason's text is the notification's, and each other one adds a line below it. While archives or logs are
+ * The main reason's text is the notification's, and each other one adds a line below it. A tap on it brings the app up,
+ * on the terminal while one is open or being opened ([ForegroundWork.terminalToOpen]). While archives or logs are
  * transferred it also holds a wake lock: the agent pulls, and a phone that dozes stops answering. Once the install has
  * begun the head unit finishes by itself, and the lock is let go. No lock is held for a terminal.
  */
@@ -80,19 +81,20 @@ class JobService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // The promise made by startForegroundService is kept before anything else, whatever there is to show. The head
         // units' names come with the first look below.
-        val now = ForegroundWork.notice(ForegroundWork.reasons(jobs.job.value, jobs.logPull.value, terminal.state.value, emptyList()))
-        startForeground(NOTIFICATION_ID, notification(now), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        val shell = terminal.state.value
+        val now = ForegroundWork.notice(ForegroundWork.reasons(jobs.job.value, jobs.logPull.value, shell, emptyList()))
+        startForeground(NOTIFICATION_ID, notification(now, ForegroundWork.terminalToOpen(shell)), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         if (!watching) {
             watching = true
             scope.launch {
                 combine(jobs.job, jobs.logPull, terminal.state, headUnits.headUnits) { view, pull, open, units ->
-                    ForegroundWork.notice(ForegroundWork.reasons(view, pull, open, units))
-                }.collect { notice ->
+                    ForegroundWork.notice(ForegroundWork.reasons(view, pull, open, units)) to ForegroundWork.terminalToOpen(open)
+                }.collect { (notice, toOpen) ->
                     if (notice == null) {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     } else {
-                        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(notice))
+                        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(notice, toOpen))
                         holdAwake(notice.awake)
                     }
                 }
@@ -114,14 +116,14 @@ class JobService : Service() {
         if (hold && !lock.isHeld) lock.acquire(MAX_TRANSFER_MILLIS) else if (!hold && lock.isHeld) lock.release()
     }
 
-    /** The notification for [notice]; with none yet, one that says only that the app works with the head unit. */
-    private fun notification(notice: ForegroundNotice?): Notification {
-        val open = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE,
-        )
+    /**
+     * The notification for [notice]; with none yet, one that says only that the app works with the head unit. A tap
+     * brings the app up, on the terminal of the head unit [terminalOf] where a terminal is open or being opened.
+     */
+    private fun notification(notice: ForegroundNotice?, terminalOf: String?): Notification {
+        val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        terminalOf?.let { intent.putExtra(MainActivity.EXTRA_TERMINAL, it) }
+        val open = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_head_unit)
             .setContentTitle(notice?.title ?: "Working with the head unit")

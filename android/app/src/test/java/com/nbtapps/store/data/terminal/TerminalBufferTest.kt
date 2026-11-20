@@ -257,17 +257,61 @@ class TerminalBufferTest {
     }
 
     @Test
-    fun `clear empties it, and a sequence cut across it is still dropped`() {
+    fun `clear empties the finished lines and keeps the one being written, and a sequence cut across it is still dropped`() {
         val buffer = TerminalBuffer()
-        buffer.write(text("one\ntwo\u001b[3"))
+        buffer.write(text("one\ntwo\n$ \u001b[3"))
         val before = buffer.snapshot()
         buffer.clear()
         val after = buffer.snapshot()
-        assertEquals(emptyList<TerminalLine>(), after.lines)
+        assertEquals(listOf(TerminalLine("$ ")), after.lines)
         assertNotEquals(before.revision, after.revision)
-        buffer.write(text("1mthree"))
-        assertEquals(listOf("three"), linesOf(buffer))
-        assertEquals("three", buffer.text())
+        // What Copy all gives is what is shown.
+        assertEquals("$ ", buffer.text())
+        // The shell's echo goes on in the prompt's line, at the cursor.
+        buffer.write(text("1mls\r\nfile\r\n$ "))
+        assertEquals(listOf("$ ls", "file", "$ "), linesOf(buffer))
+    }
+
+    @Test
+    fun `clear keeps a character half read and the cursor where it was`() {
+        val buffer = TerminalBuffer()
+        val euro = "€".encodeToByteArray()
+        buffer.write(text("abc\rx"))
+        buffer.write(euro, 0, 1)
+        buffer.clear()
+        assertEquals(listOf("xbc"), linesOf(buffer))
+        buffer.write(euro, 1, euro.size - 1)
+        assertEquals(listOf("x€c"), linesOf(buffer))
+    }
+
+    @Test
+    fun `clear with no line being written leaves nothing`() {
+        val buffer = TerminalBuffer()
+        buffer.write(text("one\ntwo\n"))
+        buffer.mark("The shell ended")
+        buffer.clear()
+        assertEquals(emptyList<TerminalLine>(), buffer.snapshot().lines)
+        assertEquals("", buffer.text())
+    }
+
+    @Test
+    fun `reset empties it whole, the line being written, a character half read and a sequence begun`() {
+        val buffer = TerminalBuffer()
+        buffer.write(text("one\n$ \u001b[3"))
+        val before = buffer.snapshot()
+        buffer.reset()
+        assertEquals(emptyList<TerminalLine>(), buffer.snapshot().lines)
+        assertNotEquals(before.revision, buffer.snapshot().revision)
+        // What follows is not taken as the rest of the sequence.
+        buffer.write(text("1mx"))
+        assertEquals(listOf("1mx"), linesOf(buffer))
+
+        buffer.reset()
+        buffer.write(bytes(0xE2, 0x82))
+        buffer.reset()
+        buffer.write(text("ok"))
+        assertEquals(listOf("ok"), linesOf(buffer))
+        assertEquals("ok", buffer.text())
     }
 
     @Test
