@@ -317,7 +317,8 @@ are done.
 
 ```sh
 make test-pkg                                              # the tool and the test packages
-make agent-test                                            # agent/ in the bench container (docker); about a minute
+make agent-test                                            # agent/ in the bench container (docker), one part after another
+make -j4 --output-sync=target agent-test                   # the same, four parts at a time, as build.sh agent runs it
 QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh agent      # those tests, then built with qcc -> release/agent/ and release/pkg/, then make agent-check
 make agent-pkg                                             # the agent's own package from release/agent/ -> release/pkg/, not signed
 make agent-release KEY=/path/to/package.key                # that package and the check again, then signed -> release/pkg/signed/

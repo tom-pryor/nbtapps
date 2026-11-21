@@ -14,6 +14,8 @@
 #   QNX_LICENSE_DIR  (required) directory holding your QNX `licenses` file; mounted at /etc/qnx/license.
 #                    It must be writable: qcc creates licenses.lck next to the file.
 #   QNX_IMAGE        Docker image with the SDP (default: qnx650-sdk)
+#   AGENT_TEST_JOBS  how many of the agent's tests `./build.sh agent` runs at a time (default: 4); 1 runs them one
+#                    after another
 set -eu
 
 image=${QNX_IMAGE:-qnx650-sdk}
@@ -51,8 +53,10 @@ fi
 # The image has no git, so the version is worked out here.
 version=$(git describe --always --dirty 2>/dev/null || echo unknown)
 
+# The agent's tests run side by side, with each one's output kept together. --output-sync needs GNU make 4 or later,
+# which this is on the host; the SDP image's make below is 3.81 and is not asked for it.
 if [ "$target" = agent ]; then
-    make agent-test
+    make -j"${AGENT_TEST_JOBS:-4}" --output-sync=target agent-test
 fi
 docker run --rm -u "$(id -u):$(id -g)" \
     -v "$(pwd)":/src \

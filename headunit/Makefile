@@ -17,7 +17,9 @@
 #   make agent-test tests of the agent (agent/): package reader, install engine, protocol, nbtagent with
 #                   nbtctl end to end, and the launcher and install scripts. The agent's side runs in a Docker
 #                   container (tools/bench.py), so that the packages' scripts do not run loose on this machine
-#                   needs docker, g++, gcc, zlib, python3 + cryptography (host). About a minute, more the first time
+#                   needs docker, g++, gcc, zlib, python3 + cryptography (host). About four minutes one part after
+#                   another; `make -j4 --output-sync=target agent-test` runs four parts at a time, as build.sh agent
+#                   does, and takes about as long as the longest part, test_serial
 #   make bench-image the Docker image for that: nbtagent and the test programs, built inside it
 #   make agent-host build/agent-host/: nbtagent and nbtctl for this machine. nbtctl is the one to use; run the
 #                   agent with tools/bench.py
@@ -172,7 +174,14 @@ AGENT_HOST_CXXFLAGS = -std=gnu++0x -O1 -g -Wall -Wextra -DNBT_HOST_TEST
 # Defined before the rules that name it as a prerequisite: make reads a rule's prerequisites as it meets them.
 TESTDATA = $(BUILD)/testdata/vectors.json
 
-agent-test: $(addprefix run-agent-,$(AGENT_TESTS)) test-protocol test-agent-pkg test-plugin-pkg agent-e2e agent-launcher
+# The parts of agent-test share nothing they write: each test program runs in a container of its own and keeps its
+# files in a folder of its own under $(BENCH_WORK), and the other parts keep theirs in folders of their own or in
+# temporary ones. So make -j can run them side by side, as build.sh does, with --output-sync=target to keep each
+# part's output together. The two that take longest by far come first, so that they start at once and the rest run
+# beside them.
+AGENT_TESTS_FIRST = test_serial test_engine
+agent-test: $(addprefix run-agent-,$(AGENT_TESTS_FIRST) $(filter-out $(AGENT_TESTS_FIRST),$(AGENT_TESTS))) \
+            test-protocol test-agent-pkg test-plugin-pkg agent-e2e agent-launcher
 	@echo [DONE] $(words $(AGENT_TESTS)) agent tests, the protocol vectors, the tests of the two package scripts, the end-to-end test and the launcher test passed
 
 agent-host: $(addprefix $(AGENT_HOST)/,$(AGENT_PROGS))
