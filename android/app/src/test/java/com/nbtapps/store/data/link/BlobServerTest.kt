@@ -6,6 +6,7 @@ import com.nbtapps.store.data.crypto.sha256Hex
 import java.io.File
 import java.io.RandomAccessFile
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -13,6 +14,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -164,7 +167,16 @@ class BlobServerTest {
         val link = linked(capacity = 4)
         link.agent.fetch(1, archiveHash, 0, 100_000)
         assertEquals("""{"stream":1,"size":100000}""", link.agent.message().result().toString())
-        link.agent.fetch(2, manifestHash, 0)
+        // The second request is handed to the server here, not sent over the link: nothing says when the phone gets
+        // to one that comes over the link, and with the agent reading on, that may be after the stream's last frame,
+        // when it is served. Undispatched: the server has looked at it before the agent reads a frame, and its answer
+        // waits for room on the link.
+        val second = async(start = CoroutineStart.UNDISPATCHED) {
+            link.session.blobs.fetch(link.session.peer, 2, buildJsonObject {
+                put("sha256", manifestHash)
+                put("offset", 0)
+            })
+        }
 
         var received = 0
         var busy = false
@@ -182,6 +194,7 @@ class BlobServerTest {
             }
         }
         assertEquals(100_000, received)
+        second.await()
     }
 
     @Test
