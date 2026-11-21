@@ -111,6 +111,8 @@ public:
     void replay(int64_t after, size_t room, json::Writer* out, bool* more) const;
     // What the steps that are done need now: "none", "hmi-restart" or "required".
     const std::string& restart() const { return restart_; }
+    // The ids of the packages the job's steps install, upgrade or remove, in the order of the steps.
+    std::vector<std::string> packages() const;
 
     // Test only: the largest range asked for at a time.
     void setFetchChunk(uint64_t bytes) { fetchChunk_ = bytes; }

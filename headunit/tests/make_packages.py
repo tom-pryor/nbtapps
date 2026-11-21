@@ -8,18 +8,20 @@
   OUTDIR/bad/*.nbtpkg    hello 1.2.0 with one defect each; every reader must refuse each of them, except that the
                          phone app takes those that vectors.json marks with "app", so that a later format, behind
                          requires.agent, never stops it downloading a package: "no-settings" for a fault in settings,
-                         which it takes with no settings, and "later-format" for something in install or requires that
-                         it does not know, which it takes and marks as of a later format
+                         which it takes with no settings, "no-channels" for a fault in channels, which it takes with no
+                         channels, and "later-format" for something in install, requires or channels that it does not
+                         know, which it takes and marks as of a later format
   OUTDIR/skipped/*.nbtpkg  hello 1.2.0 with what nbtpkg.py refuses to the package's author and the agent and the app
                          take: a log in a folder the schema does not know, which they skip (spec/log-paths.vectors),
-                         or a requires.app with no requires.agent to keep out the agents that do not know it
+                         or a requires.app or channels with no requires.agent to keep out the agents that do not know
+                         it
   OUTDIR/detached/*.nbtpkg  hello 1.2.0 as an author might sign it, each read with a detached signature over its
                          manifest instead of its manifest.sig
   OUTDIR/vectors.json    what each file is: for a good one the values an index entry or a job.plan offer carries,
                          for a bad one the code the refusal has (bad-archive, bad-signature, bad-manifest or
                          unsupported-manifest), what is wrong with it and, where the app takes it, "app", for a
                          skipped one nbtpkg.py's code, what is wrong with it and the member its refusal names
-                         ("names": logs[1].path or requires.app), for a detached one the signature to read it
+                         ("names": logs[1].path, requires.app or channels), for a detached one the signature to read it
                          with and the code ("" when it is accepted, trusting the package key only)
 
 The same sources give the same files, byte for byte. Every implementation that reads packages runs against this
@@ -520,6 +522,73 @@ def build_all(out_dir):
              "a select of 1,025 bytes of text: 16 values of 61 characters, their labels, its key and label")):
         bad[label] = (with_changed_manifest(field(["settings"], settings)), "bad-manifest", why)
         app[label] = "no-settings"
+
+    # ---- channels: what a controller opens to the package's program ----
+    # Each with hello's files, so that a start's program can be hello's own, and the first agent that knows channels.
+    CHANNELS = "no-channels"
+    echo = {"name": "echo", "apps": [], "access": "both", "start": {"program": "bin/hello"}}
+
+    def with_channels(channels, requirement=">=1.7.0-beta.1"):
+        def change(m):
+            m["requires"]["agent"] = requirement
+            m["channels"] = channels
+        return with_changed_manifest(change)
+    most = [{"name": "c" * 32, "apps": [], "access": "read", "switch": False}]
+    most += [{"name": "c%d" % i, "apps": [], "access": "both"} for i in range(1, 6)]
+    most.append(dict(echo, name="0-9", switch=True, start={"program": "bin/hello", "args": ["a b", "é", ""] + ["x"] * 13}))
+    most.append(dict(echo, name="last-one", start={"args": [], "program": "bin/hello"}))
+    good["channels-most"] = (with_channels(most), "8 channels, a name of 32 characters, one of digits and a hyphen, a "
+                             "program with 16 arguments and one with none, and none started")
+    for label, channels, code, why in (
+            ("channels-not-a-list", echo, "bad-manifest", "channels is one channel, not a list"),
+            ("channels-empty", [], "bad-manifest", "channels with no channel in its list"),
+            ("channels-too-many", [dict(echo, name="c%d" % i) for i in range(9)], "bad-manifest", "9 channels"),
+            ("channels-entry-not-object", ["echo"], "bad-manifest", "a channel that is a string"),
+            ("channels-no-name", [{"apps": [], "access": "both"}], "bad-manifest", "a channel with no name"),
+            ("channels-no-apps", [{"name": "echo", "access": "both"}], "bad-manifest", "a channel with no apps"),
+            ("channels-no-access", [{"name": "echo", "apps": []}], "bad-manifest", "a channel with no access"),
+            ("channels-name-uppercase", [dict(echo, name="Echo")], "bad-manifest", "a channel name with a capital"),
+            ("channels-name-too-long", [dict(echo, name="e" * 33)], "bad-manifest", "a channel name of 33 characters"),
+            ("channels-name-hyphen-first", [dict(echo, name="-echo")], "bad-manifest",
+             "a channel name that starts with a hyphen"),
+            ("channels-name-dot", [dict(echo, name="ec.ho")], "bad-manifest", "a channel name with a dot"),
+            ("channels-name-twice", [echo, dict(echo, access="read")], "bad-manifest", "the same channel twice"),
+            ("channels-apps-not-list", [dict(echo, apps="org.example.app")], "bad-manifest",
+             "a channel's apps that is a string"),
+            ("channels-apps-named", [dict(echo, apps=["org.example.app"])], "unsupported-manifest",
+             "a channel that names a phone app, which this version does not know"),
+            ("channels-access-unknown", [dict(echo, access="write")], "bad-manifest", "an unknown access"),
+            ("channels-switch-string", [dict(echo, switch="on")], "bad-manifest", "switch as a string"),
+            ("channels-unknown-key", [dict(echo, title="Echo")], "unsupported-manifest",
+             "a key in a channel that this version does not know"),
+            ("channels-start-not-object", [dict(echo, start="bin/hello")], "bad-manifest", "start as a string"),
+            ("channels-start-no-program", [dict(echo, start={"args": []})], "bad-manifest", "a start with no program"),
+            ("channels-start-dotdot", [dict(echo, start={"program": "../hello"})], "bad-manifest",
+             "a program with `..`"),
+            ("channels-start-absolute", [dict(echo, start={"program": "/bin/sh"})], "bad-manifest",
+             "a program given as an absolute path"),
+            ("channels-start-unplaced", [dict(echo, start={"program": "bin/other"})], "bad-manifest",
+             "a program the package does not place"),
+            ("channels-start-link", [dict(echo, start={"program": "bin/hello-cli"})], "bad-manifest",
+             "a program that is a link the package places, not a file"),
+            ("channels-start-args-not-list", [dict(echo, start={"program": "bin/hello", "args": "-v"})], "bad-manifest",
+             "a program's args that is a string"),
+            ("channels-start-args-too-many", [dict(echo, start={"program": "bin/hello", "args": ["x"] * 17})],
+             "bad-manifest", "17 arguments"),
+            ("channels-start-arg-control", [dict(echo, start={"program": "bin/hello", "args": ["a\nb"]})],
+             "bad-manifest", "an argument with a line end"),
+            ("channels-start-arg-number", [dict(echo, start={"program": "bin/hello", "args": [5]})], "bad-manifest",
+             "an argument that is a number"),
+            ("channels-start-arg-too-long", [dict(echo, start={"program": "bin/hello", "args": ["x" * 256]})],
+             "bad-manifest", "an argument of 256 characters"),
+            ("channels-start-unknown-key", [dict(echo, start={"program": "bin/hello", "cwd": "/"})],
+             "unsupported-manifest", "a key in a channel's start that this version does not know")):
+        bad[label] = (with_channels(channels), code, why)
+        app[label] = LATER if code == "unsupported-manifest" else CHANNELS
+    # channels, which an agent knows from 1.7.0, with hello's requires.agent, which lets an older agent install the
+    # package without them: nbtpkg.py refuses it to the package's author.
+    skipped["channels-no-agent"] = (with_channels([echo], ">=1.0.0"), "bad-manifest",
+                                    "channels with a requires.agent that an older agent is in", "channels")
 
     # ---- detached signatures: a package its author signed, with the catalogue's signature over its manifest ----
     countersigned = nbtpkg.sign(seed, manifest_bytes)

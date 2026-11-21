@@ -1,0 +1,472 @@
+Dropbear's SSH server and OpenSSH's sftp-server, built for the head unit (QNX 6.5.0, armle-v7, GCC 4.4.2) and for
+this machine. Third-party code: its sources are two git submodules, and nothing of them is copied into this
+repository.
+
+  dropbear/  https://github.com/mkj/dropbear, tag DROPBEAR_2026.94, commit 28216cd9af822732a1549b78621c2ea9a76a0fe5
+             (Dropbear 2026.94). MIT, with other free licences for some parts: its LICENSE.
+  openssh/   https://github.com/openssh/openssh-portable, tag V_10_6_P2, commit d449e662b6b8b8cb20e852d8084c269af1c5e8f1
+             (OpenSSH 10.6p2, portable). BSD and licences freer than that: its LICENCE.
+
+Both are shallow (.gitmodules). Ours, beside them:
+
+  dropbear-qnx.patch  changes to Dropbear's source, each said below. MIT, as Dropbear (REUSE.toml)
+  localoptions.h      Dropbear's build options, which override its src/default_options.h. MIT, as Dropbear
+  build-qnx.sh        configure and make for the head unit, run in the QNX SDP image
+  build-host.sh       the same for this machine, with its own compiler
+  relay/              sshrelay, the program of the package's channel, which starts the server for each connection
+                      (below, "The relay"). Ours, under the repository's licence
+  relay/version.hpp   the package's version (below, "The package")
+  package/manifest.json.in  the package's manifest, with a placeholder for the version
+  ../tools/ssh_pkg.py    make ssh-pkg, make ssh-release; its test is ../tests/test_ssh_pkg.py (make test-ssh-pkg)
+  ../tools/check_ssh.py  make ssh-check
+  ../tests/ssh/       the relay's tests, make ssh-test
+
+
+Building
+
+From headunit/:
+
+  make ssh-src     build/ssh/src/: each submodule's pinned commit (the one in the index, which is what
+                   `git submodule update` checks out) exported with `git archive`; Dropbear's copy patched
+                   (patch -F 0, so a hunk whose context has moved fails) and given localoptions.h. The
+                   submodules are fetched first, shallow, when they are not there. They are only read: no build
+                   writes into them, and `git status` stays clean.
+  make ssh         build/ssh/qnx/dropbearmulti and sftp-server, stripped, for the head unit: build-qnx.sh in the
+                   SDP image (QNX_IMAGE, qnx650-sdk when unset). It uses the bare ntoarmv7-gcc driver, which needs
+                   no QNX licence file (qcc does), so no licence folder is mounted.
+  make ssh-host    build/ssh/host/: the same two programs for this machine, for tests.
+  make ssh-relay   build/ssh/qnx/sshrelay, the relay for the head unit, stripped: qcc in the SDP image, as the
+                   agent's programs are built, which needs the QNX licence folder. ./build.sh ssh runs it there
+                   (below).
+  make ssh-relay-host  build/ssh/host/sshrelay, the relay for this machine, with the test hooks.
+  make ssh-test    the relay's tests (tests/ssh/run_relay.py), on this machine; needs make ssh-host first.
+  make ssh-check   the head unit's two programs are ARM EABI5 soft-float executables, not position-independent,
+                   that ask for libc.so.3 and libsocket.so.3 only (no zlib), and its relay the same with
+                   libcpp.so.4 too, and without the test hooks; this machine's key tool makes an ed25519 host key,
+                   and its server, given one connection on a socket pair (-i), sends the banner
+                   SSH-2.0-dropbear_<version>.
+
+  make ssh-pkg     release/pkg/org.nbtapp.ssh-<version>.nbtpkg, not signed (below, "The package").
+  make ssh-release KEY=FILE
+                   that package signed with the package key, to release/pkg/signed/, and its SHA-256 printed.
+
+  QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh ssh
+                   all of it in order: make ssh-host, make ssh-test, make ssh, make ssh-relay in the SDP image,
+                   make ssh-check, make ssh-pkg.
+
+make ssh-src writes build/ssh/src/sources: each submodule's pinned commit, and the SHA-256 of the patch and of
+localoptions.h. make ssh copies it to build/ssh/qnx/sources with the SHA-256 of build-qnx.sh: what the head unit's
+dropbearmulti and sftp-server were built from, which hold no version or build of ours.
+
+`make ssh` and `make ssh-host` each export again and build from the start, outside the export, in
+build/ssh/<qnx|host>/obj/, where configure.log and make.log are kept. Everything is under build/, which
+`make clean` removes.
+
+What is built:
+
+  dropbearmulti  PROGRAMS="dropbear dropbearkey scp" MULTI=1: the server, its key tool and scp in one program,
+                 which acts as the one it is started as (a link's name, or its first argument). dbclient, the
+                 client, is not built: the head unit only serves. The server needs nothing of it, and neither
+                 does scp as the far end of a client's copy (scp -t, scp -f); only an scp started on the head
+                 unit to copy to another machine would. Compression is built out (--disable-zlib): the SDP's zlib
+                 is from 2005, and the server then offers "none" only.
+  sftp-server    OpenSSH's, `make sftp-server` only, with no change to its source. Dropbear starts it for an
+                 sftp session by the bare name sftp-server (localoptions.h), looked up in PATH.
+
+The configure options, for the head unit (build-qnx.sh):
+
+  - CC=ntoarmv7-gcc, CFLAGS -O2 -march=armv7-a -mfpu=vfpv3 -mfloat-abi=softfp -D_QNX_SOURCE -std=gnu99: as the
+    agent is built, soft-float calls.
+  - LIBS=-lsocket: configure does not find socket() by itself.
+  - Dropbear ac_cv_have_decl_htole64=yes: QNX defines htole64 and the like as macros in <net/netbyte.h> (through
+    <netinet/in.h>); configure looks only in <endian.h>, misses them, and compat.h's prototypes then collide with
+    the macros.
+  - Dropbear --disable-harden, OpenSSH --without-hardening --without-stackprotect --without-pie: among those
+    flags is -pie, and a position-independent executable does not start on the head unit.
+  - --disable-lastlog, -utmp, -utmpx, -wtmp, -wtmpx (and Dropbear's -loginfunc, -pututline, -pututxline): no
+    login records are written. --disable-shadow / --without-shadow: logins are by public key only.
+  - Dropbear --enable-bundled-libtom: the SDP has no LibTomCrypt or LibTomMath.
+  - OpenSSH --without-openssl (sftp-server needs no cryptography), --without-zlib, --disable-strip (the script
+    strips).
+build-host.sh uses the same options where they apply: not the cross-compiler, CFLAGS, -lsocket, the htole64
+answer, or Dropbear's --disable-harden and OpenSSH's three hardening options.
+
+What dropbear-qnx.patch changes, each for QNX 6.5 or for the server run with -i on a socket pair:
+
+  - src/compat.h: O_NOFOLLOW defined as 0 when the system has none; QNX 6.5 has none. Every use but scp's has
+    O_EXCL, which refuses an existing link anyway.
+  - src/scpmisc.c: a vasprintf() of its own on QNX, whose libc has none.
+  - src/sshpty.c: <unix.h> on QNX, which declares openpty() (it is in libc.a).
+  - src/netio.c: -i on a socket pair or a pipe, which has no IP address, no longer ends "Failed socket address";
+    the address is given as "local", port 0.
+  - src/svr-authpubkey.c: with an absolute -D folder, only that folder's ownership and mode are checked, not
+    every folder above it (the head unit's /tmp and /dev/shmem are mode 777).
+  - src/svr-auth.c (QNX only): with no /etc/shells, an executable login shell is accepted. QNX 6.5's built-in
+    getusershell() list lacks /bin/ksh, root's shell ("User 'root' has invalid shell, rejected"), and making
+    /etc/shells would be a write to the system partition.
+  - src/svr-chansession.c: with -e the PATH the server was started with is kept, where it would otherwise be
+    the compiled DEFAULT_ROOT_PATH.
+
+What localoptions.h sets:
+
+  - no default host key or pid file paths (/nonexistent/...): -r is always given, and nothing is written under
+    /etc;
+  - inetd mode (-i) and the listening mode both built in, no re-exec;
+  - public keys only (with authorized_keys options), no password login, no agent or X11 forwarding;
+  - no message of the day;
+  - DROPBEAR_SVR_DROP_PRIVS 0, and no Unix-socket forwarding either way: QNX 6.5 has no setresgid(), which
+    dropping privileges needs (sysoptions.h stops the build otherwise), and Unix-socket forwarding needs the
+    dropping. Root logs in as root, so nothing is lost. (DROPBEAR_SVR_MULTIUSER 0 builds, but at run time
+    refuses a kernel whose getgroups() works: "Non-multiuser Dropbear requires a non-multiuser kernel".)
+  - the head unit's shell PATH as the default PATH, which is used only without -e;
+  - SFTPSERVER_PATH "sftp-server", found in PATH.
+
+
+The package
+
+org.nbtapp.ssh, "SSH access" (tools/ssh_pkg.py; ../README.md, "The SSH package"). Its manifest
+(package/manifest.json.in) places, all in the package's own folder ${app}:
+
+  bin/dropbearmulti, bin/sftp-server, bin/sshrelay   the head unit's three programs, mode 0755
+  bin/scp                                            a link to dropbearmulti, which acts as scp under that name
+  licenses/                                          the licence texts (below, "Licences to ship with the
+                                                     programs") and a README that says which program each is of
+
+It has one channel, ssh: for NBTApps itself (apps []), both ways, switched (off until a phone or nbtctl switches
+it on), and started on demand: its program is bin/sshrelay. Its logs are the channel's, ${tmp}/channels/ssh.log
+and ssh.log.1. It runs no hook, places nothing outside its folders, and asks for no restart, so the one risk flag it
+gets is starts-program. It requires agent >=1.7.0-beta.1, the first with channels (a pre-release is outside
+>=1.7.0), and app >=0.9.0.
+
+Its version is the relay's: NBT_SSH_VERSION in relay/version.hpp. sshrelay --version prints it with what
+git describe --always --dirty said when the relay was built, and the relay's log begins with the same line
+(sshrelay 1.0.0-beta.1 (build 03039b4)). make ssh-check finds it in the head unit's relay, and make ssh-release
+refuses a relay of another version, or of another commit than the one checked out, or of a checkout with changes;
+and Dropbear and sftp-server built from other sources than that commit pins (build/ssh/qnx/sources, above). The
+version is raised whenever anything the package holds changes, also when only Dropbear or OpenSSH does: a version
+that has been released is never built again with other content.
+
+What it writes on a head unit: the host key, once, in ${data} (hostkey_ed25519, and beside it hostkey_ed25519.pub,
+the key tool's copy of the public line, which nothing reads; both kept until the package's data is removed);
+everything else on the RAM disk, in ${tmp}: the socket, the keys folders, the state file and, by the agent, the
+channel's logs.
+
+
+The relay
+
+sshrelay (relay/) is the program of the package's channel "ssh". The agent starts it when the channel is opened
+and nothing listens (headunit/README.md, "A package's channels"), and connects to it once for each channel a phone
+opens. For each connection the relay starts one Dropbear server on a socket pair and carries the bytes between the
+channel and the server. One process, one thread, one select loop; nothing in the loop waits.
+
+  relay.hpp, relay.cpp    the loop, a connection from its first byte to its end
+  driver.cpp              the pty driver, started on demand
+  state.cpp               the state file, and what a start ends of what a relay that died left
+  key_lines.hpp, .cpp     the keys message and the rule each key line is held to
+  processes.hpp, .cpp     the process list: each process's parent, group, session and start time (QNX: devctl
+                          DCMD_PROC_INFO on /proc/<pid>/as; Linux: /proc/<pid>/stat)
+  child.hpp, .cpp         starting the server, the key tool and the driver
+  main.cpp                the environment, the signals
+It takes the agent's JSON reader and writer, its file helpers and its program names as source files (agent/json,
+json_writer, fsutil, sha256, programs).
+
+Its start. From the environment the agent gives: NBT_TMP_DIR, NBT_DATA_DIR, NBT_APP_DIR and NBT_CHANNEL; with one
+missing it says so on a line and exits with 2. It ignores SIGPIPE. Before it listens, an older relay that the
+state file names and that still runs is ended (below, "The state file"). It listens at
+$NBT_TMP_DIR/channels/$NBT_CHANNEL (removing a file an earlier run left there; a backlog of 64, since on QNX a
+connect to a full queue is refused), writes the state file, begins to end what the state file of a relay that died
+names, and removes every keys folder left in $NBT_TMP_DIR/auth (the folder auth itself, made again at once,
+0700). Then the host key, $NBT_DATA_DIR/hostkey_ed25519: when it is not there it is made with the key tool
+($NBT_APP_DIR/bin/dropbearmulti dropbearkey -t ed25519 -f FILE) and set to 0600 (the tool also writes the public
+line to FILE.pub, which the relay leaves where it is); its public line is read with the key tool
+(dropbearkey -y -f FILE), without the tool's comment. Apart from the end of an older relay, this is the
+one thing the relay waits for (at most 20 s for each run of the tool), and it comes after the socket is listened
+on, so the
+agent's 5 s for the socket to appear are not spent on it; connections meanwhile wait in the queue. When the key
+cannot be made or read, the relay says so and answers every connection failed. The key is made once and kept:
+it goes with the package's data.
+
+A connection:
+
+  1. The agent's line of JSON and its newline, at most 2,048 bytes: {"v":1,"channel":"ssh","access":"both",
+     "caller":"nbtapps"|"cli","phone":NAME,"maxMessage":4096}. The relay keeps caller, phone (which may be absent)
+     and maxMessage (256 to 65,535, so that the answer fits one message). After it, each message either way is two bytes of length, high byte first, and
+     1 to maxMessage bytes. A line that cannot be read, or a message of another length from the agent, ends the
+     connection with nothing sent.
+  2. The phone's first message, which has to come within 10 s of the connection or the connection is dropped:
+       { "v": 1, "keys": [ "LINE", ... ] }
+     v is 1; keys holds 1 to 8 key lines, each of which passes the rule below. Other members are not looked at.
+     Anything else (not JSON, another v, no list, a line that fails) is answered bad-keys.
+  3. With four connections that have, or wait for, a server, the answer is too-many; with no host key, failed.
+     When the pty driver is to be started, or is being looked for, the connection waits for that (below), at most
+     2 s; its 10 s for the keys message are over once the message has come. What the phone sends behind the keys
+     message meanwhile waits in the relay.
+  4. The lines are written, each with a newline, to $NBT_TMP_DIR/auth/<n>/authorized_keys, where n is the
+     connection's number in this run: the folder 0700, the file 0600, on the RAM disk. (A folder of that number
+     that a relay which did not end its connections left is removed first.)
+  5. The server is started (below), and the answer is one message:
+       { "v": 1, "hostKeys": [ "ssh-ed25519 AAAA..." ], "pty": true }
+     or, with nothing started and nothing left, { "error": CODE } and the connection closed once it has gone:
+       bad-keys   the keys message is not as above
+       too-many   four connections have, or wait for, a server
+       failed     no host key, the keys folder or file cannot be made, or the server cannot be started
+     There is no error for want of a pty: copying files and running single commands need none, so a connection
+     is served with "pty": false all the same (below).
+  6. Then the bridge. What the server writes goes to the agent in messages of up to maxMessage bytes, cut where
+     the reads fall; the phone's messages go to the server as bytes, their boundaries ignored. Each direction
+     holds about one message (up to 2 + maxMessage bytes from the agent, maxMessage for the server, one framed
+     message for the agent), and a side is not read while what it sent before has not been taken: a slow reader
+     on either side holds the other back, and the relay's memory stays bounded.
+
+The key-line rule. A line is TYPE SP BASE64, or TYPE SP BASE64 SP COMMENT:
+  - TYPE is ssh-ed25519 or ecdsa-sha2-nistp256, and comes first, so that no line can put authorized_keys options
+    (command="...", no-pty, from=...) in front of its key;
+  - BASE64 is strict base64 (standard alphabet, padded, no bits left over) of an SSH public key blob whose first
+    string is TYPE and whose rest is exactly that type's key: a string of 32 bytes for ssh-ed25519; the string
+    nistp256 and an uncompressed point of 65 bytes for ecdsa-sha2-nistp256. RSA and other types are refused;
+  - COMMENT is 1 to 128 characters;
+  - every byte is printable ASCII, space to tilde: no control character, tab, line end or byte outside ASCII;
+    so a line is at most 289 bytes.
+
+The server. A socket pair; one end is the server's standard input and output, its standard error is the relay's
+(so its -E lines are in the channel's log), and it gets no other file of the relay's. It is started as
+
+  $NBT_APP_DIR/bin/dropbearmulti dropbear -i -E -s -e -j -k -I 1800 -r HOSTKEY -D KEYSFOLDER
+
+one connection on its standard input (-i), its log to standard error (-E), no password logins (-s), the
+environment passed on to what it runs (-e), no port forwarding either way (-j, -k), ended after 30 minutes with no
+traffic (-I 1800). It leads a session of its own, so the agent's signals to the relay's process group do not reach
+it and what it starts can be found by session; no signal is blocked in it, and SIGPIPE, SIGHUP, SIGINT, SIGTERM and
+SIGCHLD are at their defaults. Its environment is the relay's making, with nothing of the relay's own: on QNX,
+PATH=$NBT_APP_DIR/bin:/proc/boot:/boot/bin:/bin:/opt/os/bin:/opt/sys/bin:/opt/core/bin:/opt/car/bin and
+LD_LIBRARY_PATH=/proc/boot:/boot/lib:/lib:/usr/lib:/opt/os/lib:/opt/sys/lib:/opt/core/lib:/opt/car/lib; elsewhere
+PATH=$NBT_APP_DIR/bin and then the relay's own PATH. The package's bin/ comes first for sftp-server, and for scp,
+which is a name of dropbearmulti. On QNX it is started with spawn(), given the list of its three files and
+SPAWN_SETSID, as the agent starts its programs (no fork); elsewhere with fork(), setsid() and execve(), with a pipe
+that the exec closes so that a program that cannot be started is known at once, as spawn() makes it known.
+
+How a connection ends:
+  - The agent's side closes (the phone closed the channel, the link dropped, the channel was switched off): the
+    relay closes the server's end, and the server exits.
+  - The server closes its end, or has exited and its end holds nothing more: what still waits for the agent goes
+    first, then the agent's connection is closed.
+  - Either way, then, what the server left behind is ended. A login shell on a pty leads a session of its own and
+    its background jobs stay after it (each in a group of its own, in that session); without a pty, the shell and
+    everything it ran stay in the server's own session. QNX has no call that signals a session. So while a server
+    runs, the relay notes about once a second the server's children that lead a session (the login shells), and
+    once more when the agent's side closes, while the server is still their parent. At the end it walks the
+    process list and sends SIGHUP to every process group whose session is the server's (its pid) or a noted one,
+    and 2 s later SIGKILL to each such group that is still there, without waiting meanwhile. It signals no group
+    of another session, and never its own. A shell that a server starts in the last second before it ends by
+    itself can be missed. The connection's keys folder is removed, by the path the connection made.
+  - Ended children are collected as they end.
+  - SIGTERM, SIGINT or SIGHUP to the relay: it stops listening and removes the socket file, ends every connection
+    so, with the SIGKILL 0.5 s after the SIGHUP, ends its pty driver the same way (SIGTERM, SIGKILL 0.5 s later if
+    it is still there), removes the keys folders (and auth/ when it is empty) and the state file, and exits with
+    0, all by 1.5 s at most: within the 2 s the agent waits before its SIGKILL to the relay's group, which would
+    not reach the servers' sessions or the driver's.
+
+The pty driver. A shell needs a pty. On the head unit ptys come from /bin/devc-pty, a program of the car's own
+debug set-up, which may not be installed, and may already run with ptys of its own. At a keys message, when the
+relay has no driver of its own running and /bin/devc-pty is there and can be run, it runs `/bin/devc-pty -n 4`
+(in a session of its own, its output to /dev/null, its errors to the relay's log). On QNX devc-pty detaches: the
+relay is told its child has ended (waitpid gives an exit with 0) while the driver runs on under the pid it was
+started with, in session 1, its parent still the relay; when it is ended later it leaves nothing to collect. A
+devc-pty of another build could as well run on under a new pid that its command starts, so the relay takes
+either. It takes the process list before it runs the command, reads the start time of the command's own process,
+and then looks every 100 ms, for 2 s at most, at the processes that were not in that list, have not ended, have a
+start time and run a program of the file name devc-pty (or of the file /bin/devc-pty leads to through links):
+  - the command's own process (its pid with the start time it had) is taken once the relay has been told it ended
+    and it still runs, or at the end of the 2 s when it still runs;
+  - another such process is taken when it is the only one and the command's own process does not run beside it.
+    While two or more are there (a starter that has not gone yet beside its driver) the look goes on, and at the
+    end of the 2 s none of them is taken: they are left alone.
+The driver's start time is kept with its pid. Connections whose keys come meanwhile wait for the same look, and
+when the driver is found, or the 2 s are over, or the command failed and none appeared, they all go on. The relay
+never signals a devc-pty it did not find so: another one, the debug set-up's, is left alone whenever it started.
+A start that found none is not tried again for 30 s; the connections meanwhile go on at once.
+  - 30 s after the last connection has ended (when no connection is left that has not ended, also one still
+    waiting for its keys message), the relay sends its driver SIGTERM, which removes the driver's names, and
+    SIGKILL 2 s later if it is still there. A connection within the 30 s keeps it, and the 30 s start again
+    after it. One whose keys come while a driver is being ended sends it its SIGKILL at once and starts another.
+  - A driver that has gone by itself is noticed at the next keys message, or with the notes of the sessions
+    (about once a second while a server runs), and one is started again at the next connection.
+  - Before it signals its driver the relay checks that the pid still runs, with the start time it had, a program
+    of the driver's file name.
+  - Elsewhere than QNX there is no such driver and ptys are always there: nothing is started.
+
+pty in the answer. "pty" is true when the relay's own driver runs, or, without one, when the system has ptys
+anyway: on QNX when at least one name /dev/ptyp* is there (another driver's); elsewhere always. A connection is
+never refused for want of a pty: scp, sftp and single commands need none. Nor does "pty": true promise one: the
+server takes whichever pty is free on the whole system when a client asks for one, any one connection can ask for
+several, and other programs use them too; with none free the server cannot give a session one. (Dropbear also
+closes a session's pty when the client's input ends, so a client keeps its input open while a command runs on a
+pty.)
+
+Four connections at once. A keys message while four connections have, or wait for, a server is answered too-many
+before anything is made for it, and the connection is closed. A slot is free again once a connection has ended:
+its agent side closed, its server's end closed and the SIGHUP sent, not when the SIGKILL 2 s later is. So a phone
+that loses its link and connects again at once is not refused while what its last server left is being ended;
+the processes of four ended connections may meanwhile still be there for up to 2 s beside those of four new ones.
+
+Its life. The relay does not exit by itself: with no connection only the driver goes, after its 30 s. The agent
+ends it (SIGTERM to its group, SIGKILL 2 s later) when the channel is switched off or its package changes.
+
+The state file, $NBT_TMP_DIR/sshrelay.state, for a relay that dies without its cleanup (SIGKILL, a crash). One
+line of JSON, written whole whenever what it holds changes (a new file, renamed over the old one, so that a reader
+never sees half of one), and removed at a clean exit:
+  { "v": 1, "relay": REC, "driver": REC, "servers": [ { "pid": N, "start": "T", "logins": [ REC, ... ] } ] }
+REC is { "pid": N, "start": "T" }, a pid and that process's start time as the process list gives it (QNX: ns, from
+DCMD_PROC_INFO; Linux: clock ticks since boot), "0" when it was not known; "driver" is there while the relay has
+one; "servers" holds each connection's server whose cleanup is not done, with the login sessions noted for it.
+The start time is a string of decimal digits, not a JSON number: on QNX it has 18 digits or more, and the agent's
+JSON reader, which the relay uses, takes no integer above 2^53 - 1. It is read back only in the form it is written
+in: 1 to 20 digits, no leading zero, at most 2^64 - 1.
+At a start:
+  1. A file that cannot be read, or holds anything else (another key, another type, a pid of 1 or less, a start
+     time in another form, more than 64 entries), is ignored whole and replaced: nothing it names is signalled.
+  2. Before listening: if the relay it names still runs (the same pid and start time, not ended, and a program of
+     this relay's file name), it is sent SIGTERM and waited for 2 s, then sent SIGKILL and waited for 0.3 s at
+     most; the file is read again after it. A relay that ends cleanly removes the socket file and the state file;
+     one that does not leaves the file for the next step. So the start's worst case before the socket is there
+     is about 2.3 s (the 2 s, the 0.3 s, and two reads of the process list), inside the 5 s the agent waits.
+  3. After listening, without holding the loop: what the file names is ended as a connection's leftovers are,
+     SIGHUP to every process group of the sessions that pass the checks below and SIGKILL 2 s later to those
+     still there, and the driver gets SIGTERM, then SIGKILL 2 s later (or 0.5 s at a SIGTERM to the relay).
+     Never pid 1 or below, the relay's own pid, group or session.
+       - A server's session (the server's pid) and a login session (its leader's pid): when a process of that pid
+         is there and has not ended, it must have the recorded start time and still lead its session, and for a
+         server run a program of the server's file name (dropbearmulti); otherwise the session is left alone.
+         When no process of that pid is there, the session is ended only if processes are still in it.
+       - The driver: the same pid and start time, not ended, and a program of the driver's file name.
+     A session's id is its leader's pid, which is not given to another process while the session has members.
+     So a process that is none of these is hit only if it has the recorded pid and start time, which makes it
+     the recorded process, or if it is in a session whose leader was given the recorded pid after the recorded
+     session had emptied and has itself ended since, all between the death of the relay and this start.
+  4. Every keys folder in $NBT_TMP_DIR/auth is removed.
+
+Its log is its standard error, which the agent appends to the channel's log (${tmp}/channels/ssh.log): a line for
+its start (pid, socket), an older relay ended, what a relay that died left and what of it was ended, a state file
+that was ignored, the host key (made, its SHA-256 fingerprint, or why there is none), each connection (#n
+connected; the caller, the phone's name, and each key's type and comment; a wait for the driver; the server's pid
+and whether there is a pty), a refusal and its code, how a connection ended (with the bytes each way and the
+seconds), how its server exited, and what was ended after it (the groups given SIGHUP, and those still there for
+SIGKILL); the driver started and its pid, or why none was; the driver gone by itself, sent SIGTERM and why, ended,
+or sent SIGKILL. It never writes key material other than a key's type and comment, and never a message's bytes.
+The server's own lines (logins, not what is typed) come between them, and the key tool's when it makes the key.
+
+The test hooks. A build for this machine (make ssh-relay-host, -DNBT_SSHRELAY_TEST_HOOK) reads these variables;
+the head unit's build has none of them, which make ssh-check checks (no NBT_SSHRELAY_TEST_ in the program):
+  NBT_SSHRELAY_TEST_SERVER       a program run in the server's place, with the server's arguments after
+                                 `dropbear`: the tests' stand-in (tests/ssh/standin_server.py), which echoes, reads
+                                 or writes slowly, exits by itself, stays, or leaves processes behind as a login does
+  NBT_SSHRELAY_TEST_SERVER_NAME  the program name that program's processes have (a script's is its interpreter's),
+                                 for the check a start makes before it ends a recorded server
+  NBT_SSHRELAY_TEST_PTY_DRIVER   a stand-in for /bin/devc-pty (tests/ssh/standin_pty.cpp, copied as devc-pty),
+                                 treated as /bin/devc-pty is on QNX
+  NBT_SSHRELAY_TEST_DEV          a folder that stands for QNX's /dev where pty names are looked for; without it
+                                 there are always ptys, as on any system but QNX
+  NBT_SSHRELAY_TEST_DRIVER_MS    the driver's 30 s, both of them (with no connection, and after a start that
+                                 found none), in milliseconds
+  NBT_SSHRELAY_TEST_START_OFFSET a number added to every start time the process list gives (that is not 0), so
+                                 that the state file holds start times of the size QNX's are
+
+The tests, make ssh-test (tests/ssh/run_relay.py), on this machine and not in the bench's container: the key-line
+rule (test_key_lines.cpp) and the walk of /proc with start times (test_processes.cpp); with stand-ins for the
+server, the protocol (no keys message in time, an agent's line that cannot be read, bad keys messages, a good one:
+the answer, the keys file, the modes, the server's arguments, files, session and environment; failed; the host key
+made once), the bridge (1 MiB each way in messages of every size, compared; a slow reader on either side, with the
+relay's memory looked at), and the ends (the client goes away; the server exits with bytes still to come; what a
+server leaves in its session and in a session of its own ended, and a process of another session left; SIGTERM
+with two connections open); with a stand-in for the driver too, in both forms (one that runs on under a new pid,
+and one that is the process the relay started): the driver started at the first connection and its pid found,
+not started for a second, kept by a connection within its time, ended after it and not before, started again,
+ended at the relay's end, and another of the same name left alone; connections that wait for a driver that comes
+late; a starter that stays beside its driver for a moment, not taken; one that never appears, and none there; one
+that goes by itself; one that ignores SIGTERM; "pty" false with no ptys and the connection served, true with
+another driver's names; four connections and a fifth too-many, and a slot free again after an end; with start
+times of the size QNX gives (NBT_SSHRELAY_TEST_START_OFFSET): a relay killed with two servers, their leftovers and
+a driver, and the next start ending them all and the keys folders, and serving; a state file naming unrelated
+processes, and one of nonsense (also a start time in any form but the one written), signalling none, and start
+times up to 2^64 - 1 read; an older relay still running ended before the new one listens,
+also one that ignores SIGTERM, with the start's time measured; and, with this machine's Dropbear (make ssh-host)
+and OpenSSH client, through tests/ssh/ssh_proxy.py as the client's proxy command: a login with a command and its
+exit status, one on a pty, a wrong key refused, and the host key of the answer the one the client checks. With no
+ssh on the machine those are skipped, and the last line says so. At the end no process of the tests may be left.
+
+
+Provenance
+
+The submodules are taken from GitHub, which is not where the releases are signed. Each tag's tree was compared,
+once, with the release archive whose PGP signature had been verified:
+
+  https://matt.ucc.asn.au/dropbear/releases/dropbear-2026.94.tar.bz2
+    sha256 e098034a843699200c8c977a991fff73159735bf795d5f72ef672c41a6b1ae81
+    signed by F734 7EF2 EE2E 07A2 6762 8CA9 4493 1494 F29C 6773 (dropbear-key-2015.asc on the same site)
+  https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz
+    sha256 9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b
+    signed by 7168 B983 815A 5EEF 59A4 ADFD 2A3F 414E 7360 60BA (RELEASE_KEY.asc)
+
+Each archive, extracted, against `git archive` of the commit above, extracted: identical. Dropbear 967 files and
+OpenSSH 893, the same names, the same bytes (diff -r) and the same modes, no links, nothing on one side only. So
+the tags carry the generated files the archives carry (configure, config.h.in), and the build needs no autotools.
+(Checked 2026-11-19.)
+
+The same exports build the same bytes: two builds from two fresh exports gave identical stripped programs, for
+the head unit and for this machine. The programs hold the paths of the source files they were compiled from (in
+assertion messages): /src/build/ssh/src/... for the head unit, because the image is given headunit/ at /src, so
+any checkout builds the same program there with the same image; for this machine, the checkout's own path, so
+those differ from one checkout to another. Nothing holds a date.
+
+
+Moving to a new upstream version
+
+  1. In the submodule: git fetch --depth 1 origin tag NEWTAG, git checkout NEWTAG; then, in headunit/,
+     git add ssh/dropbear (or ssh/openssh). That pins it.
+  2. Compare the new tag's tree with its signed release archive as above, and write the result here.
+  3. make ssh-src. A hunk of the patch that no longer applies fails here. Make the change again in a fresh
+     export and write the patch with diff -ruN of the unpatched export against the changed one (paths a/ and b/,
+     -p1), leaving out localoptions.h.
+  4. Read the new src/default_options.h and sysoptions.h for options that localoptions.h has to set, and the
+     CHANGES file for anything that touches -i, -D, -e or what QNX lacks.
+  5. make ssh ssh-host ssh-check, and change the tags and commits at the top of this file.
+  6. Look again at what the build compiles and links for the licences to ship (below), and raise the package's
+     version (ssh/relay/version.hpp).
+
+
+Licences to ship with the programs
+
+Not kept here: tools/ssh_pkg.py takes them from the exported sources (build/ssh/src/) when it makes the package,
+and puts them in its licenses/ folder with a README that says which program each belongs to. A notice is the
+comments at the head of its file, up to its first line of code. The lists are of what the head unit's build
+compiles and links: every object on dropbearmulti's link line that holds code, and the members of OpenSSH's two
+libraries that sftp-server takes (found by the symbols each object defines that the program holds; checked
+2026-11-20, for the pins above). For dropbearmulti:
+
+  - dropbear/LICENSE (dropbear-LICENSE): Dropbear's MIT licence, and the notices of the parts from OpenSSH, PuTTY
+    and TweetNaCl;
+  - dropbear/libtomcrypt/LICENSE and dropbear/libtommath/LICENSE (libtomcrypt-LICENSE, libtommath-LICENSE);
+  - in dropbear-notices, the notices at the head of these files, whose holders or terms LICENSE does not give in
+    full: src/atomicio.c, src/chachapoly.c, src/compat.c (getusershell(), which QNX's libc has not), src/loginrec.c,
+    src/mlkem768.c, src/libcrux_mlkem768_sha3.h (MIT, Cryspen; included by src/mlkem768.c), src/scp.c,
+    src/scpmisc.c, src/sshpty.c, src/svr-authpubkey.c (its part from OpenSSH) and src/svr-authpubkeyoptions.c.
+    src/fake-rfc2553.c, src/gcm.c, src/progressmeter.c and src/svr-authpam.c are compiled with their code switched
+    off for the head unit, and src/sntrup761.c is public domain.
+For sftp-server:
+
+  - openssh/LICENCE (openssh-LICENCE), which collects the notices of OpenSSH's files and, in its part 8, those of
+    the portable compatibility code;
+  - in openssh-notices, the notices of the files it takes whose holders that file does not name: atomicio.c,
+    misc.c, openbsd-compat/fmt_scaled.c, openbsd-compat/freezero.c, openbsd-compat/memmem.c,
+    openbsd-compat/reallocarray.c, openbsd-compat/recallocarray.c, openbsd-compat/strtonum.c and platform-pledge.c.
+    (openbsd-compat/explicit_bzero.c is public domain.)
+A new upstream version, or other build options, can change what is compiled: look again (step 6 above), and change
+the lists in tools/ssh_pkg.py with this one (make test-ssh-pkg holds the two together).
+
+
+Worktrees
+
+In a linked worktree, the submodules' clones live in the main repository's .git/worktrees/<name>/modules/
+(`git rev-parse --git-dir` in a submodule shows it), not in the worktree's folder. `git worktree remove` refuses
+a worktree with submodules: it takes --force, which also throws away uncommitted changes and untracked files, so
+look at `git status` first. Such a worktree cannot be moved with `git worktree move` either.

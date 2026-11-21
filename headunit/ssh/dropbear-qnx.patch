@@ -1,0 +1,138 @@
+diff -ruN a/src/compat.h b/src/compat.h
+--- a/src/compat.h	2026-07-23 12:00:00.000000000 +0100
++++ b/src/compat.h	2026-11-19 06:38:56.493504435 +0000
+@@ -49,6 +49,12 @@
+ void endusershell(void);
+ #endif
+ 
++/* QNX 6.5 has no O_NOFOLLOW. Every use but scp's has O_EXCL, which refuses
++ * an existing link anyway. */
++#ifndef O_NOFOLLOW
++#define O_NOFOLLOW 0
++#endif
++
+ #ifndef DROPBEAR_PATH_DEVNULL
+ #define DROPBEAR_PATH_DEVNULL "/dev/null"
+ #endif
+diff -ruN a/src/netio.c b/src/netio.c
+--- a/src/netio.c	2026-07-23 12:00:00.000000000 +0100
++++ b/src/netio.c	2026-11-19 06:45:47.084406176 +0000
+@@ -693,17 +693,24 @@
+ 	
+ 	if (local_host || local_port) {
+ 		addrlen = sizeof(addr);
+-		if (getsockname(fd, (struct sockaddr*)&addr, &addrlen) < 0) {
+-			dropbear_exit("Failed socket address: %s", strerror(errno));
++		if (getsockname(fd, (struct sockaddr*)&addr, &addrlen) < 0
++				|| (addr.ss_family != AF_INET && addr.ss_family != AF_INET6)) {
++			/* A pipe or a socket pair (-i from a parent process): no address. */
++			if (local_host) *local_host = m_strdup("local");
++			if (local_port) *local_port = m_strdup("0");
++		} else {
++			getaddrstring(&addr, local_host, local_port, host_lookup);
+ 		}
+-		getaddrstring(&addr, local_host, local_port, host_lookup);		
+ 	}
+ 	if (remote_host || remote_port) {
+ 		addrlen = sizeof(addr);
+-		if (getpeername(fd, (struct sockaddr*)&addr, &addrlen) < 0) {
+-			dropbear_exit("Failed socket address: %s", strerror(errno));
++		if (getpeername(fd, (struct sockaddr*)&addr, &addrlen) < 0
++				|| (addr.ss_family != AF_INET && addr.ss_family != AF_INET6)) {
++			if (remote_host) *remote_host = m_strdup("local");
++			if (remote_port) *remote_port = m_strdup("0");
++		} else {
++			getaddrstring(&addr, remote_host, remote_port, host_lookup);
+ 		}
+-		getaddrstring(&addr, remote_host, remote_port, host_lookup);		
+ 	}
+ }
+ 
+diff -ruN a/src/scpmisc.c b/src/scpmisc.c
+--- a/src/scpmisc.c	2026-07-23 12:00:00.000000000 +0100
++++ b/src/scpmisc.c	2026-11-19 06:39:33.224774968 +0000
+@@ -47,6 +47,24 @@
+ #include "includes.h"
+ #include "scpmisc.h"
+ 
++#ifdef __QNXNTO__
++/* QNX 6.5's libc has no vasprintf(). */
++static int
++vasprintf(char **out, const char *fmt, va_list ap)
++{
++	va_list ap2;
++	int n;
++
++	va_copy(ap2, ap);
++	n = vsnprintf(NULL, 0, fmt, ap2);
++	va_end(ap2);
++	*out = NULL;
++	if (n < 0 || (*out = malloc((size_t)n + 1)) == NULL)
++		return -1;
++	return vsnprintf(*out, (size_t)n + 1, fmt, ap);
++}
++#endif
++
+ void *
+ xmalloc(size_t size)
+ {
+diff -ruN a/src/sshpty.c b/src/sshpty.c
+--- a/src/sshpty.c	2026-07-23 12:00:00.000000000 +0100
++++ b/src/sshpty.c	2026-11-19 06:40:29.691194901 +0000
+@@ -30,6 +30,9 @@
+ #ifdef HAVE_PTY_H
+ # include <pty.h>
+ #endif
++#ifdef __QNXNTO__
++# include <unix.h>	/* openpty() */
++#endif
+ #if defined(USE_DEV_PTMX) && defined(HAVE_STROPTS_H)
+ # include <stropts.h>
+ #endif
+diff -ruN a/src/svr-auth.c b/src/svr-auth.c
+--- a/src/svr-auth.c	2026-07-23 12:00:00.000000000 +0100
++++ b/src/svr-auth.c	2026-11-19 07:02:37.812146096 +0000
+@@ -315,6 +315,14 @@
+ 	/* check the shell is valid. If /etc/shells doesn't exist, getusershell()
+ 	 * should return some standard shells like "/bin/sh" and "/bin/csh" (this
+ 	 * is platform-specific) */
++#ifdef __QNXNTO__
++	/* QNX 6.5 has no /etc/shells, and its built-in list lacks /bin/ksh, the
++	 * head unit's root shell: without the file, an executable shell is taken. */
++	if (access("/etc/shells", F_OK) != 0 && access(usershell, X_OK) == 0) {
++		setusershell();
++		goto goodshell;
++	}
++#endif
+ 	setusershell();
+ 	while ((listshell = getusershell()) != NULL) {
+ 		TRACE(("test shell is '%s'", listshell))
+diff -ruN a/src/svr-authpubkey.c b/src/svr-authpubkey.c
+--- a/src/svr-authpubkey.c	2026-07-23 12:00:00.000000000 +0100
++++ b/src/svr-authpubkey.c	2026-11-19 06:37:16.229444498 +0000
+@@ -595,6 +595,11 @@
+ 		if (strcmp(path, ses.authstate.pw_dir) == 0 || strcmp(path, "/") == 0) {
+ 			break;
+ 		}
++		/* An absolute -D directory: only that directory itself is checked,
++		 * so that it may sit inside a world-writable RAM disk folder. */
++		if (svr_opts.authorized_keys_dir[0] == '/') {
++			break;
++		}
+ 	}
+ 
+ 	/* all looks ok, return success */
+diff -ruN a/src/svr-chansession.c b/src/svr-chansession.c
+--- a/src/svr-chansession.c	2026-07-23 12:00:00.000000000 +0100
++++ b/src/svr-chansession.c	2026-11-19 06:37:19.126561810 +0000
+@@ -1007,7 +1007,9 @@
+ 	addnewvar("LOGNAME", ses.authstate.pw_name);
+ 	addnewvar("HOME", ses.authstate.pw_dir);
+ 	addnewvar("SHELL", get_user_shell());
+-	if (getuid() == 0) {
++	if (svr_opts.pass_on_env && getenv("PATH") != NULL) {
++		/* -e: the PATH the server was started with is kept */
++	} else if (getuid() == 0) {
+ 		addnewvar("PATH", DEFAULT_ROOT_PATH);
+ 	} else {
+ 		addnewvar("PATH", DEFAULT_PATH);

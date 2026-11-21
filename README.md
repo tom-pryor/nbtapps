@@ -93,7 +93,8 @@ SPDX identifier `LicenseRef-PolyForm-Strict-1.0.0` (PolyForm Strict is not on th
 `LicenseRef-`), and [REUSE.toml](REUSE.toml) covers the files that cannot carry a header. `reuse lint` checks
 both. The license texts are in [LICENSES/](LICENSES/).
 
-Third-party code keeps its own terms: TweetNaCl in `headunit/agent/vendor/tweetnacl/` (public domain) and the
-Gradle wrapper in `android/` (Apache-2.0).
+Third-party code keeps its own terms: TweetNaCl in `headunit/agent/vendor/tweetnacl/` (public domain), the
+Gradle wrapper in `android/` (Apache-2.0), and Dropbear and OpenSSH, the submodules in `headunit/ssh/` (their own
+licence files; our patch to Dropbear and its build options are MIT, as Dropbear).
 
 Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)

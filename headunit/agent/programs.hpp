@@ -3,10 +3,11 @@
 #ifndef NBT_AGENT_PROGRAMS_HPP
 #define NBT_AGENT_PROGRAMS_HPP
 
-// Which programs are running, told by the file name of a process's executable. Three users: the gate, which names
+// Which programs are running, told by the file name of a process's executable. Four users: the gate, which names
 // the program that opens a serial node (spp_gate.hpp), the agent, which has to know whether the program that
-// answers for a serial service is still there (serial_services.hpp), and the checks, which stop the programs of an
-// app before its files are removed (checks.hpp): those are found by the folder their executable is in.
+// answers for a serial service is still there (serial_services.hpp), the checks, which stop the programs of an app
+// before its files are removed (checks.hpp): those are found by the folder their executable is in; and the agent
+// again, at its start, for the program of a channel an earlier agent started (runsProgram).
 //
 // A process is its executable: one that a shell runs from a script is the shell, not the script.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
@@ -40,6 +41,14 @@ inline std::string programName(const char* exePath) {
 //                             which is what the process list shows. QNX gives it as it was given, without its
 //                             leading '/' ("bin/sh"), and does not follow links in it
 std::string exePathOf(long pid, const char* procDir = "/proc");
+
+// Whether process `pid` runs the program in the file `programPath` (absolute), which an earlier agent started in a
+// process group of its own (channels.hpp): its executable has the file's name; or the file is a script, whose
+// process is its interpreter, and the process leads its own process group, and its executable has the file name of
+// the interpreter on the script's first line (`#!/bin/sh`), or of the file that path leads to through links. Another
+// process given the same pid since passes only if it looks like that too: for a script, a shell that leads a group
+// of its own.
+bool runsProgram(long pid, const std::string& programPath, const char* procDir = "/proc");
 
 enum ProgramState {
     kProgramRunning,      // a process with that executable is there

@@ -23,6 +23,22 @@
       "id": "org.nbtapp.hello",
       "version": "1.2.0",
       "name": "Hello NBT",
+      "sha256": "95868b1ed5f52df1c0a1575a30f1eece8486a44cc0619fa529c103e5ed8cc08b",
+      "size": 2545,
+      "manifestSha256": "4bb7568aff2d64732fea32edef644d012b3f720be9aa9affe9336111676cf973",
+      "flags": [
+        "runs-scripts",
+        "starts-program"
+      ],
+      "signature": "a11deed915728bf9e54337957eab2f4d93f348d35630cf124166d546cb41ba56613fc8a7b18f604d42e8ab5f8c435d5dc4412a810bcdd270bf3100986efc9905",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/channels-most.nbtpkg",
+      "what": "8 channels, a name of 32 characters, one of digits and a hyphen, a program with 16 arguments and one with none, and none started"
+    },
+    {
+      "id": "org.nbtapp.hello",
+      "version": "1.2.0",
+      "name": "Hello NBT",
       "sha256": "9319a66c61ec474046dd1198f842efd36399333b145c84c60608e680b8d245da",
       "size": 2480,
       "manifestSha256": "2a93a7dc6bf0dc9a0898208c6c0cf31d7042011ea536e7a2f68218f5dbcc2429",
@@ -154,6 +170,36 @@
       "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
       "file": "good/org.nbtapp.agent-2.5.0.nbtpkg",
       "what": "built from tests/packages/agent-2.5.0-badlauncher"
+    },
+    {
+      "id": "org.nbtapp.chan",
+      "version": "1.0.0",
+      "name": "Channels",
+      "sha256": "96af53a2d6205f9a6701329404b16669ad6a60888ef7806d6663c65b36e4b4f5",
+      "size": 1316,
+      "manifestSha256": "965b338834a794219979ba85a8ba7964b47da1113b3bde19e2cb2e260db02f77",
+      "flags": [
+        "starts-program"
+      ],
+      "signature": "6a6c9df375142d5e500e6279469c4a8eacc4824924f0f255771ec4d9077a73eadf7ea1e4b726699f765492b96fa13f431807a7de2b4ed837ad80ffd5c10cf406",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.chan-1.0.0.nbtpkg",
+      "what": "built from tests/packages/chan-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.chan",
+      "version": "1.1.0",
+      "name": "Channels",
+      "sha256": "48037c40436a4f5c945551c54a38e88a35ffa935f933ea63d52107801816170b",
+      "size": 1316,
+      "manifestSha256": "7ddd93c1a2316b454f41090a30add6a9a745fc35488701f93376613ab10b90de",
+      "flags": [
+        "starts-program"
+      ],
+      "signature": "844f07ed72a5ce16e25c2c69c453bcb83a1500bdc6fbb690ab831d9f285c713f967e14dabeb60ce42676d2460e148aee25f171d9e14e36cb9d75c02f7d2ad501",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.chan-1.1.0.nbtpkg",
+      "what": "built from tests/packages/chan-1.1.0"
     },
     {
       "id": "org.nbtapp.demoplugin",
@@ -477,6 +523,36 @@
       "what": "built from tests/packages/slow-1.0.0"
     },
     {
+      "id": "org.nbtapp.ssh",
+      "version": "1.0.0",
+      "name": "SSH access",
+      "sha256": "92f5315c0eeabcb05424cc400d849bd6295485175729c94e177ab8618ab08207",
+      "size": 2014,
+      "manifestSha256": "3233027e2cf4b1543aadf1b38c5360e8e2d3d9501bbf0eff69a35ae84077d6fd",
+      "flags": [
+        "starts-program"
+      ],
+      "signature": "908b26c517f1db29a7206d8cd387eeb8e30dc6101e9a78e87ed85187452c167624e8db778035125d11eb4229afe59d3b988f619ba6552b936af10dc1e18f740a",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.ssh-1.0.0.nbtpkg",
+      "what": "built from tests/packages/ssh-1.0.0"
+    },
+    {
+      "id": "org.nbtapp.ssh",
+      "version": "1.0.1",
+      "name": "SSH access",
+      "sha256": "26da245c81dffafd3fbd6f06fe031249622b882449433a00e79126c722ccc569",
+      "size": 2013,
+      "manifestSha256": "6f70d588e81173efa26a4bde65cc6d3131328500f2fc8464eaec6ac06c7665b8",
+      "flags": [
+        "starts-program"
+      ],
+      "signature": "739e54eee5e43bffba051ece62a7d95b228e3e9a8afe38df9e16ad8b23d11abf1f465380abf0b007e3d2f78ca13bf493aa9bb7444e54819977d2f621cd6e9708",
+      "key": "18680457e3b23112c2f64935bdf852c263df25880d99ece34561c01c76a9758d",
+      "file": "good/org.nbtapp.ssh-1.0.1.nbtpkg",
+      "what": "built from tests/packages/ssh-1.0.1"
+    },
+    {
       "id": "org.nbtapp.syshook",
       "version": "1.0.0",
       "name": "System file with hooks",
@@ -604,6 +680,180 @@
       "file": "bad/bytes-before-start.nbtpkg",
       "code": "bad-archive",
       "what": "four bytes in front of the manifest"
+    },
+    {
+      "file": "bad/channels-access-unknown.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an unknown access",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-apps-named.nbtpkg",
+      "code": "unsupported-manifest",
+      "what": "a channel that names a phone app, which this version does not know",
+      "app": "later-format"
+    },
+    {
+      "file": "bad/channels-apps-not-list.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel's apps that is a string",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-empty.nbtpkg",
+      "code": "bad-manifest",
+      "what": "channels with no channel in its list",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-entry-not-object.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel that is a string",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-name-dot.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel name with a dot",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-name-hyphen-first.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel name that starts with a hyphen",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-name-too-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel name of 33 characters",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-name-twice.nbtpkg",
+      "code": "bad-manifest",
+      "what": "the same channel twice",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-name-uppercase.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel name with a capital",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-no-access.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel with no access",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-no-apps.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel with no apps",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-no-name.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a channel with no name",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-not-a-list.nbtpkg",
+      "code": "bad-manifest",
+      "what": "channels is one channel, not a list",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-absolute.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a program given as an absolute path",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-arg-control.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an argument with a line end",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-arg-number.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an argument that is a number",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-arg-too-long.nbtpkg",
+      "code": "bad-manifest",
+      "what": "an argument of 256 characters",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-args-not-list.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a program's args that is a string",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-args-too-many.nbtpkg",
+      "code": "bad-manifest",
+      "what": "17 arguments",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-dotdot.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a program with `..`",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-link.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a program that is a link the package places, not a file",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-no-program.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a start with no program",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-not-object.nbtpkg",
+      "code": "bad-manifest",
+      "what": "start as a string",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-start-unknown-key.nbtpkg",
+      "code": "unsupported-manifest",
+      "what": "a key in a channel's start that this version does not know",
+      "app": "later-format"
+    },
+    {
+      "file": "bad/channels-start-unplaced.nbtpkg",
+      "code": "bad-manifest",
+      "what": "a program the package does not place",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-switch-string.nbtpkg",
+      "code": "bad-manifest",
+      "what": "switch as a string",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-too-many.nbtpkg",
+      "code": "bad-manifest",
+      "what": "9 channels",
+      "app": "no-channels"
+    },
+    {
+      "file": "bad/channels-unknown-key.nbtpkg",
+      "code": "unsupported-manifest",
+      "what": "a key in a channel that this version does not know",
+      "app": "later-format"
     },
     {
       "file": "bad/contents-hash-uppercase.nbtpkg",
@@ -1407,6 +1657,12 @@
     }
   ],
   "skipped": [
+    {
+      "file": "skipped/channels-no-agent.nbtpkg",
+      "code": "bad-manifest",
+      "what": "channels with a requires.agent that an older agent is in",
+      "names": "channels"
+    },
     {
       "file": "skipped/logs-absolute-elsewhere.nbtpkg",
       "code": "bad-manifest",

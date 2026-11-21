@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.data.link
 
+import com.nbtapps.store.data.channels.ChannelLink
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.LinkClosing
 import java.io.IOException
@@ -49,7 +50,7 @@ import kotlinx.serialization.json.JsonObject
  */
 class AgentSession(
     link: Link,
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     io: CoroutineDispatcher = Dispatchers.IO,
     /** A serial link's keep-alive times. A test shortens them. */
     private val pingAfterMs: Long = ProtocolConstants.SERIAL_PING_AFTER_MS,
@@ -132,8 +133,31 @@ class AgentSession(
             peer.failStream(stream.toInt(), params["code"].stringOrNull() ?: "io-error", params["message"].stringOrNull().orEmpty())
             return
         }
-        JobEvent.parse(name, seq, params)?.let { eventChannel.trySend(it) }
+        // A channel's events, here too, in their places among its messages. One for a channel that is not open is
+        // dropped: a close and a credit can cross.
+        when (name) {
+            CHANNEL_CREDIT -> channelOf(params)?.onCredit(params["messages"].integerOrNull() ?: 0)
+            CHANNEL_CLOSE -> channelOf(params)?.onClosed(params["reason"].stringOrNull().orEmpty())
+            CHANNEL_PAUSED -> peer.openChannels().forEach { it.onPaused(true) }
+            CHANNEL_RESUMED -> peer.openChannels().forEach { it.onPaused(false) }
+            else -> JobEvent.parse(name, seq, params)?.let { eventChannel.trySend(it) }
+        }
     }
+
+    /**
+     * Opens the channel [channel] of the installed package [packageId] on this link, and returns it open; see
+     * [ChannelLink]. The answer can take a little over [ProtocolConstants.CHANNEL_START_WAIT_MS] while the agent starts
+     * the package's program, and nothing here limits the wait. A caller that gives up waiting leaves nothing open: a
+     * channel the agent opens after that is closed as the answer comes. The channel ends with the link at the latest.
+     *
+     * @throws RemoteException with the agent's refusal, one of [com.nbtapps.store.model.ChannelError]'s.
+     * @throws ProtocolException for an answer this app cannot read.
+     * @throws LinkClosedException if the link ends first.
+     */
+    suspend fun openChannel(packageId: String, channel: String): ChannelLink = ChannelLink.open(peer, client, scope, packageId, channel)
+
+    private fun channelOf(params: JsonObject): ChannelSink? =
+        params["stream"].integerOrNull()?.takeIf { it in ProtocolConstants.CHANNEL_FIRST_STREAM..65_535 }?.let { peer.channel(it.toInt()) }
 
     /** Pings the link when it is quiet and ends it when it stays silent. It starts with `hello`, as the agent's does. */
     private suspend fun watch() = coroutineScope {
@@ -163,5 +187,11 @@ class AgentSession(
     private companion object {
         /** The agent's event that a files stream cannot go on: see [AgentClient.filesFetch]. */
         const val FILES_ERROR = "files.error"
+
+        /** The agent's events of channels: see [ChannelLink]. */
+        const val CHANNEL_CREDIT = "channel.credit"
+        const val CHANNEL_CLOSE = "channel.close"
+        const val CHANNEL_PAUSED = "channel.paused"
+        const val CHANNEL_RESUMED = "channel.resumed"
     }
 }

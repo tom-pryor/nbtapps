@@ -15,11 +15,12 @@ same input gives the same bytes.
 
 `verify` applies the checks the Android app and the head-unit agent apply, and names a failure with the code the
 agent reports for it: bad-archive, bad-signature, bad-manifest or unsupported-manifest. Without --key the signature is
-not checked, and the output says so. In three places the tool is stricter than the agent, for the package's author:
+not checked, and the output says so. In four places the tool is stricter than the agent, for the package's author:
 it refuses a logs path that an agent would skip (skipped_log_message); a file or link placed in a folder only a later
 agent knows, such as ${var_plugins}, without a requires.agent that leaves the older agents out (VARIABLE_FIRST_AGENT);
-and a requirement only a later agent knows, such as requires.app, the phone app's, without such a requires.agent
-(REQUIREMENT_FIRST_AGENT). All three are bad-manifest here.
+a requirement only a later agent knows, such as requires.app, the phone app's, without such a requires.agent
+(REQUIREMENT_FIRST_AGENT); and a key at the top that an older agent ignores, such as channels, without one either
+(KEY_FIRST_AGENT). All four are bad-manifest here.
 
 The format, as the plan document sets it:
   - a zip archive under a strict profile: manifest.json first, manifest.sig second, stored or deflated entries one
@@ -34,6 +35,8 @@ The format, as the plan document sets it:
     pull, and its `settings`, which a phone shows and changes: options of the types bool, int, text and select,
     each held to its type's definition in the schema and to the rules that span its fields (check_settings). An
     option of a type this version does not know is skipped, so a later type does not stop a package installing
+  - and its `channels`, which a controller opens to the package's program through the agent; a channel whose
+    program the agent starts flags the package starts-program
 
 Key files are text: one line of 64 hex characters (the 32-byte Ed25519 seed or public key); lines starting with #
 are comments. A key's fingerprint is the first 16 hex characters of the SHA-256 of the 32 public key bytes.
@@ -75,6 +78,9 @@ VARIABLE_FIRST_AGENT = {variable: first for variable, first in FOLDER_VARIABLES.
 # The same for the members of requires, which an older agent refuses as unsupported-manifest: requires.app, the
 # versions of the phone app that may install the package, which the agent takes and does not act on.
 REQUIREMENT_FIRST_AGENT = {"app": (1, 6, 0)}
+# The top-level keys an older agent ignores, with the first agent that knows each: `channels`, which an older agent
+# would install the package without, so that it has none.
+KEY_FIRST_AGENT = {"channels": (1, 7, 0)}
 _COMPARATOR = re.compile(r"(>=|<=|>|<|=)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
@@ -291,7 +297,11 @@ def check_manifest(manifest):
     try:
         validate(manifest, manifest_schema(), manifest_schema(), "manifest")
     except SchemaError as e:
-        raise PkgError("unsupported-manifest" if e.unknown_key else "bad-manifest", skipped_log_message(manifest, e))
+        # A channel's apps that names a phone app is a later format's, as an unknown key is: an array that is not
+        # empty. One that is no array at all is broken.
+        apps = re.match(r"manifest\.channels\[(\d+)\]\.apps\Z", e.where)
+        later = e.unknown_key or (apps is not None and isinstance(manifest["channels"][int(apps.group(1))]["apps"], list))
+        raise PkgError("unsupported-manifest" if later else "bad-manifest", skipped_log_message(manifest, e))
 
     def bad(message):
         raise PkgError("bad-manifest", "manifest " + message)
@@ -309,13 +319,16 @@ def check_manifest(manifest):
 
     install = manifest.get("install", {})
     placed = set()
+    files = set()   # what install.files places, without the links
 
-    def place(dest):
+    def place(dest, link=False):
         if len(dest.encode("utf-8")) > MAX_PATH_BYTES:
             bad("places a path longer than %d bytes: %s" % (MAX_PATH_BYTES, dest))
         if dest in placed:
             bad("places %s twice" % dest)
         placed.add(dest)
+        if not link:
+            files.add(dest)
 
     for entry in install.get("files", []):
         src, dest = entry["src"], entry["dest"]
@@ -334,25 +347,29 @@ def check_manifest(manifest):
                 bad("installs %s, which is not listed in contents" % src)
             place(dest)
     for link in install.get("links", []):
-        place(link["path"])
+        place(link["path"], link=True)
     requires = manifest.get("requires", {})
     requirement = requires.get("agent")
 
-    def needs_newer_agent(what, first, broken):
+    def needs_newer_agent(what, first, otherwise):
         if not agent_requirement_ok(requirement, first):
             version = "%d.%d.%d" % first
             bad("%s, which an agent knows from %s, and its requires.agent (%s) lets an older agent take it: add "
                 "\"requires\": {\"agent\": \">=%s\"}, or raise it to that, so that an older agent says the package "
-                "needs a newer agent (agent-too-old) and does not report it as %s"
-                % (what, version, "none" if requirement is None else repr(requirement), version, broken))
+                "needs a newer agent (agent-too-old) and does not %s"
+                % (what, version, "none" if requirement is None else repr(requirement), version, otherwise))
 
     for variable, first in sorted(VARIABLE_FIRST_AGENT.items()):
         uses = sorted(p for p in placed if p.startswith(variable + "/"))
         if uses:
-            needs_newer_agent("places %s in %s" % (uses[0], variable), first, "broken (bad-manifest)")
+            needs_newer_agent("places %s in %s" % (uses[0], variable), first, "report it as broken (bad-manifest)")
     for key, first in sorted(REQUIREMENT_FIRST_AGENT.items()):
         if key in requires:
-            needs_newer_agent("has requires.%s" % key, first, "of a format it does not know (unsupported-manifest)")
+            needs_newer_agent("has requires.%s" % key, first,
+                              "report it as of a format it does not know (unsupported-manifest)")
+    for key, first in sorted(KEY_FIRST_AGENT.items()):
+        if key in manifest:
+            needs_newer_agent("has %s" % key, first, "install it without its %s" % key)
     for name, hook in sorted(install.get("hooks", {}).items()):
         if hook["script"] not in paths:
             bad("names %s as %s, which is not listed in contents" % (hook["script"], name))
@@ -366,6 +383,15 @@ def check_manifest(manifest):
         if log["path"] in logs:
             bad("names the log %s twice" % log["path"])
         logs.add(log["path"])
+    # A channel's program is a file the package itself places in ${app}: the agent starts nothing else.
+    channels = set()
+    for channel in manifest.get("channels", []):
+        if channel["name"] in channels:
+            bad("names the channel %s twice" % channel["name"])
+        channels.add(channel["name"])
+        if "start" in channel and "${app}/" + channel["start"]["program"] not in files:
+            bad("starts %s for the channel %s, which install.files does not place in ${app}"
+                % (channel["start"]["program"], channel["name"]))
     if "settings" in manifest:
         check_settings(manifest["settings"]["options"])
 
@@ -472,6 +498,8 @@ def risk_flags(manifest):
         flags.append("modifies-system")
     if install.get("reboot", "none") != "none":
         flags.append("needs-reboot")
+    if any("start" in channel for channel in manifest.get("channels", [])):
+        flags.append("starts-program")
     return flags
 
 

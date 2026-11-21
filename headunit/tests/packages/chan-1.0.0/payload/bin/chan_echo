@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for the program of the same name, which the test bench builds of tests/agent/chan_echo.cpp and keeps in
+# its image beside the agent: it is that program, under this name, with these arguments.
+exec /opt/nbtagent/chan_echo "$@"

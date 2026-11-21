@@ -15,10 +15,12 @@
 #                   does the agent's   needs python3 + cryptography, git (host)
 #   make check      ids, XML, the built library and the plugin's package  needs python3 + readelf (host)
 #   make agent-test tests of the agent (agent/): package reader, install engine, protocol, nbtagent with
-#                   nbtctl end to end, and the launcher and install scripts. The agent's side runs in a Docker
+#                   nbtctl end to end, the SSH package's bench form through the agent with an OpenSSH client
+#                   (make ssh-e2e), and the launcher and install scripts. The agent's side runs in a Docker
 #                   container (tools/bench.py), so that the packages' scripts do not run loose on this machine
 #                   needs docker, g++, gcc, zlib, python3 + cryptography (host). About a minute, more the first time
-#   make bench-image the Docker image for that: nbtagent and the test programs, built inside it
+#   make bench-image the Docker image for that: nbtagent and the test programs, built inside it, and the SSH
+#                   package's programs, built of the export make ssh-src makes first, with Debian's OpenSSH client
 #   make agent-host build/agent-host/: nbtagent and nbtctl for this machine. nbtctl is the one to use; run the
 #                   agent with tools/bench.py
 #   make agent      the same code, tests and programs compiled for the head unit, and release/agent/: nbtagent,
@@ -36,9 +38,35 @@
 #                   needs python3 + cryptography, git (host)
 #   make test-agent-pkg   host test of tools/agent_pkg.py, which those two run   needs python3 + cryptography
 #   make test-plugin-pkg  host test of tools/plugin_pkg.py   needs python3 + cryptography
+#   make test-ssh-pkg     host test of tools/ssh_pkg.py      needs python3 + cryptography
 #   make test-pkg   host test of tools/nbtpkg.py and the test packages   needs python3 + cryptography
 #   make testdata   build/testdata/: good and deliberately broken .nbtpkg files for every reader's tests
 #   make icons      redraw assets/*.png             needs python3 + Pillow (host)
+#   make ssh-src    build/ssh/src/: the sources of Dropbear and of OpenSSH, exported from the commits the submodules
+#                   ssh/dropbear and ssh/openssh are pinned at (fetched first, shallow, when they are not there),
+#                   Dropbear's with ssh/dropbear-qnx.patch and ssh/localoptions.h. The submodules are only read
+#                   needs git, patch (host)
+#   make ssh        build/ssh/qnx/: Dropbear's dropbearmulti (server, key tool, scp) and OpenSSH's sftp-server for the
+#                   head unit, stripped, built from those sources in the SDP image (QNX_IMAGE, qnx650-sdk when
+#                   unset) with the bare ntoarmv7-gcc, which needs no QNX licence   needs docker
+#   make ssh-host   build/ssh/host/: the same two programs for this machine, for tests   needs gcc, make (host)
+#   make ssh-relay  build/ssh/qnx/sshrelay: the relay (ssh/relay/), the SSH package's own program, for the head unit,
+#                   stripped   needs the SDP (qcc); ./build.sh ssh runs it in the image
+#   make ssh-relay-host  build/ssh/host/sshrelay: the relay for this machine, with its test hook   needs g++ (host)
+#   make ssh-test   the relay's tests on this machine (tests/ssh/): the key-line rule, the process list, the protocol,
+#                   the bridge, the ends, the pty driver, the limit and the state file with stand-ins for the server
+#                   and the driver, and with this machine's Dropbear (make
+#                   ssh-host first) and OpenSSH client, which are skipped, and said so, when there is no ssh
+#                   needs g++, python3 (host)
+#   make ssh-check  the builds looked at: the head unit's programs, which are not run, ask for libc.so.3 and
+#                   libsocket.so.3 only (and the relay for libcpp.so.4 too, and has no test hook); this machine's key
+#                   tool makes a host key and its server says it is Dropbear on one connection; the head unit's relay
+#                   says it is the version of ssh/relay/version.hpp   needs python3 + readelf (host)
+#   make ssh-pkg    release/pkg/org.nbtapp.ssh-<version>.nbtpkg: the SSH package, of build/ssh/qnx/'s three programs
+#                   and the licence texts of build/ssh/src/, not signed   needs python3 (host)
+#   make ssh-release KEY=FILE   signs that package for the catalogue, to release/pkg/signed/, as plugin-release does
+#                   the plugin's; refuses a relay not built from the commit checked out, and Dropbear and sftp-server
+#                   not built from the sources that commit pins   needs python3 + cryptography, git (host)
 #   make clean
 
 QCC ?= qcc
@@ -68,8 +96,8 @@ PLUGIN_AGENT_SRCS = agent/frame.cpp agent/json.cpp agent/peer.cpp
 HDRS = $(wildcard src/*.hpp) $(wildcard agent/*.hpp)
 
 .PHONY: all lib pkg check agent agent-check agent-test agent-host agent-programs agent-e2e agent-launcher \
-        agent-pkg agent-release test-agent-pkg plugin-pkg plugin-release test-plugin-pkg \
-        bench-image \
+        agent-pkg agent-release test-agent-pkg plugin-pkg plugin-release test-plugin-pkg ssh-e2e \
+        bench-image ssh-src ssh ssh-host ssh-check ssh-relay ssh-relay-host ssh-test ssh-pkg ssh-release test-ssh-pkg \
         test-protocol test-pkg testdata icons clean FORCE
 .SECONDARY:
 
@@ -140,6 +168,7 @@ TOOL_CXXFLAGS = -O2 -Wall -D_QNX_SOURCE -Wc,-std=gnu++0x -march=armv7-a -mfpu=vf
 #   checks       the compatibility checks: what was put onto a head unit by hand, and its removal, a path at a time
 #   settings_file  the text of a package's settings file: the lines of the keys asked about, and every other line kept
 #   settings     a package's settings: the rules a value is read and checked by
+#   channels     the channels that are open: a controller's messages to a package's program and back
 # One static library, one test program per tests/agent/test_*.cpp, and two programs: nbtagent (the agent: on a
 # folder that stands in for the head unit, and in the build for the head unit also on the head unit itself) and
 # nbtctl (a command-line controller, and a package source from a folder). `make agent-test` builds all of it into a Docker image and runs it there: the engine runs packages'
@@ -154,7 +183,7 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/spp_service.cpp agent/spp_gate.cpp agent/node_reader.cpp agent/serial_link.cpp agent/programs.cpp \
                agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp agent/checks.cpp \
                agent/settings_file.cpp agent/settings.cpp agent/serial_report.cpp agent/presence.cpp \
-               agent/dial_rules.cpp agent/problem_log.cpp
+               agent/dial_rules.cpp agent/problem_log.cpp agent/channels.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 # src/*.hpp: test_plugin runs the plugin's screens about phones, which are headers, against an agent, and
@@ -163,6 +192,8 @@ AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 AGENT_TEST_HDRS = $(wildcard tests/agent/*.hpp) $(wildcard src/*.hpp)
 AGENT_TESTS  = $(patsubst tests/agent/%.cpp,%,$(wildcard tests/agent/test_*.cpp))
 AGENT_PROGS  = nbtagent nbtctl
+# The programs of the test package chan's channels (tests/agent/chan_program.hpp), which its scripts run on the bench.
+CHAN_PROGS   = chan_echo chan_feed
 agent_objs   = $(patsubst agent/%.cpp,$(1)/%.o,$(AGENT_SRCS)) $(patsubst agent/vendor/tweetnacl/%.c,$(1)/%.o,$(AGENT_C_SRCS))
 
 HOST_CXX ?= g++
@@ -172,14 +203,15 @@ AGENT_HOST_CXXFLAGS = -std=gnu++0x -O1 -g -Wall -Wextra -DNBT_HOST_TEST
 # Defined before the rules that name it as a prerequisite: make reads a rule's prerequisites as it meets them.
 TESTDATA = $(BUILD)/testdata/vectors.json
 
-agent-test: $(addprefix run-agent-,$(AGENT_TESTS)) test-protocol test-agent-pkg test-plugin-pkg agent-e2e agent-launcher
-	@echo [DONE] $(words $(AGENT_TESTS)) agent tests, the protocol vectors, the tests of the two package scripts, the end-to-end test and the launcher test passed
+agent-test: $(addprefix run-agent-,$(AGENT_TESTS)) test-protocol test-agent-pkg test-plugin-pkg test-ssh-pkg agent-e2e ssh-e2e \
+            agent-launcher
+	@echo [DONE] $(words $(AGENT_TESTS)) agent tests, the protocol vectors, the tests of the three package scripts, the two end-to-end tests and the launcher test passed
 
 agent-host: $(addprefix $(AGENT_HOST)/,$(AGENT_PROGS))
 	@echo [DONE] $(AGENT_HOST): nbtagent and nbtctl for this machine
 
 # Everything the bench image holds. tools/bench/Dockerfile runs this inside the image.
-agent-programs: $(addprefix $(AGENT_HOST)/,$(AGENT_TESTS) $(AGENT_PROGS) nbtagent-next)
+agent-programs: $(addprefix $(AGENT_HOST)/,$(AGENT_TESTS) $(AGENT_PROGS) $(CHAN_PROGS) nbtagent-next)
 
 # Asked for on every run, because only Docker can tell whether the image is this checkout's; it is quick to say so.
 bench-image:
@@ -190,6 +222,13 @@ bench-image:
 agent-e2e: bench-image $(AGENT_HOST)/nbtctl $(TESTDATA)
 	@echo [TEST] agent end to end
 	@python3 tests/e2e/run_agent.py $(AGENT_HOST) $(BUILD)/testdata
+
+# The SSH package's bench form (tests/packages/ssh-1.0.0) installed through the agent in its container, and the
+# image's OpenSSH client, in a container of its own, logging in through nbtctl channel as its proxy command: a
+# command, a pty, scp and sftp, the switch, an upgrade, the agent started again, removal (tests/e2e/run_ssh.py).
+ssh-e2e: bench-image $(AGENT_HOST)/nbtctl $(TESTDATA)
+	@echo [TEST] the SSH package end to end
+	@python3 tests/e2e/run_ssh.py $(AGENT_HOST) $(BUILD)/testdata
 
 # The starter (agent/nbtstart.sh), a version's launcher (agent/nbtlaunch.sh) and the first install
 # (agent/hu_install.sh), in a container: on folders, with stand-ins for nbtagent that end as each case says, with
@@ -223,6 +262,10 @@ $(AGENT_HOST)/libnbtagent.a: $(call agent_objs,$(AGENT_HOST)) Makefile
 $(AGENT_HOST)/test_%: tests/agent/test_%.cpp $(AGENT_HOST)/libnbtagent.a $(AGENT_HDRS) $(AGENT_TEST_HDRS)
 	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -o $@ $< $(AGENT_HOST)/libnbtagent.a -lz
 
+$(AGENT_HOST)/chan_%: tests/agent/chan_%.cpp tests/agent/chan_program.hpp
+	@mkdir -p $(AGENT_HOST)
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -o $@ $<
+
 # NBT_TEST_KEYS gives the host's nbtagent its --test-key option and NBT_DEBUG_TCP its --debug-tcp option (a TCP
 # link on the loopback address, over which a phone is paired in the clear). The head unit's build below has
 # neither, and nbtagent.cpp does not compile for it with either.
@@ -235,7 +278,7 @@ $(AGENT_HOST)/nbtctl: agent/nbtctl.cpp $(AGENT_HOST)/libnbtagent.a $(AGENT_HDRS)
 # The same nbtagent, built to say that it is a later version (agent/version.hpp), so that an update of the agent
 # by the agent can be run from end to end: tests/e2e/run_launcher.py makes a package of this program, as the
 # version it says it is. Test bench only, like the options above.
-AGENT_NEXT_VERSION = 1.7.0
+AGENT_NEXT_VERSION = 1.8.0
 $(AGENT_HOST)/nbtagent-next: agent/nbtagent.cpp $(AGENT_HOST)/libnbtagent.a $(AGENT_HDRS) $(BUILD)/version
 	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_TEST_KEYS -DNBT_DEBUG_TCP -DNBT_TEST_AGENT_VERSION='"$(AGENT_NEXT_VERSION)"' \
 	    -DNBT_APP_VERSION='"$(VERSION)"' -o $@ $< $(AGENT_HOST)/libnbtagent.a -lz
@@ -260,6 +303,7 @@ run-agent-test_serial_report: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_programs: TEST_ARGS = $(BENCH_WORK)/programs
 run-agent-test_serial_services: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
 run-agent-test_checks: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
+run-agent-test_channels: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
 
 run-agent-%: bench-image
 	@echo [TEST] agent/$*
@@ -267,7 +311,7 @@ run-agent-%: bench-image
 
 # The package reader and the engine are tested against the packages the Python tool builds.
 run-agent-test_package run-agent-test_engine run-agent-test_agent run-agent-test_hu_platform \
-run-agent-test_serial_services run-agent-test_embedded_keys run-agent-test_checks: $(TESTDATA)
+run-agent-test_serial_services run-agent-test_embedded_keys run-agent-test_checks run-agent-test_channels: $(TESTDATA)
 
 $(TESTDATA): tests/make_packages.py tools/nbtpkg.py tools/plugin_pkg.py tools/agent_pkg.py spec/manifest.schema.json \
              plugin/NbtApp.manifest plugin/NbtApp.xml plugin/package/manifest.json.in \
@@ -286,9 +330,9 @@ AGENT_CFLAGS = -O2 -D_QNX_SOURCE -march=armv7-a -mfpu=vfpv3 -mfloat-abi=softfp
 AGENT_OUT = release/agent
 AGENT_SCRIPTS = hu_probe.sh hu_install.sh nbtlaunch.sh nbtstart.sh
 
-agent: $(AGENT_QNX)/libnbtagent.a $(addprefix $(AGENT_QNX)/,$(AGENT_TESTS) $(AGENT_PROGS)) \
+agent: $(AGENT_QNX)/libnbtagent.a $(addprefix $(AGENT_QNX)/,$(AGENT_TESTS) $(AGENT_PROGS) $(CHAN_PROGS)) \
        $(addprefix $(AGENT_OUT)/,$(AGENT_PROGS) $(AGENT_SCRIPTS) version)
-	@echo [DONE] $(AGENT_QNX): the agent library, $(words $(AGENT_TESTS)) test programs, nbtagent and nbtctl compile and link for the head unit
+	@echo [DONE] $(AGENT_QNX): the agent library, $(words $(AGENT_TESTS)) test programs, the two of the test channels, nbtagent and nbtctl compile and link for the head unit
 	@echo [DONE] $(AGENT_OUT): nbtagent, nbtctl, version and $(AGENT_SCRIPTS). make agent-check looks at them
 
 $(addprefix $(AGENT_OUT)/,$(AGENT_SCRIPTS)): $(AGENT_OUT)/%: agent/%
@@ -343,6 +387,11 @@ $(AGENT_QNX)/test_%: tests/agent/test_%.cpp $(AGENT_QNX)/libnbtagent.a $(AGENT_H
 	@echo [BUILD] $@
 	$(TOOL_CXX) $(TOOL_CXXFLAGS) -o $@ $< $(AGENT_QNX_LIBS)
 
+$(AGENT_QNX)/chan_%: tests/agent/chan_%.cpp tests/agent/chan_program.hpp
+	@echo [BUILD] $@
+	@mkdir -p $(AGENT_QNX)
+	$(TOOL_CXX) $(TOOL_CXXFLAGS) -Wextra -o $@ $< -lsocket
+
 $(AGENT_QNX)/nbtagent: agent/nbtagent.cpp $(AGENT_QNX)/libnbtagent.a $(AGENT_HDRS) $(BUILD)/version
 	@echo [BUILD] $@ $(VERSION)
 	$(TOOL_CXX) $(TOOL_CXXFLAGS) -Wextra -DNBT_APP_VERSION='"$(VERSION)"' -o $@ $< $(AGENT_QNX_LIBS)
@@ -377,6 +426,115 @@ test-plugin-pkg:
 
 testdata:
 	python3 tests/make_packages.py $(BUILD)/testdata
+
+# ---- SSH: Dropbear and OpenSSH's sftp-server, third party (ssh/README) -----------------------------------------
+# Their sources are the submodules ssh/dropbear and ssh/openssh, which no build writes to: each starts from a new
+# export of the commit the index pins (what `git submodule update` checks out) into build/ssh/src/, and builds
+# outside that too, in build/ssh/qnx/obj/ and build/ssh/host/obj/. The image has no git, so the export is made
+# here. Every run builds from the start: a few minutes at most.
+SSH       = $(BUILD)/ssh
+SSH_SRC   = $(SSH)/src
+QNX_IMAGE ?= qnx650-sdk
+
+ssh-src:
+	@test -e ssh/dropbear/.git && test -e ssh/openssh/.git || git submodule update --init --depth 1 -- ssh/dropbear ssh/openssh
+	rm -rf build/ssh/src
+	mkdir -p $(SSH_SRC)/dropbear $(SSH_SRC)/openssh
+	git -C ssh/dropbear archive -o $(CURDIR)/$(SSH_SRC)/dropbear.tar $$(git rev-parse :./ssh/dropbear)
+	git -C ssh/openssh archive -o $(CURDIR)/$(SSH_SRC)/openssh.tar $$(git rev-parse :./ssh/openssh)
+	tar -xf $(SSH_SRC)/dropbear.tar -C $(SSH_SRC)/dropbear
+	tar -xf $(SSH_SRC)/openssh.tar -C $(SSH_SRC)/openssh
+	rm -f build/ssh/src/dropbear.tar build/ssh/src/openssh.tar
+	patch -d $(SSH_SRC)/dropbear -p1 -s -F 0 -i $(CURDIR)/ssh/dropbear-qnx.patch
+	cp ssh/localoptions.h $(SSH_SRC)/dropbear/
+	{ echo "$$(git rev-parse :./ssh/dropbear)  ssh/dropbear"; echo "$$(git rev-parse :./ssh/openssh)  ssh/openssh"; \
+	  sha256sum ssh/dropbear-qnx.patch ssh/localoptions.h; } > $(SSH_SRC)/sources
+	@echo [DONE] $(SSH_SRC): Dropbear $$(git rev-parse --short :./ssh/dropbear), patched, and OpenSSH $$(git rev-parse --short :./ssh/openssh)
+
+ssh: ssh-src
+	@docker image inspect $(QNX_IMAGE) >/dev/null 2>&1 || { echo "make ssh: Docker image '$(QNX_IMAGE)' not found (set QNX_IMAGE)" >&2; exit 1; }
+	rm -rf build/ssh/qnx/obj
+	rm -f build/ssh/qnx/dropbearmulti build/ssh/qnx/sftp-server build/ssh/qnx/sources
+	docker run --rm -u "$$(id -u):$$(id -g)" -v "$(CURDIR)":/src -w /src $(QNX_IMAGE) \
+	    sh ssh/build-qnx.sh $(SSH_SRC)/dropbear $(SSH_SRC)/openssh $(SSH)/qnx
+	{ cat $(SSH_SRC)/sources; sha256sum ssh/build-qnx.sh; } > $(SSH)/qnx/sources
+	@echo [DONE] $(SSH)/qnx: dropbearmulti and sftp-server for the head unit. make ssh-check looks at them
+
+ssh-host: ssh-src
+	rm -rf build/ssh/host/obj
+	rm -f build/ssh/host/dropbearmulti build/ssh/host/sftp-server
+	CC=$(HOST_CC) sh ssh/build-host.sh $(SSH_SRC)/dropbear $(SSH_SRC)/openssh $(SSH)/host
+	@echo [DONE] $(SSH)/host: dropbearmulti and sftp-server for this machine
+
+ssh-check:
+	python3 tools/check_ssh.py
+
+# sshrelay, ours (ssh/relay/, ssh/README "The relay"): the program of the SSH package's channel. It takes the agent's
+# JSON reader and file helpers as source files. For the head unit as the agent's programs are built (qcc, the
+# Dinkumware C++ library, no -fPIC), which needs the QNX licence: ./build.sh ssh runs this target in the SDP image.
+# For this machine with the test hooks (NBT_SSHRELAY_TEST_*), which the head unit's build has not.
+SSH_RELAY_SRCS = ssh/relay/main.cpp ssh/relay/relay.cpp ssh/relay/driver.cpp ssh/relay/state.cpp \
+                 ssh/relay/key_lines.cpp ssh/relay/processes.cpp ssh/relay/child.cpp agent/json.cpp agent/fsutil.cpp \
+                 agent/sha256.cpp agent/programs.cpp
+SSH_RELAY_HDRS = $(wildcard ssh/relay/*.hpp) agent/json.hpp agent/json_writer.hpp agent/fsutil.hpp agent/bytes.hpp \
+                 agent/sha256.hpp agent/programs.hpp
+SSH_TEST = $(SSH)/test
+
+ssh-relay: $(SSH)/qnx/sshrelay
+	@echo [DONE] $(SSH)/qnx/sshrelay: the relay for the head unit. make ssh-check looks at it
+
+$(SSH)/qnx/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS) $(BUILD)/version
+	@echo [BUILD] $@ $(VERSION)
+	@mkdir -p $(SSH)/qnx $(SSH)/relay-qnx
+	$(TOOL_CXX) $(TOOL_CXXFLAGS) -Wextra -Iagent -DNBT_APP_VERSION='"$(VERSION)"' -o $(SSH)/relay-qnx/sshrelay \
+	    $(SSH_RELAY_SRCS) -lsocket
+	ntoarmv7-strip -o $@ $(SSH)/relay-qnx/sshrelay
+
+ssh-relay-host: $(SSH)/host/sshrelay
+	@echo [DONE] $(SSH)/host/sshrelay: the relay for this machine, with the test hooks
+
+$(SSH)/host/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS) $(BUILD)/version
+	@mkdir -p $(SSH)/host
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_SSHRELAY_TEST_HOOK -DNBT_APP_VERSION='"$(VERSION)"' -Iagent -o $@ $(SSH_RELAY_SRCS)
+
+# The relay of the test bench's image (tools/bench/Dockerfile builds it there, with Dropbear and sftp-server from
+# build-host.sh): this machine's kind of program, without the test hooks, as the head unit's is built.
+$(SSH)/bench/sshrelay: $(SSH_RELAY_SRCS) $(SSH_RELAY_HDRS) $(BUILD)/version
+	@mkdir -p $(SSH)/bench
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -DNBT_APP_VERSION='"$(VERSION)"' -Iagent -o $@ $(SSH_RELAY_SRCS)
+$(SSH_TEST)/test_key_lines: tests/ssh/test_key_lines.cpp ssh/relay/key_lines.cpp agent/json.cpp $(SSH_RELAY_HDRS)
+	@mkdir -p $(SSH_TEST)
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -Iagent -Issh/relay -o $@ $< ssh/relay/key_lines.cpp agent/json.cpp
+
+$(SSH_TEST)/test_processes: tests/ssh/test_processes.cpp ssh/relay/processes.cpp $(SSH_RELAY_HDRS)
+	@mkdir -p $(SSH_TEST)
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -Issh/relay -o $@ $< ssh/relay/processes.cpp
+
+# A stand-in for the pty driver, which the tests copy under the name devc-pty.
+$(SSH_TEST)/standin_pty: tests/ssh/standin_pty.cpp
+	@mkdir -p $(SSH_TEST)
+	$(HOST_CXX) $(AGENT_HOST_CXXFLAGS) -o $@ $<
+
+# On this machine, not in the bench's container: the relay starts only its own stand-ins and this machine's build
+# of Dropbear, as this user, in a temporary folder. Needs make ssh-host first.
+ssh-test: $(SSH)/host/sshrelay $(SSH_TEST)/test_key_lines $(SSH_TEST)/test_processes $(SSH_TEST)/standin_pty
+	@python3 tests/ssh/run_relay.py $(SSH)
+
+# The SSH package, org.nbtapp.ssh (README "The SSH package"), of the head unit's three programs in build/ssh/qnx/ and
+# the licence texts of build/ssh/src/. ssh-pkg leaves it not signed; ssh-release signs it with the package key, as
+# plugin-release signs the plugin's, and the signed archive is what the catalogue records.
+ssh-pkg:
+	python3 tools/ssh_pkg.py build $(SSH)/qnx --src $(SSH_SRC) -o $(AGENT_PKG_OUT)
+
+ssh-release:
+	@test -n "$(KEY)" || { echo "usage: make ssh-release KEY=FILE   (the private half of the package key)" >&2; exit 2; }
+	python3 tools/ssh_pkg.py build $(SSH)/qnx --src $(SSH_SRC) -o $(AGENT_PKG_OUT)
+	python3 tools/check_ssh.py
+	python3 tools/ssh_pkg.py release $(SSH)/qnx --src $(SSH_SRC) --pkg $(AGENT_PKG_OUT) --key "$(KEY)"
+
+test-ssh-pkg:
+	@echo [TEST] tools/ssh_pkg.py
+	@python3 tests/test_ssh_pkg.py
 
 # ---- host side -------------------------------------------------------------------------------------------------
 pkg:

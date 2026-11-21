@@ -29,6 +29,8 @@ data class PackageManifest(
     val logs: List<String> = emptyList(),
     /** `settings`: what a phone shows and changes for the package; null when the manifest names none. */
     val settings: PackageSettings? = null,
+    /** `channels`: what a controller may open to the package's program, through the agent; in manifest order. */
+    val channels: List<ManifestChannel> = emptyList(),
     /**
      * The manifest uses, in `install` or `requires`, something of a later format than this app knows: a folder
      * variable, a key, a `reboot` value, a hook name or a requirement. It was skipped, and [flags] leave it out: the app
@@ -50,6 +52,7 @@ data class PackageManifest(
                 links.any { outsideOwnPlaces(it.path) }
             if (system) add(RiskFlag.MODIFIES_SYSTEM.id)
             if (reboot in RESTARTS) add(RiskFlag.NEEDS_REBOOT.id)
+            if (channels.any { it.program != null }) add(RiskFlag.STARTS_PROGRAM.id)
         }
 
     /** Outside the package's own places, as [flags] count it: an absolute path, and not one in a folder variable. */
@@ -103,6 +106,20 @@ data class ManifestSerialService(
     val name: String,
     /** The file name of the program that registers it. */
     val program: String,
+)
+
+/**
+ * One entry of `channels`: a channel a controller may open, through the agent, to the package's program, which the
+ * agent reaches through a local socket of the channel's [name].
+ */
+data class ManifestChannel(
+    val name: String,
+    /** `read`, where the phone only reads, or `both`. */
+    val access: String,
+    /** `switch`: the channel is off until it is switched on. */
+    val switched: Boolean = false,
+    /** `start.program`, relative to `${app}`: what the agent starts when the channel is opened; null for none. */
+    val program: String? = null,
 )
 
 /**

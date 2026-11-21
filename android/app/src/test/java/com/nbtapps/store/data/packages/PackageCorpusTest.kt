@@ -4,6 +4,7 @@ package com.nbtapps.store.data.packages
 
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.data.crypto.Hex
+import com.nbtapps.store.model.ManifestChannel
 import com.nbtapps.store.model.ManifestSerialService
 import com.nbtapps.store.model.PackageRequirements
 import kotlinx.serialization.json.Json
@@ -67,6 +68,31 @@ class PackageCorpusTest {
     }
 
     @Test
+    fun `the channels a package names are read, in the order of the text, with the flag of a program it starts`() {
+        fun manifest(file: String) =
+            PackageArchive.verify(AgentVectors.file("packages/good/$file"), listOf(AgentVectors.packageKey)).manifest
+
+        val chan = manifest("org.nbtapp.chan-1.0.0.nbtpkg")
+        assertEquals(
+            listOf(
+                ManifestChannel("echo", "both", switched = false, program = "bin/chan_echo"),
+                ManifestChannel("gated", "both", switched = true, program = "bin/chan_echo"),
+                ManifestChannel("feed", "read", switched = false, program = "bin/chan_feed"),
+            ),
+            chan.channels,
+        )
+        assertEquals(listOf("starts-program"), chan.flags)
+        val most = manifest("channels-most.nbtpkg")
+        assertEquals(8, most.channels.size)
+        assertEquals("c".repeat(32), most.channels[0].name)
+        assertNull(most.channels[0].program)
+        assertTrue(most.channels.single { it.name == "0-9" }.switched)
+        assertFalse(most.laterFormat)
+        // None at all.
+        assertTrue(manifest("org.nbtapp.runtime-2.1.0.nbtpkg").channels.isEmpty())
+    }
+
+    @Test
     fun `the versions of the app a package names are read as a range, beside the agent's`() {
         fun requires(file: String) =
             PackageArchive.verify(AgentVectors.file("packages/$file"), listOf(AgentVectors.packageKey)).manifest.requires
@@ -119,9 +145,10 @@ class PackageCorpusTest {
      * Every broken package is refused with the code the agent gives, except one that `vectors.json` marks with `app`:
      * the planned differences between the readers (see [ManifestParser]), which the agent refuses and the app takes,
      * so that a later format, which an agent that knows it takes behind `requires.agent`, does not stop this app from
-     * downloading the package. `no-settings`, whose only fault is in `settings`, is taken with no settings and no mark.
-     * `later-format`, which has in `install` or `requires` what this app does not know, is taken with the mark, and
-     * with the risk flags of what the app could read: hello's own.
+     * downloading the package. `no-settings`, whose only fault is in `settings`, is taken with no settings and no mark;
+     * `no-channels`, whose only fault is in `channels`, with no channels and no mark. `later-format`, which has in
+     * `install`, `requires` or `channels` what this app does not know, is taken with the mark, and with the risk flags
+     * of what the app could read: hello's own, and `starts-program` for a channel with a program.
      */
     @Test
     fun `every broken package is refused, with the code the agent gives, but one the app takes as a later format`() {
@@ -152,9 +179,15 @@ class PackageCorpusTest {
                     assertNull(what, manifest.settings)
                     assertFalse(what, manifest.laterFormat)
                 }
+                "no-channels" -> {
+                    assertTrue(what, manifest.channels.isEmpty())
+                    assertFalse(what, manifest.laterFormat)
+                }
                 "later-format" -> {
                     assertTrue(what, manifest.laterFormat)
-                    assertEquals(what, hello.getValue("flags").jsonArray.map { it.jsonPrimitive.content }, manifest.flags)
+                    // A channel the app could read, whose program the agent starts, adds its flag.
+                    val starts = if (manifest.channels.any { it.program != null }) listOf("starts-program") else emptyList()
+                    assertEquals(what, hello.getValue("flags").jsonArray.map { it.jsonPrimitive.content } + starts, manifest.flags)
                 }
                 else -> fail("$what: app is ${entry.text("app")}")
             }
@@ -176,6 +209,7 @@ class PackageCorpusTest {
             assertFalse(what, manifest.laterFormat)
             when (entry.text("names")) {
                 "requires.app" -> assertEquals(what, PackageRequirements(agent = null, app = ">=0.8.0"), manifest.requires)
+                "channels" -> assertEquals(what, listOf("echo"), manifest.channels.map { it.name })
                 "logs[1].path" -> {
                     assertEquals(what, 2, manifest.logs.size)
                     assertEquals(what, "\${data}/hello.log", manifest.logs[0])

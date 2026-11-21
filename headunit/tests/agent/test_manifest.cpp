@@ -342,6 +342,78 @@ int main() {
         assert(validProgramName("radiod") && !validProgramName("bin/radiod") && !validProgramName(".."));
     }
 
+    // 11a'. Channels: 1 to 8, each a name, an empty apps and an access, a switch and a start that names a file the
+    //       package places in ${app}; no name twice. A key this agent does not know, and an apps that names a phone
+    //       app, are a later format's.
+    {
+        struct Channels {
+            static std::string code(const std::string& list, Manifest* out = 0) {
+                return ::code(make(std::string(kHead) + "\"channels\":" + list + ",", content("p/run") + "," + content("p/x"),
+                                   "\"files\":[{\"src\":\"p/run\",\"dest\":\"${app}/bin/run\",\"mode\":\"0755\"},"
+                                   "{\"src\":\"p/x\",\"dest\":\"${data}/x\",\"mode\":\"0644\"}],"
+                                   "\"links\":[{\"path\":\"${app}/bin/ln\",\"target\":\"run\"}]"),
+                              out);
+            }
+            static std::string one(const std::string& members) {
+                return code("[{\"name\":\"echo\",\"apps\":[],\"access\":\"both\"" + members + "}]");
+            }
+            static std::string named(const std::string& name) {
+                return code("[{\"name\":\"" + name + "\",\"apps\":[],\"access\":\"read\"}]");
+            }
+        };
+        assert(Channels::code("[{\"name\":\"echo\",\"apps\":[],\"access\":\"both\",\"switch\":true,"
+                              "\"start\":{\"program\":\"bin/run\",\"args\":[\"-v\",\"a b\",\"\"]}},"
+                              "{\"access\":\"read\",\"apps\":[],\"name\":\"feed\"}]", &m) == "");
+        assert(m.channels.size() == 2 && m.channels[0].name == "echo" && m.channels[0].access == "both" && m.channels[0].switched);
+        assert(m.channels[0].hasStart && m.channels[0].program == "bin/run" && m.channels[0].args.size() == 3 && m.channels[0].args[1] == "a b");
+        assert(m.channels[1].name == "feed" && m.channels[1].access == "read" && !m.channels[1].switched && !m.channels[1].hasStart);
+        assert(findChannel(m, "feed") == &m.channels[1] && findChannel(m, "other") == 0);
+        assert(riskFlags(m).size() == 1 && riskFlags(m)[0] == "starts-program");
+        assert(Channels::code("[{\"name\":\"echo\",\"apps\":[],\"access\":\"both\"}]", &m) == "" && riskFlags(m).empty());
+        // Names.
+        assert(Channels::named("a") == "" && Channels::named("0") == "" && Channels::named(std::string(32, 'c')) == "");
+        assert(Channels::named("ssh-2") == "" && Channels::named("a-") == "");
+        const char* const noNames[] = {"", "-a", "Echo", "e.cho", "e cho", "e_cho", "e/cho", "caf\\u00e9", 0};
+        for (int i = 0; noNames[i] != 0; ++i) assert(Channels::named(noNames[i]) == bad);
+        assert(Channels::named(std::string(33, 'c')) == bad);
+        // The list.
+        assert(Channels::code("[]") == bad && Channels::code("{}") == bad && Channels::code("[\"echo\"]") == bad);
+        std::string eight, nine;
+        for (int i = 0; i < 9; ++i) {
+            std::string one = std::string(i == 0 ? "" : ",") + "{\"name\":\"c" + std::string(1, (char)('0' + i)) + "\",\"apps\":[],\"access\":\"both\"}";
+            if (i < 8) eight += one;
+            nine += one;
+        }
+        assert(Channels::code("[" + eight + "]") == "" && Channels::code("[" + nine + "]") == bad);
+        assert(Channels::code("[{\"name\":\"a\",\"apps\":[],\"access\":\"both\"},{\"name\":\"a\",\"apps\":[],\"access\":\"read\"}]") == bad);
+        // Each member.
+        assert(Channels::code("[{\"apps\":[],\"access\":\"both\"}]") == bad && Channels::code("[{\"name\":\"a\",\"access\":\"both\"}]") == bad);
+        assert(Channels::code("[{\"name\":\"a\",\"apps\":[]}]") == bad);
+        assert(Channels::code("[{\"name\":\"a\",\"apps\":{},\"access\":\"both\"}]") == bad);
+        assert(Channels::code("[{\"name\":\"a\",\"apps\":[\"org.example.app\"],\"access\":\"both\"}]") == unsupported);
+        assert(Channels::one(",\"access\":\"write\"") == bad);   // a key twice is outside the JSON profile
+        assert(Channels::code("[{\"name\":\"a\",\"apps\":[],\"access\":\"write\"}]") == bad);
+        assert(Channels::one(",\"switch\":\"on\"") == bad && Channels::one(",\"switch\":false") == "");
+        assert(Channels::one(",\"title\":\"Echo\"") == unsupported);
+        // start.
+        assert(Channels::one(",\"start\":\"bin/run\"") == bad && Channels::one(",\"start\":{}") == bad);
+        assert(Channels::one(",\"start\":{\"program\":\"bin/run\",\"cwd\":\"/\"}") == unsupported);
+        const char* const noPrograms[] = {"bin/other", "bin/ln", "x", "../bin/run", "/bin/run", "${app}/bin/run", "bin/run/", 0};
+        for (int i = 0; noPrograms[i] != 0; ++i) assert(Channels::one(std::string(",\"start\":{\"program\":\"") + noPrograms[i] + "\"}") == bad);
+        std::string sixteen, seventeen;
+        for (int i = 0; i < 17; ++i) {
+            if (i < 16) sixteen += std::string(i == 0 ? "" : ",") + "\"x\"";
+            seventeen += std::string(i == 0 ? "" : ",") + "\"x\"";
+        }
+        assert(Channels::one(",\"start\":{\"program\":\"bin/run\",\"args\":[" + sixteen + "]}") == "");
+        assert(Channels::one(",\"start\":{\"program\":\"bin/run\",\"args\":[" + seventeen + "]}") == bad);
+        assert(Channels::one(",\"start\":{\"program\":\"bin/run\",\"args\":\"-v\"}") == bad);
+        assert(Channels::one(",\"start\":{\"program\":\"bin/run\",\"args\":[5]}") == bad);
+        assert(Channels::one(",\"start\":{\"program\":\"bin/run\",\"args\":[\"a\\nb\"]}") == bad);
+        assert(Channels::one(",\"start\":{\"program\":\"bin/run\",\"args\":[\"" + std::string(255, 'a') + "\"]}") == "");
+        assert(Channels::one(",\"start\":{\"program\":\"bin/run\",\"args\":[\"" + std::string(256, 'a') + "\"]}") == bad);
+    }
+
     // 11b. Logs: each path of spec/log-paths.vectors (ok and skip taken, bad refused), at most 16 entries, none
     //      twice. An entry is open, and old agents skip the key: a top-level key they do not know is ignored.
     {

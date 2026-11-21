@@ -31,15 +31,16 @@ Nothing in HmiMain3D is patched.
 | `tools/plugin_pkg.py` | Builds that package of `release/NbtApp/` (`make plugin-pkg`) and signs it for a release (`make plugin-release`) |
 | `tools/check.py` | `make check` |
 | `tools/make_icons.py`, `tools/update_stubs.sh` | Redraw the images; regenerate `stubs/*.syms` from a firmware dump |
-| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `node_reader` (the one reader of an open serial node, which keeps a read out on it), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running), `serial_services` (the serial services other programs register, and the removal of one whose program is gone), `serial_report` (the start-up report: what the head unit says of its Bluetooth when the agent starts), `presence` (which of the car's phones are there, from its device list), `dial_rules` and `dial_config` (when the car dials a phone of the agent's, and what each answer comes to), `serial_dial` (what the agent and the listener tell each other of the dial and of `serial.status`) and `problem_log` (the problem file). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). `settings` and `settings_file` are a package's settings: the rules a value is held to, where the file is, and its text edited a key at a time. Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
+| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `node_reader` (the one reader of an open serial node, which keeps a read out on it), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running), `serial_services` (the serial services other programs register, and the removal of one whose program is gone), `serial_report` (the start-up report: what the head unit says of its Bluetooth when the agent starts), `presence` (which of the car's phones are there, from its device list), `dial_rules` and `dial_config` (when the car dials a phone of the agent's, and what each answer comes to), `serial_dial` (what the agent and the listener tell each other of the dial and of `serial.status`) and `problem_log` (the problem file). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). `settings` and `settings_file` are a package's settings: the rules a value is held to, where the file is, and its text edited a key at a time. `channels` is the channels that are open: a controller's messages to a package's program and back, and the programs the agent starts for them. Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
 | `spec/` | Definitions shared with the Android app: `manifest.schema.json`; `json-profile.vectors`, the cases every JSON parser of the project must agree on; and `protocol/`, the frames every codec must build and refuse alike, one whole conversation with the agent, frame by frame, and `constants.txt`, the names and numbers both sides must hold alike |
 | `tools/nbtpkg.py` | Builds, signs and verifies `.nbtpkg` packages |
 | `tools/check_agent.py` | `make agent-check`: `release/agent/` is the head unit's kind of program, holds nothing of the test bench, and its `nbtagent` holds the official package key; and the agent's own package in `release/pkg/` is byte for byte what `tools/agent_pkg.py` makes of that folder |
 | `agent/package/manifest.json.in`, `tools/agent_pkg.py` | The agent's own package, `org.nbtapp.agent`: its manifest, with a placeholder for the version, and the script that makes the archive of `release/agent/` (`make agent-pkg`) and signs it for a release (`make agent-release KEY=FILE`); `tests/test_agent_pkg.py` tests the script |
-| `tests/` | Host tests of the Python tools: `test_nbtpkg.py` (`make test-pkg`), `test_agent_pkg.py` (`make test-agent-pkg`) and `test_plugin_pkg.py` (`make test-plugin-pkg`) |
-| `tests/agent/` | Tests of `agent/` (`make agent-test`), run in a Docker container (`tools/bench.py`); `tests/compare_readers.py` holds the agent's package reader and the tool's together, `tests/test_protocol_vectors.py` reads `spec/protocol/` with a codec of its own, `tests/e2e/run_agent.py` runs `nbtagent` and `nbtctl` as two processes, and `tests/e2e/run_launcher.py` runs the starter, a version's launcher and the install script on folders |
+| `tests/` | Host tests of the Python tools: `test_nbtpkg.py` (`make test-pkg`), `test_agent_pkg.py` (`make test-agent-pkg`), `test_plugin_pkg.py` (`make test-plugin-pkg`) and `test_ssh_pkg.py` (`make test-ssh-pkg`) |
+| `tests/agent/` | Tests of `agent/` (`make agent-test`), run in a Docker container (`tools/bench.py`), and `chan_echo.cpp` and `chan_feed.cpp`, the programs of the test package chan's channels; `tests/compare_readers.py` holds the agent's package reader and the tool's together, `tests/test_protocol_vectors.py` reads `spec/protocol/` with a codec of its own, `tests/e2e/run_agent.py` runs `nbtagent` and `nbtctl` as two processes, `tests/e2e/run_ssh.py` logs in through the SSH package's bench form with an OpenSSH client, and `tests/e2e/run_launcher.py` runs the starter, a version's launcher and the install script on folders |
 | `tests/packages/`, `tests/keys/` | Package sources and test keys for `tests/make_packages.py`, which builds good and deliberately broken packages (`make testdata`); `tests/test_nbtpkg.py` tests the tool against them (`make test-pkg`) |
-| `build/`, `release/` | Build products, not tracked. `release/NbtApp/` is the folder for the head unit; `release/agent/` holds the agent's programs for it, and `release/pkg/` the plugin's and the agent's own packages |
+| `ssh/` | Third party: Dropbear's SSH server and OpenSSH's `sftp-server`, as git submodules pinned at release tags (`ssh/dropbear`, `ssh/openssh`), with our patch to Dropbear, its build options and the build scripts, for the head unit and for this machine; `tools/check_ssh.py` is `make ssh-check`. `ssh/README` says what each change is for and how the sources were checked against the signed releases. Ours: `ssh/relay/`, `sshrelay`, the program of the SSH package's channel, which starts a Dropbear server for each connection and carries its bytes (`ssh/README`, "The relay"), and its `version.hpp`, the package's version; its tests are `tests/ssh/` (`make ssh-test`). `ssh/package/manifest.json.in` is the manifest of the SSH package, `org.nbtapp.ssh`, and `tools/ssh_pkg.py` makes it (`make ssh-pkg`) and signs it for a release (`make ssh-release KEY=FILE`); see [The SSH package](#the-ssh-package) |
+| `build/`, `release/` | Build products, not tracked. `release/NbtApp/` is the folder for the head unit; `release/agent/` holds the agent's programs for it, and `release/pkg/` the plugin's, the agent's own and the SSH package |
 
 Ids that must not collide with other apps on the car: the manifest's connector id (211; BMW's apps use 17 and 200,
 and 210 is known to be taken by another add-on app) and `entryButtonFocusID` (32754; 32752 and 32753 are taken the
@@ -68,6 +69,21 @@ dependencies, `pluginAppInfo` exported, only HU Framework symbols that exist) an
 
 To link against a head unit's real HU Framework libraries instead of the stubs:
 `make lib FRAMEWORK_LIBDIR=/path/to/opt/hmi/ID5/lib`. The result is identical.
+
+Dropbear and OpenSSH's `sftp-server` (`ssh/`, see `ssh/README`) are built from the submodules, which
+`make ssh-src` fetches when they are not there (a plain `git clone` leaves them out), and the relay from `ssh/relay/`:
+
+```sh
+make ssh-src      # the submodules' pinned commits exported to build/ssh/src/, Dropbear's patched; the submodules are only read
+make ssh          # -> build/ssh/qnx/: dropbearmulti and sftp-server for the head unit, in the SDP image (docker; no QNX licence)
+make ssh-host     # -> build/ssh/host/: the same two for this machine
+make ssh-relay-host  # -> build/ssh/host/sshrelay: the relay for this machine, with its test hooks
+make ssh-test     # the relay's tests on this machine (after make ssh-host); the last line says what was skipped
+make ssh-check    # the builds looked at; the head unit's are not run
+QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh ssh   # all of it: ssh-host, ssh-test, ssh, the relay for the head unit
+                                                      # (make ssh-relay, qcc, in the image) -> build/ssh/qnx/sshrelay, ssh-check,
+                                                      # and the SSH package -> release/pkg/ (make ssh-pkg, not signed)
+```
 
 ## Packages and the agent
 
@@ -232,6 +248,10 @@ format and the protocol.
   and needs a link whose frame holds 4,096 bytes. `nbtctl settings ID` lists them, `nbtctl set ID KEY VALUE`
   changes one and `nbtctl unset ID KEY` takes one out of the file (`agent/settings.hpp`, `spec/settings.vectors`
   for the value rules, and the plan document's Message reference).
+- A controller can open a channel to a package's program: messages pass both ways between the phone and the
+  program, through the agent, which reaches the program at a local socket and may start it. A package names its
+  channels in its manifest's `channels`; a switched one is off until a phone or `nbtctl` switches it on. An agent
+  from 1.7.0 has them and lists the capability `channels` in `hello`. See [A package's channels](#a-packages-channels).
 
 `agent/hu_probe.sh` collects those answers from a head unit: which node it is, what is mounted where and what is
 read-only, the room in `/var/opt` and `/tmp`, the plugin folders and their manifests, the tools a hook can count on,
@@ -276,7 +296,9 @@ build/agent-host/nbtctl remove org.nbtapp.hello org.nbtapp.runtime
 its header lists the other commands. It runs on this machine and reaches the agent through the socket in the root
 folder. `make agent-host` also builds an `nbtagent` for this machine, which takes the same arguments and keeps no
 script from anything: leave it for when Docker is not to be had. After a change to `agent/`, `make bench-image`
-again; `make agent-test` does that itself.
+again; `make agent-test` does that itself. The image also holds the SSH package's programs and an OpenSSH client
+(see [The SSH package](#the-ssh-package)): `make bench-image` exports their sources first (`make ssh-src`), which
+fetches the two submodules the first time, so it needs git, patch and the network once.
 
 The agent writes what it does to standard error, a line at a time with the time of day: links that come and go,
 each request and how it was answered, the plans it makes, what it fetches, and every step, phase and log line of a
@@ -437,6 +459,108 @@ upgrade, and through a removal unless the user has the package's data removed to
 option leaves its line in the file, and one that changes an option's type may find the old value shown as set by
 hand.
 
+### A package's channels
+
+A channel carries messages between a phone (or `nbtctl`) and a program of a package on the head unit, through the
+agent. This is what a package's author does for one, and what the agent does with it. As yet a channel is for
+NBTApps itself only: no other phone app may open one.
+
+The manifest's `channels` names 1 to 8 of them:
+
+```json
+"requires": { "agent": ">=1.7.0" },
+"channels": [
+  { "name": "ssh", "apps": [], "access": "both", "switch": true,
+    "start": { "program": "bin/relay", "args": ["--quiet"] } }
+]
+```
+
+- `name` is 1 to 32 of `a-z`, `0-9` and `-`, the first a letter or a digit, none twice in a manifest. The program
+  listens on a local stream socket of that name in `${tmp}/channels`, which the agent makes for the package, for
+  its own user only. The package's id and the name have to leave that path short enough for a local socket on the
+  head unit (`/tmp/nbtapp/apps/<id>/channels/<name>`); a package whose path is too long is refused at install.
+- `apps` is the phone apps other than NBTApps that may open the channel. This agent knows none, so it is `[]`; an
+  entry that names one, or has a key this agent does not know, is refused as `unsupported-manifest`, so that a
+  package that uses such a thing names a later agent in `requires.agent`.
+- `access` is `both`, or `read`, where the phone only reads: a message from it closes the channel.
+- `switch`, when true, keeps the channel off until a phone or `nbtctl` switches it on (`channel.set`). The switch
+  is a file in the agent's run folder, on the RAM disk: it is off again after a power down, it stays through a
+  restart of the agent, nothing is written to flash for it, and it goes with its package. The iDrive plugin may
+  not switch it. Switched off, its channels close (`off`), and an open still waiting for its program is refused as
+  `off`.
+- `start` names a file the package places in `${app}` with `install.files` (not a link), and up to 16 arguments.
+  When a channel is opened and nothing listens, the agent starts it (see below). A package with one is flagged
+  `starts-program` before it is installed.
+- An agent before 1.7.0 ignores `channels` and would install the package without them, so `nbtpkg.py` asks for a
+  `requires.agent` of 1.7.0 or later. A pre-release agent, 1.7.0-beta.1, is outside `>=1.7.0`: a package for it
+  names `>=1.7.0-beta.1`.
+
+What the program does:
+
+- It listens at `$NBT_TMP_DIR/channels/<name>`, removing a file an earlier run left there first, and takes a
+  connection for each channel that is opened: the agent connects once per channel, and never waits for it.
+- On each connection the agent first writes one line of JSON and a newline:
+  `{"v":1,"channel":"ssh","access":"both","caller":"nbtapps","phone":"Pixel 9","maxMessage":4096}`. `caller` is
+  `nbtapps` for a phone, with the phone's name, or `cli` for `nbtctl`. After that each message, either way, is two
+  bytes of length, high byte first, and 1 to 4,096 bytes. A message of another length closes the channel.
+- Closing the connection closes the channel; the phone is told `closed` once what the program sent has gone to it.
+  When the phone closes the channel, or its link goes, the agent closes the connection.
+- The agent takes from the socket only as fast as the phone takes from the agent, and passes on at most 16
+  messages from the phone that the program has not read: a program that reads slowly holds the phone back, and
+  one that writes faster than the phone reads waits in its own socket. A stream of bytes, cut into messages and
+  joined again on the other side, goes through as well, at whatever boundaries.
+
+What the agent does:
+
+- **Starting.** With `start`, when nothing listens, the agent starts the program once, in `${app}`, in a process
+  group of its own, with standard input from `/dev/null`, its output and errors appended to
+  `${tmp}/channels/<name>.log`, and the environment a hook gets: `PATH`, `NBT_PKG_ID`, `NBT_PKG_VERSION`,
+  `NBT_APP_DIR`, `NBT_DATA_DIR`, `NBT_TMP_DIR`, and `NBT_CHANNEL`, the channel's name. It tries the socket every
+  100 ms for 5 seconds, and `channel.open` waits for that; another open meanwhile starts nothing. A program that
+  has not taken the connection by then is ended, and the open is refused as `unavailable`. The agent does not end
+  a program when its channels close: it ends by itself, when it likes.
+- **Its pid** is kept in the run folder (`channel-pid.<id>.<name>`), so an agent that is started again while the
+  program runs knows it, as long as that process still runs that program: its executable has the program's file
+  name, or, for a script, the process is the interpreter its `#!` line names and still leads the process group it
+  was started in. A script that `exec`s a program of another file name is not known again.
+- **Ending it**: SIGTERM to its group, and SIGKILL 2 seconds later if it is still there, without the agent waiting
+  meanwhile. The agent does so when its channel is switched off, and before a job installs, upgrades or removes
+  its package.
+- **Its log** is kept under 256 KB while the agent runs: past that it is copied to `<name>.log.1`, over the one
+  before, and emptied, and the program writes on at its new end. When the copy fails (a full RAM disk) the log is
+  emptied all the same, and what it held is lost. Name both in the manifest's `logs`
+  (`${tmp}/channels/*.log*`) for a phone to pull them.
+- **Jobs.** While a job runs (from `job.start` until it has ended) every channel is held: the phones with channels
+  are told `channel.paused`, nothing is read from or written to a program, nothing is opened, and when the job has
+  ended they are told `channel.resumed`. An open still waiting for its program when the job starts is refused as
+  `busy` then, and a program that open started is ended, unless another channel of it is open. Before its first step, the channels of a package the job installs,
+  upgrades or removes are closed (`package-changed`) and the program the agent started for it is ended; the step
+  waits for that program to go, or for 3 seconds. A new version's program is started by the next open.
+
+The messages are in `agent/agent.hpp` ("Channels") and the plan document's Message reference. `nbtctl` opens a
+channel from the head unit's shell or the bench:
+
+```sh
+nbtctl channel status org.nbtapp.ssh ssh      # switched, on, and how many connections it has
+nbtctl channel on org.nbtapp.ssh ssh          # and off
+nbtctl channel org.example.feed news          # each message as a line; --hex for its bytes in hex
+nbtctl channel org.example.echo echo --send hello
+nbtctl channel org.nbtapp.ssh ssh --raw       # standard input and output as the stream, for a proxy command
+nbtctl channel org.nbtapp.ssh ssh --raw --send '{"v":1,"keys":[...]}' --skip-first   # the answer to --send on standard error
+```
+
+`nbtctl channel` ends when the channel closes, with 0 if its program closed it and 1 for another reason, with 3
+when its link to the agent ends, and at Ctrl+C, SIGTERM or SIGHUP with 0, closing the channel itself. With `--raw`
+the end of its input does not end it: it stops reading and goes on writing what the program sends, until one of
+those ends (an SSH client ends its proxy command with SIGHUP). When its output cannot be written, because the
+reader has gone, it closes the channel and exits with 1. Its output is the channel's alone, in every mode: a job
+run meanwhile from another controller prints nothing there, and a line on standard error says when the job holds
+the channel and when it goes on. With `--raw`, `--skip-first` takes the first message that comes out of the stream
+and writes it to standard error as one line (each line end in it a space): with `--send`, that is how an SSH client's
+proxy command reaches the SSH package's relay, which answers the keys message with its host keys before the server's
+bytes begin (see [The SSH package](#the-ssh-package)). Without `--raw` it is refused: there the first message is a
+line already.
+
 ## Installing
 
 [INSTALL.md](INSTALL.md) sets up a car and a phone from nothing, step by step: the agent, the app and this
@@ -501,6 +625,65 @@ the HMI. The app then does not start the agent either (see "Starting with the he
 `Plugins/NbtApp` folder.
 
 Log: `sloginfo | grep NbtApp`.
+
+## The SSH package
+
+`org.nbtapp.ssh`, "SSH access", is a root shell and file copy on the head unit over SSH, reached only through a
+paired phone's link to the agent, and only while its switch is on. It is a package of its own, beside the agent's
+and the plugin's: nothing of it is in the agent, which knows nothing of SSH. It holds three programs in
+`${app}/bin/`: Dropbear's `dropbearmulti` (the server, its key tool and `scp`, with `${app}/bin/scp` a link to it),
+OpenSSH's `sftp-server`, and `sshrelay`, ours; and in `${app}/licenses/` the licence texts of the first two, with a
+README that says which program each belongs to. Its manifest is `ssh/package/manifest.json.in`; it runs no hook,
+places nothing outside its own folders and asks for no restart, so its one risk flag is `starts-program`.
+
+```sh
+QNX_LICENSE_DIR=/path/to/qnx/license ./build.sh ssh    # also leaves release/pkg/org.nbtapp.ssh-<version>.nbtpkg, not signed
+make ssh-release KEY=/path/to/package.key              # -> release/pkg/signed/, and the SHA-256 the catalogue records
+```
+
+- **Its version** is the package's own, `NBT_SSH_VERSION` in `ssh/relay/version.hpp`, and is neither the agent's
+  nor the upstream versions. `sshrelay --version` prints it with the build, `git describe --always --dirty`, and
+  the relay's log begins with that line. It is raised whenever anything the package holds changes, Dropbear or
+  OpenSSH alone too: a version that has been released is never built again with other content.
+- **`requires`**: agent `>=1.7.0-beta.1`, the first with channels (a pre-release agent is outside `>=1.7.0`), and
+  app `>=0.9.0`.
+- **`make ssh-release`** refuses what `make plugin-release` refuses: a relay that was not built from the commit
+  checked out, or from a checkout with changes, or does not say it is the version of the package; a key that is
+  not built into the agent; a signed archive of that version that is there already with other bytes. Dropbear and
+  `sftp-server` hold no version of ours: they are tied to the checkout by what they are built from, the commits
+  the submodules are pinned at and our patch, options and build script, which `make ssh` records in
+  `build/ssh/qnx/sources`, and the release refuses programs whose record is not of the checkout.
+- **Its channel** is `ssh`: for NBTApps itself (`"apps": []`), both ways, switched, and started on demand with
+  `bin/sshrelay` as its program (see [A package's channels](#a-packages-channels)). The switch is off after every
+  power down, and the iDrive plugin may not turn it on. `nbtctl channel on org.nbtapp.ssh ssh` turns it on from the
+  head unit's shell or the bench.
+- **The relay.** For each connection the agent makes to it, it reads the phone's first message, the public keys
+  that may log in (`{"v":1,"keys":["ssh-ed25519 AAAA... comment", ...]}`, held to a strict rule: no options, two
+  key types), writes them to a keys folder of that connection's own, starts `dropbear -i` on a socket pair for it,
+  answers with the host key (`{"v":1,"hostKeys":["ssh-ed25519 AAAA..."],"pty":true}`, or `{"error":...}`), and
+  then carries the SSH stream both ways in messages. It starts the pty driver a shell needs when there is none
+  (`/bin/devc-pty`), serves four connections at once, and when a connection ends, ends what its server left
+  behind. Logins are by public key only, as root, with no port forwarding; 30 minutes without traffic ends one.
+  The whole of it is in `ssh/README`, "The relay".
+- **What it writes where.** The host key is made on the head unit the first time the relay starts, and kept in
+  `${data}/hostkey_ed25519`, on flash, until the package's data is removed (an upgrade keeps it; so does a removal
+  that keeps the data), with `hostkey_ed25519.pub` beside it, the key tool's copy of the public line, which nothing
+  reads. Everything else is on the RAM disk, in `${tmp}`: the relay's socket, the keys folders, its
+  state file `sshrelay.state`, and the channel's logs `${tmp}/channels/ssh.log` and `ssh.log.1`, which the manifest
+  names for a phone to pull.
+- **An SSH client beside `nbtctl`** (on the bench, say) reaches the relay with `nbtctl` as its proxy command:
+  `nbtctl channel org.nbtapp.ssh ssh --raw --send KEYS --skip-first`, where `KEYS` is the keys message; the relay's
+  answer comes on `nbtctl`'s standard error, and the stream on its standard output.
+- **The bench form.** The test bench's image holds the three programs built for it, in `/opt/nbtagent/ssh/`
+  (Dropbear and `sftp-server` from the same exported sources and options as the head unit's, the relay without its
+  test hooks), and Debian's OpenSSH client. `tests/packages/ssh-1.0.0` (and `ssh-1.0.1`, for an upgrade) is the
+  package as the bench has it: the same id, channel, switch, program, logs and requires, with scripts in `bin/`
+  that run the image's programs (`bin/scp` a script that runs `dropbearmulti` as `scp`, where the real package has
+  a link), signed with the test key. `make ssh-e2e` (`tests/e2e/run_ssh.py`, part of `make agent-test`) installs it
+  through the agent in its container and logs in with the image's `ssh`, `scp` and `sftp` through `nbtctl`: a
+  command, a shell on a pty, files both ways, a wrong key and a wrong host key refused, the switch off and an
+  upgrade with a session open, the agent started again while the relay runs, and removal. A phone's tests can
+  install the same package in the bench.
 
 ## The agent on the head unit
 
@@ -1144,7 +1327,9 @@ nothing there:
   from a Bluetooth address the agent did not have for it, has that address written to `phones.json`. With
   Bluetooth serial, a problem writes a line to `serial-problems.log` ("The problem file", above), the first of
   each kind in a run, 16 at most; a run with none does not touch that file. A check's fix writes what it moves and
-  removes, and its lines in the install log.
+  removes, and its lines in the install log. A channel writes nothing to flash: its switch, the pid of the
+  program the agent started for it, its socket and its program's log are on the RAM disk (`/tmp/nbtapp` and the
+  package's `${tmp}`), and a power down takes them.
 - **A version of the agent on trial** writes none of its state until a phone has confirmed it: the job's
   record, the journal and the install log stay as the version before left them, for that version to read if it
   comes back. The confirmation then writes `current`, the package's record and the job's.
@@ -1300,6 +1485,8 @@ the new version, and then the plugin's, which restarts the HMI.
 PolyForm Strict License 1.0.0, as the whole repo: see [LICENSE.md](../LICENSE.md) at its root.
 
 `agent/vendor/tweetnacl/` is third-party code in the public domain; see the README in that folder.
+`ssh/dropbear` and `ssh/openssh` are third-party code under their own licences, and `ssh/dropbear-qnx.patch` and
+`ssh/localoptions.h` are MIT, as Dropbear; see `ssh/README`.
 
 Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 

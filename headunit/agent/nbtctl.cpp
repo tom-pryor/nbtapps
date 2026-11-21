@@ -38,6 +38,13 @@
 //   serial  reset                          has the car end the phone's Bluetooth serial link (serial.reset)
 //   serial  status                         how Bluetooth serial stands (serial.status)
 //   serial  dial                           has the car dial the phones connected to it now, for trials (serial.dial)
+//   channel PACKAGE NAME [--send TEXT] [--hex | --raw [--skip-first]]
+//                                          opens a channel of an installed package and prints each message that
+//                                          comes, a line each; --hex prints its bytes in hex; --send writes one
+//                                          message first; --raw passes standard input and output through instead;
+//                                          --skip-first puts the first message that comes on standard error
+//   channel status|on|off PACKAGE NAME     whether a switched channel is on, and how many connections it has; switch
+//                                          it on or off
 //   settings ID                            the settings of an installed package, and how each stands in its file
 //   set     ID KEY VALUE                   one setting changed: VALUE as the option's type takes it
 //   unset   ID KEY                         one setting's line taken out of the file, so that the package's own
@@ -78,6 +85,23 @@
 // object as "object.name", and an array's items with ", " between them: "registered true", "dial on",
 // "counts.dials 3". `serial dial` prints "dialling N phones", and the agent's log says what came of it.
 //
+// `channel` keeps to the credits both ways (agent.hpp, "Channels") and ends when the channel closes, with 0 if its
+// program closed it and 1 for any other reason, which it says; with 3 when the link to the agent ends; and at SIGINT,
+// SIGTERM or SIGHUP with 0, when it closes the channel itself. With --raw, standard input is cut into messages of up
+// to 4,096 bytes as it is read, and each message that comes is written to standard output as it is, with nothing
+// between them: so an SSH client can take it as its proxy command. The end of its input ends nothing: nbtctl stops
+// reading and goes on writing what comes until one of the ends above (the client ends its proxy command with SIGHUP).
+// Standard output is written without a buffer, in every mode: when it cannot be written (its reader has gone),
+// `channel` closes the channel, says why, and exits with 1. Standard output carries the channel and nothing else: a
+// job that another controller runs meanwhile is not printed, and while it holds the channel (channel.paused, then
+// channel.resumed) a line on standard error says so at its start and at its end. With --raw, --skip-first takes the
+// first message that comes out of that stream: it is written to standard error as one line (its bytes, each line end
+// in it a space, and a newline), and standard output carries what comes after it. With --send that makes nbtctl the
+// proxy command of an SSH client against a program that answers a first message before the stream begins, as the
+// SSH package's relay answers the keys message with its host keys: the client reads the stream and the caller
+// reads the answer. --skip-first without --raw is a usage error: there the first message is a line of its own.
+// `channel status`, `on` and `off` print "switched", "on" and "open", a line each.
+//
 // `pair` prints "code NNNNNN" as its first line, then one line when the window has closed: "paired", or
 // "not paired: " and the reason (wrong-code, expired, replaced). Its exit status is 0 only for "paired".
 //
@@ -91,6 +115,7 @@
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <dirent.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,6 +125,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <deque>
 #include <map>
 #include <set>
 #include <string>
@@ -123,6 +149,10 @@ using namespace nbt;
 namespace {
 
 const size_t kQueueLow = 256u << 10;   // DATA frames are queued only while less than this waits to be written
+
+// Set by SIGINT, SIGTERM and SIGHUP while `channel` runs: it closes the channel and ends.
+volatile sig_atomic_t gStop = 0;
+void onStop(int) { gStop = 1; }
 
 // A package in the --from folder.
 struct Archive {
@@ -149,7 +179,7 @@ public:
         : peer_(0), nextStream_(1), streaming_(false), stream_(0), left_(0), file_(0), memory_(0), memoryAt_(0),
           archiveStream_(false), archiveBytes_(0), cancelAfter_(-1), dropAfter_(-1), cancelSent_(false), done_(false),
           quiet_(false), restarting_(false), pullId_(0), pullStream_(0), pullSize_(0), pullWire_(0), pullBytes_(0),
-          pullOut_(0), pullInflater_(0), pullEnded_(false) {}
+          pullOut_(0), pullInflater_(0), pullEnded_(false), chanOpenId_(0), chanStream_(0), chanMaySend_(0) {}
     ~Controller() {
         if (file_ != 0) fclose(file_);
         delete pullInflater_;
@@ -388,6 +418,12 @@ public:
 
     virtual void onResponse(Peer*, int64_t id, bool ok, const json::Value& result, const std::string& code,
                             const std::string& message) {
+        // The channel's first messages may come in the same read as this answer: its number is taken at once.
+        if (chanOpenId_ != 0 && id == chanOpenId_ && ok) {
+            json::Value stream = result.find("stream"), credit = result.find("credit");
+            if (stream.isInteger() && stream.integer() >= kChannelFirstStream && stream.integer() <= 65535) chanStream_ = (uint16_t)stream.integer();
+            if (credit.isInteger() && credit.integer() > 0) chanMaySend_ = (unsigned)credit.integer();
+        }
         if (pullId_ != 0 && id == pullId_) {
             pullId_ = 0;
             json::Value stream = result.find("stream"), size = result.find("size");
@@ -429,7 +465,7 @@ public:
             lastProgress_ = line;
             if (state.string() == "restarting" && !restarting_) {
                 restarting_ = true;
-                printf("The agent is restarting to finish its own update. The link ends with it; `nbtctl status`, once the\n"
+                if (!quiet_) printf("The agent is restarting to finish its own update. The link ends with it; `nbtctl status`, once the\n"
                        "new version is up, is what confirms that version and shows how the job went.\n");
             }
         } else if (event == "job.log") {
@@ -444,6 +480,17 @@ public:
             if (pullStream_ != 0 && stream.isInteger() && stream.integer() == pullStream_) {
                 endPull("the agent ended the stream: " + (message.isString() ? message.string() : std::string("io-error")));
             }
+        } else if (event == "channel.credit" || event == "channel.close") {
+            json::Value stream = params.find("stream"), messages = params.find("messages"), reason = params.find("reason");
+            if (chanStream_ == 0 || !stream.isInteger() || stream.integer() != chanStream_) return;
+            if (event == "channel.credit" && messages.isInteger() && messages.integer() > 0) chanMaySend_ += (unsigned)messages.integer();
+            if (event == "channel.close") chanClosed_ = reason.isString() && !reason.string().empty() ? reason.string() : std::string("closed");
+        } else if (event == "channel.paused" || event == "channel.resumed") {
+            // On standard error: standard output is the channel's.
+            if (chanStream_ != 0) {
+                fprintf(stderr, "%s\n", event == "channel.paused" ? "nbtctl: the channel is held while a job runs"
+                                                                   : "nbtctl: the job is over: the channel goes on");
+            }
         } else if (event == "pairing.closed") {
             json::Value reason = params.find("reason");
             pairingClosed_ = reason.isString() && !reason.string().empty() ? reason.string() : std::string("closed");
@@ -451,8 +498,12 @@ public:
         fflush(stdout);
     }
 
-    // DATA from the agent: the stream of this controller's files.fetch, and nothing else.
+    // DATA from the agent: the stream of this controller's files.fetch, or its channel's messages, and nothing else.
     virtual void onData(Peer* peer, uint16_t stream, const std::string& bytes, bool last) {
+        if (chanStream_ != 0 && stream == chanStream_) {
+            chanIn_.push_back(bytes);
+            return;
+        }
         if (pullStream_ == 0 || stream != pullStream_) {
             peer->close("the agent sent a DATA frame for a stream that is not open");
             return;
@@ -481,6 +532,119 @@ public:
         if (last) endPull(pullBytes_ == pullSize_ ? "" : "the stream ended at " + number(pullBytes_) + " of " + number(pullSize_) + " bytes");
     }
 
+    // `channel`: opens it, and serves it until it ends. The exit status.
+    int channel(const std::string& package, const std::string& name, bool raw, bool hex, bool sendFirst, const std::string& first,
+                bool skipFirst) {
+        // Standard output is the channel's alone: a job that another controller runs meanwhile is not printed.
+        quiet_ = true;
+        json::Writer w;
+        w.beginObject().key("package").string(package).key("channel").string(name).key("credit").integer(kChannelCredit).endObject();
+        chanOpenId_ = peer_->request("channel.open", w.text());
+        if (chanOpenId_ == 0) return 3;
+        while (replies_.count(chanOpenId_) == 0) {
+            if (!pump(1000)) return 3;
+        }
+        Reply reply = replies_[chanOpenId_];
+        replies_.erase(chanOpenId_);
+        chanOpenId_ = 0;
+        if (!reply.ok) {
+            fprintf(stderr, "nbtctl: channel.open: %s: %s\n", reply.code.c_str(), reply.message.c_str());
+            return 1;
+        }
+        if (chanStream_ == 0) {
+            fprintf(stderr, "nbtctl: channel.open gave no stream\n");
+            return 3;
+        }
+        unsigned taken = 0;    // messages written out here since the agent was last granted more
+        // The end of the input ends nothing: what the program says after it still comes (an SSH client's proxy
+        // command is ended by the client, with SIGHUP).
+        bool inputEnded = !raw;
+        if (sendFirst && chanMaySend_ > 0) {
+            peer_->data(chanStream_, first.data(), first.size(), true);
+            --chanMaySend_;
+        }
+        for (;;) {
+            // What came is written out first, whatever then ends the run. Straight to the descriptor: nothing waits
+            // in a buffer of stdio, and a write that fails is known at once.
+            std::string outputError;
+            while (!chanIn_.empty() && outputError.empty() && !gStop) {
+                const std::string& m = chanIn_.front();
+                if (skipFirst) {
+                    // The first message, to standard error as one line; the stream on standard output begins after it.
+                    std::string line = m;
+                    for (size_t i = 0; i < line.size(); ++i) {
+                        if (line[i] == '\n' || line[i] == '\r') line[i] = ' ';
+                    }
+                    line += "\n";
+                    fwrite(line.data(), 1, line.size(), stderr);
+                    fflush(stderr);
+                    skipFirst = false;
+                    chanIn_.pop_front();
+                    ++taken;
+                    continue;
+                }
+                std::string line;
+                if (hex) line = toHex((const uint8_t*)m.data(), m.size()) + "\n";
+                else if (!raw) line = m + "\n";
+                const std::string& bytes = hex || !raw ? line : m;
+                if (!writeOut(bytes.data(), bytes.size(), &outputError)) break;
+                chanIn_.pop_front();
+                ++taken;
+            }
+            if (!outputError.empty()) {
+                fprintf(stderr, "nbtctl: standard output: %s: the channel is closed\n", outputError.c_str());
+                closeChannel();
+                return 1;
+            }
+            if (taken >= kChannelCredit / 2 && peer_->open()) {
+                json::Writer c;
+                c.beginObject().key("stream").integer(chanStream_).key("messages").integer(taken).endObject();
+                peer_->event("channel.credit", -1, c.text());
+                taken = 0;
+            }
+            if (!chanClosed_.empty()) {
+                if (chanClosed_ != "closed") fprintf(stderr, "nbtctl: the agent closed the channel: %s\n", chanClosed_.c_str());
+                return chanClosed_ == "closed" ? 0 : 1;
+            }
+            if (!peer_->open()) {
+                lost();
+                return 3;
+            }
+            // Ended here: at a signal.
+            if (gStop) {
+                closeChannel();
+                return 0;
+            }
+            fd_set readable, writable;
+            FD_ZERO(&readable);
+            FD_ZERO(&writable);
+            int fd = peer_->fd(), top = fd;
+            FD_SET(fd, &readable);
+            if (peer_->wantsWrite()) FD_SET(fd, &writable);
+            bool reading = raw && !inputEnded && chanMaySend_ > 0 && peer_->queued() < kQueueLow;
+            if (reading) FD_SET(STDIN_FILENO, &readable);
+            struct timeval tv;
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            if (select(top + 1, &readable, &writable, 0, &tv) > 0) {
+                if (reading && FD_ISSET(STDIN_FILENO, &readable)) {
+                    char buffer[kChannelMaxMessage];
+                    ssize_t n = read(STDIN_FILENO, buffer, sizeof buffer);
+                    if (n > 0) {
+                        peer_->data(chanStream_, buffer, (size_t)n, true);
+                        --chanMaySend_;
+                    } else if (n == 0 || (errno != EINTR && errno != EAGAIN)) {
+                        // From here on only the channel's own end, the link's, or a signal ends the run.
+                        inputEnded = true;
+                    }
+                }
+                if (FD_ISSET(fd, &writable)) peer_->flush();
+                if (peer_->open() && FD_ISSET(fd, &readable)) peer_->readable();
+            }
+            // A link that has ended is seen at the top, once what came before its end has been written out.
+        }
+    }
+
     static void printLog(const std::string& source, const std::string& text) {
         size_t at = 0;
         while (at < text.size()) {
@@ -495,6 +659,45 @@ private:
     bool lost() {
         fprintf(stderr, "nbtctl: the link to the agent ended: %s\n", peer_->closeReason().c_str());
         return false;
+    }
+
+    // `channel`'s own close: channel.close to the agent, and a moment for the link to take it.
+    void closeChannel() {
+        if (!peer_->open()) return;
+        json::Writer e;
+        e.beginObject().key("stream").integer(chanStream_).key("reason").string("closed").endObject();
+        peer_->event("channel.close", -1, e.text());
+        for (int i = 0; i < 100 && peer_->open() && peer_->wantsWrite(); ++i) pump(20);
+    }
+
+    // All of `bytes` to standard output. False when that fails, with *why; and false with *why empty when a signal
+    // that ends `channel` comes while it waits.
+    static bool writeOut(const char* bytes, size_t length, std::string* why) {
+        while (length > 0) {
+            ssize_t n = write(STDOUT_FILENO, bytes, length);
+            if (n > 0) {
+                bytes += n;
+                length -= (size_t)n;
+                continue;
+            }
+            if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
+                if (gStop) return false;
+                if (errno == EAGAIN) {
+                    // An output that someone else made non-blocking: until it takes more.
+                    fd_set writable;
+                    FD_ZERO(&writable);
+                    FD_SET(STDOUT_FILENO, &writable);
+                    struct timeval tv;
+                    tv.tv_sec = 1;
+                    tv.tv_usec = 0;
+                    select(STDOUT_FILENO + 1, 0, &writable, 0, &tv);
+                }
+                continue;
+            }
+            *why = n < 0 ? strerror(errno) : "nothing could be written";
+            return false;
+        }
+        return true;
     }
 
     // Queues DATA frames of the open stream, as long as the link keeps up.
@@ -583,7 +786,7 @@ private:
     bool done_;
     std::string doneText_;
     std::string lastProgress_;
-    bool quiet_;
+    bool quiet_;    // nothing of a job is printed: its progress, its log, the agent's restart for it
     std::string pairingClosed_;   // the reason of pairing.closed, once it has come
     bool restarting_;   // the job has said that the agent restarts for its own update
 
@@ -597,6 +800,13 @@ private:
     Inflater* pullInflater_;   // 0 for compress: none
     bool pullEnded_;
     std::string pullError_;
+
+    // The one channel of `channel`.
+    int64_t chanOpenId_;             // its channel.open, until the answer has come
+    uint16_t chanStream_;            // then its number
+    unsigned chanMaySend_;           // the messages this side may still send
+    std::deque<std::string> chanIn_;   // messages that came and are not written out yet
+    std::string chanClosed_;         // the reason of the agent's channel.close, once it has come
 };
 
 int usage() {
@@ -621,6 +831,10 @@ int usage() {
             "  serial  reset            have the car end the phone's Bluetooth serial link\n"
             "  serial  status           how Bluetooth serial stands\n"
             "  serial  dial             have the car dial the phones connected to it now\n"
+            "  channel PACKAGE NAME [--send TEXT] [--hex | --raw [--skip-first]]\n"
+            "                           open a channel: print what comes, or pass standard input and output through;\n"
+            "                           --skip-first: the first message that comes to standard error, as a line\n"
+            "  channel status|on|off PACKAGE NAME   whether a switched channel is on; switch it\n"
             "  settings ID              the settings of an installed package\n"
             "  set     ID KEY VALUE     change one of them\n"
             "  unset   ID KEY           take one out of its file: the package's default holds\n"
@@ -861,7 +1075,9 @@ int main(int argc, char** argv) {
     std::vector<std::string> args;
     std::string from;
     std::vector<std::string> removes;
-    bool deleteData = false, events = false, all = false, uncompressed = false, listPaths = false;
+    bool deleteData = false, events = false, all = false, uncompressed = false, listPaths = false, hex = false, raw = false;
+    bool sendFirst = false, skipFirst = false;
+    std::string first;
     long long cancelAfter = -1, dropAfter = -1, offset = -1, length = -1;
     std::string out;
     for (int i = 1; i < argc; ++i) {
@@ -901,6 +1117,16 @@ int main(int argc, char** argv) {
             all = true;
         } else if (arg == "--list") {
             listPaths = true;
+        } else if (arg == "--hex") {
+            hex = true;
+        } else if (arg == "--raw") {
+            raw = true;
+        } else if (arg == "--skip-first") {
+            skipFirst = true;
+        } else if (arg == "--send" && value != 0) {
+            sendFirst = true;
+            first = value;
+            ++i;
         } else if (arg.compare(0, 2, "--") == 0) {
             return usage();
         } else {
@@ -932,6 +1158,34 @@ int main(int argc, char** argv) {
         }
         printf("restartNeeded %s\n", text(r, "restartNeeded").c_str());
         return 0;
+    }
+
+    if (command == "channel" && args.size() == 3 && (args[0] == "status" || args[0] == "on" || args[0] == "off")) {
+        if (!validPackageId(args[1])) return usage();
+        json::Writer w;
+        w.beginObject().key("package").string(args[1]).key("channel").string(args[2]);
+        if (args[0] != "status") w.key("on").boolean(args[0] == "on");
+        w.endObject();
+        const char* method = args[0] == "status" ? "channel.get" : "channel.set";
+        if (!c.call(method, w.text(), &reply)) return 3;
+        if (!reply.ok) return refused(method, reply);
+        doc.parse(reply.text, 0);
+        printMembers(doc.root(), "");
+        return 0;
+    }
+
+    if (command == "channel") {
+        if (args.size() != 2 || !validPackageId(args[0]) || (hex && raw) || (skipFirst && !raw) ||
+            (sendFirst && (first.empty() || first.size() > kChannelMaxMessage))) {
+            return usage();
+        }
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_handler = onStop;
+        sigaction(SIGINT, &action, 0);
+        sigaction(SIGTERM, &action, 0);
+        sigaction(SIGHUP, &action, 0);
+        return c.channel(args[0], args[1], raw, hex, sendFirst, first, skipFirst);
     }
 
     if (command == "list") {

@@ -313,6 +313,19 @@ bool isChoiceValue(const std::string& text) {
     return true;
 }
 
+// $defs/channel/name: 1 to 32 of [a-z0-9-], the first a letter or a digit.
+bool isChannelName(const std::string& text) {
+    if (text.empty() || text.size() > kMaxChannelName || text[0] == '-') return false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+    }
+    return true;
+}
+
+// $defs/channelArg: at most 255 characters, no control character.
+bool isChannelArg(const std::string& text) { return utf8Length(text) <= 255 && noControls(text); }
+
 // A string that names one of `names`, a list ending in 0.
 bool oneOf(const Value& v, const char* const* names) {
     if (!v.isString()) return false;
@@ -354,6 +367,8 @@ public:
                 if (!logs(v)) return false;
             } else if (key == "settings") {
                 if (!settings(v)) return false;
+            } else if (key == "channels") {
+                if (!channels(v)) return false;
             }
             // manifestVersion was checked by the caller; any other key at this level is ignored.
         }
@@ -575,6 +590,72 @@ private:
                 }
             }
         }
+        return true;
+    }
+
+    // properties/channels: 1 to 8 of $defs/channel, which is closed, as is its start. An apps that names a phone app
+    // is a later format's: this agent knows NBTApps' own use only.
+    bool channels(const Value& v) {
+        static const char* const required[] = {"name", "apps", "access", 0};
+        static const char* const access[] = {"read", "both", 0};
+        if (!v.isArray()) return bad("manifest.channels", "must be an array");
+        if (v.size() < 1) return bad("manifest.channels", "needs at least one channel");
+        if (v.size() > kMaxChannels) return bad("manifest.channels", "has more than 8 channels");
+        for (size_t i = 0; i < v.size(); ++i) {
+            Value c = v.at(i);
+            std::string at = item("manifest.channels", i);
+            if (!c.isObject()) return bad(at, "must be an object");
+            if (!has(c, required, at)) return false;
+            ManifestChannel channel;
+            for (size_t k = 0; k < c.size(); ++k) {
+                const std::string& key = c.key(k);
+                Value value = c.at(k);
+                if (key == "name") {
+                    if (!text(value, isChannelName, at + ".name", &channel.name)) return false;
+                } else if (key == "apps") {
+                    if (!value.isArray()) return bad(at + ".apps", "must be an array");
+                    if (value.size() != 0) {
+                        return error_->fail("unsupported-manifest", at + ".apps names phone apps, which this agent does not know");
+                    }
+                } else if (key == "access") {
+                    if (!oneOf(value, access)) return bad(at + ".access", "must be one of: read, both");
+                    channel.access = value.string();
+                } else if (key == "switch") {
+                    if (!value.isBool()) return bad(at + ".switch", "must be true or false");
+                    channel.switched = value.boolean();
+                } else if (key == "start") {
+                    if (!channelStart(value, at + ".start", &channel)) return false;
+                } else {
+                    return unknown(at, key);
+                }
+            }
+            m_->channels.push_back(channel);
+        }
+        return true;
+    }
+
+    // $defs/channel/start: closed, with the program and up to 16 arguments.
+    bool channelStart(const Value& v, const std::string& at, ManifestChannel* channel) {
+        static const char* const required[] = {"program", 0};
+        if (!v.isObject()) return bad(at, "must be an object");
+        if (!has(v, required, at)) return false;
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (v.key(i) == "program") {
+                if (!text(v.at(i), isPath, at + ".program", &channel->program)) return false;
+            } else if (v.key(i) == "args") {
+                Value list = v.at(i);
+                if (!list.isArray()) return bad(at + ".args", "must be an array");
+                if (list.size() > kMaxChannelArgs) return bad(at + ".args", "has more than 16 arguments");
+                for (size_t k = 0; k < list.size(); ++k) {
+                    std::string arg;
+                    if (!text(list.at(k), isChannelArg, item(at + ".args", k), &arg)) return false;
+                    channel->args.push_back(arg);
+                }
+            } else {
+                return unknown(at, v.key(i));
+            }
+        }
+        channel->hasStart = true;
         return true;
     }
 
@@ -896,6 +977,17 @@ private:
         for (size_t i = 0; i < m_->logs.size(); ++i) {
             if (!logs.insert(m_->logs[i]).second) return bad("manifest", ("names the log " + m_->logs[i] + " twice").c_str());
         }
+        // A channel's program is a file the package itself places in ${app}: the agent starts nothing else.
+        std::set<std::string> channels, files;
+        for (size_t i = 0; i < m_->placements.size(); ++i) files.insert(m_->placements[i].dest);
+        for (size_t i = 0; i < m_->channels.size(); ++i) {
+            const ManifestChannel& c = m_->channels[i];
+            if (!channels.insert(c.name).second) return bad("manifest", ("names the channel " + c.name + " twice").c_str());
+            if (c.hasStart && files.count("${app}/" + c.program) == 0) {
+                return bad("manifest", ("starts " + c.program + " for the channel " + c.name +
+                                        ", which install.files does not place in ${app}").c_str());
+            }
+        }
         return settingsRules();
     }
 
@@ -986,7 +1078,17 @@ std::vector<std::string> riskFlags(const Manifest& manifest) {
     }
     if (system) flags.push_back("modifies-system");
     if (manifest.reboot != "none") flags.push_back("needs-reboot");
+    bool starts = false;
+    for (size_t i = 0; i < manifest.channels.size(); ++i) starts = starts || manifest.channels[i].hasStart;
+    if (starts) flags.push_back("starts-program");
     return flags;
+}
+
+const ManifestChannel* findChannel(const Manifest& manifest, const std::string& name) {
+    for (size_t i = 0; i < manifest.channels.size(); ++i) {
+        if (manifest.channels[i].name == name) return &manifest.channels[i];
+    }
+    return 0;
 }
 
 }  // namespace nbt

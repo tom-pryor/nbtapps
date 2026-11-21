@@ -8,6 +8,10 @@ import com.nbtapps.store.data.crypto.newSha256
 import com.nbtapps.store.data.packages.ManifestParser
 import com.nbtapps.store.model.AgentInfo
 import com.nbtapps.store.model.Autostart
+import com.nbtapps.store.model.ChannelCloseReason
+import com.nbtapps.store.model.ChannelError
+import com.nbtapps.store.model.ChannelOpened
+import com.nbtapps.store.model.ChannelSwitch
 import com.nbtapps.store.model.Check
 import com.nbtapps.store.model.CheckFixResult
 import com.nbtapps.store.model.CheckList
@@ -450,6 +454,106 @@ class AgentClient(
      */
     suspend fun settingsSet(packageId: String, set: Map<String, SettingValue>, reset: List<String> = emptyList()) {
         call<JsonObject>("settings.set", settingsSetParams(packageId, set, reset))
+    }
+
+    /**
+     * Opens the channel [channel] of the installed package [packageId], for NBTApps itself (no phone app is named), and
+     * grants the agent [credit] messages to send at first. The channel's messages and events go to [sink] from the
+     * moment the answer is read ([Peer.requestChannel]). Only an agent that lists [ProtocolConstants.CAPABILITY_CHANNELS]
+     * has it.
+     *
+     * The answer can take up to [ProtocolConstants.CHANNEL_START_WAIT_MS] and a little more, while the agent starts the
+     * package's program: nothing here limits how long it is waited for.
+     *
+     * @throws RemoteException with one of [ChannelError]'s: `not-found` for no such package or channel, `off` for a
+     *   switched channel that is off, `busy` while a job runs or the agent is on trial, `unavailable` where no program
+     *   took the connection, `too-many` with as many channels open on this link as it may have, `unsupported` from an
+     *   agent without channels or on a link whose frame is too small, `forbidden` and `bad-request`.
+     * @throws ProtocolException for an answer this app cannot read: the channel it named, if any, is closed and the
+     *   agent told.
+     */
+    suspend fun channelOpen(
+        packageId: String,
+        channel: String,
+        sink: ChannelSink,
+        credit: Int = ProtocolConstants.CHANNEL_CREDIT,
+    ): ChannelOpened {
+        require(credit in 1..65_535) { "a channel's first credit is 1 to 65535" }
+        val result = peer.requestChannel(
+            buildJsonObject {
+                put("package", packageId)
+                put("channel", channel)
+                put("credit", credit)
+            },
+            sink,
+        )
+        val opened = try {
+            decode<ChannelOpened>(result)
+        } catch (e: ProtocolException) {
+            null
+        }
+        if (opened == null || opened.maxMessage < 1 || opened.credit < 0) {
+            // The peer took the channel up as the answer came: it goes again.
+            val stream = result["stream"].integerOrNull()?.toInt()
+            if (stream != null && peer.endChannel(stream, sink)) channelClose(stream, ChannelCloseReason.PROTOCOL)
+            throw ProtocolException(UNREADABLE)
+        }
+        return opened
+    }
+
+    /**
+     * Whether the channel [channel] of the installed package [packageId] has a switch, whether it is on, and how many
+     * connections of it are open. Only an agent that lists [ProtocolConstants.CAPABILITY_CHANNELS] has it.
+     *
+     * @throws RemoteException with `not-found` for no such package or channel, `busy` while an install step runs,
+     *   `unsupported` from an agent without channels, `bad-request`.
+     */
+    suspend fun channelGet(packageId: String, channel: String): ChannelSwitch = call("channel.get", buildJsonObject {
+        put("package", packageId)
+        put("channel", channel)
+    })
+
+    /**
+     * Switches the switched channel [channel] of [packageId] on or off, and returns how it then stands. Off closes its
+     * open channels on every link with the reason `off`, and ends the program the agent started for it. The switch is
+     * in the head unit's memory: off again after a power down.
+     *
+     * @throws RemoteException with `bad-request` for a channel that has no switch, `busy` while a job runs or the
+     *   agent is on trial, `not-found`, `forbidden`, `unsupported` as for [channelGet], `io-error` where the switch
+     *   could not be changed.
+     */
+    suspend fun channelSet(packageId: String, channel: String, on: Boolean): ChannelSwitch = call("channel.set", buildJsonObject {
+        put("package", packageId)
+        put("channel", channel)
+        put("on", on)
+    })
+
+    /**
+     * Tells the agent that this side has closed the channel [stream] (the event `channel.close`), and takes nothing more
+     * of it. [reason] is one of [ChannelCloseReason]'s: `closed`, or `protocol` when the agent broke the channel's
+     * rules. The agent answers nothing.
+     *
+     * @throws LinkClosedException if the link has ended, which ends the channel too.
+     */
+    suspend fun channelClose(stream: Int, reason: String = ChannelCloseReason.CLOSED) {
+        peer.channel(stream)?.let { peer.endChannel(stream, it) }
+        peer.event("channel.close", buildJsonObject {
+            put("stream", stream)
+            put("reason", reason)
+        })
+    }
+
+    /**
+     * Grants the agent [messages] more messages on the channel [stream] (the event `channel.credit`).
+     *
+     * @throws LinkClosedException if the link has ended.
+     */
+    suspend fun channelCredit(stream: Int, messages: Int) {
+        require(messages in 1..65_535) { "a channel.credit grants 1 to 65535 messages" }
+        peer.event("channel.credit", buildJsonObject {
+            put("stream", stream)
+            put("messages", messages)
+        })
     }
 
     /**
