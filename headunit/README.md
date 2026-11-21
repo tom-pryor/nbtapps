@@ -198,7 +198,8 @@ format and the protocol.
   `both`), whether a failed dial may have left the car's record of phone-opened links wrong (`recordDoubtful`),
   for a phone's link whether a link that phone opens itself is left to another program now (`phoneOpenedLeft`,
   see "Other programs' links"; not there on the local socket), counts of the asks before the dials, of the dials, their answers and the registration checks, of the links
-  phones opened that were left to another program unread (`leftUnread`, see "Other programs' links"), and how many
+  phones opened that the rule left to another program unread (`leftUnread`), of the links on which bytes the agent
+  had read were put back for another program (`putBack`; both in "Other programs' links"), and how many
   problems were written to the problem file and how many only counted. The count `notListening` is of the dials
   answered 5; every dial now follows an ask that listed the agent's service, so it no longer means the app was not
   listening (the name is kept for the app's sake). Never a phone's address or name. An agent
@@ -606,7 +607,7 @@ not stay behind:
 
 ```sh
 /tmp/nbt/nbtagent --root /tmp/hu --bluetooth 2> /tmp/hu.log &
-/tmp/nbt/nbtagent --root /tmp/hu --bluetooth --decide 800 --decide-hold 2> /tmp/hu.log &   # see "Other programs' links"
+/tmp/nbt/nbtagent --root /tmp/hu --bluetooth --decide 800 2> /tmp/hu.log &   # see "Other programs' links"
 ```
 
 Once Bluetooth serial has started and its registration has gone out (or has not, after 15 seconds), a thread of
@@ -633,7 +634,12 @@ moves into the node only when new bytes come while nothing waits there, or when 
 `select()` does not ask the stack, so it says that the node is empty while bytes wait ahead of it. Bytes that
 nobody read outlive their link and come on a later link, ahead of that link's own, as one run of bytes. A node
 that the agent had stopped reading while the phone went on sending was seen to leave every later link silent to
-an agent that waited on `select()`, until a plain read of the node brought all the old bytes at once. So:
+an agent that waited on `select()`, until a plain read of the node brought all the old bytes at once. A read that
+does not wait, made while the node's queue is empty, takes nothing and has the stack hand on what waits ahead of
+the node; after one read on a link, what the phone sends comes into the node as it comes, for a reader that waits on
+`select()` too. Bytes that were read can be put back into the node's queue (`tcinject()`), and the next reader gets
+them first, provided a descriptor stays open on the node: its last close empties the queue, which holds 6144 bytes.
+So:
 
 - every open node has one reader (`agent/node_reader.hpp`), a thread that issues a blocking read from the moment
   the node is opened, under a time limit of 100 ms that the kernel holds it to (`TimerTimeout`), and another one
@@ -647,8 +653,8 @@ an agent that waited on `select()`, until a plain read of the node brought all t
   links" below). A stale `hello` at the very start of the
   old bytes cannot be told from a new one: the agent takes it, meets the next stale magic bytes as a broken frame,
   and ends the link; its node is then read to the end, and the phone's next try is clean;
-- a node is not closed under a link that may still carry bytes, except for a program that reads such links
-  ("Other programs' links" below).
+- a node is not closed under a link that may still carry bytes, except for a program that reads such links when
+  what the agent read cannot be put back for it ("Other programs' links" below).
 
 **How a link ends.** Closing a link's node does not end the link: the phone ends it, or the car does when it is
 asked to. The agent therefore:
@@ -670,9 +676,10 @@ asked to. The agent therefore:
 - has the car end the phone's link when it is asked to: `serial.reset`, which `nbtctl serial reset` sends. The
   agent sends the car's Bluetooth service a ServiceDisconnect for the phone that last asked for a link. With a
   serial node open (one being decided on, a link of the agent's, or one being read to its end) that goes out about
-  300 ms after the answer, so that a phone that asked on that very link has its answer first; if by then no node
-  the agent opened is there any more, the link has ended meanwhile and nothing is sent: the log and the problem
-  file say so, and the reset is done. A ServiceDisconnect for a phone-opened link when the car has no live link
+  300 ms after the answer, so that a phone that asked on that very link has its answer first; if by then no such
+  node is there any more, the link has ended meanwhile and nothing is sent: the log and the problem file say so,
+  and the reset is done. A node the agent keeps open, unread, for another program ("Other programs' links") is not
+  counted: the car would end that program's link. A ServiceDisconnect for a phone-opened link when the car has no live link
   there can hold that instance up for well over a minute. With none open, the
   next serial link whose node opens within 60 seconds is ended at the open, with no decide step, and its node read
   until the link ends; that is for a phone whose links come up and carry nothing, which taps Connect once more.
@@ -698,8 +705,9 @@ asked to. The agent therefore:
   is what an agent from before `serial.reset` answers, and one with no Bluetooth serial listener. One press per
   showing; the page starts over when it is shown again. It needs no SSH and no link from the phone.
 
-A link that the agent lets go as another program's (below) is closed for that program if there is a sign of one,
-and read otherwise, until it ends or a sign of one comes.
+A link that the agent lets go as another program's (below) is kept open, unread, for that program if there is a
+sign of one, with what the agent read from it put back (or closed for it, where that cannot be done), and read
+otherwise, until it ends or a sign of one comes.
 
 **The car dials the phone.** The car gives every link a phone opens the one node `/dev/btspp0`, and takes one such
 link at a time, so another program that holds it keeps the phone's app from the agent. The car can also open a
@@ -861,13 +869,19 @@ a phone's request that names the agent's service or the car's serial service is 
 another service (audio, hands-free) never brings one, is only logged, and does not have the next node left alone.
 Three things keep the two apart, all in the agent:
 
-- A rule leaves a link a phone opens to the other program: the agent never opens or reads its node, and puts no
-  hold on (below) for the phone's request that brings it, when all three of these hold at the request and again
-  when the node appears: the car dials the phone (`--dial on`, the default); a program declared for a serial
-  service (above) is running, or whether one is cannot be told; and the phone that asked is one of the agent's
-  whose app a link the car dialled has been the agent's on before (`"dialled": true` in `phones.json`, "The car
-  dials the phone" below, kept across restarts). The other program then gets the link whole, its first bytes too,
-  which the decide step below would have read, and the agent's app is reached by the dial, which the request still
+- A rule leaves a link a phone opens to the other program: the agent never reads it, and puts no hold on (below)
+  for the phone's request that brings it, when all three of these hold at the request and again when the node
+  appears: the car dials the phone (`--dial on`, the default); a program declared for a serial service (above) is
+  running, or whether one is cannot be told; and the phone that asked is one of the agent's whose app a link the car
+  dialled has been the agent's on before (`"dialled": true` in `phones.json`, "The car dials the phone" below, kept
+  across restarts). It does open the node at once, and primes it for the other program: a program that waits on
+  `select()` before it reads never sees what the phone sent on a link no read was made on ("What the node does",
+  above). With nothing in the node's queue, the agent makes one read that does not wait, which as a rule takes
+  nothing; bytes it does take, which came in that very moment, are put back. It then keeps the node open, unread,
+  until the link ends, and closes it then; the node counts as no link of the agent's for anything else (the dial,
+  the hold, `serial.reset`). A node that cannot be opened or primed is closed again and left as it is, and the log
+  says why. The other program then gets the link whole, its first bytes too, which the decide step below would
+  have read, and the agent's app is reached by the dial, which the request still
   brings. A link that the agent's app opens itself on such a phone is left all the same: that is the rule's cost.
   The mark is a safety net for a car on which dialling does not work: there the phone's own link stays the way in.
   So it is also given up when dialling stops working for a phone that has it: after 3 dials of the phone in a row
@@ -876,19 +890,24 @@ Three things keep the two apart, all in the agent:
   In every other case (dial off, no such program, a phone that is not the agent's or that no dial has reached, a
   request that gave no address, a node with no request) the agent goes on as below, and so it does when the rule
   held at the request and no longer does when the node appears. The log says once for each link that it was left
-  to another program, and why; `serial.status` counts them (`leftUnread`). The phone's app learns that the rule
+  to another program, and why, and how the node was primed: with bytes put back or not; `serial.status` counts
+  such links (`leftUnread`, whether the node could be primed or not), and the links on which bytes were put back
+  here or in the decide step below (`putBack`). The phone's app learns that the rule
   holds for its phone from `info.get` (`"phoneOpenedLeft": true` in `serial`), and then opens no link itself:
   it only waits for the car's.
 - The agent opens a link's node and reads what the phone says first. A link that opens with the protocol's magic
   bytes, after any leftovers of an earlier link ("What the node does", above), is the agent's. Any other is let
   go, at once if something else came first and after 500 ms if nothing came, and the agent has written nothing
-  into it. The agent stops reading the node and closes it, so that the program the link belongs to finds it as it
-  would have, when there is a sign of such a program: a program declared for a serial service (above) is running,
-  or whether one is cannot be told; the gate has seen another program open `/dev/btspp0`, or try to, since this
-  link's node appeared (the car's media process, which the gate refuses every time, does not count); or a program
-  of software put on by hand (the checks' `/opt/aa`) is running, which nothing declares. What the phone had sent
-  by then is lost to that program, so this suits a program whose links start with the car speaking, or a phone
-  that sends again. With no such sign nobody would ever read the link, and what waited unread would come ahead of
+  into it. When there is a sign of a program the link may belong to (a program declared for a serial service,
+  above, is running, or whether one is cannot be told; the gate has seen another program open `/dev/btspp0`, or try
+  to, since this link's node appeared, the car's media process, which the gate refuses every time, not counting; or
+  a program of software put on by hand, the checks' `/opt/aa`, is running, which nothing declares), the agent stops
+  reading the node and puts all it read back into the node's queue, in the order it came, with whatever came into
+  the queue after its last read behind it, and keeps the node open, unread, until the link ends: that program finds
+  the link whole, as it would have. A put-back is made only into a node that takes bytes as they are (raw) and
+  only when the bytes fit in its queue; where it cannot be made, or fails, the agent closes the node for that
+  program as before and the log says why: what the phone had sent by then is then lost to that program. With no
+  such sign nobody would ever read the link, and what waited unread would come ahead of
   the next link's bytes: the agent reads the node, dropping what comes, until the link ends. If a sign comes while
   it does (the gate sees another program open the node, or try to, after the link was let go; or a program of
   software put on by hand starts to run, looked for every 2 seconds at most), the agent stops reading and closes
@@ -902,15 +921,15 @@ Three things keep the two apart, all in the agent:
   the same.
 
 The log has, for every link, how long after the open its first message came, how many bytes an earlier link had
-left on it, whether it was the agent's or was let go, and why, whether the node was still there after
-the close and when it went, how much was dropped from a node that was read to its end, and each time the gate
-starts and stops refusing those programs. Two options of `nbtagent` change the decide step without a new build, a
-third the registration check, and two the car's dialling; all five go with Bluetooth serial only:
+left on it, whether it was the agent's or was let go, and why, how many bytes were put back for another program or
+why they could not be, whether the node was still there after the close and when it went, how much was dropped
+from a node that was read to its end, and each time the gate starts and stops refusing those programs. One option
+of `nbtagent` changes the decide step without a new build, one the registration check, and two the car's dialling;
+all four go with Bluetooth serial only:
 
 | Option | What it changes |
 |---|---|
 | `--decide <ms>` | How long the magic bytes are waited for, 1 to 10000, in place of the protocol's 500 ms. A phone app goes by the protocol's time, so this is for measuring, not for a car that is in use |
-| `--decide-hold` | A link that is let go keeps its node open, unread, until the link ends, in place of having it closed or read to its end. For a car on which a link does not outlive the close of its node: there the other program would lose every link the agent lets go. The agent reads and writes nothing on a node it keeps, and the gate's hold is off by then, so the other program can open the node beside it |
 | `--register-check <s>` | Every how many seconds the registration is checked while all is quiet, 0 to 3600, in place of 30; 0 never checks it |
 | `--dial on\|off` | Whether the car dials a phone of the agent's (above); on by default. With off, the agent takes only the links phones open, as before |
 | `--dial-poll <f>,<l>,<t>` | The dial's polls: every f seconds (1 to 3600) for l seconds (0 to 86400) after a phone connects or a link ends, then every t seconds (1 to 3600), in place of 10,120,30 |
@@ -921,7 +940,7 @@ taken or is lost, how it checks the registration, the programs the gate holds of
 moment (the list is taken anew each time the hold goes on), and how the car dials a phone:
 
 ```
-bluetooth: a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any whole frames left over from an earlier link. Any other is let go: its node is closed for the program it belongs to if a program declared for a serial service is running, the gate has seen another program open the node, or a program of software put on by hand is running, and otherwise read until the link ends or one of those signs comes. A link that a phone of the agent's opens, whose app a link the car dialled has reached, is not opened at all while a program declared for a serial service is running, or may be: it is left to that program, and the app is reached by the dial
+bluetooth: a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any whole frames left over from an earlier link. Any other is let go. If a program declared for a serial service is running, the gate has seen another program open the node, or a program of software put on by hand is running, what was read from it is put back into its node, which stays open, unread, until the link ends, for the program it belongs to; where that cannot be done, its node is closed for that program. Otherwise it is read until the link ends or one of those signs comes. A link that a phone of the agent's opens, whose app a link the car dialled has reached, is not read at all while a program declared for a serial service is running, or may be: it is left to that program, its node primed for it with one read that does not wait and kept open, unread, until the link ends, and the app is reached by the dial
 bluetooth: a link the agent ends keeps its node, read and with what comes dropped, until the phone ends the link; the log says so if it is still up 5000 ms after the agent's end closed
 bluetooth: a serial service that the car's Bluetooth service does not take, or that is not registered for 20 s, is given up: the gate is taken away, and both are set up again 30 s later, for as long as it takes
 bluetooth: while the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, the registration is checked every 30 s by registering it again: switching Bluetooth off and on drops it, and the car says nothing

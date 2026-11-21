@@ -6,7 +6,7 @@
 //   nbtagent --root DIR [--socket PATH]      on a folder that stands in for the head unit
 //   nbtagent                                 on the head unit itself: in the build for the head unit only
 //   (host build also: [--test-key FILE]... [--debug-tcp [ADDRESS:]PORT])
-//   (head unit's build also: [--bluetooth] [--no-bluetooth] [--decide MS] [--decide-hold] [--register-check S]
+//   (head unit's build also: [--bluetooth] [--no-bluetooth] [--decide MS] [--register-check S]
 //    [--dial on|off] [--dial-poll F,L,T], and `nbtagent --look PATH` for its own use)
 //
 // With --root, everything it touches is inside DIR, laid out as host_platform.hpp says: installed records,
@@ -75,11 +75,10 @@
 // with the agent itself, by a code from the car's screen, and proves that with `auth` on every link (agent.hpp).
 // An agent that ends without stopping leaves its registration behind until the car's Bluetooth restarts or the
 // next agent replaces it, so with --root, where SIGHUP is not ignored, SIGHUP stops the agent as SIGTERM does.
-// Two options are for finding out what a car needs of the decide step, which lets go the links of other programs
+// One option is for finding out what a car needs of the decide step, which lets go the links of other programs
 // (serial_link.hpp): --decide MS waits that long for a link's magic bytes in place of the protocol's
-// serial.decideMs, and --decide-hold keeps the node of a link that is let go open, unread, until the link ends,
-// in place of closing it for another program or reading it to its end. The agent's first lines in the log say which of the two it goes by, and which programs
-// the gate holds off a link meanwhile. Switching Bluetooth off and on in iDrive drops the registration, and the car
+// serial.decideMs. The agent's first lines in the log say what it goes by, what becomes of a link that is let go,
+// and which programs the gate holds off a link meanwhile. Switching Bluetooth off and on in iDrive drops the registration, and the car
 // says nothing of it, so the agent checks it by registering it again while all is quiet: every 30 seconds, or as
 // often as --register-check S says (0: never). The car also dials a phone of the agent's that is connected to it and
 // paired with it (dial_rules.hpp), on its own node that no other program's link uses, once the phone's service list,
@@ -143,9 +142,9 @@ static void onStop(int) { gStop = 1; }
 static int usage() {
     fprintf(stderr,
 #ifdef NBT_HEAD_UNIT
-            "usage: nbtagent [--no-bluetooth] [--decide MS] [--decide-hold] [--register-check S]\n"
+            "usage: nbtagent [--no-bluetooth] [--decide MS] [--register-check S]\n"
             "                [--dial on|off] [--dial-poll F,L,T]     work on this head unit\n"
-            "       nbtagent --root DIR [--socket PATH] [--bluetooth [--decide MS] [--decide-hold]\n"
+            "       nbtagent --root DIR [--socket PATH] [--bluetooth [--decide MS]\n"
             "                [--register-check S] [--dial on|off] [--dial-poll F,L,T]]\n"
             "                                             work on a folder that stands in for one\n"
             "  (no --root)     state in /var/opt/nbtapp, the socket at %s; the system\n"
@@ -157,8 +156,6 @@ static int usage() {
             "  --decide MS     with Bluetooth serial: how long a link's magic bytes are waited for, from\n"
             "                  the open of its node, before the link is let go as another program's\n"
             "                  (1 to %u; default %u, the protocol's)\n"
-            "  --decide-hold   with Bluetooth serial: a link that is let go keeps its node open, unread,\n"
-            "                  until the link ends, in place of having it closed or read to its end\n"
             "  --register-check S\n"
             "                  with Bluetooth serial: every how many seconds the registration, which\n"
             "                  switching Bluetooth off and on drops, is checked (0 to %u; 0: never;\n"
@@ -225,7 +222,6 @@ struct Options {
     std::string debugTcpAddress;
     int bluetooth;                 // 1: Bluetooth serial, 0: none, below 0: not said. Only the head unit's build
     unsigned decideMs;             // --decide; 0: not given, so the protocol's time. Only the head unit's build
-    bool decideHold;               // --decide-hold. Only the head unit's build
     int checkS;                    // --register-check; below 0: not given. Only the head unit's build
     int dial;                      // --dial: 1 on, 0 off, below 0: not given. Only the head unit's build
     bool dialPoll;                 // --dial-poll was given, with these values
@@ -233,7 +229,7 @@ struct Options {
     std::string self;              // how this program was started, to start it again for the gate's check
 
     Options()
-        : debugTcpPort(-1), debugTcpAddress("127.0.0.1"), bluetooth(-1), decideMs(0), decideHold(false), checkS(-1),
+        : debugTcpPort(-1), debugTcpAddress("127.0.0.1"), bluetooth(-1), decideMs(0), checkS(-1),
           dial(-1), dialPoll(false) {}
 };
 
@@ -294,11 +290,10 @@ struct Bluetooth {
     }
 };
 
-// The listener's settings: the built-in ones, with what --decide and --decide-hold change.
+// The listener's settings: the built-in ones, with what the options change.
 static SerialConfig serialConfigOf(const Options& options) {
     SerialConfig config;
     if (options.decideMs != 0) config.decideMs = options.decideMs;
-    config.letGoKeepsNode = options.decideHold;
     if (options.checkS >= 0) config.checkMs = (unsigned)options.checkS * 1000;
     if (options.dial >= 0) config.dial.on = options.dial == 1;
     if (options.dialPoll) {
@@ -576,8 +571,6 @@ int main(int argc, char** argv) {
                 return kExitUsage;
             }
             ++i;
-        } else if (arg == "--decide-hold") {
-            options.decideHold = true;
         } else if (arg == "--register-check" && value != 0) {
             unsigned s = 0;
             if (!parseSerialCheckS(value, &s)) {
@@ -637,9 +630,9 @@ int main(int argc, char** argv) {
     if (options.root.empty() && !options.socketPath.empty()) return usage();
     if (options.bluetooth < 0) options.bluetooth = options.root.empty() ? 1 : 0;
     if (options.bluetooth == 0 &&
-        (options.decideMs != 0 || options.decideHold || options.checkS >= 0 || options.dial >= 0 || options.dialPoll)) {
-        fprintf(stderr, "nbtagent: --decide, --decide-hold, --register-check, --dial and --dial-poll are about Bluetooth "
-                        "serial, which is off%s\n", options.root.empty() ? "" : ": with --root it takes --bluetooth");
+        (options.decideMs != 0 || options.checkS >= 0 || options.dial >= 0 || options.dialPoll)) {
+        fprintf(stderr, "nbtagent: --decide, --register-check, --dial and --dial-poll are about Bluetooth serial, which "
+                        "is off%s\n", options.root.empty() ? "" : ": with --root it takes --bluetooth");
         return kExitUsage;
     }
     if (options.dial == 0 && options.dialPoll) {

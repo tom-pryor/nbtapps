@@ -171,7 +171,7 @@
 //     "phonesPresent": 1, "phonesEligible": 1, "dial": "on", "dialState": "idle", "lastResult": "DEFAULT",
 //     "link": "none", "recordDoubtful": false, "phoneOpenedLeft": false, "counts": { "dials", "answeredOk", "notListening", "notInReach",
 //     "busy", "otherAnswers", "noAnswer", "notTheApp", "leftBehind", "asks", "asksListed", "asksNotListed",
-//     "asksNoAnswer", "askErrors", "checks", "checksRestored", "refusals", "leftUnread" },
+//     "asksNoAnswer", "askErrors", "checks", "checksRestored", "refusals", "leftUnread", "putBack" },
 //     "problems": { "recorded", "counted" } }
 //
 // checkedMsAgo is absent before the service has first been registered. dial is on or off (nbtagent --dial);
@@ -188,7 +188,10 @@
 // app stopped listening in between or something else went wrong, not that it was not listening; the name stays, for
 // the app's sake. asks counts the asks for a
 // phone's service list; asksListed, asksNotListed, asksNoAnswer and askErrors what they came to. leftUnread counts
-// the links phones opened that the agent left to another program without opening them (serial_link.hpp). problems:
+// the links phones opened that the rule left to another program without reading them: their node primed for that
+// program and kept open, or left as it was when that could not be done (serial_link.hpp). putBack counts the links
+// on which bytes the agent had read were put back into the node for another program: the few a priming read took,
+// or what the decide step read from a link it let go. problems:
 // the lines written to the problem file in this run, and the problems only counted (serial_link.hpp).
 //
 // serial.dial, on the local socket only: a round of dials now, to each phone connected to the car and paired with

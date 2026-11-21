@@ -6,7 +6,9 @@
 // The car's parts are played here. A serial node is a pseudo-terminal: its far end is the phone, and a symbolic
 // link to its near end, made when "the link comes up", is the node the listener finds. The Bluetooth service is a
 // GapClient of the test's own, which takes the registration and says what a phone asked for, and the gate is a
-// NodeGate that only notes what was done to it. All names are invented.
+// NodeGate that only notes what was done to it. Where a test needs the node's queue as the car's stack keeps it (the
+// phone's bytes held back until a read, a put-back), the listener is given the test's calls on the node in place
+// of the platform's (heldCalls()). All names are invented.
 //
 // Unlike the agent's other tests this one runs on real time, with the listener's and the links' threads: it waits
 // for what should happen, up to a few seconds each, and for a short while where nothing should.
@@ -20,7 +22,9 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <termios.h>
 #include <time.h>
@@ -428,6 +432,14 @@ private:
 
 // ---- a serial node, and the phone at its far end ------------------------------------------------------------------
 
+class Node;
+static void addNode(Node* node);
+static void dropNode(Node* node);
+
+// A node can also play the car's stack as it treats a link no read has been made on (node_reader.hpp): with `held`,
+// what the phone sends (send()) waits ahead of the node, where the terminal does not have it, until a read is made
+// through the test's calls (NodeCalls, below); from then on it comes into the node as it comes. A node also says how
+// many descriptors this process holds on it, and what the test's calls on its queue are to do.
 class Node {
 public:
     // The node `prefix` + `index`, not there yet.
@@ -439,12 +451,21 @@ public:
     // The node at `at`, not there yet.
     explicit Node(const std::string& at) : phone(-1) { make(at); }
     ~Node() {
+        dropNode(this);
         vanish();
         hangUp();
+        pthread_mutex_destroy(&mu_);
     }
 
     void make(const std::string& at) {
         path = at;
+        held = false;
+        primed_ = false;
+        notRaw = false;
+        queueSize = 6144;
+        injectError = 0;
+        injects = 0;
+        pthread_mutex_init(&mu_, NULL);
         phone = posix_openpt(O_RDWR | O_NOCTTY);
         CHECK(phone >= 0 && grantpt(phone) == 0 && unlockpt(phone) == 0);
         near_ = ptsname(phone);
@@ -455,8 +476,58 @@ public:
         CHECK(tcgetattr(fd, &raw) == 0);
         cfmakeraw(&raw);
         CHECK(tcsetattr(fd, TCSANOW, &raw) == 0);
+        struct stat st;
+        CHECK(fstat(fd, &st) == 0);
+        rdev_ = st.st_rdev;
         close(fd);
         fcntl(phone, F_SETFL, fcntl(phone, F_GETFL, 0) | O_NONBLOCK);
+        addNode(this);
+    }
+
+    // What the phone sends: ahead of the node while it is held and no read has been made, otherwise into it.
+    void send(const std::string& bytes) {
+        pthread_mutex_lock(&mu_);
+        bool ahead = held && !primed_;
+        if (ahead) ahead_ += bytes;
+        pthread_mutex_unlock(&mu_);
+        if (!ahead) say(bytes);
+    }
+    // A read has been made through `fd`: what waited ahead of the node comes into it. True if this was the first.
+    bool prime(int fd) {
+        pthread_mutex_lock(&mu_);
+        bool first = held && !primed_;
+        primed_ = true;
+        std::string ahead;
+        ahead.swap(ahead_);
+        pthread_mutex_unlock(&mu_);
+        if (!ahead.empty()) into(fd, ahead);
+        return first;
+    }
+    // Bytes into the node's queue, as the phone's: the call returns once `fd` has them to read.
+    void into(int fd, const std::string& bytes) {
+        int before = 0;
+        ioctl(fd, FIONREAD, &before);
+        say(bytes);
+        double end = monoNow() + 2.0;
+        int now = 0;
+        while (monoNow() < end && (ioctl(fd, FIONREAD, &now) != 0 || now < before + (int)bytes.size())) pause(1);
+    }
+    // What the test's calls do once, as they come to them: `gap` comes into the node just before the read that does
+    // not wait, `late` just before the queue is looked at for a put-back.
+    void setGap(const std::string& bytes) { set(&gap_, bytes); }
+    void setLate(const std::string& bytes) { set(&late_, bytes); }
+    std::string takeGap() { return take(&gap_); }
+    std::string takeLate() { return take(&late_); }
+    // A terminal's number is given again once both its ends are closed: one that was hung up is no longer this node.
+    bool is(dev_t rdev) const { return phone >= 0 && rdev == rdev_; }
+    // How many descriptors of this process are open on the node now.
+    int holders() const {
+        int n = 0;
+        for (int fd = 0; fd < 1024; ++fd) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == rdev_) ++n;
+        }
+        return n;
     }
 
     // The link comes up: the node is there.
@@ -506,9 +577,156 @@ public:
 
     int phone;          // the far end; -1 once hung up or given away
     std::string path;   // where the listener finds the node
+    bool held;          // the phone's bytes wait ahead of the node until a read is made (send())
+    bool notRaw;        // the test's calls say that the node is not raw
+    long queueSize;     // and that its queue holds this much
+    int injectError;    // and that a put-back fails with this errno; 0: it works
+    int injects;        // put-backs made
 
 private:
+    void set(std::string* what, const std::string& bytes) {
+        pthread_mutex_lock(&mu_);
+        *what = bytes;
+        pthread_mutex_unlock(&mu_);
+    }
+    std::string take(std::string* what) {
+        pthread_mutex_lock(&mu_);
+        std::string bytes;
+        bytes.swap(*what);
+        pthread_mutex_unlock(&mu_);
+        return bytes;
+    }
+
     std::string near_;
+    dev_t rdev_;
+    pthread_mutex_t mu_;   // ahead_, primed_, gap_, late_
+    std::string ahead_, gap_, late_;
+    bool primed_;
+};
+
+// Every Node there is, for the test's calls to find a node by a descriptor the listener opened on it.
+static pthread_mutex_t gNodesMu = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<Node*> gNodes;
+
+static void addNode(Node* node) {
+    pthread_mutex_lock(&gNodesMu);
+    gNodes.push_back(node);
+    pthread_mutex_unlock(&gNodesMu);
+}
+
+static void dropNode(Node* node) {
+    pthread_mutex_lock(&gNodesMu);
+    for (size_t i = 0; i < gNodes.size(); ++i)
+        if (gNodes[i] == node) gNodes.erase(gNodes.begin() + (long)i--);
+    pthread_mutex_unlock(&gNodesMu);
+}
+
+static Node* nodeOf(int fd) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) return 0;
+    pthread_mutex_lock(&gNodesMu);
+    Node* found = 0;
+    for (size_t i = 0; i < gNodes.size() && found == 0; ++i)
+        if (gNodes[i]->is(st.st_rdev)) found = gNodes[i];
+    pthread_mutex_unlock(&gNodesMu);
+    return found;
+}
+
+// ---- the test's calls on a node: the car's stack as the node meets it ----------------------------------------------
+// What the platform's would do on a terminal, but for a held node, on which a read is what brings the phone's bytes
+// into the node, and for the size of the node's queue and a put-back, which a terminal does not have: a put-back is
+// a write from the phone's end, which puts the bytes behind what is in the node's queue, as the car's does.
+
+static long heldQueued(int fd) { return platformNodeCalls().queued(fd); }
+
+static int heldRaw(int fd) {
+    Node* n = nodeOf(fd);
+    if (n != 0 && n->notRaw) return 0;
+    return platformNodeCalls().raw(fd);
+}
+
+static long heldQueueSize(int fd) {
+    Node* n = nodeOf(fd);
+    if (n == 0) return 6144;
+    std::string late = n->takeLate();
+    if (!late.empty()) n->into(fd, late);
+    return n->queueSize;
+}
+
+// A read made while nothing is in the node's queue takes nothing, and brings what waits ahead of the node into it.
+static long heldReadNow(int fd, void* buf, size_t len) {
+    Node* n = nodeOf(fd);
+    if (n != 0 && n->prime(fd)) {
+        errno = EAGAIN;
+        return -1;
+    }
+    if (n != 0) {
+        std::string gap = n->takeGap();
+        if (!gap.empty()) n->into(fd, gap);
+    }
+    return platformNodeCalls().readNow(fd, buf, len);
+}
+
+static int heldInject(int fd, const void* buf, size_t len) {
+    Node* n = nodeOf(fd);
+    if (n == 0) {
+        errno = ENODEV;
+        return -1;
+    }
+    if (n->injectError != 0) {
+        errno = n->injectError;
+        return -1;
+    }
+    ++n->injects;
+    n->into(fd, std::string((const char*)buf, len));
+    return 0;
+}
+
+// The reader's timed read: a read brings what waits ahead of the node into it.
+static long heldRead(int fd, void* buf, size_t len, int ms) {
+    Node* n = nodeOf(fd);
+    if (n != 0) n->prime(fd);
+    return timedNodeRead(fd, buf, len, ms);
+}
+
+static NodeCalls heldCalls() {
+    NodeCalls c;
+    c.queued = &heldQueued;
+    c.raw = &heldRaw;
+    c.queueSize = &heldQueueSize;
+    c.readNow = &heldReadNow;
+    c.inject = &heldInject;
+    return c;
+}
+
+// Another program on the node, which waits on select() before each read, as the car's own readers do.
+class OtherProgram {
+public:
+    explicit OtherProgram(Node& node) : fd_(node.openNear()) {}
+    ~OtherProgram() { close(fd_); }
+    // What it has read within `ms`, until `want` bytes are there.
+    std::string reads(size_t want, int ms) {
+        std::string got;
+        double end = monoNow() + ms / 1000.0;
+        while (got.size() < want && monoNow() < end) {
+            fd_set rf;
+            FD_ZERO(&rf);
+            FD_SET(fd_, &rf);
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 20000;
+            if (select(fd_ + 1, &rf, NULL, NULL, &tv) <= 0) continue;
+            char buffer[256];
+            size_t room = want - got.size() < sizeof buffer ? want - got.size() : sizeof buffer;
+            ssize_t n = read(fd_, buffer, room);
+            if (n <= 0) break;
+            got.append(buffer, (size_t)n);
+        }
+        return got;
+    }
+
+private:
+    int fd_;
 };
 
 void FakeGap::dialUp() {
@@ -2880,7 +3098,9 @@ static bool closedUnwritten(Node& node, int ms) {
 // then on, with nothing written into it, and never handed to the agent.
 static void testDecide() {
     std::string dir = freshFolder("decide");
-    {   // a program declared for a serial service runs, so a link that is let go is closed for it
+    {   // a program declared for a serial service runs, so a link that is let go is that program's: kept open for it
+        // when nothing was read from it, and, with the host's own calls on the node, which cannot put bytes back
+        // (testPutBack() has the put-back), closed for it otherwise
         Trace trace;
         LinksGone gone;
         FakeGap gap(&trace);
@@ -2905,23 +3125,33 @@ static void testDecide() {
         double asked = monoNow();
         CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
         CHECK(monoNow() - asked >= 0.25);   // not before the time was over
-        CHECK_IN(trace.text(), trace.saw("(nothing came from the phone in that time) and closed: its node is still "
-                                         "there. It is closed for another reader: a program declared for a serial "
-                                         "service is running, or whether one is cannot be told"));
-        CHECK(closedUnwritten(silent, 2000) && acceptWithin(listener, 50) == 0);
-        // The log says when the node of a link that was let go went.
+        CHECK_IN(trace.text(), trace.saw("(nothing came from the phone in that time). Nothing had been read from it, "
+                                         "and its node is kept open, unread, until the link ends, for another reader: "
+                                         "a program declared for a serial service is running, or whether one is "
+                                         "cannot be told"));
+        bool closed = false;
+        CHECK(silent.hear(1, 200, &closed).empty() && !closed && acceptWithin(listener, 50) == 0);
+        // The log says when the link of a node that was kept went, and the node is closed then.
         silent.vanish();
-        CHECK_IN(trace.text(), sawWithin(trace, "btspp0 is gone, ", 2000) && trace.saw("s after it was let go and closed"));
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp0: the link ended ", 2000) &&
+                               trace.saw("s after it was let go, and its node is closed now"));
+        CHECK(closedUnwritten(silent, 2000));
 
-        // Another app's opening: let go for what it said, without the wait.
+        // Another app's opening: let go for what it said, without the wait. What was read cannot be put back here,
+        // so its node is closed for the other program as it was before put-backs.
         Node foreign(dir + "/btspp", 1);
         gap.phone(kInfServiceRequest, kCarSerialService);
         foreign.appear();
         foreign.say("\x10\x20\x30\x40 another app's opening");
         CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
         CHECK_IN(trace.text(), trace.saw("btspp1: its first message came") &&
-                               trace.saw("(it did not open with the magic bytes) and closed"));
+                               trace.saw("(it did not open with the magic bytes) and closed: its node is still there. "
+                                         "It is closed for another reader: a program declared for a serial service is "
+                                         "running, or whether one is cannot be told. The 26 B read from it could not "
+                                         "be put back: the size of its queue could not be told: "));
         CHECK(closedUnwritten(foreign, 2000) && acceptWithin(listener, 50) == 0);
+        foreign.vanish();
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp1 is gone, ", 2000) && trace.saw("s after it was let go and closed"));
         CHECK(!trace.saw("another app's opening"));   // what another app said is not for the log
 
         // One that starts like the magic bytes and goes on otherwise.
@@ -3003,17 +3233,19 @@ static void testDecide() {
         CHECK_IN(trace.text(), sawWithin(trace, "btspp0: the link ended", 3000));
         pause(450);
 
-        // The gate sees another program open the node while the link is decided on: closed for that program.
+        // The gate sees another program open the node while the link is decided on: kept for that program.
         Node second(dir + "/btspp", 0);
         gap.phone(kInfServiceRequest, kCarSerialService);
         second.appear();
         CHECK_IN(trace.text(), sawWithin(trace, "btspp0 opened", 2000));
         gate.otherOpens("handreader");
         CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
-        CHECK_IN(trace.text(), sawWithin(trace, "It is closed for another reader: the gate saw handreader open the node, "
-                                                "or try to, since this link's node appeared", 1000));
-        CHECK(closedUnwritten(second, 2000));
+        CHECK_IN(trace.text(), sawWithin(trace, "its node is kept open, unread, until the link ends, for another reader: "
+                                                "the gate saw handreader open the node, or try to, since this link's "
+                                                "node appeared", 1000));
+        CHECK(second.hear(1, 100, &closed).empty() && !closed);
         second.vanish();
+        CHECK_IN(trace.text(), countWithin(trace, "btspp0: the link ended ", 2, 2000) && closedUnwritten(second, 2000));
         pause(450);
 
         // The gate is in front of the first node only: an open it saw says nothing of a link on another node. A
@@ -3024,10 +3256,11 @@ static void testDecide() {
         third.appear();
         gate.otherOpens("handreader");
         CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
-        CHECK_IN(trace.text(), sawWithin(trace, "It is closed for another reader: a program of software put on by hand "
-                                                "is running (aad), which may read serial links", 1000));
-        CHECK(closedUnwritten(third, 2000));
+        CHECK_IN(trace.text(), sawWithin(trace, "for another reader: a program of software put on by hand is running "
+                                                "(aad), which may read serial links", 1000));
+        CHECK(third.hear(1, 100, &closed).empty() && !closed);
         third.vanish();
+        CHECK_IN(trace.text(), sawWithin(trace, "btspp1: the link ended ", 2000) && closedUnwritten(third, 2000));
         listener.stop();
         services.setRemover(0);
     }
@@ -3093,42 +3326,6 @@ static void testDecide() {
         listener.stop();
         services.setRemover(0);
     }
-    {   // for a car on which a link does not outlive the close of its node: the node stays open, unread, until the
-        // link ends
-        Trace trace;
-        LinksGone gone;
-        FakeGap gap(&trace);
-        FakeGate gate(&trace);
-        SerialConfig config = configFor(dir);
-        config.letGoKeepsNode = true;
-        SerialListener listener(&gap, &gate, &trace, config);
-        std::string why;
-        CHECK_IN(why, listener.start(&why));
-        gap.attach();
-        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
-
-        Node kept(dir + "/btspp", 0);
-        gap.phone(kInfServiceRequest, kCarSerialService);
-        kept.appear();
-        CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
-        CHECK(trace.saw("Its node stays open, unread, until the link ends") && !trace.saw("and closed"));
-        bool closed = false;
-        kept.say("for whoever reads the node now");
-        CHECK(kept.hear(1, 300, &closed).empty() && !closed);
-        // The link ends, which on the car takes its node away: now it is closed.
-        kept.vanish();
-        CHECK_IN(trace.text(), sawWithin(trace, "btspp0: the link ended", 2000) && trace.saw("its node is closed now"));
-        CHECK(closedUnwritten(kept, 2000));
-
-        // One that is still kept when the listener stops is closed then.
-        Node last(dir + "/btspp", 1);
-        gap.phone(kInfServiceRequest, kCarSerialService);
-        last.appear();
-        CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
-        CHECK(last.hear(1, 100, &closed).empty() && !closed);
-        listener.stop();
-        CHECK(closedUnwritten(last, 2000));
-    }
     {   // a link that was let go is a sign of a service that nothing answers: the other programs' services are
         // swept, and no more often than they may be
         Trace trace;
@@ -3178,6 +3375,168 @@ static void testDecide() {
         CHECK_IN(trace.text(), trace.count("deregister TestRadio") == 2);
         listener.stop();
         services.setRemover(0);
+    }
+}
+
+// ---- what was read from a link that is let go, put back for another program ------------------------------------------
+
+// A listener whose links that are let go have another reader (radiod, declared for a serial service, runs), and the
+// test's calls on the node, which can put bytes back.
+struct Letting {
+    Trace trace;
+    LinksGone gone;
+    FakeGap gap;
+    FakeGate gate;
+    std::string dir;
+    Machine machine;
+    Store store;
+    SerialServices services;
+    SerialConfig config;
+    SerialListener* listener;
+
+    explicit Letting(const std::string& name)
+        : gap(&trace), gate(&trace), dir(freshFolder(name)), machine(dir + "/root"), store(&machine),
+          services(&machine, &store, &trace), listener(0) {
+        config = configFor(dir);
+        config.nodeCalls = heldCalls();
+        config.readNode = &heldRead;
+        config.resetArmedMs = 1000;
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        machine.running = "radiod";
+    }
+    ~Letting() {
+        if (listener != 0) {
+            listener->stop();
+            services.setRemover(0);
+            delete listener;
+        }
+        if (getenv("NBT_TEST_TRACE") != 0) fprintf(stderr, "---- %s\n%s", dir.c_str(), trace.text().c_str());
+    }
+    void start() {
+        listener = new SerialListener(&gap, &gate, &trace, config);
+        services.setRemover(listener);
+        listener->setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener->start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+    }
+};
+
+static std::string frameOf(const std::string& text);
+
+static void testPutBack() {
+    const std::string opening = "\x10\x20\x30\x40 another app's opening";
+    const std::string reader = "for another reader: a program declared for a serial service is running, or whether "
+                               "one is cannot be told";
+    {   // everything the decide step read goes back, in order, and what came after its last read behind it; the node
+        // stays open, unread, until the link ends, and the other program reads it all, and what follows
+        Letting l("put-back");
+        l.start();
+        Node node(l.dir + "/btspp", 0);
+        node.held = true;
+        node.setLate("and more");   // comes into the node after the reader's last read, before the put-back
+        l.gap.phone(kInfServiceRequest, kCarSerialService);
+        node.send(opening);
+        node.appear();
+        CHECK_IN(l.trace.text(), sawWithin(l.trace, "btspp0 let go ", 3000));
+        CHECK_IN(l.trace.text(), l.trace.saw("(it did not open with the magic bytes). The ") &&
+                                 l.trace.saw(" B read from it were put back, in the order they came, with ") &&
+                                 l.trace.saw(" B that came after the last read behind them, and its node is kept open, "
+                                             "unread, until the link ends, " + reader));
+        CHECK(!l.trace.saw("and closed") && node.injects == 1 && l.listener->serialStatus().putBack == 1);
+        CHECK(node.holders() == 1 && acceptWithin(*l.listener, 50) == 0);
+        {
+            OtherProgram other(node);
+            CHECK(other.reads(opening.size() + 8, 2000) == opening + "and more");
+            node.send("and the next");
+            CHECK(other.reads(12, 2000) == "and the next");
+        }
+        bool closed = false;
+        CHECK(node.hear(1, 100, &closed).empty() && !closed);   // nothing written, and still open
+        node.vanish();
+        CHECK_IN(l.trace.text(), sawWithin(l.trace, "btspp0: the link ended ", 2000) &&
+                                 l.trace.saw("s after it was let go, and its node is closed now"));
+        CHECK(node.holders() == 0 && closedUnwritten(node, 1000));
+        pause(450);
+
+        // Leftovers of an earlier link at its start are put back with the rest: they are the phone's bytes.
+        const std::string old = frameOf("{\"id\":7,\"result\":{}}");
+        Node left(l.dir + "/btspp", 1);
+        l.gap.phone(kInfServiceRequest, kCarSerialService);
+        const std::string rest = "\x10\x20\x30\x40 not a frame";
+        left.send(old + rest);
+        left.appear();
+        CHECK_IN(l.trace.text(), sawWithin(l.trace, "btspp1 let go ", 3000));
+        CHECK(l.trace.saw("left over from an earlier link came first, as whole frames, and were passed over") &&
+              l.listener->serialStatus().putBack == 2);
+        CHECK(OtherProgram(left).reads(old.size() + rest.size(), 2000) == old + rest);
+        left.vanish();
+        pause(450);
+
+        // serial.reset with only such a node open: armed for the next link, and nothing sent.
+        Node kept(l.dir + "/btspp", 2);
+        l.gap.phone(kInfServiceRequest, kCarSerialService);
+        kept.say(opening);
+        kept.appear();
+        CHECK_IN(l.trace.text(), sawWithin(l.trace, "btspp2 let go ", 3000));
+        // Its decide step is over once the hold is off.
+        CHECK_IN(l.trace.text(), countWithin(l.trace, "are passed on again (the link was let go)", 3, 2000));
+        std::string why;
+        int64_t forMs = 0;
+        CHECK(l.listener->resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetArmed);
+        CHECK_IN(l.trace.text(), sawWithin(l.trace, "serial.reset: no serial link came within 1 s", 3000));
+        CHECK(!l.trace.saw("gap disconnect") && kept.holders() == 1);
+        CHECK(OtherProgram(kept).reads(opening.size(), 2000) == opening);
+    }
+    {   // a put-back that cannot be made: the node is closed for the other program, as before put-backs, and the
+        // log says why
+        Letting l("put-back-not");
+        l.start();
+        for (int c = 0; c < 3; ++c) {
+            Node node(l.dir + "/btspp", c);
+            const char* why = "";
+            if (c == 0) {
+                node.notRaw = true;
+                why = "the node does not take bytes as they are (it is not raw)";
+            } else if (c == 1) {
+                node.queueSize = 10;
+                why = " would not fit in its queue of 10 B";
+            } else {
+                node.injectError = EIO;
+                why = "putting the bytes back failed: ";
+            }
+            l.gap.phone(kInfServiceRequest, kCarSerialService);
+            node.say(opening);
+            node.appear();
+            CHECK_IN(l.trace.text(), sawWithin(l.trace, node.path + " let go ", 3000));
+            CHECK_IN(l.trace.text(), l.trace.count("(it did not open with the magic bytes) and closed: its node is still "
+                                                   "there. It is closed " + reader + ". The ") == (unsigned)c + 1 &&
+                                     l.trace.count(" B read from it could not be put back: ") == (unsigned)c + 1 &&
+                                     l.trace.saw(why));
+            CHECK(closedUnwritten(node, 2000) && node.holders() == 0 && node.injects == 0);
+            node.vanish();
+            CHECK_IN(l.trace.text(), sawWithin(l.trace, node.path + " is gone, ", 2000));
+            pause(450);
+        }
+        CHECK(l.listener->serialStatus().putBack == 0);
+    }
+    {   // no other reader known: read, with what comes dropped, until the link ends, as ever; nothing put back
+        Letting l("put-back-none");
+        l.machine.running = "";
+        l.start();
+        Node node(l.dir + "/btspp", 0);
+        l.gap.phone(kInfServiceRequest, kCarSerialService);
+        node.say(opening);
+        node.appear();
+        CHECK_IN(l.trace.text(), sawWithin(l.trace, "btspp0 let go ", 3000));
+        CHECK(l.trace.saw("so nobody would read it: its node is read, with what comes dropped, until the link ends"));
+        node.say("dropped too");
+        bool closed = false;
+        CHECK(node.hear(1, 200, &closed).empty() && !closed && node.injects == 0);
+        node.hangUp();
+        CHECK_IN(l.trace.text(), sawWithin(l.trace, "btspp0: the link ended ", 3000));
+        CHECK(l.trace.saw("s after it was let go; 11 B were dropped") && l.listener->serialStatus().putBack == 0);
     }
 }
 
@@ -3329,6 +3688,8 @@ struct Rule {
         config.dial.node = dir + "/nbtapp";
         config.dial.signalWaitMs = 300;
         config.dial.pollFirstMs = config.dial.pollLaterMs = 3600000;
+        config.nodeCalls = heldCalls();
+        config.readNode = &heldRead;
         gap.queryLists = false;
         gap.phones.push_back(carPhone(kDialled, kConnConnected, 7));
         services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
@@ -3376,42 +3737,149 @@ struct Rule {
 // What the rule changes, and that it changes nothing in any other case.
 static void testLeftUnread() {
     const std::string opening = "\x10\x20\x30\x40 another app's opening";
-    {   // all three hold: the node is never opened or read, no hold goes on, the other program reads the link whole
-        // from its first byte, and the phone's request still brings the ask that reaches the app by the dial
+    const std::string rule = "left to another program, and never read: the car dials this phone of the agent's, whose "
+                             "app a dialled link has reached, and a program declared for a serial service is running, "
+                             "or whether one is cannot be told. ";
+    {   // all three hold: the node is opened and primed, never read, no hold goes on, the other program, which waits
+        // on select() before it reads, reads the link whole from its first byte, and the phone's request still
+        // brings the ask that reaches the app by the dial
         Rule r("left-unread");
         r.start();
         unsigned asks = r.trace.count("gap query 00:11:22:33:44:55");
         Node node(r.dir + "/btspp", 0);
+        node.held = true;
+        // No agent on the node: what the phone sent before the other program's open never reaches it.
+        {
+            Node alone(r.dir + "/alone");
+            alone.held = true;
+            alone.send(opening);
+            OtherProgram other(alone);
+            CHECK(other.reads(1, 300).empty());
+        }
         r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        node.send(opening);   // before the node is there, or opened
         node.appear();
-        node.say(opening);
-        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp0: left to another program, never opened or read: the car dials "
-                                                    "this phone of the agent's, whose app a dialled link has reached, and a "
-                                                    "program declared for a serial service is running, or whether one is "
-                                                    "cannot be told", 2000));
-        CHECK(r.otherReads(node, opening.size()) == opening);
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp0: " + rule + "Its node is opened and primed for that program "
+                                                    "with one read that does not wait, which took nothing. It is kept "
+                                                    "open, unread, until the link ends", 2000));
+        CHECK(node.holders() == 1);
+        {
+            OtherProgram other(node);
+            CHECK(other.reads(opening.size(), 2000) == opening);
+            node.send("and the next");
+            CHECK(other.reads(12, 2000) == "and the next");
+        }
         CHECK_IN(r.trace.text(), countWithin(r.trace, "gap query 00:11:22:33:44:55", asks + 1, 3000));
         CHECK(acceptWithin(*r.listener, 100) == 0);
         CHECK_IN(r.trace.text(), !r.trace.saw("btspp0 opened") && !r.trace.saw("gate hold") && !r.trace.saw("btspp0 let go"));
         CHECK(r.trace.loggedCount("left to another program") == 1 && r.listener->serialStatus().leftUnread == 1);
+        CHECK(r.listener->serialStatus().putBack == 0 && r.listener->serialStatus().link == "none" && node.injects == 0);
         bool closed = false;
-        CHECK(node.hear(1, 100, &closed).empty());   // nothing written into it
-        node.hangUp();
+        CHECK(node.hear(1, 100, &closed).empty() && !closed);   // nothing written into it, and still open
+        CHECK(node.holders() == 1);
+        // Kept open until the link ends, and closed then.
         node.vanish();
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp0: the link ended ", 2000));
+        CHECK(r.trace.saw("s after it was primed for another program, and its node is closed now"));
+        CHECK(node.holders() == 0 && closedUnwritten(node, 1000));
+        node.hangUp();
         pause(450);
 
         // The rule's cost: a link the agent's own app opens on such a phone, with the magic bytes, is left alone too.
         // The app is reached by the dial.
         Node app(r.dir + "/btspp", 1);
+        app.held = true;
         r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        app.send(kMagic);
         app.appear();
-        app.say(kMagic);
-        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp1: left to another program, never opened or read", 2000));
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp1: left to another program, and never read", 2000));
         CHECK(acceptWithin(*r.listener, 300) == 0 && !r.trace.saw("btspp1 opened") && !r.trace.saw("gate hold"));
-        CHECK(r.otherReads(app, kMagic.size()) == kMagic && r.listener->serialStatus().leftUnread == 2);
+        CHECK_IN(r.trace.text(), r.otherReads(app, kMagic.size()) == kMagic && r.listener->serialStatus().leftUnread == 2);
         app.hangUp();
         app.vanish();
         CHECK(!r.trace.logged("00:11:22") && !r.trace.logged("001122"));
+    }
+    {   // bytes that come into the node in the moment between the look at its queue and the primer's read are taken
+        // by that read, and put back: the other program gets them first, then what follows, in order
+        Rule r("left-unread-gap");
+        r.start();
+        Node node(r.dir + "/btspp", 0);
+        node.setGap("just come");
+        r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        node.appear();
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp0: " + rule + "Its node is opened and primed for that program "
+                                                    "with one read that does not wait, which took 9 B that had just "
+                                                    "come: they were put back. It is kept open, unread, until the link "
+                                                    "ends", 2000));
+        CHECK(node.injects == 1 && r.listener->serialStatus().putBack == 1 && r.listener->serialStatus().leftUnread == 1);
+        OtherProgram other(node);
+        node.send("then this");
+        CHECK(other.reads(18, 2000) == "just comethen this");
+        CHECK(node.holders() == 2);   // the listener's and the other program's
+    }
+    {   // bytes in the node's queue already: nothing is read. A put-back that fails: the bytes the read took are lost,
+        // the node is closed again and left as it is, and the link still counts as left
+        Rule r("left-unread-fail");
+        r.start();
+        Node queued(r.dir + "/btspp", 0);
+        r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        queued.say("waiting");   // a terminal that is not held: into its queue at once
+        pause(20);
+        queued.appear();
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp0: " + rule + "Its node is opened, and 7 B were in its queue "
+                                                    "already, so nothing is read. It is kept open", 2000));
+        CHECK(OtherProgram(queued).reads(7, 2000) == "waiting");
+        queued.vanish();
+        pause(450);
+
+        Node failing(r.dir + "/btspp", 1);
+        failing.setGap("just come");
+        failing.injectError = EIO;
+        r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        failing.appear();
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp1: " + rule + "Its node could not be primed for that program "
+                                                    "(putting the bytes back failed: " + strerror(EIO) + "), and the 9 B "
+                                                    "its read took are lost: it is closed again, and left as it is", 2000));
+        CHECK(failing.holders() == 0 && closedUnwritten(failing, 1000));
+        CHECK(r.listener->serialStatus().leftUnread == 2 && r.listener->serialStatus().putBack == 0);
+        CHECK(!r.trace.saw("btspp1 opened") && !r.trace.saw("gate hold") && acceptWithin(*r.listener, 100) == 0);
+    }
+    {   // serial.reset with only such a node open: it is not a node of the listener's, so the reset is armed for the
+        // next link and nothing is sent; with a link of the agent's up as well, it is sent as ever, and only that
+        // link's node is watched
+        Rule r("left-unread-reset");
+        r.config.resetArmedMs = 1000;
+        r.start();
+        Node node(r.dir + "/btspp", 0);
+        node.held = true;
+        r.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        node.appear();
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "btspp0: left to another program", 2000));
+        std::string why;
+        int64_t forMs = 0;
+        CHECK(r.listener->resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetArmed && forMs == 1000);
+        CHECK_IN(r.trace.text(), r.trace.saw("serial.reset: no serial node is open, so the next serial link whose node "
+                                             "opens within 1 s is ended at its open"));
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "serial.reset: no serial link came within 1 s", 3000));
+        CHECK(!r.trace.saw("gap disconnect") && node.holders() == 1);
+
+        // A link of the agent's, from a phone the rule does not hold for.
+        Node ours(r.dir + "/btspp", 1);
+        r.gap.phone(kInfServiceRequest, kCarSerialService, "66:77:88:99:AA:BB");
+        ours.appear();
+        Link* link = dialled(*r.listener, ours, r.trace);
+        CHECK(r.listener->resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetSent);
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "gap disconnect", 2000));
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "serial.reset: ServiceDisconnect sent, ", 2000));
+        ours.hangUp();
+        ours.vanish();
+        CHECK_IN(r.trace.text(), sawWithin(r.trace, "serial.reset: " + ours.path + " went ", 2000));
+        CHECK(endsWithin(link, 3000));
+        delete link;
+        pause(300);
+        CHECK_IN(r.trace.text(), !r.trace.saw("serial.reset: " + node.path + " went") &&
+                                 !r.trace.saw("the link was still up 3 s after ServiceDisconnect"));
+        CHECK(node.holders() == 1 && r.trace.count("gap disconnect") == 1);
     }
     // Each of the three not so, and a request with no address: the link is decided on as ever, with the hold on
     // from the request, and the agent's app's link is the agent's.
@@ -3732,6 +4200,75 @@ static void testReader() {
     }
 }
 
+// The primer by itself, on a node with the test's calls, and with the host's own.
+static void testPrimer() {
+    std::string dir = freshFolder("primer");
+    NodePrimer primer(heldCalls());
+    {   // a held node: the read takes nothing and brings what waits ahead of the node into it
+        Node node(dir + "/btspp", 0);
+        node.held = true;
+        node.send("first");
+        int fd = node.openNear();
+        NodePrimer::Result r;
+        std::string why;
+        CHECK_IN(why, primer.prime(fd, &r, &why) && r.queued == 0 && r.taken == 0 && r.putBack == 0);
+        OtherProgram other(node);
+        CHECK(other.reads(5, 1000) == "first");
+        // Once primed, the next prime finds the queue as it is: bytes there, nothing read.
+        node.send("second");
+        pause(20);
+        CHECK_IN(why, primer.prime(fd, &r, &why) && r.queued == 6 && r.taken == 0);
+        CHECK(other.reads(6, 1000) == "second");
+        close(fd);
+    }
+    {   // a put-back goes in front of what came into the queue meanwhile, which is read out and put back behind it
+        Node node(dir + "/btspp", 1);
+        int fd = node.openNear();
+        node.say("later");
+        pause(20);
+        std::vector<uint8_t> read;
+        const std::string earlier = "earlier ";
+        read.assign(earlier.begin(), earlier.end());
+        NodePrimer::Result r;
+        std::string why;
+        CHECK_IN(why, primer.putBack(fd, read, &r, &why) && r.putBack == 13 && r.fromQueue == 5 && r.lost == 0);
+        CHECK(OtherProgram(node).reads(13, 1000) == "earlier later");
+        // Nothing to put back: no call is made, not even one that would fail.
+        node.injectError = EIO;
+        CHECK_IN(why, primer.putBack(fd, std::vector<uint8_t>(), &r, &why) && r.putBack == 0 && node.injects == 1);
+        // Too much for the queue with what waits there: nothing is read out of it, and it stays for the next reader.
+        node.injectError = 0;
+        node.queueSize = 10;
+        node.say("waits");
+        pause(20);
+        CHECK(!primer.putBack(fd, read, &r, &why) && why == "13 B would not fit in its queue of 10 B" && r.lost == 8);
+        CHECK(OtherProgram(node).reads(5, 1000) == "waits" && node.injects == 1);
+        close(fd);
+    }
+    {   // the host's own calls: the queue's fill, the terminal settings and the read that does not wait, but no size
+        // and no put-back
+        Node node(dir + "/btspp", 2);
+        int fd = node.openNear();
+        NodeCalls host = platformNodeCalls();
+        CHECK(host.raw(fd) == 1 && host.queued(fd) == 0);
+        char byte;
+        CHECK(host.readNow(fd, &byte, 1) == -1 && errno == EAGAIN);
+        CHECK(host.queueSize(fd) == -1 && errno == ENOSYS && host.inject(fd, "x", 1) == -1 && errno == ENOSYS);
+        node.say("ab");
+        pause(20);
+        CHECK(host.queued(fd) == 2 && host.readNow(fd, &byte, 1) == 1 && byte == 'a');
+        NodePrimer own;
+        NodePrimer::Result r;
+        std::string why;
+        CHECK(!own.putBack(fd, std::vector<uint8_t>(1, 'a'), &r, &why) && has(why, "the size of its queue could not be told"));
+        struct termios cooked;
+        CHECK(tcgetattr(fd, &cooked) == 0);
+        cooked.c_lflag |= ICANON;
+        CHECK(tcsetattr(fd, TCSANOW, &cooked) == 0 && host.raw(fd) == 0);
+        close(fd);
+    }
+}
+
 // ---- what an earlier link left behind -------------------------------------------------------------------------------
 
 // A frame of the protocol, as a phone app sends one: a MSG with this text.
@@ -3746,9 +4283,12 @@ static std::string frameOf(const std::string& text) {
 static void testLeftOvers() {
     std::string dir = freshFolder("left-over");
     const std::string old = frameOf("{\"id\":7,\"method\":\"ping\",\"params\":{}}") + frameOf("{\"id\":8,\"result\":{}}");
-    char said[160];
+    char said[160], passed[160];
     snprintf(said, sizeof said, ": %u B left over from an earlier link came first, as whole frames, and were dropped",
              (unsigned)old.size());
+    // Of a link that is let go: where they go is the let-go line's to say.
+    snprintf(passed, sizeof passed, ": %u B left over from an earlier link came first, as whole frames, and were "
+             "passed over", (unsigned)old.size());
     {
         Trace trace;
         LinksGone gone;
@@ -3803,7 +4343,7 @@ static void testLeftOvers() {
         CHECK_IN(trace.text(), trace.saw("(nothing more came after the leftovers in that time). No program is "
                                          "declared for a serial service, the gate has seen no other program open the "
                                          "node"));
-        CHECK(trace.saw(std::string("btspp2") + said));
+        CHECK(trace.saw(std::string("btspp2") + passed));
         only.say("NBTL late");
         bool closed = false;
         CHECK(only.hear(1, 300, &closed).empty() && !closed && acceptWithin(listener, 50) == 0);
@@ -3852,7 +4392,7 @@ static void testLeftOvers() {
         only.say(old);
         CHECK_IN(trace.text(), sawWithin(trace, "btspp0 let go", 3000));
         CHECK(trace.saw("(nothing more came after the leftovers in that time) and closed"));
-        CHECK(trace.saw(std::string("btspp0") + said) && closedUnwritten(only, 2000) && acceptWithin(listener, 50) == 0);
+        CHECK(trace.saw(std::string("btspp0") + passed) && closedUnwritten(only, 2000) && acceptWithin(listener, 50) == 0);
         only.vanish();
 
         Node other(dir + "/btspp", 1);
@@ -4047,8 +4587,7 @@ static void testReset() {
     CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetFailed);
 }
 
-// What nbtagent's --decide and --decide-hold are made of: the value of the one, and what the agent's first log
-// lines say of the decide step and of the gate's hold.
+// What nbtagent's dial options are made of, and what the agent's first log line says of the dial.
 static void testDialOptions() {
     {   // --dial-poll F,L,T
         DialConfig c;
@@ -4106,22 +4645,28 @@ static void testOptions() {
     CHECK((unsigned)kSerialDecideMs >= 1 && (unsigned)kSerialDecideMs <= kSerialDecideMostMs);
 
     SerialConfig config;
-    CHECK(config.decideMs == (unsigned)kSerialDecideMs && !config.letGoKeepsNode);
+    CHECK(config.decideMs == (unsigned)kSerialDecideMs);
+    CHECK(config.nodeCalls.queued == 0 && config.nodeCalls.inject == 0);   // the platform's
     CHECK(describeSerialDecide(config) ==
           "a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any "
-          "whole frames left over from an earlier link. Any other is let go: its node is closed for the program it "
-          "belongs to if a program declared for a serial service is running, the gate has seen another program open "
-          "the node, or a program of software put on by hand is running, and otherwise read until the link ends or one of "
-          "those signs comes. A link that a phone of the agent's opens, whose app a link the car dialled has reached, is "
-          "not opened at all while a program declared for a serial service is running, or may be: it is left to that "
-          "program, and the app is reached by the dial");
+          "whole frames left over from an earlier link. Any other is let go. If a program declared for a serial "
+          "service is running, the gate has seen another program open the node, or a program of software put on by "
+          "hand is running, what was read from it is put back into its node, which stays open, unread, until the "
+          "link ends, for the program it belongs to; where that cannot be done, its node is closed for that program. "
+          "Otherwise it is read until the link ends or one of those signs comes. A link that a phone of the agent's "
+          "opens, whose app a link the car dialled has reached, is not read at all while a program declared for a "
+          "serial service is running, or may be: it is left to that program, its node primed for it with one read "
+          "that does not wait and kept open, unread, until the link ends, and the app is reached by the dial");
     config.decideMs = 1200;
-    config.letGoKeepsNode = true;
     config.dial.on = false;
     CHECK(describeSerialDecide(config) ==
           "a link is the agent's if it opens with the magic bytes within 1200 ms (--decide; the protocol's time is "
           "500 ms) of the open of its node, after any whole frames left over from an earlier link. Any other is let "
-          "go: its node stays open, unread, until the link ends (--decide-hold)");
+          "go. If a program declared for a serial service is running, the gate has seen another program open the "
+          "node, or a program of software put on by hand is running, what was read from it is put back into its "
+          "node, which stays open, unread, until the link ends, for the program it belongs to; where that cannot be "
+          "done, its node is closed for that program. Otherwise it is read until the link ends or one of those signs "
+          "comes");
     config.dial.on = true;
     CHECK(config.lingerMs == (unsigned)kSerialLingerMs &&
           describeSerialLinger(config) == "a link the agent ends keeps its node, read and with what comes dropped, until "
@@ -4256,6 +4801,7 @@ int main(int argc, char** argv) {
     testOptions();
     testDialOptions();
     testReader();   // first: the one line of the process on whether a read came back on time is its
+    testPrimer();
     testLink();
     testListener();
     testOtherServices();
@@ -4268,6 +4814,7 @@ int main(int argc, char** argv) {
     testAgentDials();
     testLeftBehind();
     testDecide();
+    testPutBack();
     testLeftOvers();
     testReset();
     testHold();

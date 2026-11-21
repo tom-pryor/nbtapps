@@ -5,14 +5,20 @@
 #include "node_reader.hpp"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef __QNXNTO__
+#include <devctl.h>
+#include <sys/dcmd_chr.h>
 #include <sys/neutrino.h>
+#else
+#include <sys/ioctl.h>
 #endif
 
 namespace nbt {
@@ -255,7 +261,7 @@ uint64_t NodeReader::dropped() {
     return d;
 }
 
-int NodeReader::stop() {
+int NodeReader::stop(std::vector<uint8_t>* rest) {
     pthread_mutex_lock(&mu_);
     stop_ = true;
     pthread_cond_broadcast(&cv_);
@@ -265,6 +271,7 @@ int NodeReader::stop() {
         if (pthread_cond_timedwait(&cv_, &mu_, &until) == ETIMEDOUT) break;
     }
     if (done_) {
+        if (rest != 0) rest->insert(rest->end(), queue_.begin(), queue_.end());
         pthread_mutex_unlock(&mu_);
         pthread_join(thread_, NULL);
         int fd = fd_;
@@ -289,6 +296,197 @@ int NodeReader::stop() {
 void NodeReader::finish() {
     int fd = stop();
     if (fd >= 0) close(fd);
+}
+
+// ---- the node's input queue ----------------------------------------------------------------------------------------
+
+namespace {
+
+long platformQueued(int fd) {
+#ifdef __QNXNTO__
+    return (long)tcischars(fd);
+#else
+    int n = 0;
+    if (ioctl(fd, FIONREAD, &n) != 0) return -1;
+    return (long)n;
+#endif
+}
+
+// What the node does to bytes on their way in. Output settings say nothing of that, and are not looked at.
+int platformRaw(int fd) {
+    struct termios t;
+    if (tcgetattr(fd, &t) != 0) return -1;
+    bool cooked = (t.c_lflag & (ECHO | ICANON | ISIG | IEXTEN)) != 0 ||
+                  (t.c_iflag & (IXON | ISTRIP | INLCR | IGNCR | ICRNL | PARMRK)) != 0;
+    return cooked ? 0 : 1;
+}
+
+long platformQueueSize(int fd) {
+#ifdef __QNXNTO__
+    int size = -1;
+    int r = devctl(fd, DCMD_CHR_ISSIZE, &size, sizeof size, NULL);
+    if (r != EOK) {
+        errno = r;   // devctl() returns the error itself
+        return -1;
+    }
+    return (long)size;
+#else
+    (void)fd;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+long platformReadNow(int fd, void* buf, size_t len) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) return -1;
+    long n = (long)read(fd, buf, len);
+    int error = errno;
+    fcntl(fd, F_SETFL, flags);
+    errno = error;
+    return n;
+}
+
+int platformInject(int fd, const void* buf, size_t len) {
+#ifdef __QNXNTO__
+    // A negative count puts the bytes into the queue as they are, with nothing done to them on the way.
+    if (tcinject(fd, (char*)buf, -(int)len) != 0) return -1;
+    return 0;
+#else
+    (void)fd;
+    (void)buf;
+    (void)len;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+bool nothingToRead(int error) { return error == EAGAIN || error == EWOULDBLOCK; }
+
+std::string bytesText(size_t n) {
+    char text[32];
+    snprintf(text, sizeof text, "%u B", (unsigned)n);
+    return text;
+}
+
+// What a read of the node gives at most here: more than its queue holds.
+const size_t kPrimeReadBytes = 8192;
+// How often the queue is read out before a put-back, when the phone goes on sending meanwhile.
+const int kPutBackRounds = 8;
+
+}  // namespace
+
+NodeCalls platformNodeCalls() {
+    NodeCalls c;
+    c.queued = &platformQueued;
+    c.raw = &platformRaw;
+    c.queueSize = &platformQueueSize;
+    c.readNow = &platformReadNow;
+    c.inject = &platformInject;
+    return c;
+}
+
+NodePrimer::NodePrimer(const NodeCalls& calls) : calls_(calls) {
+    NodeCalls own = platformNodeCalls();
+    if (calls_.queued == 0) calls_.queued = own.queued;
+    if (calls_.raw == 0) calls_.raw = own.raw;
+    if (calls_.queueSize == 0) calls_.queueSize = own.queueSize;
+    if (calls_.readNow == 0) calls_.readNow = own.readNow;
+    if (calls_.inject == 0) calls_.inject = own.inject;
+}
+
+bool NodePrimer::prime(int fd, Result* result, std::string* why) {
+    *result = Result();
+    long queued = calls_.queued(fd);
+    if (queued < 0) {
+        *why = std::string("what waits in its queue could not be told: ") + strerror(errno);
+        return false;
+    }
+    result->queued = queued;
+    if (queued > 0) return true;   // the stack has handed bytes on already: a reader that waits sees them
+    std::vector<uint8_t> buf(kPrimeReadBytes);
+    long n = calls_.readNow(fd, &buf[0], buf.size());
+    if (n < 0 && nothingToRead(errno)) return true;
+    if (n < 0) {
+        *why = std::string("the read that does not wait failed: ") + strerror(errno);
+        return false;
+    }
+    if (n == 0) {
+        result->ended = true;
+        *why = "the link had ended";
+        return false;
+    }
+    // Bytes came in the moment between the look and the read: they go back.
+    result->taken = (size_t)n;
+    buf.resize((size_t)n);
+    return putBack(fd, buf, result, why);
+}
+
+// prime() has set `queued` and `taken` already, and they stay as they are.
+bool NodePrimer::putBack(int fd, const std::vector<uint8_t>& read, Result* result, std::string* why) {
+    result->putBack = 0;
+    result->fromQueue = 0;
+    result->ended = false;
+    result->lost = read.size();
+    if (read.empty()) return true;
+    int raw = calls_.raw(fd);
+    if (raw < 0) {
+        *why = std::string("its terminal settings could not be read: ") + strerror(errno);
+        return false;
+    }
+    if (raw == 0) {
+        *why = "the node does not take bytes as they are (it is not raw)";
+        return false;
+    }
+    long size = calls_.queueSize(fd);
+    if (size < 0) {
+        *why = std::string("the size of its queue could not be told: ") + strerror(errno);
+        return false;
+    }
+    std::vector<uint8_t> all = read;
+    // What has come into the queue since the last read goes behind what was read before it.
+    for (int round = 0;; ++round) {
+        long queued = calls_.queued(fd);
+        if (queued < 0) {
+            *why = std::string("what waits in its queue could not be told: ") + strerror(errno);
+            return false;
+        }
+        if (queued == 0) break;
+        if (all.size() + (size_t)queued > (size_t)size) {
+            *why = bytesText(all.size() + (size_t)queued) + " would not fit in its queue of " + bytesText((size_t)size);
+            return false;
+        }
+        if (round == kPutBackRounds) {
+            *why = "the phone went on sending while its queue was read out";
+            return false;
+        }
+        size_t at = all.size();
+        all.resize(at + (size_t)queued);
+        long n = calls_.readNow(fd, &all[at], (size_t)queued);
+        if (n <= 0) {
+            all.resize(at);
+            if (n < 0 && nothingToRead(errno)) continue;
+            result->ended = n == 0;
+            *why = n == 0 ? std::string("the link had ended")
+                          : std::string("a read of its queue failed: ") + strerror(errno);
+            return false;
+        }
+        all.resize(at + (size_t)n);
+        result->fromQueue += (size_t)n;
+        result->lost = all.size();
+    }
+    if (all.size() > (size_t)size) {
+        *why = bytesText(all.size()) + " would not fit in its queue of " + bytesText((size_t)size);
+        return false;
+    }
+    if (calls_.inject(fd, &all[0], all.size()) != 0) {
+        *why = std::string("putting the bytes back failed: ") + strerror(errno);
+        return false;
+    }
+    result->putBack = all.size();
+    result->lost = 0;
+    return true;
 }
 
 }  // namespace nbt

@@ -27,6 +27,19 @@
 // The one part that differs between the head unit and the build host is the timed read (NodeReadFn): on QNX a
 // blocking read() under TimerTimeout, and on the host, where the tests' nodes are pseudo-terminals, select() and
 // then read(). A test gives its own in its place.
+//
+// The node's input queue, for a link that another program is to have (NodePrimer, below):
+//
+//   * A read that does not wait, made while nothing is in the node's queue, takes nothing, and has the stack hand
+//     what waits ahead of the node into the queue: select() then says so, to every reader of the node. Once one read
+//     has been made on a link, what the phone sends later comes into the queue as it comes, for a reader that waits
+//     on select(), also after the node has been closed and opened again. A program that waits on select() before
+//     it reads, on a link no read was ever made on, never sees anything.
+//   * Bytes that were read can be put back into the queue (tcinject() with a negative count adds them as they
+//     are, behind what is there), and a later reader gets them first and then what follows, in order, provided a
+//     descriptor stays open on the node: the last close empties the queue. The node takes bytes as they are (raw)
+//     when it is opened; its queue holds 6144 bytes, and a put-back larger than the room left is cut short with no
+//     error.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <pthread.h>
@@ -89,9 +102,10 @@ public:
     uint64_t dropped();
 
     // Ends the thread and frees this object. Returns the node's descriptor, still open, if the thread had stopped
-    // within three ticks. Otherwise its read did not come back when its time was up: the node is closed under it,
-    // the log says so, the thread frees itself when that read returns, and -1 is returned.
-    int stop();
+    // within three ticks; what it had read and its owner had not taken yet is added to *rest then, if `rest` is
+    // given, and dropped otherwise. Otherwise its read did not come back when its time was up: the node is closed
+    // under it, the log says so, the thread frees itself when that read returns, and -1 is returned.
+    int stop(std::vector<uint8_t>* rest = 0);
     // stop(), and the node closed.
     void finish();
 
@@ -116,6 +130,63 @@ private:
     bool drain_, stop_, ended_, done_, released_;
     int error_;
     uint64_t dropped_;
+};
+
+// ---- the node's input queue: a link primed for another program, and bytes put back ---------------------------------
+
+// The calls on a node's input queue that NodePrimer makes. A member left 0 is the platform's (platformNodeCalls()); a
+// test gives its own in its place.
+struct NodeCalls {
+    // How many bytes wait in the node's input queue (tcischars()). -1 with errno.
+    long (*queued)(int fd);
+    // Whether the node gives bytes as they came, with nothing done to them on the way in: no lines, echo, signals,
+    // stripped bits or changed line ends (tcgetattr()). 1 or 0; -1 with errno.
+    int (*raw)(int fd);
+    // How many bytes the node's input queue holds (devctl() DCMD_CHR_ISSIZE). -1 with errno.
+    long (*queueSize)(int fd);
+    // One read that does not wait, as read() returns: -1 with EAGAIN when there is nothing to read.
+    long (*readNow)(int fd, void* buf, size_t len);
+    // Puts `len` bytes into the node's input queue, behind what waits there, as they are, as if the phone had sent
+    // them (tcinject() with a negative count). 0, or -1 with errno.
+    int (*inject)(int fd, const void* buf, size_t len);
+
+    NodeCalls() : queued(0), raw(0), queueSize(0), readNow(0), inject(0) {}
+};
+
+// The platform's own. On QNX all five; on the build host the queue's fill (FIONREAD), the terminal settings and the
+// read that does not wait, but neither the queue's size nor a put-back, which fail with ENOSYS.
+NodeCalls platformNodeCalls();
+
+// What a link that another program is to have needs from the agent, which opened its node (the top of this file):
+// prime() makes sure that what the phone sent comes into the node's queue, and putBack() gives back what the agent
+// read from it. The caller then keeps its descriptor open, unread, until the link ends. Each says why it failed, and
+// what was read and is not back in the queue then is lost.
+class NodePrimer {
+public:
+    explicit NodePrimer(const NodeCalls& calls = NodeCalls());
+
+    struct Result {
+        long queued;       // prime(): what the queue held when it was looked at
+        size_t taken;      // prime(): the bytes its read took, which came in the moment before
+        size_t putBack;    // the bytes put back into the queue, in all
+        size_t fromQueue;  // of those, the ones that had come into the queue and were read out of it just before,
+                           // so that they go back behind the others
+        size_t lost;       // on a failure: the bytes read that are not back in the queue
+        bool ended;        // a read gave 0: the link has ended
+        Result() : queued(0), taken(0), putBack(0), fromQueue(0), lost(0), ended(false) {}
+    };
+
+    // If nothing is in the node's queue, one read that does not wait, which takes nothing as a rule; bytes it does
+    // take are put back (putBack()). With bytes in the queue already, nothing is done. False with *why if the queue
+    // cannot be looked at, the read fails or ends, or what it took cannot be put back.
+    bool prime(int fd, Result* result, std::string* why);
+    // Puts `read` back into the node's queue, in the order it came, with what has come into the queue since the
+    // last read behind it: that is read out first, so that the phone's order is kept. Only into a raw node, and only
+    // what fits in its queue. Nothing to put back is no failure, and makes no call. False with *why otherwise.
+    bool putBack(int fd, const std::vector<uint8_t>& read, Result* result, std::string* why);
+
+private:
+    NodeCalls calls_;
 };
 
 }  // namespace nbt

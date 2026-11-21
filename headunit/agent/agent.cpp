@@ -1612,7 +1612,7 @@ void Agent::writeSerial(json::Writer& w, Session* s) {
     w.key("asks").integer(st.asks).key("asksListed").integer(st.asksListed).key("asksNotListed").integer(st.asksNotListed);
     w.key("asksNoAnswer").integer(st.asksNoAnswer).key("askErrors").integer(st.askErrors);
     w.key("checks").integer(st.checks).key("checksRestored").integer(st.checksRestored).key("refusals").integer(st.refusals);
-    w.key("leftUnread").integer(st.leftUnread);
+    w.key("leftUnread").integer(st.leftUnread).key("putBack").integer(st.putBack);
     w.endObject();
     w.key("problems").beginObject().key("recorded").integer(st.problemsRecorded);
     w.key("counted").integer(st.problemsCounted).endObject();

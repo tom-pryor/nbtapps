@@ -638,9 +638,10 @@ void SppNodeGate::detach() {
 // ---- the listener ------------------------------------------------------------------------------------------------
 
 SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, const SerialConfig& config)
-    : gate_(gate), log_(log), services_(0), serverLook_(0), config_(config), spp_(gap, this), wakeRead_(-1), wakeWrite_(-1),
+    : gate_(gate), log_(log), services_(0), serverLook_(0), config_(config), primer_(config.nodeCalls), spp_(gap, this),
+      wakeRead_(-1), wakeWrite_(-1),
       hasThread_(false), watchFrom_(0), stop_(false), active_(false), tracker_(config.requestWindowS), hotUntil_(0),
-      reqAt_(0), refused_(0), deciding_(false), held_(false), holdWhy_(0), kept_(0), resetHotUntil_(0), askedAt_(0),
+      reqAt_(0), refused_(0), deciding_(false), held_(false), holdWhy_(0), reading_(0), resetHotUntil_(0), askedAt_(0),
       checkedAt_(0), opened_(false), final_(false), unattachedSince_(0), everAttached_(false), attachSaid_(false), lookDone_(false),
       scannedAt_(0), refusalCount_(0), refusalNode_(RefusalFacts::kNoNode), refusalAt_(0), handLookAt_(0), ours_(0),
       rules_(config.dial), dialPhase_(kDialNone), dialReader_(0), dialOpenedAt_(0), dialLink_(0), discAt_(0),
@@ -859,7 +860,7 @@ void SerialListener::shutDown() {
     pthread_mutex_unlock(&mu_);
     if (held) gate_->release();
     gate_->detach();
-    closeKept(kAllButRead);
+    closeKept(kAllButUp);
 }
 
 Link* SerialListener::accept() {
@@ -1169,7 +1170,8 @@ SerialReset::Outcome SerialListener::resetSerialLink(const std::string& device, 
     unsigned agents = serialLinksOpen();
     pthread_mutex_lock(&mu_);
     bool active = active_;
-    bool open = deciding_ || kept_ > 0 || agents > 0;
+    // A node kept open, unread, for another program is not counted: ending its link would end that program's.
+    bool open = deciding_ || reading_ > 0 || agents > 0;
     pthread_mutex_unlock(&mu_);
     if (!active) {
         *why = "Bluetooth serial is not set up just now";
@@ -1239,7 +1241,8 @@ void SerialListener::tendReset() {
         say("serial.reset: no serial link came within %u s to be ended at its open: nothing is asked any more",
             config_.resetArmedMs / 1000);
     if (due || waited) {
-        // The nodes this listener opened, that are there now. Someone else's are not watched.
+        // The nodes this listener opened, that are there now. Someone else's are not watched, and neither is one the
+        // listener keeps open for another program, which the tracker has as someone else's (handedOver()).
         bool present[NodeTracker::kNodes];
         scanNodes(present);
         bool any = false;
@@ -1405,9 +1408,9 @@ Opening judgeOpening(const uint8_t* p, size_t n, size_t* frameBytes) {
 //
 // kOurs: the magic bytes came, at the start or after such leftovers, and *first holds what was read from them on.
 // kLetGo: anything else came, or nothing did, before or after such leftovers: the link is another program's, or
-// nobody's. Leftovers alone do not make it the agent's: another program's link may have the agent's old bytes in
-// front of it, and letGo() gives it to that program as it gives any other. kEnded: the link ended first. *why says
-// which, for the log. Nothing is written.
+// nobody's, and *first holds all that was read, leftovers too, in order. Leftovers alone do not make it the agent's:
+// another program's link may have the agent's old bytes in front of it, and letGo() gives it to that program as it
+// gives any other. kEnded: the link ended first. *why says which, for the log. Nothing is written.
 SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::string& path, double openedAt,
                                                std::vector<uint8_t>* first, uint64_t* leftOver, std::string* why) {
     const double by = openedAt + config_.decideMs / 1000.0;
@@ -1430,6 +1433,7 @@ SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::st
         if (at < got.size() && o == kOpenOther) {
             *why = *leftOver > 0 ? "after the leftovers came bytes that are neither a frame nor the magic bytes"
                                  : "it did not open with the magic bytes";
+            first->assign(got.begin(), got.end());
             return kLetGo;
         }
         if (stopping()) {
@@ -1439,6 +1443,7 @@ SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::st
         tendReset();
         double left = by - monoNow();
         if (left <= 0) {
+            first->assign(got.begin(), got.end());
             if (*leftOver > 0) {
                 *why = at == got.size() ? "nothing more came after the leftovers in that time"
                                         : "neither a whole frame nor the magic bytes came after the leftovers in that time";
@@ -1492,26 +1497,66 @@ bool SerialListener::otherReader(int node, std::string* why) {
     return false;
 }
 
+namespace {
+std::string sizeText(size_t n) {
+    char text[32];
+    snprintf(text, sizeof text, "%u B", (unsigned)n);
+    return text;
+}
+
+// What a put-back came to, for the log: `read` bytes the agent had read, and what NodePrimer did with them.
+std::string putBackText(size_t read, const NodePrimer::Result& r) {
+    if (r.putBack == 0) return "Nothing had been read from it";
+    std::string text = "The " + sizeText(read) + " read from it were put back, in the order they came";
+    if (r.fromQueue > 0) text += ", with " + sizeText(r.fromQueue) + " that came after the last read behind them";
+    return text;
+}
+}  // namespace
+
 // Lets the link on the node go: it was not the agent's, and nothing was written into it. Who reads it now decides
-// what becomes of its node (otherReader()). If another program may read it, the reader is stopped and the node
-// closed for that program. With none, nobody would ever read the link, and bytes that wait unread ahead of a node
-// come on the next link: the node is read, and what comes dropped, until the link ends or a sign of another reader
-// comes after all (tendLetGo()).
-void SerialListener::letGo(NodeReader* reader, int node, const std::string& path, double openedAt, const std::string& why) {
+// what becomes of its node (otherReader()). If another program may read it, the reader is stopped, what was read
+// (`read`, and what the reader had not handed on yet) is put back into the node's queue, and the node is kept open,
+// unread, until the link ends, for that program; where that cannot be done the node is closed for it. With none,
+// nobody would ever read the link, and bytes that wait unread ahead of a node come on the next link: the node is
+// read, and what comes dropped, until the link ends or a sign of another reader comes after all (tendLetGo()).
+void SerialListener::letGo(NodeReader* reader, int node, const std::string& path, double openedAt, const std::string& why,
+                           const std::vector<uint8_t>& read) {
     double ms = (monoNow() - openedAt) * 1000.0;
-    if (config_.letGoKeepsNode) {
-        int fd = reader->stop();
-        say("%s let go %.0f ms after the open (%s). Its node stays open, unread, until the link ends", path.c_str(), ms,
-            why.c_str());
-        keep(node, fd, 0, "let go");
-        return;
-    }
     std::string reason;
     if (otherReader(node, &reason)) {
-        reader->finish();
+        pthread_mutex_lock(&mu_);
+        handedOver(node);
+        pthread_mutex_unlock(&mu_);
+        std::vector<uint8_t> all = read;
+        int fd = reader->stop(&all);
+        NodePrimer::Result back;
+        std::string failed;
+        bool kept = false;
+        if (fd < 0) {
+            failed = "its read did not stop in time, and the node was closed under it";
+            back.lost = all.size();
+        } else {
+            kept = primer_.putBack(fd, all, &back, &failed);
+        }
+        char head[160];
+        snprintf(head, sizeof head, " let go %.0f ms after the open (", ms);
+        if (kept) {
+            if (back.putBack > 0) {
+                pthread_mutex_lock(&mu_);
+                ++counts_.putBack;
+                pthread_mutex_unlock(&mu_);
+            }
+            log_->line(path + head + why + "). " + putBackText(all.size(), back) +
+                       ", and its node is kept open, unread, until the link ends, for another reader: " + reason);
+            keep(node, fd, 0, "let go");
+            return;
+        }
+        if (fd >= 0) close(fd);
         bool there = access(path.c_str(), F_OK) == 0;
-        say("%s let go %.0f ms after the open (%s) and closed: %s. It is closed for another reader: %s", path.c_str(),
-            ms, why.c_str(), there ? "its node is still there" : "its node went with the close", reason.c_str());
+        std::string lost = back.lost > 0 ? "The " + sizeText(back.lost) + " read from it could not be put back: "
+                                         : "Nothing could be put back: ";
+        log_->line(path + head + why + ") and closed: " + (there ? "its node is still there" : "its node went with the close") +
+                   ". It is closed for another reader: " + reason + ". " + lost + failed);
         if (there) keep(node, -1, 0, "let go");   // until its node goes
         return;
     }
@@ -1532,9 +1577,9 @@ void SerialListener::keep(int node, int fd, NodeReader* reader, const char* what
     kept.at = monoNow();
     kept.what = what;
     letGo_.push_back(kept);
-    if (fd >= 0 || reader != 0) {
+    if (reader != 0) {
         pthread_mutex_lock(&mu_);
-        ++kept_;
+        ++reading_;
         pthread_mutex_unlock(&mu_);
     }
 }
@@ -1572,7 +1617,8 @@ void SerialListener::tendLetGo() {
         kept.reader->finish();
         kept.reader = 0;
         pthread_mutex_lock(&mu_);
-        --kept_;
+        --reading_;
+        handedOver(kept.node);
         pthread_mutex_unlock(&mu_);
         std::string path = nodePath(kept.node);
         say("%s: reading it stopped, and its node closed for another reader, %.1f s after it was let go: %s. %llu B "
@@ -1583,21 +1629,22 @@ void SerialListener::tendLetGo() {
 }
 
 // The nodes that are not the agent's link and whose link has ended since: a node that is read or kept open is
-// closed. kEvery: every one of them, the listener's thread having ended. kAllButRead: the same, except that a node
-// whose link is still up and is read goes on being read.
+// closed. kEvery: every one of them, the listener's thread having ended. kAllButUp: the same, except that a node
+// whose link is still up goes on being read, or kept open for another program.
 void SerialListener::closeKept(Closing which) {
     for (size_t i = 0; i < letGo_.size();) {
         const LetGo kept = letGo_[i];
         std::string path = nodePath(kept.node);
         bool ended = kept.reader != 0 ? kept.reader->ended() : access(path.c_str(), F_OK) != 0;
-        if (!ended && (which == kEndedOnly || (which == kAllButRead && kept.reader != 0))) {
+        bool open = kept.reader != 0 || kept.fd >= 0;
+        if (!ended && (which == kEndedOnly || (which == kAllButUp && open))) {
             ++i;
             continue;
         }
         letGo_.erase(letGo_.begin() + (long)i);
-        if (kept.fd >= 0 || kept.reader != 0) {
+        if (kept.reader != 0) {
             pthread_mutex_lock(&mu_);
-            --kept_;
+            --reading_;
             pthread_mutex_unlock(&mu_);
         }
         uint64_t dropped = 0;
@@ -1613,10 +1660,12 @@ void SerialListener::closeKept(Closing which) {
                       : "%s: the link was still up %.1f s after it was %s, and its node is closed as the listener "
                         "stops; %llu B were dropped",
                 path.c_str(), after, kept.what, (unsigned long long)dropped);
-        } else if (which == kEndedOnly) {
-            say(kept.fd >= 0 ? "%s: the link ended %.1f s after it was %s, and its node is closed now"
-                             : "%s is gone, %.1f s after it was %s and closed",
+        } else if (kept.fd >= 0) {
+            say(ended ? "%s: the link ended %.1f s after it was %s, and its node is closed now"
+                      : "%s: the link was still up %.1f s after it was %s, and its node is closed as the listener stops",
                 path.c_str(), after, kept.what);
+        } else if (which == kEndedOnly) {
+            say("%s is gone, %.1f s after it was %s and closed", path.c_str(), after, kept.what);
         }
     }
 }
@@ -1692,9 +1741,10 @@ void SerialListener::take(int node, const std::string& address) {
     std::string why;
     uint64_t leftOver = 0;
     Decided found = decide(reader, path, openedAt, &first, &leftOver, &why);
+    // Of a link that is let go they go where the rest of what was read goes: letGo() says.
     if (leftOver > 0)
-        say("%s: %llu B left over from an earlier link came first, as whole frames, and were dropped", path.c_str(),
-            (unsigned long long)leftOver);
+        say("%s: %llu B left over from an earlier link came first, as whole frames, and were %s", path.c_str(),
+            (unsigned long long)leftOver, found == kLetGo ? "passed over" : "dropped");
     Link* link = 0;
     const char* holdWhy = 0;
     if (found == kOurs) {
@@ -1703,7 +1753,7 @@ void SerialListener::take(int node, const std::string& address) {
         link = newSerialLink(reader, path, log_, first, config_.lingerMs, address);
         if (link == 0) holdWhy = "the link could not be set up";
     } else if (found == kLetGo) {
-        letGo(reader, node, path, openedAt, why);
+        letGo(reader, node, path, openedAt, why, first);
         holdWhy = "the link was let go";
     } else {
         reader->finish();
@@ -1742,16 +1792,17 @@ void SerialListener::lookForLinks() {
     // A node that is new has appeared since the look before this one.
     for (int i = 0; i < NodeTracker::kNodes; ++i)
         if (present[i] && before[i] == NodeTracker::kAbsent) appeared_[i] = lastLook > 0 ? lastLook : scannedAt_;
-    // The request it came with was left to another program: so is the link, if the rule still holds now. Otherwise it
-    // is decided on as any other, which is the safe side for the agent's own app.
+    // The request it came with was left to another program: so is the link, if the rule still holds now, primed for
+    // that program and never read. Otherwise it is decided on as any other, which is the safe side for the agent's
+    // own app.
     if (leave) {
         std::string why;
         if (leftToOther(address, &why)) {
             pthread_mutex_lock(&mu_);
-            tracker_.leaveAlone(ours);
+            handedOver(ours);
             ++counts_.leftUnread;
             pthread_mutex_unlock(&mu_);
-            say("%s: left to another program, never opened or read: %s", nodePath(ours).c_str(), why.c_str());
+            primeForOther(ours, why);
             ours = -1;
         } else {
             say("%s: the phone's request was to be left to another program, but %s now: the link is decided on as any "
@@ -1766,14 +1817,61 @@ void SerialListener::lookForLinks() {
     }
 }
 
-// The rule for a link that a phone opens: it is left to another program, its node never opened or read and no hold
-// put on for it, when the car dials (SerialConfig::dial), a program declared for a serial service runs or may
-// (SerialServices::readers()), and the phone that asked is one of the agent's whose app a link the car dialled has
-// reached before (PhoneAddressList::dialledBefore()). The app is reached by the dial then, and the other program
-// gets the link whole, its first bytes too, which the decide step would have read. A link that the agent's app
-// opens on such a phone is left all the same: that is the rule's cost. Without a dial that has reached the phone,
-// the car may be one on which dialling does not work, and the phone's own link stays the way in. *why says, for the
-// log, why the rule holds, or which part of it does not. From either thread: the cheap parts are looked at first.
+// A link the rule leaves to another program (leftToOther()), on the listener's thread as soon as its node is there.
+// A program that waits on select() before it reads would never see what the phone sent before a read was made on
+// the link, so the node is opened and primed for it (NodePrimer::prime()): with nothing in its queue, one read that
+// does not wait, which as a rule takes nothing; what it does take is put back. Then the node is kept open, unread,
+// until the link ends, as the last close would empty its queue. One that cannot be opened or primed is closed again,
+// and left as it is. The log says which, once for the link.
+void SerialListener::primeForOther(int node, const std::string& rule) {
+    std::string path = nodePath(node);
+    std::string line = path + ": left to another program, and never read: " + rule + ". ";
+    int fd = open(path.c_str(), O_RDWR);
+    if (fd < 0) {
+        log_->line(line + "Its node could not be opened to prime it for that program (" + strerror(errno) +
+                   "), so it is left as it is");
+        return;
+    }
+    closeOnExec(fd);
+    NodePrimer::Result r;
+    std::string failed;
+    if (!primer_.prime(fd, &r, &failed)) {
+        close(fd);
+        std::string lost = r.lost > 0 ? ", and the " + sizeText(r.lost) + " its read took are lost" : "";
+        log_->line(line + "Its node could not be primed for that program (" + failed + ")" + lost +
+                   ": it is closed again, and left as it is");
+        return;
+    }
+    if (r.putBack > 0) {
+        pthread_mutex_lock(&mu_);
+        ++counts_.putBack;
+        pthread_mutex_unlock(&mu_);
+    }
+    if (r.queued > 0) {
+        line += "Its node is opened, and " + sizeText((size_t)r.queued) + " were in its queue already, so nothing is "
+                "read";
+    } else if (r.taken == 0) {
+        line += "Its node is opened and primed for that program with one read that does not wait, which took nothing";
+    } else {
+        line += "Its node is opened and primed for that program with one read that does not wait, which took " +
+                sizeText(r.taken) + " that had just come: they were put back";
+        if (r.fromQueue > 0) line += ", with " + sizeText(r.fromQueue) + " that came after them behind them";
+    }
+    log_->line(line + ". It is kept open, unread, until the link ends");
+    keep(node, fd, 0, "primed for another program");
+    // As after any open of a link's node: the gate is checked once the node is open.
+    gate_->watch();
+}
+
+// The rule for a link that a phone opens: it is left to another program, its node never read and no hold put on for
+// it, but primed for that program (primeForOther()), when the car dials (SerialConfig::dial), a program declared
+// for a serial service runs or may (SerialServices::readers()), and the phone that asked is one of the agent's whose
+// app a link the car dialled has reached before (PhoneAddressList::dialledBefore()). The app is reached by the dial
+// then, and the other program gets the link whole, its first bytes too, which the decide step would have read. A
+// link that the agent's app opens on such a phone is left all the same: that is the rule's cost. Without a dial that
+// has reached the phone, the car may be one on which dialling does not work, and the phone's own link stays the way
+// in. *why says, for the log, why the rule holds, or which part of it does not. From either thread: the cheap parts
+// are looked at first.
 bool SerialListener::leftToOther(const std::string& address, std::string* why) {
     if (!config_.dial.on) {
         *why = "the car does not dial phones in this run";

@@ -36,8 +36,10 @@ struct SerialStatus {
     // The asks for a phone's service list before a dial: sent, and what they came to.
     unsigned asks, asksListed, asksNotListed, asksNoAnswer, askErrors;
     unsigned checks, checksRestored, refusals;
-    // The links phones opened that were left to another program unread, never opened (serial_link.hpp).
-    unsigned leftUnread;
+    // leftUnread: the links phones opened that the rule left to another program, never read: primed for it, or left
+    // as they were when that could not be done (serial_link.hpp). putBack: the links on which bytes the agent had
+    // read were put back into the node's queue for another program, by the rule's priming or when a link was let go.
+    unsigned leftUnread, putBack;
     unsigned problemsRecorded;        // lines written to the problem file in this run (serial_link.hpp)
     unsigned problemsCounted;          // problems that were not written, only counted
     SerialStatus()
@@ -45,7 +47,7 @@ struct SerialStatus {
           lastResult("none"), link("none"), recordDoubtful(false), dials(0), answeredOk(0), notListening(0),
           notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0), leftBehind(0), asks(0), asksListed(0),
           asksNotListed(0), asksNoAnswer(0), askErrors(0), checks(0), checksRestored(0), refusals(0),
-          leftUnread(0), problemsRecorded(0), problemsCounted(0) {}
+          leftUnread(0), putBack(0), problemsRecorded(0), problemsCounted(0) {}
 };
 
 class SerialDial {

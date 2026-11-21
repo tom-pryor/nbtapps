@@ -26,7 +26,9 @@ namespace btspp {
 //     someone else's if it named another. One request accounts for one link
 //   * a node with no request waits the grace time for one, and is then someone else's
 //   * anything that is not ours is left alone: never opened, never read. A node that scan() took can be left alone
-//     after all (leaveAlone()): the caller's mark on its request (takenLeave()) says that it may be
+//     after all (leaveAlone()): the caller's mark on its request (takenLeave()) says that it may be, and the caller
+//     hands a node it opened to another program that way. A node left alone after it was taken may still be held
+//     open by the caller for that program (serial_link.hpp); to the tracker it is someone else's
 // `any` takes every new node, whatever was asked for.
 // A ServiceRequestComplete follows a request for the same link, sometimes after the node is there, so it is not
 // counted as a request of its own.
