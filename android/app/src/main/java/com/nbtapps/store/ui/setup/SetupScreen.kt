@@ -50,6 +50,7 @@ fun SetupScreen(
             onCancel = back,
             onSkip = skip,
             onRetry = viewModel::retry,
+            onConnectFromPhone = if (step.fromPhone) viewModel::connectFromPhone else null,
             onPickAnother = viewModel::pickAnother,
             onRefresh = viewModel::refreshBluetooth,
             diagnostics = viewModel::diagnostics,

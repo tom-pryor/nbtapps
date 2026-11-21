@@ -59,6 +59,7 @@ import com.nbtapps.store.model.PairedDevice
 import com.nbtapps.store.ui.headunits.AddHeadUnitFlow
 import com.nbtapps.store.ui.headunits.AdvancedAutostart
 import com.nbtapps.store.ui.headunits.AutostartChecklist
+import com.nbtapps.store.ui.headunits.CONNECT_FROM_PHONE
 import com.nbtapps.store.ui.headunits.CarPickerFlow
 import com.nbtapps.store.ui.headunits.CheckFixDialog
 import com.nbtapps.store.ui.headunits.ChecksLine
@@ -153,6 +154,7 @@ fun PairRequestScreen(
                     uiState = uiState,
                     name = uiState.carName,
                     onRetry = viewModel::pair,
+                    onConnectFromPhone = viewModel::connectFromPhone,
                     onClose = onClose,
                     onOpenApp = onOpenApp,
                 )
@@ -419,15 +421,27 @@ private fun Done(
 /**
  * The code did not pair the phone ([failedPage]): it ran out, the agent refused it, or there was no link. The code,
  * a failed mark by the title, what happened, and where the car is saved that it stays. Retry where the code can still
- * go, else Close.
+ * go, else Close; and with Retry, where the connect only waited for the car's link and none came, the offer to
+ * connect from the phone ([onConnectFromPhone]).
  */
 @Composable
-private fun Failed(uiState: PairRequestUiState, name: String?, onRetry: () -> Unit, onClose: () -> Unit, onOpenApp: () -> Unit) {
+private fun Failed(
+    uiState: PairRequestUiState,
+    name: String?,
+    onRetry: () -> Unit,
+    onConnectFromPhone: () -> Unit,
+    onClose: () -> Unit,
+    onOpenApp: () -> Unit,
+) {
     val page = failedPage(uiState, name) ?: return
     Page(
         buttons = {
             if (page.retry) {
                 Button(onClick = onRetry, Modifier.fillMaxWidth()) { Text("Retry") }
+                // Where the connect only waited for the car: the one way to have the phone try itself.
+                if ((uiState.step as? PairRequestStep.NoLink)?.fromPhone == true) {
+                    OutlinedButton(onClick = onConnectFromPhone, Modifier.fillMaxWidth()) { Text(CONNECT_FROM_PHONE) }
+                }
                 TextButton(onClick = onClose, Modifier.fillMaxWidth()) { Text("Close") }
             } else {
                 Button(onClick = onClose, Modifier.fillMaxWidth()) { Text("Close") }

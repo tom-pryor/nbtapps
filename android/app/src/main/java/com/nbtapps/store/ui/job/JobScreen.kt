@@ -49,6 +49,7 @@ import com.nbtapps.store.model.JobState
 import com.nbtapps.store.model.LATER_FEATURES_WARNING
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RestartKind
+import com.nbtapps.store.ui.headunits.CONNECT_FROM_PHONE
 
 /** The words every plan and every running job carry: the head unit must stay powered until the job is done. */
 internal const val IGNITION_NOTICE =
@@ -273,6 +274,8 @@ private fun JobContent(
                     },
                 )
                 Button(onClick = viewModel::reconnect) { Text("Connect again") }
+                // Where the connect only waited for the car: the one way to have the phone try itself.
+                if (uiState.fromPhone) OutlinedButton(onClick = viewModel::connectFromPhone) { Text(CONNECT_FROM_PHONE) }
             }
             else -> {
                 IgnitionNotice()

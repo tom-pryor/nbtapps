@@ -207,6 +207,7 @@ abstract class AppModule {
             foreground = foreground,
             // Read now, which also begins following Bluetooth being switched on and off.
             bluetoothOn = bluetooth.also { it.refreshConnected() }.on,
+            carsHolding = bluetooth.connected,
             log = AndroidLinkLog,
         )
 

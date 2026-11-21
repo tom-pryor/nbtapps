@@ -2260,14 +2260,23 @@ class JobRepositoryTest {
     /**
      * A repository over [dialler] to [bluetoothCar], saved as one whose agent [dials] and, where [left], leaves the
      * phone's own links, with waits for `hello` of [waitMs], by default long enough for a test to bring the car's link
-     * in. Out of sight, so that nothing listens but what a connect does.
+     * in. Out of sight, so that nothing listens but what a connect does. [holding]: the cars that hold the phone over
+     * hands-free or audio, as [com.nbtapps.store.data.PhoneBluetooth.connected] has them.
      */
-    private suspend fun leftCar(left: Boolean, dials: Boolean = true, waitMs: Long = 3_000, pauseMs: Long = 10): JobRepository {
+    private suspend fun leftCar(
+        left: Boolean,
+        dials: Boolean = true,
+        waitMs: Long = 3_000,
+        pauseMs: Long = 10,
+        holding: Set<String> = emptySet(),
+        rejoin: Rejoin = patient,
+    ): JobRepository {
         shown.state.value = false
         headUnits.add(bluetoothCar.copy(serialDial = dials, phoneOpenedLeft = left))
         val jobs = JobRepository(
-            headUnits, dialler, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L },
+            headUnits, dialler, identity, keys, store, { kept.incrementAndGet() }, scope, now = { 1234L }, rejoin = rejoin,
             greeting = Greeting(timeoutMs = waitMs, retryTimeoutMs = waitMs, pauseMs = pauseMs), foreground = shown, bluetoothOn = bluetoothOn,
+            carsHolding = MutableStateFlow(holding),
         )
         // The app's leaving at the start, which ends a connect under way, is over before the test connects.
         delay(200)
@@ -2339,6 +2348,113 @@ class JobRepositoryTest {
         assertTrue("$seen", seen.none { it is ConnectionState.Failed })
         dialIn()
         await(jobs.connection, "the link") { it is ConnectionState.Connected }
+    }
+
+    @Test
+    fun `a quiet connect on coming back that only listens while the car holds the phone offers the phone's own connect`() = test {
+        val jobs = leftCar(left = true, holding = setOf(carAddress))
+        dialler.onConnect = { leaves(it, true) }
+        dialler.listenOnlyMs = 300
+        shown.state.value = true
+        dialIn()
+        await(jobs.connection, "the link") { it is ConnectionState.Connected }
+        shown.state.value = false
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        val asked = dialler.listenOnly.size
+
+        shown.state.value = true
+
+        val failed = await(jobs.connection, "the failure") { it is ConnectionState.Failed } as ConnectionState.Failed
+        assertTrue(failed.listenedOnly)
+        assertEquals("The car didn't connect to this app", failed.reason)
+        assertEquals(listOf(true), dialler.listenOnly.drop(asked))
+        // The offer works as after any connect that only listened.
+        assertTrue(jobs.connectFromPhone("bt").isSuccess)
+        assertEquals(listOf(true, false), dialler.listenOnly.drop(asked))
+    }
+
+    /** Connects over the car's link to an agent that can reset it, has the car end it, and lets the app connect again: only listening, with no car's link. */
+    private suspend fun resetToListening(jobs: JobRepository): SerialResetOutcome {
+        dialler.onConnect = { agent ->
+            leaves(agent, true)
+            agent.capabilities = """["${ProtocolConstants.CAPABILITY_SERIAL_DIAL}","${ProtocolConstants.CAPABILITY_SERIAL_RESET}"]"""
+        }
+        dialler.listenOnlyMs = 300
+        // In sight, so that the link is kept once it is idle; the car's link goes to the connect, once it listens.
+        shown.state.value = true
+        val before = dialler.listenOnly.size
+        val connecting = scope.async { jobs.connect("bt") }
+        until("the connect listens") { dialler.listenOnly.size > before }
+        dialIn()
+        assertTrue(connecting.await().isSuccess)
+        assertTrue((jobs.connection.value as ConnectionState.Connected).serialReset)
+        // Saved just after the link shows as connected: the connect after the reset goes by it.
+        withTimeoutOrNull(10_000) { headUnits.headUnit("bt").first { it?.phoneOpenedLeft == true } } ?: throw AssertionError("never kept")
+        return jobs.resetSerial().getOrThrow()
+    }
+
+    @Test
+    fun `the connect after a reset that only listens shows nothing away from the car`() = test {
+        val away = leftCar(left = true)
+        assertEquals(SerialResetOutcome.Sent(endedByCar = true, connected = false), resetToListening(away))
+        assertEquals(ConnectionState.Disconnected, away.connection.value)
+        assertEquals(true, dialler.listenOnly.last())
+    }
+
+    @Test
+    fun `the connect after a reset that only listens, while the car holds the phone, offers the phone's own connect`() = test {
+        val inCar = leftCar(left = true, holding = setOf(carAddress))
+        assertEquals(SerialResetOutcome.Sent(endedByCar = true, connected = false), resetToListening(inCar))
+        val failed = inCar.connection.value as ConnectionState.Failed
+        assertTrue(failed.listenedOnly)
+        assertTrue(inCar.connectFromPhone("bt").isSuccess)
+        assertEquals(false, dialler.listenOnly.last())
+    }
+
+    @Test
+    fun `an agent that does not come back to connects that only listen is given up on with the phone's own connect offered`() = test {
+        val jobs = leftCar(left = true, rejoin = Rejoin(firstAfterMs = 20, pauseMs = 20, giveUpAfterMs = 400))
+        dialler.onConnect = { leaves(it, true) }
+        // In sight, so that the link is kept once it is idle; the car's link goes to the connect, once it listens.
+        shown.state.value = true
+        val before = dialler.listenOnly.size
+        val connecting = scope.async { jobs.connect("bt") }
+        until("the connect listens") { dialler.listenOnly.size > before }
+        dialIn()
+        assertTrue(connecting.await().isSuccess)
+        dialler.listenOnlyMs = 100
+
+        dialler.agent.closing(LinkClosing.RESTARTING)
+
+        val failed = await(jobs.connection, "the giving up") { it is ConnectionState.Failed } as ConnectionState.Failed
+        assertTrue(failed.reason, failed.reason.startsWith("The head unit's agent hasn't answered since it restarted."))
+        assertTrue(failed.listenedOnly)
+        assertTrue("${dialler.listenOnly}", dialler.listenOnly.size > 1 && dialler.listenOnly.all { it })
+    }
+
+    @Test
+    fun `a link of the car's that won as the wait was cancelled is kept, and nothing is kept where none had won`() {
+        val link = object : Link {
+            override val kind = Link.SERIAL
+            override val input = java.io.ByteArrayInputStream(ByteArray(0))
+            override val output = java.io.ByteArrayOutputStream()
+            override fun close() {}
+        }
+        val held = CopyOnWriteArrayList<Link>()
+        val cause = kotlinx.coroutines.CancellationException("the wait's time ran out")
+
+        val linked = CompletableDeferred<Link?>(link)
+        keepWhatWon(linked, cause, { it }, { held.add(it) })
+        assertEquals(listOf<Link>(link), held)
+        assertTrue("what had won stays", linked.isCompleted && !linked.isCancelled)
+
+        // An answer that won holds no link.
+        keepWhatWon(CompletableDeferred<Link?>(null), cause, { it }, { held.add(it) })
+        // Nothing had won: the wait ends with the cause.
+        val none = CompletableDeferred<Link?>()
+        keepWhatWon(none, cause, { it }, { held.add(it) })
+        assertTrue(none.isCancelled)
+        assertEquals(listOf<Link>(link), held)
     }
 
     @Test

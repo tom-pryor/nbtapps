@@ -82,6 +82,12 @@ class SetupViewModelTest {
             return inner.connect(endpoint)
         }
 
+        // A connect that only listens for the car's link, as one to a car whose agent leaves the phone's own links.
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
+            gate?.await()
+            return inner.connect(endpoint, dials, listenOnly)
+        }
+
         // A link the car opens is never held.
         override fun accepts(endpoint: Endpoint) = inner.accepts(endpoint)
 
@@ -204,6 +210,26 @@ class SetupViewModelTest {
 
         viewModel.awaitStep("pair") { it is SetupStep.Pair }
         assertEquals(1, saved().size)
+    }
+
+    @Test
+    fun `a connect that only waited for the car's link offers to connect from the phone, which goes on to Pair`() = test {
+        phones.code = "420042"
+        // A car whose agent dials and leaves the phone's own links: the app's connect only listens for the car.
+        val id = headUnits.saveCar(car)
+        headUnits.update(id) { it.copy(serialDial = true, phoneOpenedLeft = true) }
+        connector.listenOnlyMs = 300
+        val viewModel = viewModel()
+        viewModel.pickTheCar()
+
+        val failed = viewModel.awaitStep("failed") { it is SetupStep.Connect && it.failure != null }
+        assertEquals(SetupStep.Connect("The car didn't connect to this app", fromPhone = true), failed.step)
+
+        viewModel.connectFromPhone()
+
+        viewModel.awaitStep("pair") { it is SetupStep.Pair }
+        assertEquals(listOf(true, false), connector.listenOnly)
+        assertEquals(1, connector.agents.size)
     }
 
     @Test

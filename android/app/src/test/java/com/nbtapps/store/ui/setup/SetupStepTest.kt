@@ -44,6 +44,13 @@ class SetupStepTest {
     fun `with a car picked the link to it decides until the phone is paired`() {
         assertEquals(SetupStep.Connect(), setupStep(picked, ConnectionState.Connecting("car"), null))
         assertEquals(SetupStep.Connect("No agent answered"), setupStep(picked, ConnectionState.Failed("car", "No agent answered"), null))
+        // A connect that only waited for the car's link offers to connect from the phone; while the next is under way, not.
+        assertEquals(
+            SetupStep.Connect("No link came", fromPhone = true),
+            setupStep(picked, ConnectionState.Failed("car", "No link came", listenedOnly = true), null),
+        )
+        assertEquals(SetupStep.Connect(), setupStep(picked, ConnectionState.Failed("car", "No link came", listenedOnly = true), null, connecting = true))
+        assertEquals(SetupStep.Connect(NO_LINK), setupStep(picked, ConnectionState.Failed("other", "No link came", listenedOnly = true), null))
         assertEquals(SetupStep.Pair(stale = false, offersAutostart = true), setupStep(picked, waiting("car"), null))
         assertEquals(SetupStep.Pair(stale = true, offersAutostart = false), setupStep(picked, waiting("car", stale = true, autostart = false), null))
     }

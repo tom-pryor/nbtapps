@@ -56,6 +56,11 @@ data class JobUiState(
     val job: JobView? = null,
     /** Whether there is a link to the head unit now. */
     val connected: Boolean = false,
+    /**
+     * The last connect to the job's head unit failed having only waited for the car's link, so the screen offers to
+     * connect from the phone: see [ConnectionState.Failed.listenedOnly].
+     */
+    val fromPhone: Boolean = false,
     /** Display names by package id, for packages the catalogue or the head unit knows. */
     val names: Map<String, String> = emptyMap(),
     /** The request is a removal. */
@@ -73,6 +78,13 @@ data class JobUiState(
 ) {
     fun name(id: String): String = names[id] ?: id
 }
+
+/**
+ * Whether the job screen offers to connect from the phone: the last connect to [job]'s head unit failed having only
+ * waited for the car's link ([ConnectionState.Failed.listenedOnly]).
+ */
+internal fun offersConnectFromPhone(job: JobView?, connection: ConnectionState): Boolean =
+    job != null && connection is ConnectionState.Failed && connection.headUnitId == job.headUnitId && connection.listenedOnly
 
 /**
  * One install, upgrade or removal, from the agent's plan to its result. The route says what is wanted; with
@@ -121,6 +133,7 @@ class JobViewModel @Inject constructor(
                     emptyList()
                 },
                 connected = connected != null,
+                fromPhone = offersConnectFromPhone(shown, connection),
                 names = names,
                 removal = route.removeId != null,
                 deleteData = local.deleteData,
@@ -196,6 +209,12 @@ class JobViewModel @Inject constructor(
     fun reconnect() {
         val headUnitId = uiState.value.job?.headUnitId ?: return
         act { jobs.connect(headUnitId) }
+    }
+
+    /** One connect with the phone dialling the car as well: see [JobRepository.connectFromPhone]. */
+    fun connectFromPhone() {
+        val headUnitId = uiState.value.job?.headUnitId ?: return
+        act { jobs.connectFromPhone(headUnitId) }
     }
 
     /** [kind] is `hmi` or `reboot`. */

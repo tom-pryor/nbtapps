@@ -19,8 +19,12 @@ sealed interface SetupStep {
     /** Which of the cars paired with the phone is the one to set up. */
     data object PickCar : SetupStep
 
-    /** A link to the agent on the car is being opened, or [failure] says why none could be. */
-    data class Connect(val failure: String? = null) : SetupStep
+    /**
+     * A link to the agent on the car is being opened, or [failure] says why none could be. [fromPhone]: the connect
+     * only waited for the car's link and none came, so the phone may connect itself: see
+     * [ConnectionState.Failed.listenedOnly].
+     */
+    data class Connect(val failure: String? = null, val fromPhone: Boolean = false) : SetupStep
 
     /**
      * The agent waits for the code from the car's screen. [stale]: it knew this phone once and no longer does.
@@ -106,7 +110,7 @@ internal fun setupStep(
     return when (own) {
         is ConnectionState.NeedsPairing -> SetupStep.Pair(own.stale, own.offersAutostart)
         is ConnectionState.Connecting -> SetupStep.Connect()
-        is ConnectionState.Failed -> if (connecting) SetupStep.Connect() else SetupStep.Connect(own.reason)
+        is ConnectionState.Failed -> if (connecting) SetupStep.Connect() else SetupStep.Connect(own.reason, own.listenedOnly)
         else -> if (connecting) SetupStep.Connect() else SetupStep.Connect(NO_LINK)
     }
 }

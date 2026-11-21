@@ -13,6 +13,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -26,6 +27,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.nbtapps.store.R
+import com.nbtapps.store.ui.headunits.CONNECT_FROM_PHONE
 import com.nbtapps.store.ui.headunits.ChecklistMark
 import com.nbtapps.store.ui.headunits.ChecklistMarkIcon
 import com.nbtapps.store.ui.headunits.CopyDiagnosticsButton
@@ -53,7 +55,8 @@ internal val WHAT_TO_CHECK: List<Pair<String, String>> = listOf(
  * Step 2, the link to the agent on the car, which was begun when the car was picked: no tap starts it. While it is
  * opened, [failure] is null, and Cancel ([onCancel], as back) gives it up. Once it failed, [failure] says why, and
  * the page says what to check, with Try again ([onRetry]) and Pick another car ([onPickAnother]), and "Copy
- * diagnostics", which copies what [diagnostics] gives.
+ * diagnostics", which copies what [diagnostics] gives. Where the connect only waited for the car's link and none came,
+ * [onConnectFromPhone] is given, and the page offers to connect from the phone as well.
  *
  * The first row says whether the car is connected to the phone over Bluetooth at all, read again each time the page
  * comes back ([onRefresh]); a head unit with no Bluetooth endpoint has no such row.
@@ -66,6 +69,7 @@ internal fun ConnectPage(
     onSkip: () -> Unit,
     onRetry: () -> Unit,
     onPickAnother: () -> Unit,
+    onConnectFromPhone: (() -> Unit)? = null,
     onRefresh: () -> Unit,
     diagnostics: () -> String,
 ) {
@@ -84,6 +88,8 @@ internal fun ConnectPage(
                 TextButton(onClick = onCancel, Modifier.fillMaxWidth()) { Text("Cancel") }
             } else {
                 Button(onClick = onRetry, Modifier.fillMaxWidth()) { Text("Try again") }
+                // Where the connect only waited for the car: the one way to have the phone try itself.
+                if (onConnectFromPhone != null) OutlinedButton(onClick = onConnectFromPhone, Modifier.fillMaxWidth()) { Text(CONNECT_FROM_PHONE) }
                 TextButton(onClick = onPickAnother, Modifier.fillMaxWidth()) { Text("Pick another car") }
             }
         },

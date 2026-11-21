@@ -330,9 +330,9 @@ class SetupViewModel @Inject constructor(
      * Opens the link to the head unit [id], in place of the set-up's last try. The try belongs to this set-up: it
      * is given up when the set-up is left, as [JobRepository.connect] says.
      */
-    private fun connect(id: String) {
+    private fun connect(id: String, fromPhone: Boolean = false) {
         attempt?.cancel()
-        val job = viewModelScope.launch(start = CoroutineStart.LAZY) { jobs.connect(id) }
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) { if (fromPhone) jobs.connectFromPhone(id) else jobs.connect(id) }
         attempt = job
         attempting.value = true
         job.invokeOnCompletion { if (attempt === job) attempting.value = false }
@@ -347,7 +347,15 @@ class SetupViewModel @Inject constructor(
 
     /** Try again, after the connect failed. */
     fun retry() {
-        kept.value.answers.headUnitId?.let(::connect)
+        kept.value.answers.headUnitId?.let { connect(it) }
+    }
+
+    /**
+     * Connect from the phone, after a connect that only waited for the car's link had none: one connect with the
+     * phone dialling the car as well, see [JobRepository.connectFromPhone].
+     */
+    fun connectFromPhone() {
+        kept.value.answers.headUnitId?.let { connect(it, fromPhone = true) }
     }
 
     /** Cancel on the Connect page, and back from it: the connect is given up, and the car picked with it. */

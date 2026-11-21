@@ -54,6 +54,7 @@ import com.nbtapps.store.model.LinkClosing
 import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.PlanRequest
 import com.nbtapps.store.model.RemoveTarget
+import com.nbtapps.store.model.SerialEndpoint
 import com.nbtapps.store.model.SerialResetState
 import com.nbtapps.store.model.SettingEntry
 import com.nbtapps.store.model.inConnectOrder
@@ -150,6 +151,16 @@ sealed interface ConnectionState {
      * ([JobRepository.connectFromPhone]).
      */
     data class Failed(val headUnitId: String, val reason: String, val listenedOnly: Boolean = false) : ConnectionState
+}
+
+/**
+ * For a wait on [won] that was cancelled with [cause]: where nothing had won yet, [won] ends with [cause]. Where
+ * something had, which the waiter will now never take, the link [linkOf] finds in it, if any, goes to [keep].
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+internal fun <T> keepWhatWon(won: CompletableDeferred<T>, cause: CancellationException, linkOf: (T) -> Link?, keep: (Link) -> Unit) {
+    if (won.completeExceptionally(cause) || won.getCompletionExceptionOrNull() != null) return
+    linkOf(won.getCompleted())?.let(keep)
 }
 
 /** What [JobRepository.connect] fails with when it ends in [ConnectionState.NeedsPairing]: the link is up, and of no use yet. */
@@ -335,6 +346,12 @@ class JobRepository(
     private val resetWaitMs: Long = 5_000,
     /** Whether the phone's Bluetooth is on and the app may use it: [com.nbtapps.store.data.PhoneBluetooth.on]. */
     private val bluetoothOn: StateFlow<Boolean> = MutableStateFlow(true),
+    /**
+     * The addresses of the cars that hold the phone over hands-free or audio now, in upper case:
+     * [com.nbtapps.store.data.PhoneBluetooth.connected]. What the app's own tries make of a car's link that did not
+     * come goes by it ([quietFailure]).
+     */
+    private val carsHolding: StateFlow<Set<String>> = MutableStateFlow(emptySet()),
     /** Where a link's end, and what came of a link the car opened, are said. */
     private val log: LinkLog = LinkLog.NONE,
 ) {
@@ -710,9 +727,10 @@ class JobRepository(
 
     /**
      * Connects again, quietly, to the head unit whose link was ended when the app left the foreground: one try,
-     * shown as [ConnectionState.Connecting]. A failure leaves [ConnectionState.Disconnected] and shows nothing; a
-     * phone that has to be paired ends in [ConnectionState.NeedsPairing], as any connect does. A head unit that is
-     * no longer saved is forgotten. The user's [connect] and [disconnect] take its place.
+     * shown as [ConnectionState.Connecting]. A failure leaves [ConnectionState.Disconnected] and shows nothing, but
+     * for one that only listened while the car holds the phone ([quietFailure]); a phone that has to be paired ends in
+     * [ConnectionState.NeedsPairing], as any connect does. A head unit that is no longer saved is forgotten. The
+     * user's [connect] and [disconnect] take its place.
      */
     private fun comeBack() {
         val headUnitId = remembered ?: return
@@ -721,8 +739,7 @@ class JobRepository(
                 currentCoroutineContext().ensureActive()
                 if (remembered != headUnitId) return@withLock
                 remembered = null
-                val result = attempt(headUnitId, quiet = true)
-                if (result.isFailure && result.exceptionOrNull() !is PairingNeeded) connectionState.value = ConnectionState.Disconnected
+                quietFailure(headUnitId, attempt(headUnitId, quiet = true))
             }
         }
         returning = work
@@ -732,6 +749,33 @@ class JobRepository(
             if (returning === work) returning = null
         }
         work.start()
+    }
+
+    /**
+     * What one of the app's own tries to [headUnitId] that it does not publish itself ([comeBack], and the connect
+     * after [resetSerial]) comes to: a failure leaves [ConnectionState.Disconnected] and shows nothing, so that the app
+     * coming to the foreground away from the car does not show one each time; a phone that has to be paired is left in
+     * [ConnectionState.NeedsPairing]. But a try that only listened for the car's link and had none
+     * ([NoCarLinkException]) while that car holds the phone over hands-free or audio ([carsHolding]) is shown as failed
+     * with the offer to connect from the phone ([ConnectionState.Failed.listenedOnly]): the user is likely in the car
+     * then, and would otherwise see nothing come of the wait, and wait as long again on the next connect before the
+     * offer.
+     */
+    private suspend fun quietFailure(headUnitId: String, result: Result<Unit>) {
+        val failure = result.exceptionOrNull() ?: return
+        if (failure is PairingNeeded) return
+        connectionState.value = if (failure is NoCarLinkException && carHolds(headUnitId)) {
+            ConnectionState.Failed(headUnitId, failure.message ?: "The car didn't connect to this app", listenedOnly = true)
+        } else {
+            ConnectionState.Disconnected
+        }
+    }
+
+    /** Whether the car of a Bluetooth serial endpoint of [headUnitId]'s holds the phone now: see [carsHolding]. */
+    private suspend fun carHolds(headUnitId: String): Boolean {
+        val unit = headUnits.headUnit(headUnitId).first() ?: return false
+        val holding = carsHolding.value
+        return unit.endpoints.any { it is SerialEndpoint && it.address.uppercase() in holding }
     }
 
     /**
@@ -749,6 +793,8 @@ class JobRepository(
         val began = clock()
         delay(rejoin.firstAfterMs)
         var failure: String
+        // The last try only listened, and the car's link did not come: see [ConnectionState.Failed.listenedOnly].
+        var listenedOnly: Boolean
         while (true) {
             val result = connectLock.withLock {
                 // Taking a free lock asks nothing of the caller: one that was told to stop must not connect.
@@ -758,6 +804,7 @@ class JobRepository(
             if (result.isSuccess) return
             if (result.exceptionOrNull() is PairingNeeded) return lost(headUnitId)
             failure = result.exceptionOrNull()?.message.orEmpty()
+            listenedOnly = result.exceptionOrNull() is NoCarLinkException
             if (clock() - began + rejoin.pauseMs >= rejoin.giveUpAfterMs) break
             delay(rejoin.pauseMs)
         }
@@ -765,7 +812,7 @@ class JobRepository(
             currentCoroutineContext().ensureActive()
             lost(headUnitId)
             connectionState.value =
-                ConnectionState.Failed(headUnitId, "The head unit's agent hasn't answered since it restarted. $failure".trim())
+                ConnectionState.Failed(headUnitId, "The head unit's agent hasn't answered since it restarted. $failure".trim(), listenedOnly)
         }
     }
 
@@ -1289,9 +1336,10 @@ class JobRepository(
      * With `sent` the car ends the very link it was asked on, about 300 ms after the answer. The app waits up to
      * [resetWaitMs] for that, ends the link itself where the car did not, and connects again by itself, quietly, as
      * on coming back to the foreground: shown as [ConnectionState.Connecting], and a failure leaves
-     * [ConnectionState.Disconnected]. Not where the user disconnected or connected meanwhile. With `armed` no serial
-     * link was up on the head unit, as over another kind of link, and nothing more happens: the car ends the next one
-     * that opens within the time the answer gives.
+     * [ConnectionState.Disconnected], or the failure with the offer to connect from the phone ([quietFailure]). Not
+     * where the user disconnected or connected meanwhile. With `armed` no serial link was up on the head unit, as over
+     * another kind of link, and nothing more happens: the car ends the next one that opens within the time the answer
+     * gives.
      *
      * A refusal is an [AgentRefusal] in the app's words ([AgentText.serialReset]).
      */
@@ -1329,7 +1377,7 @@ class JobRepository(
             // For the car to take the last link down, as between the links a connect opens.
             delay(greeting.pauseMs)
             val result = attempt(connected.headUnitId, quiet = true)
-            if (result.isFailure && result.exceptionOrNull() !is PairingNeeded) connectionState.value = ConnectionState.Disconnected
+            quietFailure(connected.headUnitId, result)
             result.isSuccess
         }
         Result.success(SerialResetOutcome.Sent(endedByCar, again))
@@ -1492,12 +1540,11 @@ class JobRepository(
     /**
      * Says `hello` on [next] and waits for the answer; with [carLinks], also takes a link the car opens to the phone
      * meanwhile, or one that came before and is held, and whichever comes first is what this comes to. Listening that
-     * cannot be had leaves the answer to be waited for alone. A caller that is cancelled leaves no link of the car's
-     * open.
+     * cannot be had leaves the answer to be waited for alone. A link of the car's that came just as the caller was
+     * cancelled is held in [carLinks], as one that came after the answer is: [greet] closes it, or its next round takes it.
      *
      * @throws LinkClosedException if [next] ends first.
      */
-    @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun helloOrCarLink(next: AgentSession, carLinks: CarLinks?): Greeted {
         if (carLinks == null) return Greeted.Answer(next.client.hello(identity.id(), identity.name))
         val won = CompletableDeferred<Greeted>()
@@ -1520,8 +1567,9 @@ class JobRepository(
             try {
                 won.await()
             } catch (e: CancellationException) {
-                // A link of the car's that came just as the caller gave up is nobody's, and must not stay open.
-                if (!won.completeExceptionally(e) && won.getCompletionExceptionOrNull() == null) (won.getCompleted() as? Greeted.CarLink)?.link?.close()
+                // A link of the car's that came just as the wait gave up, as its time ran out, is held for the next
+                // round to take; where the caller has given up the whole greeting, [CarLinks.stop] closes it.
+                keepWhatWon(won, e, { (it as? Greeted.CarLink)?.link }, carLinks::hold)
                 throw e
             } finally {
                 asking.cancel()

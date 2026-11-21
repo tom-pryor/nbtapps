@@ -15,6 +15,7 @@ import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.jobs.PairingNeeded
 import com.nbtapps.store.data.link.LinkConnector
+import com.nbtapps.store.data.link.NoCarLinkException
 import com.nbtapps.store.data.link.reachesTcp
 import com.nbtapps.store.data.saveCar
 import com.nbtapps.store.di.ApplicationScope
@@ -69,8 +70,12 @@ sealed interface PairRequestStep {
     /** The agent took the phone as it was: it was paired with [name] before. Nothing was sent. */
     data class AlreadyPaired(val name: String) : PairRequestStep
 
-    /** No link to the car, so the code could not go to it. [reason] is for the user. */
-    data class NoLink(val reason: String) : PairRequestStep
+    /**
+     * No link to the car, so the code could not go to it. [reason] is for the user. [fromPhone]: the connect only
+     * waited for the car's link and none came, so the phone may connect itself: see
+     * [ConnectionState.Failed.listenedOnly].
+     */
+    data class NoLink(val reason: String, val fromPhone: Boolean = false) : PairRequestStep
 
     /** The agent refused the code. [message] says why, in this screen's words. */
     data class Refused(val message: String) : PairRequestStep
@@ -433,7 +438,19 @@ class PairRequestViewModel @Inject constructor(
      * The connect belongs to this screen: leaving it gives the attempt up, as [JobRepository.connect] says. The
      * code, once it goes, belongs to the app: see [send].
      */
-    fun pair() {
+    fun pair() = pair(fromPhone = false)
+
+    /**
+     * Connect from the phone, after a connect that only waited for the car's link had none
+     * ([PairRequestStep.NoLink.fromPhone]): [pair], with one connect that has the phone dial the car as well, see
+     * [JobRepository.connectFromPhone].
+     */
+    fun connectFromPhone() {
+        if ((step.value as? PairRequestStep.NoLink)?.fromPhone != true) return
+        pair(fromPhone = true)
+    }
+
+    private fun pair(fromPhone: Boolean) {
         if (picking()) return saveAndPair()
         val unit = chosenHeadUnit(saved.value.orEmpty(), picked.value, jobs.connection.value) ?: return
         if (code.value == null) return
@@ -452,13 +469,16 @@ class PairRequestViewModel @Inject constructor(
             else -> {
                 step.value = PairRequestStep.Connecting
                 viewModelScope.launch {
-                    val result = jobs.connect(unit.id)
+                    val result = if (fromPhone) jobs.connectFromPhone(unit.id) else jobs.connect(unit.id)
                     if (mine != request) return@launch
                     val failure = result.exceptionOrNull()
                     when {
                         failure == null -> paired(PairRequestStep.AlreadyPaired(unit.name), unit)
                         failure is PairingNeeded -> send(unit, mine)
-                        else -> step.value = PairRequestStep.NoLink(failure.message ?: "The head unit couldn't be reached")
+                        else -> step.value = PairRequestStep.NoLink(
+                            failure.message ?: "The head unit couldn't be reached",
+                            fromPhone = failure is NoCarLinkException,
+                        )
                     }
                 }
             }

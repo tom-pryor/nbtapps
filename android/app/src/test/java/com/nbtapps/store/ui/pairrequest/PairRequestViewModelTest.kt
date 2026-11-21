@@ -73,6 +73,12 @@ class PairRequestViewModelTest {
             gate?.await()
             return inner.connect(endpoint)
         }
+
+        // A connect that only listens for the car's link, as one to a car whose agent leaves the phone's own links.
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
+            gate?.await()
+            return inner.connect(endpoint, dials, listenOnly)
+        }
     }
 
     private val scope = mainDispatcherRule.track(CoroutineScope(SupervisorJob() + Dispatchers.Default))
@@ -321,6 +327,29 @@ class PairRequestViewModelTest {
 
         viewModel.awaitStep("paired") { it is PairRequestStep.Paired }
         assertEquals(listOf("420042"), issued())
+    }
+
+    @Test
+    fun `a connect that only waited for the car's link offers to connect from the phone, which pairs the phone`() = test(
+        saved = listOf(HeadUnit("bt", "Test car", listOf(SerialEndpoint(device.address, device.name)), serialDial = true, phoneOpenedLeft = true)),
+    ) {
+        phones.code = "420042"
+        // The view model's connect runs on the test's main dispatcher, whose time stands still: no wait at all.
+        serial.listenOnlyMs = 0
+        val viewModel = viewModel()
+        viewModel.handle(PairRequest("420042", 60_000))
+
+        viewModel.pair()
+
+        val failed = viewModel.awaitStep("no link") { it is PairRequestStep.NoLink }
+        assertEquals(PairRequestStep.NoLink("The car didn't connect to this app", fromPhone = true), failed.step)
+        assertTrue(failed.canRetry)
+
+        viewModel.connectFromPhone()
+
+        viewModel.awaitStep("paired") { it is PairRequestStep.Paired }
+        assertEquals(listOf(true, false), serial.listenOnly)
+        assertEquals(listOf("420042"), serialIssued())
     }
 
     @Test
