@@ -1706,6 +1706,47 @@ int main() {
         CHECK(!r.seen.said("00:11:22") && !r.seen.said("66:77:88") && !r.seen.said("001122"));
     }
 
+    // 26. A ServiceConnect that is never answered is given up with giveUpConnect(), for what it named only, and the
+    //     next may go; an answer to it that comes after is another client's.
+    {
+        struct Reply {
+            static std::vector<uint8_t> of(const char* address, const char* service, uint32_t error) {
+                std::vector<uint8_t> p;
+                putString(p, address);
+                putString(p, service);
+                putU32(p, error);
+                return p;
+            }
+        };
+        Registered r;
+        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", "Test_Other"));   // none waits
+        CHECK(r.spp.connectService("BtCtrl", "testinst", "02:00:00:00:00:01", "Test_Other"));
+        r.gap.took(kReqServiceConnect);
+        CHECK(!r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName) && r.gap.sent.empty());
+        // Not for another phone or service than the one that waits: that one stays out.
+        CHECK(!r.spp.giveUpConnect("00:11:22:33:44:55", "Test_Other"));
+        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", kName));
+        CHECK(!r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName) && r.gap.sent.empty());
+        // The address in another form is the same.
+        size_t lines = r.seen.lines.size();
+        CHECK(r.spp.giveUpConnect("020000000001", "Test_Other"));
+        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", "Test_Other") && r.seen.lines.size() == lines);
+        // Its late answer with none of ours out: dropped, unsaid and untold.
+        std::vector<uint8_t> late = Reply::of("02:00:00:00:00:01", "Test_Other", 5);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.seen.connects.empty() && r.seen.lines.size() == lines && r.spp.heard().othersConnectReplies == 0);
+        // The next goes; the late answer that comes while it waits is another client's, and that one is still out.
+        CHECK(r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName));
+        r.gap.took(kReqServiceConnect);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.seen.connects.empty() && r.spp.heard().othersConnectReplies == 1);
+        CHECK(!r.spp.connectService("BtCtrl", "testinst", "02:00:00:00:00:01", "Test_Other") && r.gap.sent.empty());
+        std::vector<uint8_t> own = Reply::of("00:11:22:33:44:55", kName, 14);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &own[0], (uint32_t)own.size());
+        CHECK(r.seen.connects.size() == 1 && r.seen.connects[0].error == 14 && r.seen.connects[0].service == kName);
+        CHECK(!r.seen.said("00:11:22") && !r.seen.said("02:00:00"));
+    }
+
     // 16. The real client is the head unit's: anywhere else it does not open, and nothing can be sent through it.
 #ifndef __QNXNTO__
     {

@@ -13,7 +13,7 @@ namespace nbt {
 DialRules::DialRules(const DialConfig& config)
     : config_(config), nextPollAt_(0), fastUntil_(0), signalAt_(0), pairingWasOpen_(false), nextPairingAt_(0),
       state_(kIdle), stale_(false), okAt_(0), roundWhy_(kForced), forcedAsk_(false), endedAskUntil_(0),
-      doubtful_(false) {}
+      doubtful_(false), repointOut_(false), repointAt_(0) {}
 
 void DialRules::fastPolls(int64_t now) {
     fastUntil_ = now + config_.pollFirstForMs;
@@ -210,7 +210,7 @@ bool DialRules::keepAsking(const Facts& facts, int64_t now) {
     // The phone's own request that brought this ask may still be pending, or come again: that holds back the rest,
     // not this one. Any other request, one that names no phone among them, ends it.
     bool own = current_.why == kSignal && !askedBy_.empty() && askedBy_ == addressKey(current_.address);
-    if (facts.registered && !facts.linkOfOurs && (!facts.requestPending || own)) return true;
+    if (facts.registered && !facts.linkOfOurs && (!facts.requestPending || own) && !repointWaits(now)) return true;
     endAsk(now);
     return false;
 }
@@ -220,6 +220,8 @@ bool DialRules::next(int64_t now, const Facts& facts, Dial* out) {
     if (facts.linkOfOurs || facts.requestPending) round_.clear();
     if (state_ == kAsking) keepAsking(facts, now);
     if (state_ != kIdle || !facts.registered || facts.linkOfOurs || !presence_.known()) return false;
+    // The car takes one ServiceConnect of the agent's at a time: none may follow an ask while the re-point waits.
+    if (repointWaits(now)) return false;
     // The car answers one query at a time: one that was ended may be out still.
     if (!endedAsk_.empty()) {
         if (now < endedAskUntil_) return false;
@@ -351,7 +353,7 @@ DialRules::Reply DialRules::reply(const std::string& address, const std::string&
     state_ = kIdle;
     if (error == 2) return kLookForNode;
     // A rejection of the request was never the car's answer, and 10 does no harm: tried again a while later.
-    if (error == 10 || error == kNoError) {
+    if (!doubtingAnswer(error)) {
         phone(current_.address).retryAt = now + config_.retryMs;
         return kRetryLater;
     }
@@ -362,6 +364,10 @@ DialRules::Reply DialRules::reply(const std::string& address, const std::string&
     if (error == 5) return kNotListening;
     if (error == 14) return kUnreachable;
     return kFailed;
+}
+
+bool DialRules::doubtingAnswer(uint32_t error) {
+    return error != 0 && error != 2 && error != 10 && error != kNoError;
 }
 
 bool DialRules::overdue(int64_t now) const { return state_ == kDialling && now - current_.at >= (int64_t)config_.replyLimitMs; }
@@ -426,6 +432,21 @@ void DialRules::ended(int64_t) {
 }
 
 void DialRules::phoneLinkEnded() { doubtful_ = false; }
+
+void DialRules::repointSent(int64_t now) {
+    repointOut_ = true;
+    repointAt_ = now;
+}
+
+void DialRules::repointDone() { repointOut_ = false; }
+
+bool DialRules::repointWaits(int64_t now) const {
+    return repointOut_ && now - repointAt_ < (int64_t)config_.repointLimitMs;
+}
+
+bool DialRules::repointOverdue(int64_t now) const {
+    return repointOut_ && now - repointAt_ >= (int64_t)config_.repointLimitMs;
+}
 
 void DialRules::backOff(const std::string& address, int64_t now) {
     PhoneState& s = phone(address);

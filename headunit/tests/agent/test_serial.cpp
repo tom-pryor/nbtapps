@@ -148,8 +148,23 @@ public:
           answersList(true), listed(false),
           connection(0), security(0), answersQuery(true), queryLists(true), queryError(0), queryInforms(false),
           queryRejected(false), queryUnread(false),
-          answersConnect(true), connectError(0), dialNode(0), answersDisconnect(false),
-          disconnectError(0), events_(0), up_(false), trace_(trace) {}
+          answersConnect(true), connectError(0), dialNode(0), rejectsConnect(false), answersRepoint(true),
+          repointError(5), takesRepoint(true), rejectsRepoint(false), answersDisconnect(false), disconnectError(0), events_(0), up_(false),
+          trace_(trace) {
+        pthread_mutex_init(&connectsMu_, NULL);
+    }
+    ~FakeGap() { pthread_mutex_destroy(&connectsMu_); }
+
+    // What each ServiceConnect named, in the order they came, the re-points among them.
+    struct Connect {
+        std::string device, instance, address, service;
+    };
+    std::vector<Connect> connects() {
+        pthread_mutex_lock(&connectsMu_);
+        std::vector<Connect> c = connects_;
+        pthread_mutex_unlock(&connectsMu_);
+        return c;
+    }
 
     virtual bool open(Events* events) {
         trace_->add("gap open");
@@ -183,8 +198,29 @@ public:
         } else if (id == kReqServiceConnect) {
             Reader r(&payload[0], (uint32_t)payload.size());
             std::string device = r.str(), instance = r.str(), address = r.str(), service = r.str();
+            Connect c;
+            c.device = device;
+            c.instance = instance;
+            c.address = address;
+            c.service = service;
+            pthread_mutex_lock(&connectsMu_);
+            connects_.push_back(c);
+            pthread_mutex_unlock(&connectsMu_);
+            // The re-point is answered on its own terms, and has a line of its own in the trace: "gap connect" is a dial.
+            if (address == kRepointAddress && service == kRepointService) {
+                if (!takesRepoint) {
+                    trace_->add("gap repoint not taken");
+                    return false;
+                }
+                trace_->add("gap repoint " + device + " " + instance + " " + address + " " + service);
+                if (rejectsRepoint) events_->gapMessage(kTypeRejectedA, kReqServiceConnect, 0, 0);
+                else if (answersRepoint) connectReply(address, service, repointError);
+                return true;
+            }
             trace_->add("gap connect " + device + " " + instance + " " + address + " " + service);
-            if (answersConnect) {
+            if (rejectsConnect) {
+                events_->gapMessage(kTypeRejectedA, kReqServiceConnect, 0, 0);
+            } else if (answersConnect) {
                 uint32_t error = connectError;
                 if (!nextConnectErrors.empty()) {
                     error = nextConnectErrors.front();
@@ -364,6 +400,11 @@ public:
     uint32_t connectError;             // dialled node comes up first
     Node* dialNode;
     std::vector<uint32_t> nextConnectErrors;   // the answers to the next ServiceConnects, before connectError
+    bool rejectsConnect;               // a dial's ServiceConnect is rejected by the server, at once
+    bool answersRepoint;               // the re-point's ServiceConnect is answered, at once, with repointError; it
+    uint32_t repointError;             // is taken by the client unless takesRepoint is false, and rejected by the
+    bool takesRepoint;                 // server, at once, with rejectsRepoint
+    bool rejectsRepoint;
     bool answersDisconnect;            // ServiceDisconnect is answered, at once, with disconnectError, or what
     uint32_t disconnectError;          // disconnectErrorFor has for the address
     std::map<std::string, uint32_t> disconnectErrorFor;
@@ -373,6 +414,8 @@ private:
     Events* events_;
     bool up_;
     Trace* trace_;
+    pthread_mutex_t connectsMu_;
+    std::vector<Connect> connects_;
 };
 
 // What the system's log says, as the test has it.
@@ -2526,6 +2569,295 @@ static void testDialAsk() {
 }
 
 // ---- the registration check -------------------------------------------------------------------------------------
+
+// The re-point after a dial the car answered with a failure (dial_rules.hpp).
+static const char* const kRepointItem = "gap repoint BtCtrl nbtapp 02:00:00:DD:DD:DD HFPGW";
+
+static bool isRepoint(const FakeGap::Connect& c) {
+    return c.device == "BtCtrl" && c.instance == "nbtapp" && c.address == kRepointAddress && c.service == kRepointService;
+}
+
+// Until the listener's status holds `pred`, `ms` at most.
+struct StatusIs {
+    virtual ~StatusIs() {}
+    virtual bool operator()(const SerialStatus& s) const = 0;
+};
+static bool statusWithin(SerialListener& listener, const StatusIs& pred, int ms) {
+    double end = monoNow() + ms / 1000.0;
+    while (monoNow() < end) {
+        if (pred(listener.serialStatus())) return true;
+        pause(5);
+    }
+    return pred(listener.serialStatus());
+}
+struct Stopped : StatusIs {
+    virtual bool operator()(const SerialStatus& s) const { return s.repointStopped; }
+};
+
+// The problem file's text once it holds `part`, 3 s at most.
+static std::string problemsWith(const std::string& file, const std::string& part) {
+    double end = monoNow() + 3.0;
+    std::string text;
+    while (monoNow() < end) {
+        if (fs::kindOf(file) != fs::kNone) text = testutil::readFile(file);
+        if (has(text, part)) break;
+        pause(10);
+    }
+    return text;
+}
+
+static void testRepoint() {
+    {   // a dial answered 5, 14 or another failure: exactly one re-point, with the four values, sent before anything
+        // else of the agent's (in the trace, the item right after the answer is given); answered 5 at once, which is
+        // as expected, said, and counted. The line that doubts the car's record says it went
+        uint32_t errors[] = {5, 14, 6};
+        for (size_t i = 0; i < 3; ++i) {
+            Dialler d("repoint-sent");
+            d.gap.answersConnect = false;
+            d.start();
+            d.dial();
+            CHECK_IN(d.trace.text(), sawWithin(d.trace, "gap connect BtCtrl nbtapp 00:11:22:33:44:55 NBTApp", 2000));
+            d.trace.add("test: the dial is answered");
+            d.gap.connectReply(kDialled, "NBTApp", errors[i]);
+            int at = d.trace.at("test: the dial is answered");
+            CHECK_IN(d.trace.text(), at >= 0 && d.trace.at(kRepointItem) == at + 1);
+            std::string answer = gapErrorText(errors[i], "");
+            CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: the re-point request after the dial's answer " + answer +
+                                                            " was answered 5 DEFAULT in ", 2000));
+            CHECK(d.trace.logged("as expected: a link end that the car books against the agent's instance does not count "
+                                 "against the phone's connected services"));
+            CHECK(d.trace.logged("the agent has sent the car one re-point request"));
+            CHECK(!d.trace.logged("Nothing is sent to mend it"));
+            pause(300);
+            std::vector<FakeGap::Connect> c = d.gap.connects();
+            CHECK_IN(d.trace.text(), c.size() == 2 && !isRepoint(c[0]) && isRepoint(c[1]));
+            CHECK(d.trace.count("gap repoint") == 1);
+            SerialStatus st = d.listener->serialStatus();
+            CHECK(st.repoints == 1 && st.repointsExpected == 1 && st.repointsUnexpected == 0 && st.repointsNotSent == 0);
+            CHECK(!st.repointStopped && st.recordDoubtful);
+            // Never the phone's address, nor the re-point's.
+            CHECK(!d.trace.logged("00:11:22") && !d.trace.logged("001122") && !d.trace.logged("02:00:00") &&
+                  !d.trace.logged("020000") && !d.trace.logged("DD:DD"));
+        }
+    }
+    {   // none after 0, 2, 10 or a rejection
+        struct Row {
+            uint32_t error;
+            bool rejected;
+        } rows[] = {{0, false}, {2, false}, {10, false}, {0, true}};
+        for (size_t i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+            Dialler d("repoint-none");
+            Node node(d.dir + "/nbtapp");
+            d.gap.dialNode = &node;
+            d.gap.connectError = rows[i].error;
+            d.gap.rejectsConnect = rows[i].rejected;
+            d.gap.answersDisconnect = true;
+            d.start();
+            d.dial();
+            CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (asked for): the car's dial answered ", 2000));
+            pause(300);
+            CHECK_IN(d.trace.text(), d.trace.count("gap repoint") == 0 && d.gap.connects().size() == 1);
+            CHECK(d.listener->serialStatus().repoints == 0 && !d.trace.logged("re-point"));
+            node.hangUp();
+        }
+    }
+    {   // a dial with no answer is given up; the car's answer that comes after all brings the re-point: the car wrote
+        // its entry all the same
+        Dialler d("repoint-late");
+        d.gap.answersConnect = false;
+        d.gap.answersDisconnect = true;
+        d.gap.disconnectError = 10;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: no answer to the car's dial in 1 s", 3000));
+        CHECK(d.trace.logged("should the car answer the dial after all, one re-point request is sent then"));
+        CHECK(d.trace.count("gap repoint") == 0);
+        d.trace.add("test: the dial is answered late");
+        d.gap.connectReply(kDialled, "NBTApp", 5);
+        int at = d.trace.at("test: the dial is answered late");
+        CHECK_IN(d.trace.text(), d.trace.at(kRepointItem) == at + 1);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: the re-point request after the dial's answer 5 DEFAULT was "
+                                                    "answered 5 DEFAULT in ", 2000));
+        CHECK(d.listener->serialStatus().repointsExpected == 1);
+    }
+    {   // while it waits for its answer, nothing that could bring a ServiceConnect starts: a forced dial asks only once
+        // the answer has come
+        Dialler d("repoint-waits");
+        d.config.dial.repointSlowMs = 2000;
+        d.config.dial.repointLimitMs = 4000;
+        d.gap.answersRepoint = false;
+        d.gap.connectError = 5;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, kRepointItem, 2000));
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (asked for): the car's dial answered 5 DEFAULT", 2000));
+        d.dial();
+        pause(600);
+        CHECK_IN(d.trace.text(), d.trace.count("gap query") == 1 && d.trace.count("gap connect") == 1);
+        d.gap.answersRepoint = true;   // the next dial's, at once
+        d.gap.connectReply(kRepointAddress, kRepointService, 5);
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap query", 2, 2000));
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap connect BtCtrl nbtapp 00:11", 2, 2000));
+        CHECK(d.listener->serialStatus().repointsExpected >= 1 && !d.listener->serialStatus().repointStopped);
+    }
+    {   // another client's ServiceConnect reply while the re-point waits is left alone, and is not its answer
+        Dialler d("repoint-others");
+        d.gap.answersRepoint = false;
+        d.gap.connectError = 5;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, kRepointItem, 2000));
+        d.gap.connectReply("66:77:88:99:AA:BB", "Other_Service", 0);
+        d.gap.connectReply(kRepointAddress, "Other_Service", 0);
+        d.gap.connectReply("66:77:88:99:AA:BB", kRepointService, 7);
+        pause(50);
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(st.repointsExpected == 0 && st.repointsUnexpected == 0 && !st.repointStopped);
+        CHECK(d.trace.loggedCount("a ServiceConnect reply for another client came") == 3);
+        d.gap.connectReply(kRepointAddress, kRepointService, 5);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "was answered 5 DEFAULT in ", 2000));
+        st = d.listener->serialStatus();
+        CHECK(st.repoints == 1 && st.repointsExpected == 1 && st.repointsUnexpected == 0 && !st.repointStopped);
+    }
+    {   // the guard: an answer other than 5, a 5 that is slow, none in the limit, and 0. Each stops the re-points for
+        // the rest of the run, said once in the log and once in the problem file; dials go on afterwards, with no
+        // re-point
+        enum { kOther, kSlow, kNone, kZero, kRejected };
+        for (int kind = kOther; kind <= kRejected; ++kind) {
+            std::string file = gWork + "/repoint-guard/serial-problems.log";
+            ProblemLog problems(file, "1.0.0 (build test)");
+            Dialler d("repoint-guard");
+            d.problems = &problems;
+            d.config.dial.repointSlowMs = 150;
+            d.config.dial.repointLimitMs = 600;
+            d.gap.connectError = 5;
+            d.gap.answersDisconnect = true;
+            d.gap.disconnectError = 10;
+            d.gap.answersRepoint = kind == kOther || kind == kZero;
+            d.gap.repointError = kind == kZero ? 0 : 7;
+            d.gap.rejectsRepoint = kind == kRejected;
+            d.start();
+            d.dial();
+            CHECK_IN(d.trace.text(), sawWithin(d.trace, kRepointItem, 2000));
+            if (kind == kSlow) {
+                pause(300);
+                d.gap.connectReply(kRepointAddress, kRepointService, 5);
+            }
+            CHECK_IN(d.trace.text(), statusWithin(*d.listener, Stopped(), 3000));
+            CHECK_IN(d.trace.text(), sawWithin(d.trace, "where 5 within 150 ms is expected of the car: no more re-point "
+                                                        "requests are sent in this run of the agent", 2000));
+            const char* came[] = {"was answered 7 RFCOMM in ", "was answered 5 DEFAULT in ", "had no answer in 600 ms",
+                                  "was answered 0 OK in ", "was rejected, or its reply could not be read, in "};
+            CHECK_IN(d.trace.text(), d.trace.logged(std::string("phone 1: the re-point request after the dial's answer 5 "
+                                                                "DEFAULT ") + came[kind]));
+            if (kind == kNone) CHECK(d.trace.logged("had no answer in 600 ms, and is given up, where 5 within"));
+            std::string part = std::string("phone 1: the re-point after a failed dial ") + came[kind];
+            std::string text = problemsWith(file, part);
+            CHECK_IN(text, has(text, part) && has(text, "not 5 within 150 ms: no more are sent in this run\n"));
+            // Answered 0: the one ServiceDisconnect for what the car says it connected; never otherwise.
+            if (kind == kZero) {
+                CHECK_IN(d.trace.text(), sawWithin(d.trace, "gap disconnect", 2000));
+                CHECK(d.trace.logged("The car says it has a link for the request, so it is asked to end that link"));
+                CHECK(d.gap.disconnect == buildServiceDisconnect("BtCtrl", "nbtapp", kRepointAddress, kRepointService));
+                CHECK_IN(d.trace.text(), sawWithin(d.trace, "ServiceDisconnect reply: 10 ", 2000));
+            }
+            // Dials go on, with no re-point: a second answered 5, and a third.
+            for (unsigned n = 2; n <= 3; ++n) {
+                std::string why;
+                CHECK_IN(why, d.listener->dialNow(&why) == 1);
+                CHECK_IN(d.trace.text(), countWithin(d.trace, "gap connect BtCtrl nbtapp 00:11", n, 2000));
+                pause(100);
+            }
+            pause(200);
+            CHECK_IN(d.trace.text(), d.trace.count("gap repoint") == 1);
+            CHECK(d.trace.count("gap disconnect") == (kind == kZero ? 1u : 0u));
+            CHECK(d.trace.loggedCount("no more re-point requests are sent") == 1);
+            SerialStatus st = d.listener->serialStatus();
+            CHECK(st.repointStopped && st.repoints == 1 && st.repointsUnexpected == 1 && st.repointsExpected == 0);
+            CHECK(st.dials == 3);
+            text = testutil::readFile(file);
+            size_t first = text.find("the re-point after a failed dial");
+            CHECK_IN(text, first != std::string::npos &&
+                               text.find("the re-point after a failed dial", first + 1) == std::string::npos);
+            CHECK(!d.trace.logged("02:00:00") && !d.trace.logged("DD:DD") && !d.trace.logged("00:11:22"));
+        }
+    }
+    {   // the guard holds when the listener is set up again, after the car's Bluetooth service went and came back
+        Dialler d("repoint-guard-holds");
+        d.config.retryMs = 500;
+        d.config.registerMs = 400;
+        d.gap.connectError = 5;
+        d.gap.repointError = 7;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), statusWithin(*d.listener, Stopped(), 3000));
+        d.gap.detach();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "Bluetooth serial is off, and is set up again in", 3000));
+        d.gap.attach();
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "log: the serial service 'NBTApp' is registered", 2, 4000));
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "the car's device list: phone 1 is connected", 2000));
+        std::string why;
+        double end = monoNow() + 3.0;
+        while (d.listener->dialNow(&why) == 0 && monoNow() < end) pause(20);
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap connect BtCtrl nbtapp 00:11", 2, 3000));
+        pause(300);
+        CHECK(d.trace.count("gap repoint") == 1 && d.listener->serialStatus().repointStopped);
+    }
+    {   // a re-point that cannot be sent is counted and said, and stops nothing
+        Dialler d("repoint-not-sent");
+        d.gap.connectError = 5;
+        d.gap.takesRepoint = false;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: the re-point request after the dial's answer 5 DEFAULT could "
+                                                    "not be sent (the car's Bluetooth service did not take the request)",
+                                           2000));
+        CHECK(d.trace.logged("the re-point request, which keeps the end of such a link that the car books against the "
+                             "agent's instance from counting against the phone's connected services, could not be sent"));
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(st.repoints == 0 && st.repointsNotSent == 1 && st.repointsUnexpected == 0 && !st.repointStopped);
+        // The next goes, and the same outcome again is only counted.
+        d.gap.takesRepoint = true;
+        std::string why;
+        CHECK_IN(why, d.listener->dialNow(&why) == 1);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "was answered 5 DEFAULT in ", 2000));
+        st = d.listener->serialStatus();
+        CHECK(st.repoints == 1 && st.repointsExpected == 1 && st.repointsNotSent == 1);
+    }
+    {   // the same answer as expected again, for the same phone: counted, and the next line that differs says how many
+        Dialler d("repoint-repeats");
+        d.gap.connectError = 5;
+        d.start();
+        std::string why;
+        for (unsigned n = 1; n <= 3; ++n) {
+            CHECK_IN(why, d.listener->dialNow(&why) == 1);
+            CHECK_IN(d.trace.text(), countWithin(d.trace, "gap repoint", n, 2000));
+            pause(250);
+        }
+        CHECK_IN(d.trace.text(), d.trace.loggedCount("the re-point request after") == 1);
+        d.gap.takesRepoint = false;
+        CHECK_IN(why, d.listener->dialNow(&why) == 1);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "could not be sent (the car's Bluetooth service did not take the "
+                                                    "request) (answered as expected came 2 more times before this)", 2000));
+        CHECK(d.listener->serialStatus().repointsExpected == 3);
+    }
+    {   // the listener stops while a re-point waits: stop() does not wait for its time, and it is given up unjudged
+        Dialler d("repoint-stop");
+        d.config.dial.repointLimitMs = 10000;
+        d.gap.answersRepoint = false;
+        d.gap.connectError = 5;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, kRepointItem, 2000));
+        double at = monoNow();
+        d.listener->stop();
+        CHECK_IN(d.trace.text(), monoNow() - at < 2.0);
+        CHECK_IN(d.trace.text(), d.trace.logged("phone 1: the re-point request after the dial's answer 5 DEFAULT had no "
+                                                "answer when Bluetooth serial stops: it is given up, and not judged"));
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(!st.repointStopped && st.repoints == 1 && st.repointsUnexpected == 0);
+    }
+}
 
 static unsigned registersIn(Trace& trace) { return trace.exactly("register"); }
 
@@ -4696,6 +5028,10 @@ static void testDialOptions() {
                            has(line, "a phone whose dial the car answered with another failure or did not answer") &&
                            has(line, "After 3 dials of a phone in a row that gave the agent no link") &&
                            !has(line, "three in a row"));
+        // The re-point's times; never its address.
+        CHECK_IN(line, has(line, "one re-point request goes on the same instance") &&
+                           has(line, "its answer is waited for 3000 ms, with no ask or dial meanwhile") &&
+                           has(line, "an answer other than 5 within 500 ms stops these requests") && !has(line, "02:00"));
         CHECK(parseDialPoll("5,60,20", &c));
         CHECK(has(describeDial(c), "polls every 5 s for 60 s after"));
         c.on = false;
@@ -4885,6 +5221,7 @@ int main(int argc, char** argv) {
     testPresence();
     testDial();
     testDialAsk();
+    testRepoint();
     testRefusal();
     testAgent();
     testAgentDials();

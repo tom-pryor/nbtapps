@@ -669,7 +669,8 @@ SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, c
       rules_(config.dial), dialPhase_(kDialNone), dialReader_(0), dialOpenedAt_(0), dialLink_(0), discAt_(0),
       discAnswered_(false), discError_(0), staleAtStart_(false), cleanupKind_(kCleanOwn), leftFailing_(false),
       leftTimes_(0), cleanupQuiet_(false), leftPhase_(kLeftNone), leftAt_(0), leftTried_(false), pairingOpen_(false),
-      checkedAtShared_(0), lastLinks_(0), problems_(0), restoredSeen_(0), problemsSaid_(false) {
+      checkedAtShared_(0), lastLinks_(0), problems_(0), restoredSeen_(0), problemsSaid_(false), repointNumber_(0),
+      repointDialError_(0), repointStopped_(false), repointDisconnect_(false) {
     for (int i = 0; i < NodeTracker::kNodes; ++i) {
         watched_[i] = false;
         appeared_[i] = 0;
@@ -1051,8 +1052,83 @@ void SerialListener::pairingWindow(bool open) {
 }
 
 void SerialListener::sppConnectReply(const ServiceConnectReply& reply) {
+    int64_t at = (int64_t)(monoNow() * 1000.0);
+    // The re-point first, before the answer is queued or anything is said: it helps only if it reaches the car before
+    // the next phone-opened link ends.
+    RepointWent repoint = repointAfter(reply);
+    if (reply.service == kRepointService && addressKey(reply.address) == addressKey(kRepointAddress)) {
+        repointAnswered(reply, at);
+        return;
+    }
     pthread_mutex_lock(&mu_);
-    connectReplies_.push_back(std::make_pair(reply, (int64_t)(monoNow() * 1000.0)));
+    connectReplies_.push_back(ConnectAnswer(reply, at, repoint));
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+}
+
+// The answer is the car's to a dial of the agent's: SppService tells only the answer to its own ServiceConnect, and
+// every one of the agent's that names the agent's service is a dial, given up for no answer or not. A failure that
+// leaves the car's record doubtful brings the re-point, unless the re-points have stopped. The listener's lock is let
+// go before the request is sent: a client may answer it within the send, on this thread.
+SerialListener::RepointWent SerialListener::repointAfter(const ServiceConnectReply& reply) {
+    if (!config_.dial.on || reply.service != config_.name || !DialRules::doubtingAnswer(reply.error)) return kRepointNone;
+    int64_t now = (int64_t)(monoNow() * 1000.0);
+    pthread_mutex_lock(&mu_);
+    bool stopped = repointStopped_;
+    // One ServiceConnect of the agent's at a time, and this answer has just ended the one that was out: none is out.
+    bool out = rules_.repointOut();
+    if (!stopped && !out) {
+        rules_.repointSent(now);
+        repointNumber_ = rules_.number(reply.address);
+        repointDialError_ = reply.error;
+        ++counts_.repoints;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (stopped) return kRepointStopped;
+    if (out) return kRepointNone;
+    if (spp_.connectService(kDialDevice, kDialInstance, kRepointAddress, kRepointService)) return kRepointWent;
+    // Not sent at all: that is nothing the car did, so it is only counted.
+    RepointOutcome o;
+    o.end = kRepointUnsent;
+    o.dialError = reply.error;
+    o.why = spp_.attached() ? "the car's Bluetooth service did not take the request"
+                            : "the car's Bluetooth service is not attached";
+    pthread_mutex_lock(&mu_);
+    rules_.repointDone();
+    o.number = repointNumber_;
+    --counts_.repoints;
+    ++counts_.repointsNotSent;
+    repointEnds_.push_back(o);
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+    return kRepointNotSent;
+}
+
+// What is expected of the car is 5 within repointSlowMs; anything else stops the re-points for the rest of the run.
+// An answer that comes when none is out is one to a re-point that was given up, and passed over.
+void SerialListener::repointAnswered(const ServiceConnectReply& reply, int64_t at) {
+    pthread_mutex_lock(&mu_);
+    if (!rules_.repointOut()) {
+        pthread_mutex_unlock(&mu_);
+        return;
+    }
+    RepointOutcome o;
+    o.error = reply.error;
+    o.ms = at - rules_.repointAt();
+    o.number = repointNumber_;
+    o.dialError = repointDialError_;
+    if (reply.error == kNoError) o.end = kRepointNoCode;
+    else if (reply.error != 5) o.end = kRepointOther;
+    else if (o.ms >= (int64_t)config_.dial.repointSlowMs) o.end = kRepointSlow;
+    else o.end = kRepointExpected;
+    rules_.repointDone();
+    if (o.end == kRepointExpected) {
+        ++counts_.repointsExpected;
+    } else {
+        ++counts_.repointsUnexpected;
+        repointStopped_ = true;
+    }
+    repointEnds_.push_back(o);
     pthread_cond_signal(&wake_);
     pthread_mutex_unlock(&mu_);
 }
@@ -1146,7 +1222,7 @@ void SerialListener::waitForPass() {
     bool hot = now < hotUntil_;
     // What the Bluetooth service's thread has said for the dial, while the listener's own thread was asking it.
     bool told = !connectReplies_.empty() || !listReplies_.empty() || !disconnectReplies_.empty() || !dialEnds_.empty() ||
-                !pairingInforms_.empty();
+                !pairingInforms_.empty() || !repointEnds_.empty();
     if (!hot && !stop_ && !told) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -2146,6 +2222,7 @@ SerialStatus SerialListener::serialStatus() {
     s.phonesEligible = config_.dial.on ? rules_.eligibleCount(facts) : 0;
     s.dialState = dialStateName(rules_.state());
     s.recordDoubtful = rules_.recordDoubtful();
+    s.repointStopped = repointStopped_;
     s.refusals = refused_;
     pthread_mutex_unlock(&mu_);
     s.dialOn = config_.dial.on;
@@ -2255,13 +2332,15 @@ void SerialListener::tendAsk(const std::vector<std::pair<ServiceList, int64_t> >
     DialRules::Facts facts = dialFacts();
     if (dialPhase_ == kDialAsk) {
         pthread_mutex_lock(&mu_);
+        bool repoint = rules_.repointWaits(now);
         bool still = rules_.keepAsking(facts, now);
         pthread_mutex_unlock(&mu_);
         if (!still) {
             dialPhase_ = kDialNone;
             askEnded(facts.linkOfOurs ? "a link of the agent's is up or being decided on"
-                                      : (facts.requestPending ? "a phone has asked the car for a link"
-                                                              : "the serial service is not registered"));
+                     : repoint ? "a re-point request waits for the car's answer, and no dial may follow the ask meanwhile"
+                     : facts.requestPending ? "a phone has asked the car for a link"
+                                            : "the serial service is not registered");
         }
     }
     for (size_t i = 0; i < lists.size(); ++i) {
@@ -2407,8 +2486,10 @@ void SerialListener::sendDial(int64_t now) {
 }
 
 // A dial that failed although the phone's service list named the agent's service: the car's record of phone-opened
-// links may be wrong from here on. Said once, when that becomes so; nothing is sent to mend it (dial_rules.hpp).
-void SerialListener::doubtNow(bool before, const std::string& answer) {
+// links may be wrong from here on. Said once, when that becomes so, with what became of the re-point, which keeps a
+// link end that the car books against the agent's instance from counting against the phone's connected services and
+// leaves the record as it is (dial_rules.hpp).
+void SerialListener::doubtNow(bool before, const std::string& answer, RepointWent repoint) {
     pthread_mutex_lock(&mu_);
     bool now = rules_.recordDoubtful();
     pthread_mutex_unlock(&mu_);
@@ -2418,10 +2499,23 @@ void SerialListener::doubtNow(bool before, const std::string& answer) {
             dial_.number);
         return;
     }
+    const char* sent =
+        repoint == kRepointWent
+            ? "That record may stay wrong; the agent has sent the car one re-point request, so that the end of such a "
+              "link that the car books against the agent's instance is not counted against the phone's connected "
+              "services"
+        : repoint == kRepointNotSent
+            ? "That record may stay wrong; the re-point request, which keeps the end of such a link that the car books "
+              "against the agent's instance from counting against the phone's connected services, could not be sent"
+        : repoint == kRepointStopped
+            ? "That record may stay wrong, and no re-point request is sent for it: they have stopped in this run"
+            : "That record may stay wrong; should the car answer the dial after all, one re-point request is sent then, "
+              "so that the end of such a link that the car books against the agent's instance is not counted against "
+              "the phone's connected services";
     say("phone %u: the car's dial came to %s although the phone's service list named the agent's service. Such a dial "
         "may leave the car's record of phone-opened serial links wrong, and the car may then refuse such links, another "
-        "program's too, after one of them ends. Nothing is sent to mend it; serial.status says so until a dial is "
-        "answered 0, the car says that such a link ended, or its Bluetooth service goes", dial_.number, answer.c_str());
+        "program's too, after one of them ends. %s; serial.status says the record is doubted until a dial is answered "
+        "0, the car says that such a link ended, or its Bluetooth service goes", dial_.number, answer.c_str(), sent);
     char text[200];
     snprintf(text, sizeof text, "phone %u: the car's dial came to %s after the phone listed the agent's service: the "
              "car's record of phone-opened links may be wrong", dial_.number, answer.c_str());
@@ -2463,8 +2557,8 @@ std::vector<std::string> SerialListener::takeUndialled() {
     return taken;
 }
 
-// The car's answer to the dial.
-void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now) {
+// The car's answer to the dial. A re-point it brought has gone already (sppConnectReply()).
+void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now, RepointWent repoint) {
     pthread_mutex_lock(&mu_);
     bool doubted = rules_.recordDoubtful();
     DialRules::Reply r = rules_.reply(reply.address, reply.service, config_.name, reply.error, now);
@@ -2534,7 +2628,7 @@ void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now)
         snprintf(text, sizeof text, "phone %u: the car's dial answered %s", dial_.number, answer.c_str());
         problem(std::string("dial-") + (reply.error == kNoError ? "rejected" : gapErrorName(reply.error)), text);
     }
-    doubtNow(doubted, answer);
+    doubtNow(doubted, answer, repoint);
     if (r == DialRules::kNotListening || r == DialRules::kUnreachable || r == DialRules::kFailed) dialFailed();
     switch (r) {
     case DialRules::kOpenNode:
@@ -2951,7 +3045,7 @@ void SerialListener::tendDial() {
         pthread_mutex_unlock(&mu_);
         lastLinks_ = links;
     }
-    std::vector<std::pair<ServiceConnectReply, int64_t> > answers;
+    std::vector<ConnectAnswer> answers;
     std::vector<std::pair<ServiceList, int64_t> > lists;
     std::vector<ServiceDisconnectReply> disconnects;
     std::vector<ServiceDisconnected> ends;
@@ -2977,6 +3071,8 @@ void SerialListener::tendDial() {
         discError_ = disconnects[i].error;
     }
     for (size_t i = 0; i < ends.size(); ++i) {
+        // An end that names the re-point's address is of what a re-point answered 0 left, never of a dialled link.
+        if (addressKey(ends[i].address) == addressKey(kRepointAddress)) continue;
         // The car says that the link on the dialled instance has ended: its node is closed now.
         if (dialLink_ != 0) dialLink_->close(ends[i].reason == 1 ? "the phone ended the link" : "the car ended the link");
     }
@@ -3015,7 +3111,8 @@ void SerialListener::tendDial() {
     tendAsk(lists, now);
     switch (dialPhase_) {
     case kDialWait:
-        for (size_t i = 0; i < answers.size() && dialPhase_ == kDialWait; ++i) dialAnswered(answers[i].first, answers[i].second);
+        for (size_t i = 0; i < answers.size() && dialPhase_ == kDialWait; ++i)
+            dialAnswered(answers[i].reply, answers[i].at, answers[i].repoint);
         if (dialPhase_ == kDialWait) {
             pthread_mutex_lock(&mu_);
             bool overdue = rules_.overdue(now);
@@ -3035,7 +3132,7 @@ void SerialListener::tendDial() {
                 snprintf(text, sizeof text, "phone %u: no answer to the car's dial in %u s", dial_.number,
                          config_.dial.replyLimitMs / 1000);
                 problem("dial-no-answer", text);
-                doubtNow(doubted, "no answer");
+                doubtNow(doubted, "no answer", kRepointNone);
                 dialFailed();
                 startCleanup(std::vector<std::string>(1, dial_.address), "the dial had no answer");
                 // One ServiceDisconnect, whether or not the node is there.
@@ -3061,13 +3158,134 @@ void SerialListener::tendDial() {
     default:
         break;
     }
+    // After the dial's own lines, and before the next ask: a re-point given up in time lets that go.
+    tendRepoint(now);
     if (dialPhase_ == kDialNone) maybeDial(now);
 }
 
+void SerialListener::tendRepoint(int64_t now) {
+    bool giveUp = false;
+    std::vector<RepointOutcome> ends;
+    pthread_mutex_lock(&mu_);
+    if (rules_.repointOverdue(now)) {
+        // No answer in its time: not what is expected of the car. Done here, under the lock, so that an answer that
+        // comes meanwhile on the Bluetooth service's thread finds none out and is passed over.
+        RepointOutcome o;
+        o.end = kRepointNoAnswer;
+        o.ms = now - rules_.repointAt();
+        o.number = repointNumber_;
+        o.dialError = repointDialError_;
+        rules_.repointDone();
+        ++counts_.repointsUnexpected;
+        repointStopped_ = true;
+        repointEnds_.push_back(o);
+        giveUp = true;
+    }
+    ends.swap(repointEnds_);
+    pthread_mutex_unlock(&mu_);
+    // So that the next ServiceConnect may go: a late answer is then another client's (SppService::giveUpConnect()).
+    if (giveUp) spp_.giveUpConnect(kRepointAddress, kRepointService);
+    for (size_t i = 0; i < ends.size(); ++i) {
+        const RepointOutcome& o = ends[i];
+        std::string dial = o.dialError == kNoError ? std::string("no error code") : gapErrorText(o.dialError, "");
+        char line[600];
+        if (o.end == kRepointExpected || o.end == kRepointUnsent) {
+            // As the dial's lines: the same outcome for the same phone again is only counted, and the next line that
+            // differs says how many came.
+            std::string outcome = o.end == kRepointExpected ? "answered as expected" : "not sent";
+            Repeat& last = repointRepeats_[o.number];
+            if (last.answer == outcome) {
+                ++last.times;
+                continue;
+            }
+            char before[160] = "";
+            if (last.times > 0)
+                snprintf(before, sizeof before, " (%s came %u more time%s before this)", last.answer.c_str(), last.times,
+                         last.times == 1 ? "" : "s");
+            last.answer = outcome;
+            last.times = 0;
+            if (o.end == kRepointExpected)
+                snprintf(line, sizeof line, "phone %u: the re-point request after the dial's answer %s was answered 5 "
+                         "DEFAULT in %lld ms, as expected: a link end that the car books against the agent's instance "
+                         "does not count against the phone's connected services%s. The same outcome again is only counted",
+                         o.number, dial.c_str(), (long long)o.ms, before);
+            else
+                snprintf(line, sizeof line, "phone %u: the re-point request after the dial's answer %s could not be sent "
+                         "(%s)%s. The same outcome again is only counted", o.number, dial.c_str(), o.why.c_str(), before);
+            say("%s", line);
+            continue;
+        }
+        if (o.end == kRepointDropped) {
+            say("phone %u: the re-point request after the dial's answer %s had no answer when %s: it is given up, and "
+                "not judged", o.number, dial.c_str(), o.why.c_str());
+            continue;
+        }
+        // Not what is expected of the car: said once, as the re-points stop here, and in the problem file.
+        char came[200];
+        if (o.end == kRepointNoAnswer)
+            snprintf(came, sizeof came, "had no answer in %u ms", config_.dial.repointLimitMs);
+        else if (o.end == kRepointNoCode)
+            snprintf(came, sizeof came, "was rejected, or its reply could not be read, in %lld ms", (long long)o.ms);
+        else
+            snprintf(came, sizeof came, "was answered %s in %lld ms", gapErrorText(o.error, "").c_str(), (long long)o.ms);
+        bool linked = o.end == kRepointOther && o.error == 0;
+        say("phone %u: the re-point request after the dial's answer %s %s%s, where 5 within %u ms is expected of the "
+            "car: no more re-point requests are sent in this run of the agent%s", o.number, dial.c_str(), came,
+            o.end == kRepointNoAnswer ? ", and is given up" : "", config_.dial.repointSlowMs,
+            linked ? ". The car says it has a link for the request, so it is asked to end that link" : "");
+        // The problem file's lines are short.
+        snprintf(line, sizeof line, "phone %u: the re-point after a failed dial %s, not 5 within %u ms: no more are sent "
+                 "in this run", o.number, came, config_.dial.repointSlowMs);
+        problem("repoint-unexpected", line);
+        if (linked) repointDisconnect_ = true;
+    }
+    // The ServiceDisconnect a re-point answered 0 owes: once none of another's waits. Its answer names an address no
+    // phone has, so the dial's own ServiceDisconnects never take it for theirs (discAddress_).
+    if (repointDisconnect_ &&
+        (!spp_.attached() || spp_.disconnectService(kDialDevice, kDialInstance, kRepointAddress, kRepointService)))
+        repointDisconnect_ = false;
+}
+
+void SerialListener::endRepoint(const char* why) {
+    if (!config_.dial.on) return;
+    tendRepoint(msOf(monoNow()));
+    // A short wait for an answer that is due: the car's comes within some tens of milliseconds.
+    double end = monoNow() + config_.dial.repointSlowMs / 1000.0;
+    for (;;) {
+        pthread_mutex_lock(&mu_);
+        bool out = rules_.repointOut();
+        pthread_mutex_unlock(&mu_);
+        if (!out || monoNow() >= end) break;
+        usleep(10000);
+    }
+    pthread_mutex_lock(&mu_);
+    bool out = rules_.repointOut();
+    if (out) {
+        RepointOutcome o;
+        o.end = kRepointDropped;
+        o.number = repointNumber_;
+        o.dialError = repointDialError_;
+        o.why = why;
+        rules_.repointDone();
+        repointEnds_.push_back(o);
+    }
+    pthread_mutex_unlock(&mu_);
+    if (out) spp_.giveUpConnect(kRepointAddress, kRepointService);
+    tendRepoint(msOf(monoNow()));
+    // A ServiceDisconnect that is owed and could not go yet: one more try, and then it is not owed any more.
+    repointDisconnect_ = false;
+}
+
 // Ends what the dial has up, when the listener stops: a node being decided on is closed, and a link of the agent's
-// on the dialled instance is ended by the car, the answer waited for, and its node closed. On the thread that stops
-// the listener, once its own thread is gone.
+// on the dialled instance is ended by the car, the answer waited for, and its node closed; then a re-point that is out
+// (which a dial's answer in the meantime may have brought) has a moment for its answer, and is given up. On the
+// thread that stops the listener, once its own thread is gone.
 void SerialListener::endDial(const char* why) {
+    endDialSteps(why);
+    endRepoint(why);
+}
+
+void SerialListener::endDialSteps(const char* why) {
     if (!config_.dial.on || dialPhase_ == kDialNone) return;
     if (dialPhase_ == kDialAsk) {
         // An ask brings no link: it is dropped, and its answer passed over.
@@ -3081,12 +3299,12 @@ void SerialListener::endDial(const char* why) {
         // Never a ServiceDisconnect while the dial is out: its answer is waited for, a while.
         double end = monoNow() + config_.dial.disconnectWaitMs / 1000.0;
         while (dialPhase_ == kDialWait && monoNow() < end) {
-            std::vector<std::pair<ServiceConnectReply, int64_t> > answers;
+            std::vector<ConnectAnswer> answers;
             pthread_mutex_lock(&mu_);
             answers.swap(connectReplies_);
             pthread_mutex_unlock(&mu_);
             for (size_t i = 0; i < answers.size() && dialPhase_ == kDialWait; ++i)
-                dialAnswered(answers[i].first, answers[i].second);
+                dialAnswered(answers[i].reply, answers[i].at, answers[i].repoint);
             if (dialPhase_ == kDialWait) usleep(20000);
         }
         if (dialPhase_ == kDialWait) {

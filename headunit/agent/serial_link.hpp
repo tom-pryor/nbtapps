@@ -104,6 +104,14 @@
 // that node. A link that does not open with them is ended at once by the car (ServiceDisconnect), and the phone is
 // left alone by polls and its own requests for a while. The dialled link is a serial link like any other for the agent.
 //
+// The re-point (dial_rules.hpp) goes on the Bluetooth service's thread, in sppConnectReply(), the moment the car's
+// failed answer to a dial is seen, before that answer is queued for the listener's thread and before anything is
+// logged: SppService has cleared its "a ServiceConnect is out" state and let its lock go before it tells the answer,
+// and a request may be sent from inside an event of the client's (GapClient::request(); DsiClient sends from the
+// library's own thread). The listener's lock is not held while it is sent, since a client may answer within the send.
+// Its answer comes the same way and is judged there; the listener's thread says what it came to, and gives it up when
+// DialConfig::repointLimitMs have passed (SppService::giveUpConnect()).
+//
 // How a link of the agent's ends. The phone made the link, and the phone ends it:
 //
 //   * when the agent ends a link on purpose it tells the phone first, with the event link.closing (agent.hpp), and
@@ -679,11 +687,25 @@ private:
     void askSay(const std::string& answer, const std::string& text);
     void askEnded(const std::string& reason);
     void sendDial(int64_t now);
-    void doubtNow(bool before, const std::string& answer);
+    // What became of the re-point that a dial's answer may bring (dial_rules.hpp), for the line that says the car's
+    // record is doubted: none was due (no answer yet, or none of the car's), it went, it could not be sent, or the
+    // re-points have stopped in this run.
+    enum RepointWent { kRepointNone, kRepointWent, kRepointNotSent, kRepointStopped };
+    void doubtNow(bool before, const std::string& answer, RepointWent repoint);
     // After a dial of dial_'s phone that gave the agent no link: at kDialFailsToUnmark in a row, a phone that is
     // `dialled` is handed to the agent to give that up (takeUndialled()).
     void dialFailed();
-    void dialAnswered(const btspp::ServiceConnectReply& reply, int64_t now);
+    void dialAnswered(const btspp::ServiceConnectReply& reply, int64_t now, RepointWent repoint);
+    // The re-point, on the Bluetooth service's thread: sent if `reply` is a failed answer to a dial that brings one,
+    // and the re-points have not stopped; and its answer, judged as it comes (`at`).
+    RepointWent repointAfter(const btspp::ServiceConnectReply& reply);
+    void repointAnswered(const btspp::ServiceConnectReply& reply, int64_t at);
+    // On the listener's thread: a re-point with no answer in DialConfig::repointLimitMs is given up, what the
+    // re-points came to is said, and a ServiceDisconnect that one answered 0 owes is sent.
+    void tendRepoint(int64_t now);
+    // When the listener stops or gives up: a re-point that is out has DialConfig::repointSlowMs for its answer, and is
+    // then given up, not judged, so that a listener set up again finds none out.
+    void endRepoint(const char* why);
     void openDialled(int64_t now);
     void readMagic(int64_t now);
     void watchDialled(int64_t now);
@@ -705,6 +727,7 @@ private:
     bool startLeftForRegistration();
     LeftStep tendLeftForRegistration();
     void endDial(const char* why);
+    void endDialSteps(const char* why);
     // A problem for the problem file, from any thread.
     void problem(const std::string& kind, const std::string& text) {
         if (problems_ != 0) problems_->note(kind, text);
@@ -798,7 +821,15 @@ private:
     // registered, and forgotten while the car's Bluetooth service is gone), and what the Bluetooth service's thread
     // has said for the listener's thread to act on.
     DialRules rules_;
-    std::vector<std::pair<btspp::ServiceConnectReply, int64_t> > connectReplies_;   // with when each came
+    // The answers to the agent's ServiceConnects, with when each came and what became of the re-point it may have
+    // brought.
+    struct ConnectAnswer {
+        btspp::ServiceConnectReply reply;
+        int64_t at;
+        RepointWent repoint;
+        ConnectAnswer(const btspp::ServiceConnectReply& r, int64_t a, RepointWent w) : reply(r), at(a), repoint(w) {}
+    };
+    std::vector<ConnectAnswer> connectReplies_;
     std::vector<std::pair<btspp::ServiceList, int64_t> > listReplies_;              // the same
     std::vector<btspp::ServiceDisconnectReply> disconnectReplies_;
     std::vector<btspp::ServiceDisconnected> dialEnds_;
@@ -867,6 +898,36 @@ private:
     // The listener's thread: the phones, by addressKey(), whose mark the log has said is given up, until a dialled
     // link of theirs is the agent's again.
     std::set<std::string> undialSaid_;
+    // The re-point (dial_rules.hpp); whether one is out, and since when, is the rules'. mu_: the number of the phone
+    // whose dial's answer brought the one that is out or went last, and that answer; what each came to, for the
+    // listener's thread to say; and whether the re-points have stopped for the rest of this run, which nothing turns
+    // back, a re-attach and a new set-up of the listener included.
+    enum RepointEnd {
+        kRepointExpected,   // 5, within repointSlowMs
+        kRepointOther,      // another answer, 0 among them
+        kRepointNoCode,     // a rejection, or a reply that could not be read
+        kRepointSlow,       // 5, after repointSlowMs or more
+        kRepointNoAnswer,   // none in repointLimitMs: given up
+        kRepointUnsent,     // it could not be sent: not the car's doing, so only counted
+        kRepointDropped     // the listener stopped or gave up while it waited: given up, and not judged
+    };
+    struct RepointOutcome {
+        RepointEnd end;
+        uint32_t error;     // the car's answer to the re-point
+        int64_t ms;         // how long after it went
+        unsigned number;
+        uint32_t dialError; // the dial's answer that brought it
+        std::string why;    // kRepointUnsent, kRepointDropped: what kept it from going, or stopped the listener
+        RepointOutcome() : end(kRepointExpected), error(0), ms(0), number(0), dialError(0) {}
+    };
+    unsigned repointNumber_;
+    uint32_t repointDialError_;
+    std::vector<RepointOutcome> repointEnds_;
+    bool repointStopped_;
+    // The listener's thread: a re-point answered 0 owes one ServiceDisconnect for the address it named, sent at the
+    // first pass at which none of another's waits; and each phone's last re-point outcome, which the log only counts.
+    bool repointDisconnect_;
+    std::map<unsigned, Repeat> repointRepeats_;
 };
 
 }  // namespace nbt

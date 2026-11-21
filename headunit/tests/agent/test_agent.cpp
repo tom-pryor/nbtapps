@@ -3790,6 +3790,11 @@ public:
         status.asks = 5;
         status.asksNotListed = 2;
         status.recordDoubtful = true;
+        status.repoints = 3;
+        status.repointsExpected = 2;
+        status.repointsUnexpected = 1;
+        status.repointsNotSent = 1;
+        status.repointStopped = true;
         status.problemsCounted = 4;
     }
     virtual void pairingWindow(bool open) { said += open ? "open " : "closed "; }
@@ -3856,7 +3861,10 @@ static void testSerialDial() {
     CHECK(integer(st.result, "phonesPresent") == 2 && integer(st.result, "phonesEligible") == 1);
     CHECK(str(st.result, "dial") == "on" && str(st.result, "dialState") == "idle" && str(st.result, "lastResult") == "DEFAULT");
     CHECK(str(st.result, "link") == "none" && integer(st.result.find("counts"), "dials") == 3);
-    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 19);
+    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 23);
+    CHECK(integer(st.result.find("counts"), "repoints") == 3 && integer(st.result.find("counts"), "repointsExpected") == 2);
+    CHECK(integer(st.result.find("counts"), "repointsUnexpected") == 1 &&
+          integer(st.result.find("counts"), "repointsNotSent") == 1 && st.result.find("repointStopped").boolean());
     CHECK(integer(st.result.find("counts"), "leftUnread") == 2 && integer(st.result.find("counts"), "putBack") == 1);
     CHECK(integer(st.result.find("counts"), "asks") == 5 && integer(st.result.find("counts"), "asksNotListed") == 2);
     CHECK(integer(st.result.find("counts"), "asksListed") == 0 && integer(st.result.find("counts"), "asksNoAnswer") == 0);

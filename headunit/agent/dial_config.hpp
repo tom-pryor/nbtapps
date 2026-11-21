@@ -54,6 +54,9 @@ struct DialConfig {
                                  // is waited for, to end the link left behind before the service is registered again
     unsigned registerCleanupMs;  // and how long that clean-up may take in all, the device list included, before the
                                  // listener gives up as it does for any registration that is refused
+    unsigned repointLimitMs;     // the re-point after a dial the car answered with a failure (dial_rules.hpp): how long
+                                 // its answer is waited for, with no ask or dial meanwhile, before it is given up
+    unsigned repointSlowMs;      // and an answer 5 that takes this long or longer is not the one expected of the car
     std::string node;            // the dialled link's node, /dev/<instance>
 
     DialConfig()
@@ -61,7 +64,7 @@ struct DialConfig {
           askLimitMs(6000), settleMs(8000), signalAskMs(10000), pairingRoundMs(5000), replyLimitMs(95000),
           retryMs(15000), backOffMs(30000), backOffMostMs(300000), magicWaitMs(3000),
           disconnectWaitMs(3000), closeWaitMs(5000), overtakeMs(1000), listWaitMs(3000), registerCleanupMs(15000),
-          node("/dev/nbtapp") {}
+          repointLimitMs(3000), repointSlowMs(500), node("/dev/nbtapp") {}
 };
 
 // The value of `nbtagent --dial-poll`: three whole numbers of seconds with a comma between them, the poll's first
@@ -97,7 +100,7 @@ inline std::string describeDial(const DialConfig& c) {
     if (!c.on)
         return "the car does not dial phones (--dial off): only the links phones open are taken, on the car's one node "
                "for them";
-    char text[2400];
+    char text[3000];
     snprintf(text, sizeof text,
              "the car dials a phone of the agent's that is connected to it and paired with it, on its instance "
              "'nbtapp' (%s): polls every %u s for %u s after such a phone connects or a link of the agent's ends, then "
@@ -119,12 +122,15 @@ inline std::string describeDial(const DialConfig& c) {
              "request that the car ends while the agent's dial is out, or up to %u ms after it was answered, is not "
              "counted as a refusal. A registration refused while %s is there: the car's device list is waited for %u ms "
              "and the link ended for each phone there, %u s at most in all, and the service registered again at once if "
-             "it has gone",
+             "it has gone. As soon as the car answers a dial with a failure other than 10 or BUSY, one re-point request "
+             "goes on the same instance, so that a link end the car may book against that instance names no phone: its "
+             "answer is waited for %u ms, with no ask or dial meanwhile, and an answer other than 5 within %u ms stops "
+             "these requests for the rest of the run",
              c.node.c_str(), c.pollFirstMs / 1000, c.pollFirstForMs / 1000, c.pollLaterMs / 1000, c.signalWaitMs,
              c.pairingRoundMs / 1000, c.askLimitMs, c.settleMs, c.signalAskMs, c.magicWaitMs, c.replyLimitMs / 1000,
              c.retryMs / 1000, c.backOffMs / 1000,
              c.backOffMostMs / 1000, kDialFailsToUnmark, c.closeWaitMs, c.disconnectWaitMs, c.overtakeMs, c.node.c_str(), c.listWaitMs,
-             c.registerCleanupMs / 1000);
+             c.registerCleanupMs / 1000, c.repointLimitMs, c.repointSlowMs);
     return text;
 }
 

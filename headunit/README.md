@@ -196,8 +196,9 @@ format and the protocol.
   phones are connected to the car and how many of them the car may dial, whether the dial is on, where it is and
   what the last dial came to, which of the agent's serial links are up (`none`, `phone-opened`, `dialled` or
   `both`), whether a failed dial may have left the car's record of phone-opened links wrong (`recordDoubtful`),
+  whether the re-points after failed dials have stopped (`repointStopped`, see "The re-point" below),
   for a phone's link whether a link that phone opens itself is left to another program now (`phoneOpenedLeft`,
-  see "Other programs' links"; not there on the local socket), counts of the asks before the dials, of the dials, their answers and the registration checks, of the links
+  see "Other programs' links"; not there on the local socket), counts of the asks before the dials, of the dials, their answers, the re-points and the registration checks, of the links
   phones opened that the rule left to another program unread (`leftUnread`), of the links on which bytes the agent
   had read were put back for another program (`putBack`; both in "Other programs' links"), and how many
   problems were written to the problem file and how many only counted. The count `notListening` is of the dials
@@ -791,8 +792,22 @@ pairing key, and nothing on the link is trusted before that.
   list named the agent's service, may have left the car's record of phone-opened links wrong. The log says so once,
   the problem file gets a line, and `serial.status` says `"recordDoubtful": true` until a dial is answered 0, the
   car says that a phone-opened link (`ExtBox1`) ended, as it does when that record is right, or its Bluetooth service
-  goes. The agent sends nothing to mend it: a ServiceDisconnect for `ExtBox1` with no live link holds that instance
-  up for well over a minute.
+  goes. The agent sends nothing to make that record right: a ServiceDisconnect for `ExtBox1` with no live link holds
+  that instance up for well over a minute.
+- **The re-point.** When the car answers a dial with such a failure, its Bluetooth service keeps an entry for the
+  agent's instance `nbtapp` that still names the phone. The end of a later phone-opened link can then be booked
+  against that entry, and the car counts one connected service too few for the phone; when that count reaches zero,
+  the car closes the phone's media audio. So the moment the agent sees such an answer (also one that comes late, to a
+  dial it had given up), it sends one more ServiceConnect on `nbtapp`, with an address that belongs to no device and
+  a service the instance does not serve. The car answers it with 5 within some tens of milliseconds and sends nothing
+  over the air; on the way it writes that address into the agent's entry, so a link end booked against the entry
+  names an address the car has no record of, and the phone's count is left alone. The record stays doubted all the
+  same. While its answer is waited for, 3 seconds at most, no ask or dial starts. An answer other than 5, a 5 that
+  took half a second or more, or none in the 3 seconds is not what the car is expected to do: the log and the problem
+  file say so once, and no more re-points are sent until the agent is started again; after
+  an answer 0 the car is also asked to end what it may have connected for the request. `serial.status` counts them
+  (`repoints`, `repointsExpected`, `repointsUnexpected`, `repointsNotSent`) and says `"repointStopped": true` once
+  they have stopped.
 - **How it ends.** The phone ends it, or the car says it ended (ServiceDisconnected for `nbtapp`), and its node is
   closed at once. When the agent ends it, it says `link.closing` first as on any link, gives the phone 5 seconds to
   end it, and then has the car end it with ServiceDisconnect, waits up to 3 seconds for the answer, and closes the

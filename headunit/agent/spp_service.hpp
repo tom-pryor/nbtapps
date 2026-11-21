@@ -792,6 +792,14 @@ public:
     // thread.
     bool connectService(const std::string& device, const std::string& instance, const std::string& address,
                         const std::string& service);
+    // Gives up the ServiceConnect that waits for its answer, if it is the one connectService() was given `address`
+    // and `service` for, so that the next may go: nothing else ends one that is never answered but a rejection, a
+    // failed send or the server's going. True if it was given up; false, with nothing changed, if none waits or the
+    // one that waits names another phone or service. An answer to it that comes after all is then another client's:
+    // dropped unsaid while no ServiceConnect of ours waits, and counted and left, as any other client's, while one
+    // that names another phone or service waits; one that names the same is taken as that one's answer. Nothing is
+    // logged here: the caller says what it gives up. From any thread.
+    bool giveUpConnect(const std::string& address, const std::string& service);
     // ServiceListQuery: the car asks the phone at `address` (the colon form) for its services. False, with nothing
     // sent, if the server is not attached or did not take the request. Its answer, and any other reply of that id,
     // goes to sppServiceList(); one at a time is the caller's to keep to (dial_rules.hpp), since the car's answer

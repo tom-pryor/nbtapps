@@ -1087,7 +1087,71 @@ static void testDoubt() {
     CHECK(!r.recordDoubtful());
 }
 
+// The re-point: which answers bring it, the same rule as the doubt; while it waits nothing starts; its limit.
+static void testRepoint() {
+    {   // the rule: every answer but 0, 2 and 10, and never kNoError (a rejection, a reply not read, a failed send)
+        struct Row {
+            uint32_t error;
+            bool brings;
+        } rows[] = {
+            {0, false}, {2, false}, {10, false}, {kNoError, false},
+            {1, true}, {3, true}, {4, true}, {5, true}, {6, true}, {7, true}, {8, true}, {9, true}, {11, true},
+            {12, true}, {13, true}, {14, true}, {15, true}, {16, true}, {255, true},
+        };
+        for (size_t i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+            std::string what = "answer " + num(rows[i].error);
+            CHECK_IN(what, DialRules::doubtingAnswer(rows[i].error) == rows[i].brings);
+            // reply() goes by the same rule: the record is doubted after exactly these.
+            Quiet r;
+            present(r, 1000);
+            dialOne(r, 2000);
+            CHECK_IN(what, !r.recordDoubtful());
+            r.reply(kOne, kService, kService, rows[i].error, 2100);
+            CHECK_IN(what, r.recordDoubtful() == rows[i].brings);
+        }
+    }
+    {   // while it waits, no ask starts, forced or not, and the ask that is out is ended; its limit lets them go on
+        DialConfig c = config();
+        c.repointLimitMs = 3000;
+        DialRules r(c);
+        r.linkEnded(0);
+        present(r, 1000);
+        DialRules::Dial d = dialOne(r, 2000);
+        CHECK(r.reply(kOne, kService, kService, 5, 2100) == DialRules::kNotListening && r.recordDoubtful());
+        CHECK(!r.repointOut() && !r.repointWaits(2100) && !r.repointOverdue(2100));
+        r.repointSent(2100);
+        CHECK(r.repointOut() && r.repointAt() == 2100);
+        CHECK(r.repointWaits(2100) && r.repointWaits(5099) && !r.repointOverdue(5099));
+        CHECK(!r.repointWaits(5100) && r.repointOverdue(5100));
+        CHECK(r.force() == 1);
+        CHECK(!r.next(2200, facts(), &d) && !r.next(5099, facts(), &d) && r.state() == DialRules::kIdle);
+        // Its time over, the forced round goes on, given up or not.
+        CHECK(r.next(5100, facts(), &d) && r.state() == DialRules::kAsking && d.why == DialRules::kForced);
+        r.repointDone();
+        CHECK(!r.repointOut() && !r.repointOverdue(9000) && r.recordDoubtful());
+        // The next one, sent while that ask is out: it ends it, and its answer is passed over.
+        r.repointSent(5200);
+        CHECK(!r.keepAsking(facts(), 5200) && r.state() == DialRules::kIdle);
+        CHECK(r.listing(kOne, 0, true, facts(), 5300) == DialRules::kNotThisAsk && r.state() == DialRules::kIdle);
+        // Its answer: asks go on at once. The doubt stays as it was.
+        r.repointDone();
+        CHECK(r.force() == 1 && r.next(5400, facts(), &d) && r.state() == DialRules::kAsking);
+        CHECK(r.keepAsking(facts(), 5400));
+        CHECK(r.recordDoubtful());
+    }
+    {   // a poll waits for it too, and goes once it is done
+        DialRules r(plain());
+        present(r, 1000);
+        r.repointSent(1000);
+        DialRules::Dial d;
+        CHECK(!r.next(1000, facts(), &d));
+        r.repointDone();
+        CHECK(r.next(1000, facts(), &d) && d.why == DialRules::kPoll);
+    }
+}
+
 int main() {
+    testRepoint();
     testAnswers();
     testAsk();
     testSettle();

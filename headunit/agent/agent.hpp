@@ -169,9 +169,10 @@
 //
 //   { "listener": true, "registered": true, "checkedMsAgo": 12000, "stack": [ "...", ... ],
 //     "phonesPresent": 1, "phonesEligible": 1, "dial": "on", "dialState": "idle", "lastResult": "DEFAULT",
-//     "link": "none", "recordDoubtful": false, "phoneOpenedLeft": false, "counts": { "dials", "answeredOk", "notListening", "notInReach",
-//     "busy", "otherAnswers", "noAnswer", "notTheApp", "leftBehind", "asks", "asksListed", "asksNotListed",
-//     "asksNoAnswer", "askErrors", "checks", "checksRestored", "refusals", "leftUnread", "putBack" },
+//     "link": "none", "recordDoubtful": false, "repointStopped": false, "phoneOpenedLeft": false, "counts": { "dials",
+//     "answeredOk", "notListening", "notInReach", "busy", "otherAnswers", "noAnswer", "notTheApp", "leftBehind", "asks",
+//     "asksListed", "asksNotListed", "asksNoAnswer", "askErrors", "repoints", "repointsExpected", "repointsUnexpected",
+//     "repointsNotSent", "checks", "checksRestored", "refusals", "leftUnread", "putBack" },
 //     "problems": { "recorded", "counted" } }
 //
 // checkedMsAgo is absent before the service has first been registered. dial is on or off (nbtagent --dial);
@@ -180,7 +181,12 @@
 // rejected, no answer, not the app, or none; link is the agent's serial links that are up: none, phone-opened,
 // dialled or both. recordDoubtful is true from a dial that failed although the phone's service list named the
 // agent's service, which may leave the car's record of phone-opened serial links wrong, until a dial is answered
-// 0, the car says such a link ended, or its Bluetooth service goes (dial_rules.hpp). phoneOpenedLeft is for the
+// 0, the car says such a link ended, or its Bluetooth service goes (dial_rules.hpp). After such a failure the agent
+// sends the car one re-point request (dial_rules.hpp), which keeps the end of a phone-opened link that the car books
+// against the agent's instance from counting against the phone's connected services, and leaves the record as it is:
+// repoints counts those sent, repointsExpected the ones answered 5 in time, repointsUnexpected the ones that came to
+// anything else, and repointsNotSent the ones that could not be sent; repointStopped is true once one came to anything
+// else, after which none is sent for the rest of the agent's run. phoneOpenedLeft is for the
 // phone on the link it is asked on: true while a link that phone opens itself is left to another program, unread
 // (serial_link.hpp), so that its app waits for the car's link instead of opening one; false for a link that knows
 // no phone's address, as the bench's TCP, and absent on the local socket. notListening counts the dials

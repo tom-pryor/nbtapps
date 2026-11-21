@@ -451,6 +451,14 @@ bool SppService::connectService(const std::string& device, const std::string& in
     return false;
 }
 
+bool SppService::giveUpConnect(const std::string& address, const std::string& service) {
+    pthread_mutex_lock(&mu_);
+    bool ours = connectOut_ && connectService_ == service && addressKey(connectAddress_) == addressKey(address);
+    if (ours) connectOut_ = false;
+    pthread_mutex_unlock(&mu_);
+    return ours;
+}
+
 bool SppService::queryServices(const std::string& address) {
     if (!gap_->attached()) return false;
     pthread_mutex_lock(&mu_);

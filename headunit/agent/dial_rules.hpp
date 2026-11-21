@@ -67,10 +67,27 @@
 // leave the car's record of phone-opened serial links wrong: the car then refuses phone-opened links (another
 // program's among them) after one of them ends. A rejection of the request is not an answer of the car's. From such
 // a dial recordDoubtful() is true, until a dial is answered 0, the car says that a phone-opened link on its instance
-// kDisconnectInstance has ended (phoneLinkEnded()), or the car's Bluetooth service goes. Nothing is sent to mend it:
-// a ServiceDisconnect for that instance with no live link holds the instance up for well over a minute. So such a
-// dial is not repeated soon: its phone is backed off, for backOffMs, twice as long each time up to backOffMostMs,
-// until a dialled link of the agent's comes up for it or its connection changes in the car's device list.
+// kDisconnectInstance has ended (phoneLinkEnded()), or the car's Bluetooth service goes. Nothing is sent to make the
+// record right: a ServiceDisconnect for that instance with no live link holds the instance up for well over a minute.
+// So such a dial is not repeated soon: its phone is backed off, for backOffMs, twice as long each time up to
+// backOffMostMs, until a dialled link of the agent's comes up for it or its connection changes in the car's device
+// list.
+//
+// The re-point. Where the car answers a dial with such a failure, its Bluetooth service keeps an entry for the agent's
+// instance that still names the phone. The end of a later phone-opened link can then be booked by the car against that
+// entry, and the car counts one connected service too few for the phone; when that count reaches zero, the car closes
+// the phone's media audio. So the moment such an answer comes (doubtingAnswer(), the same rule as the doubt above),
+// the agent sends one more ServiceConnect on its own instance, with kRepointAddress, an address of no device, and
+// kRepointService, a service the instance does not serve. The car answers it with 5 within some tens of milliseconds
+// and sends nothing over the air, and on the way writes that address into the agent's entry: a link end booked
+// against the entry then names an address the car has no record of, and the phone's count is left alone. It does not
+// make the record right, and recordDoubtful() stays as it is. It helps only if it reaches the car before the next
+// phone-opened link ends, so it goes on the Bluetooth service's thread as soon as the answer is seen
+// (serial_link.hpp), and an answer to a dial that was given up for no answer brings it too. The car takes one
+// ServiceConnect of a client's at a time, so while it waits for its answer (repointWaits()), for repointLimitMs at
+// most, no ask or dial starts, and an ask that is out is ended. An answer other than 5, a 5 that took repointSlowMs or
+// longer, or none in repointLimitMs is not what is expected of the car: the listener then sends no more re-points in
+// that run of the agent.
 //
 // A dial that keeps failing. dialFailures() counts, for each phone, the dials in a row that gave the agent no link:
 // an answer that sets the doubt above, no answer, or a link that came up and was not the app's (notTheApp()). A
@@ -122,6 +139,13 @@ namespace nbt {
 // The device and the instance of the car's that every dial goes to, and so the dialled link's node, /dev/nbtapp.
 const char* const kDialDevice = "BtCtrl";
 const char* const kDialInstance = "nbtapp";
+// The re-point (see the top of this file): ServiceConnect on kDialInstance to an address that belongs to no device
+// (a locally administered one), for a service that the instance does not serve, sent right after the car answers a
+// dial with a failure. The car answers it with 5 and writes the address into the instance's entry, so that the end of
+// a phone-opened link that it books against that entry names no phone, and no phone's count of connected services
+// drops for it.
+const char* const kRepointAddress = "02:00:00:DD:DD:DD";
+const char* const kRepointService = "HFPGW";
 // Asks of a phone in a row with an error or no answer at which the log says so: once in each such run. When dials
 // that give the agent no link give up a phone's `dialled` mark: kDialFailsToUnmark, dial_config.hpp.
 const unsigned kAskMissesToSay = 3;
@@ -227,17 +251,18 @@ public:
 
     // The ask to make now, if one is due: ServiceListQuery for out->address, and the state is kAsking from here. One
     // ask or dial at a time, and none while a link of the agent's is up or being decided on, while the service is
-    // not registered, or while an ask that was ended may still be out in the car; while a phone's request is pending,
-    // only the ask of the phone that asked, once its time has run. A link of the agent's, a pending request or the
-    // registration's going ends the round, and the ask that is out (keepAsking()).
+    // not registered, while an ask that was ended may still be out in the car, or while the re-point waits for its
+    // answer (repointWaits()); while a phone's request is pending, only the ask of the phone that asked, once its time
+    // has run. A link of the agent's, a pending request or the registration's going ends the round, and the ask that
+    // is out (keepAsking()); the re-point ends the ask that is out.
     bool next(int64_t now, const Facts& facts, Dial* out);
     State state() const { return state_; }
     // The ask or dial that is out or up, while the state is not kIdle.
     const Dial& current() const { return current_; }
 
     // While asking: whether the ask goes on as things stand. A link of the agent's, a phone's request that is
-    // pending (unless it is the asked phone's, and the ask the one its request brought) and the registration's going
-    // end it: kIdle, and its answer is passed over when it comes. The pending request is the last one phoneAsked()
+    // pending (unless it is the asked phone's, and the ask the one its request brought), the registration's going and
+    // a re-point that waits for its answer end it: kIdle, and its answer is passed over when it comes. The pending request is the last one phoneAsked()
     // was told of: one that named another phone, or none, is not the asked phone's. next() does this too.
     bool keepAsking(const Facts& facts, int64_t now);
     // The answer to ServiceListQuery: `error` the car's (kNoError for a rejection or a reply not read), `listed`
@@ -261,6 +286,11 @@ public:
     // phone's. kNoError (spp_service.hpp) for a rejection of the request.
     Reply reply(const std::string& address, const std::string& service, const std::string& ourService, uint32_t error,
                 int64_t now);
+    // Whether the car's answer to a dial is a failure that leaves its record of phone-opened links doubtful
+    // (recordDoubtful()), and so brings the re-point: any answer but 0, 2 and 10, and not kNoError, which is no answer
+    // of the car's (a rejection of the request, a reply that could not be read, a send that failed). reply() goes by
+    // it too.
+    static bool doubtingAnswer(uint32_t error);
     // No answer in replyLimitMs. The listener ends what may be up, and then gaveUp().
     bool overdue(int64_t now) const;
     // The dial is given up: the phone is backed off. kIdle.
@@ -295,6 +325,20 @@ public:
     // The car says that a link on its instance for phone-opened links (kDisconnectInstance) has ended, as such ends
     // are said when its record is right: the doubt goes.
     void phoneLinkEnded();
+
+    // The re-point (see the top of this file) went to the car at `now`: from here no ask or dial starts, and an ask
+    // that is out is ended, until repointDone() or DialConfig::repointLimitMs have passed. Nothing else here changes:
+    // the doubt about the car's record stays.
+    void repointSent(int64_t now);
+    // Its answer has come, it is given up, or the listener drops it: asks and dials go on.
+    void repointDone();
+    // Whether it is out: sent, and not yet done.
+    bool repointOut() const { return repointOut_; }
+    int64_t repointAt() const { return repointAt_; }
+    // Whether it is out and its time has not run: nothing new starts.
+    bool repointWaits(int64_t now) const;
+    // Whether it is out and repointLimitMs have passed since it went: it is to be given up.
+    bool repointOverdue(int64_t now) const;
 
     // The back-off of a phone: 0 if it has none, or the time until which polls and its own requests leave it alone.
     int64_t backedOffUntil(const std::string& address) const;
@@ -362,6 +406,8 @@ private:
     SignalAsks signalsBefore_;                   // the asking phone's record before the ask a request brought: put
                                                  // back if that ask could not be sent (notSent())
     bool doubtful_;                              // recordDoubtful()
+    bool repointOut_;                            // repointOut(), since repointAt_
+    int64_t repointAt_;
 };
 
 }  // namespace nbt

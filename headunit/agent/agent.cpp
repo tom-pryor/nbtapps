@@ -1602,7 +1602,7 @@ void Agent::writeSerial(json::Writer& w, Session* s) {
     w.key("phonesPresent").integer(st.phonesPresent).key("phonesEligible").integer(st.phonesEligible);
     w.key("dial").string(st.dialOn ? "on" : "off").key("dialState").string(st.dialState);
     w.key("lastResult").string(st.lastResult).key("link").string(st.link);
-    w.key("recordDoubtful").boolean(st.recordDoubtful);
+    w.key("recordDoubtful").boolean(st.recordDoubtful).key("repointStopped").boolean(st.repointStopped);
     // For the phone on this link; a link that knows no address (the bench's TCP) is never left.
     if (!s->local) w.key("phoneOpenedLeft").boolean(serialDial_->phoneOpenedLeft(s->peer->linkPhoneAddress()));
     w.key("counts").beginObject();
@@ -1611,6 +1611,8 @@ void Agent::writeSerial(json::Writer& w, Session* s) {
     w.key("noAnswer").integer(st.noAnswer).key("notTheApp").integer(st.notTheApp).key("leftBehind").integer(st.leftBehind);
     w.key("asks").integer(st.asks).key("asksListed").integer(st.asksListed).key("asksNotListed").integer(st.asksNotListed);
     w.key("asksNoAnswer").integer(st.asksNoAnswer).key("askErrors").integer(st.askErrors);
+    w.key("repoints").integer(st.repoints).key("repointsExpected").integer(st.repointsExpected);
+    w.key("repointsUnexpected").integer(st.repointsUnexpected).key("repointsNotSent").integer(st.repointsNotSent);
     w.key("checks").integer(st.checks).key("checksRestored").integer(st.checksRestored).key("refusals").integer(st.refusals);
     w.key("leftUnread").integer(st.leftUnread).key("putBack").integer(st.putBack);
     w.endObject();

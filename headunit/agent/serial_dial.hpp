@@ -30,11 +30,16 @@ struct SerialStatus {
     std::string link;                  // the agent's serial links up: none, phone-opened, dialled, both
     bool recordDoubtful;               // a dial failed after the phone's service list named the agent's service, and
                                        // the car's record of phone-opened links may be wrong since (dial_rules.hpp)
+    bool repointStopped;               // a re-point after a failed dial came to something the car is not expected to
+                                       // do, and no more are sent in this run (dial_rules.hpp)
     // Counts since the agent started. notListening: the dials answered 5, after an ask that listed the agent's
     // service (agent.hpp says what that means now).
     unsigned dials, answeredOk, notListening, notInReach, busy, otherAnswers, noAnswer, notTheApp, leftBehind;
     // The asks for a phone's service list before a dial: sent, and what they came to.
     unsigned asks, asksListed, asksNotListed, asksNoAnswer, askErrors;
+    // The re-points after failed dials: sent, answered as expected (5, in time), with anything else (which stops
+    // them), and the ones that could not be sent at all.
+    unsigned repoints, repointsExpected, repointsUnexpected, repointsNotSent;
     unsigned checks, checksRestored, refusals;
     // leftUnread: the links phones opened that the rule left to another program, never read: primed for it, or left
     // as they were when that could not be done (serial_link.hpp). putBack: the links on which bytes the agent had
@@ -44,9 +49,10 @@ struct SerialStatus {
     unsigned problemsCounted;          // problems that were not written, only counted
     SerialStatus()
         : registered(false), checkedMsAgo(-1), phonesPresent(0), phonesEligible(0), dialOn(false), dialState("idle"),
-          lastResult("none"), link("none"), recordDoubtful(false), dials(0), answeredOk(0), notListening(0),
-          notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0), leftBehind(0), asks(0), asksListed(0),
-          asksNotListed(0), asksNoAnswer(0), askErrors(0), checks(0), checksRestored(0), refusals(0),
+          lastResult("none"), link("none"), recordDoubtful(false), repointStopped(false), dials(0), answeredOk(0),
+          notListening(0), notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0), leftBehind(0), asks(0),
+          asksListed(0), asksNotListed(0), asksNoAnswer(0), askErrors(0), repoints(0), repointsExpected(0),
+          repointsUnexpected(0), repointsNotSent(0), checks(0), checksRestored(0), refusals(0),
           leftUnread(0), putBack(0), problemsRecorded(0), problemsCounted(0) {}
 };
 
