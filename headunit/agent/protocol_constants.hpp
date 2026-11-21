@@ -58,6 +58,23 @@ const char* const kCapabilitySettings = "settings";
 // may be.
 const size_t kSettingsMaxValueBytes = 255;
 
+// A capability: this agent has channel.open, channel.get and channel.set, and the DATA and events of a channel
+// (agent.hpp, "Channels").
+const char* const kCapabilityChannels = "channels";
+// The last stream number of a files stream or a blob.fetch; the first of a channel. A channel's numbers run from
+// there to 65,535.
+const uint16_t kStreamLast = 32767;
+const uint16_t kChannelFirstStream = 32768;
+// The most bytes of one channel message, which is one DATA frame, on every link.
+const size_t kChannelMaxMessage = 4096;
+// The messages each side may send before the other grants more, at first.
+const unsigned kChannelCredit = 16;
+// The most channels open on one link.
+const unsigned kChannelPerLink = 8;
+// How long the agent tries to connect to a program it has started, and how often.
+const int64_t kChannelStartWaitMs = 5000;
+const int64_t kChannelStartRetryMs = 100;
+
 }  // namespace nbt
 
 #endif

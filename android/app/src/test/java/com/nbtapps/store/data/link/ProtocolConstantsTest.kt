@@ -52,6 +52,14 @@ class ProtocolConstantsTest {
         "capability.serialDial" to ProtocolConstants.CAPABILITY_SERIAL_DIAL,
         "capability.settings" to ProtocolConstants.CAPABILITY_SETTINGS,
         "settings.maxValueBytes" to ProtocolConstants.SETTINGS_MAX_VALUE_BYTES.toString(),
+        "capability.channels" to ProtocolConstants.CAPABILITY_CHANNELS,
+        "stream.last" to ProtocolConstants.STREAM_LAST.toString(),
+        "channel.firstStream" to ProtocolConstants.CHANNEL_FIRST_STREAM.toString(),
+        "channel.maxMessage" to ProtocolConstants.CHANNEL_MAX_MESSAGE.toString(),
+        "channel.credit" to ProtocolConstants.CHANNEL_CREDIT.toString(),
+        "channel.perLink" to ProtocolConstants.CHANNEL_PER_LINK.toString(),
+        "channel.startWaitMs" to ProtocolConstants.CHANNEL_START_WAIT_MS.toString(),
+        "channel.startRetryMs" to ProtocolConstants.CHANNEL_START_RETRY_MS.toString(),
     )
 
     /** What only the agent needs. Nothing at present: the app reads manifests, and so needs the service's name too. */
@@ -88,6 +96,11 @@ class ProtocolConstantsTest {
 
         // A setting's value holds a select's value (64 characters) and fits a serial frame many times over.
         assertTrue(ProtocolConstants.SETTINGS_MAX_VALUE_BYTES in 64..ProtocolConstants.SERIAL_MAX_FRAME / 4)
+
+        // The two kinds of stream number meet and do not overlap, and a channel message fits a serial link's frame.
+        assertEquals(ProtocolConstants.STREAM_LAST + 1, ProtocolConstants.CHANNEL_FIRST_STREAM)
+        assertTrue(ProtocolConstants.CHANNEL_MAX_MESSAGE in ProtocolConstants.FRAME_MIN_PAYLOAD..ProtocolConstants.SERIAL_MAX_FRAME)
+        assertTrue(ProtocolConstants.CHANNEL_CREDIT >= 2 && ProtocolConstants.CHANNEL_PER_LINK >= 1)
 
         assertEquals(ProtocolConstants.FRAME_MAX_PAYLOAD, FrameCodec.MAX_PAYLOAD)
         assertEquals(ProtocolConstants.FRAME_MIN_PAYLOAD, FrameCodec.MIN_PAYLOAD)

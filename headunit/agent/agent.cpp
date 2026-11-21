@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
 #include <sys/stat.h>
@@ -36,6 +37,7 @@ const int64_t kRestartFlushMs = 2000;         // how long a restart waits for it
 const int64_t kClosingFlushMs = 2000;         // how long a link that is told link.closing has to take the event
 const size_t kMaxPhoneName = 64;
 const size_t kFileReadBytes = 16384;          // read from a file that is streamed, at a time
+const int64_t kProgramEndWaitMs = 3000;       // how long a job's first step waits for a channel's program to end
 
 std::string number(uint64_t value) {
     char text[32];
@@ -111,9 +113,12 @@ Agent::Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std:
              RandomSource* random)
     : platform_(platform), keys_(keys), agentVersion_(agentVersion), clock_(clock), random_(random),
       engine_(platform, keys, agentVersion), planner_(&engine_), job_(&engine_, this), serialReset_(0), serialDial_(0),
-      nextSession_(1), building_(0),
+      nextSession_(1), channels_(this, &socketEnds_), building_(0),
       havePlan_(false), jobOwner_(0), jobAccounted_(true), inStep_(false), restartDeadlineMs_(0), onTrial_(false),
-      handOverDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), log_(stderr) {}
+      handOverDeadlineMs_(0), fetchTimeoutMs_(kFetchTimeoutMs), stepGate_(false), stepHeld_(false), stepGateUntilMs_(0),
+      log_(stderr) {
+    channels_.setPrograms(platform->runDir(), platform->shell());
+}
 
 Agent::~Agent() {
     delete building_;
@@ -392,9 +397,15 @@ bool Agent::init(std::string* error) {
             for (size_t i = 0; i < installed.size(); ++i) {
                 const Manifest& m = installed[i].manifest;
                 if (namesTmp(m) && !fs::makeDirs(platform_->tmpDir(m.id), &why)) note("the folder ${tmp} of " + m.id + " cannot be made: " + why);
+                // Where the programs of its channels listen.
+                if (!m.channels.empty() && !makeChannelsDir(platform_->tmpDir(m.id), &why)) {
+                    note("the folder of the channels of " + m.id + " cannot be made: " + why);
+                }
             }
+            adoptPrograms(installed);
         }
     }
+    sweepChannelMarks();
 
     // A record of the paired phones that cannot be read stops no start: the phones pair again.
     std::string problem;
@@ -404,6 +415,34 @@ bool Agent::init(std::string* error) {
     note(countOf(phones_.all().size(), "phone") + " paired");
     shareAddresses();
     return true;
+}
+
+// The programs an agent before this one started for channels, by their marks in the run folder: one whose process
+// still runs that program is this agent's from now on; any other mark is stale, and goes.
+void Agent::adoptPrograms(const std::vector<InstalledPackage>& installed) {
+    std::vector<std::string> names;
+    if (!fs::listDir(platform_->runDir(), &names, 0)) return;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const std::string prefix = "channel-pid.";
+        if (names[i].compare(0, prefix.size(), prefix) != 0) continue;
+        std::string path = platform_->runDir() + "/" + names[i], text;
+        bool kept = false;
+        for (size_t k = 0; k < installed.size() && !kept; ++k) {
+            const Manifest& m = installed[k].manifest;
+            for (size_t c = 0; c < m.channels.size() && !kept; ++c) {
+                const ManifestChannel& channel = m.channels[c];
+                if (!channel.hasStart || channels_.pidFile(m.id, channel.name) != path) continue;
+                char* end = 0;
+                long pid = fs::readFile(path, 32, &text, 0) ? strtol(text.c_str(), &end, 10) : 0;
+                // Believed only while that process is still the channel's program, a script's by its interpreter: a
+                // pid can be given out again.
+                if (!runsProgram(pid, engine_.store().appDir(m) + "/" + channel.program)) continue;
+                channels_.adoptProgram(m.id, channel.name, pid, channelsDir(platform_->tmpDir(m.id)) + "/" + channel.name + ".log");
+                kept = true;
+            }
+        }
+        if (!kept) fs::removeFile(path, 0);
+    }
 }
 
 void Agent::addListener(Listener* listener) { listeners_.push_back(listener); }
@@ -444,6 +483,9 @@ void Agent::serve(int timeoutMs) {
         if (peer->wantsWrite()) FD_SET(fd, &writable);
         if (fd > top) top = fd;
     }
+    // The programs' ends of the channels: what a program sends wakes the loop at once. They are served after the
+    // links, in turn() and jobIdle().
+    top = channels_.addToSets(&readable, &writable, top);
     struct timeval tv;
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
@@ -596,6 +638,7 @@ void Agent::sessionClosed(Session* s) {
     }
     if (fetch_.active && fetch_.session == s) fetch_ = Fetch();
     endOutgoing(s, "the link ended", "");
+    channels_.closeLink(s->peer, "the link ended");
     // Nobody shows the code any more.
     if (pairing_.open && pairing_.opener == s) closePairing(0);
     if (jobOwner_ == s) {
@@ -606,35 +649,45 @@ void Agent::sessionClosed(Session* s) {
 }
 
 void Agent::turn(int timeoutMs) {
-    if (job_.installing() || streamsWaiting()) timeoutMs = 0;
+    if ((job_.installing() && !stepHeld_) || streamsWaiting()) timeoutMs = 0;
+    else if (stepHeld_ && timeoutMs > 50) timeoutMs = 50;
     else if ((!pendingRestart_.empty() || job_.handingOver()) && timeoutMs > 20) timeoutMs = 20;
+    else if ((channels_.connecting() || channels_.ending()) && timeoutMs > (int)kChannelStartRetryMs) timeoutMs = (int)kChannelStartRetryMs;
     serve(timeoutMs);
+    channels_.serve();
+    channels_.tick();
     pumpStreams();
     keepAlive();
     endOverdue();
     expirePairing();
     reap();
+    channels_.reap();
     if (fetch_.active && clock_->nowMs() - fetch_.lastActivityMs > fetchTimeoutMs_) {
         endLink(fetch_.session, kClosingSilent, "no answer to blob.fetch");
         reap();
     }
     if (job_.installing()) {
-        inStep_ = true;
-        job_.runStep();
-        inStep_ = false;
-        reap();
-        if (job_.handingOver()) handOverDeadlineMs_ = clock_->nowMs() + kRestartFlushMs;
+        if (stepMayBegin()) {
+            inStep_ = true;
+            job_.runStep();
+            inStep_ = false;
+            reap();
+            if (job_.handingOver()) handOverDeadlineMs_ = clock_->nowMs() + kRestartFlushMs;
+        }
     } else {
         driveJob();
     }
     // A plan that had to wait for a stream nobody wants any more to run out.
     if (building_ != 0 && !fetch_.active) advancePlan();
     afterJob();
+    holdChannels();
     if (!pendingRestart_.empty()) doRestart();
 }
 
 void Agent::jobIdle() {
     serve(0);
+    channels_.serve();
+    channels_.tick();
     pumpStreams();
     keepAlive();
     endOverdue();
@@ -657,7 +710,48 @@ void Agent::afterJob() {
     if (jobAccounted_ || !job_.ended()) return;
     jobAccounted_ = true;
     jobOwner_ = 0;
+    stepGate_ = false;
     raiseRestartNeeded(job_.restart());
+    sweepChannelMarks();
+}
+
+// See agent.hpp, "Channels". A job that is not over holds every channel: neither a program's socket nor a channel's
+// DATA moves, and nothing is opened. The links that have channels are told when that begins and when it ends.
+void Agent::holdChannels() {
+    bool hold = job_.exists() && !job_.ended();
+    // An open that is still connecting when a job starts is answered busy at once, and a program it started ends.
+    if (hold) channels_.closeConnecting("busy", "a job is running: nothing opens until it has ended");
+    if (hold == channels_.paused()) return;
+    channels_.setPaused(hold);
+    unsigned told = 0;
+    for (size_t i = 0; i < sessions_.size(); ++i) {
+        Session* s = sessions_[i];
+        if (!s->peer->open() || (hold ? channels_.on(s->peer).empty() : !s->toldPaused)) continue;
+        s->toldPaused = hold;
+        if (s->peer->event(hold ? "channel.paused" : "channel.resumed", -1, "{}")) ++told;
+    }
+    note(std::string(hold ? "channels are held while the job runs" : "the job is over: channels go on") + " (" +
+         countOf(told, "link") + " told)");
+}
+
+// Before the first step of a job, every channel of a package the job installs, upgrades or removes is closed. The
+// step waits until the programs the agent started for those packages have gone, or for kProgramEndWaitMs.
+bool Agent::stepMayBegin() {
+    std::vector<std::string> ids = job_.packages();
+    if (!stepGate_) {
+        stepGate_ = true;
+        stepGateUntilMs_ = clock_->nowMs() + kProgramEndWaitMs;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            channels_.closePackage(ids[i], "", "package-changed", "a job installs, upgrades or removes " + ids[i]);
+            channels_.endPrograms(ids[i], "", "a job installs, upgrades or removes " + ids[i]);
+        }
+    }
+    bool waited = stepHeld_;
+    stepHeld_ = channels_.programsRunning(ids) && clock_->nowMs() < stepGateUntilMs_;
+    if (waited && !stepHeld_ && channels_.programsRunning(ids)) {
+        note("the job's first step begins with a program of a channel still running");
+    }
+    return !stepHeld_;
 }
 
 // ---- the agent's own update ---------------------------------------------------------------------------------------
@@ -1112,6 +1206,9 @@ void Agent::onRequest(Peer* peer, int64_t id, const std::string& method, const j
     else if (method == "serial.dial") serialDialNow(s, id);
     else if (method == "settings.get") settingsGet(s, id, params);
     else if (method == "settings.set") settingsSet(s, id, params);
+    else if (method == "channel.open") channelOpen(s, id, params);
+    else if (method == "channel.get") channelGet(s, id, params);
+    else if (method == "channel.set") channelSet(s, id, params);
     else refuse(s, id, "unsupported", "this agent has no method " + sanitizeUtf8(method.substr(0, 64), 0));
 }
 
@@ -1173,9 +1270,10 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     w.key("role").string("agent").key("headUnitId").string(headUnitId_).key("agentVersion").string(agentVersion_);
     // What this agent has beyond the protocol's first version: autostart.get and autostart.set, installs checked
     // with the offer's signature, the files of a package, the compatibility checks, the settings of a package,
-    // and, with Bluetooth serial, serial.reset.
+    // channels, and, with Bluetooth serial, serial.reset.
     w.key("maxFrame").integer(ours).key("capabilities").beginArray().string(kCapabilityAutostart);
     w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks).string(kCapabilitySettings);
+    w.string(kCapabilityChannels);
     if (serialReset_ != 0) w.string(kCapabilitySerialReset);
     if (serialDial_ != 0 && serialDial_->dialOn()) w.string(kCapabilitySerialDial);
     w.endArray().endObject();
@@ -1867,7 +1965,14 @@ void Agent::onResponse(Peer* peer, int64_t id, bool ok, const json::Value& resul
 
 void Agent::onData(Peer* peer, uint16_t stream, const std::string& bytes, bool last) {
     Session* s = (Session*)peer->user;
-    if (!fetch_.active || fetch_.session != s || !fetch_.streaming || fetch_.stream != stream) {
+    bool fetched = fetch_.active && fetch_.session == s && fetch_.streaming && fetch_.stream == stream;
+    // A channel's number: the table's, which drops what comes for one that is not open. The fetch's own stream goes
+    // first, for a controller that numbers its blob streams past kStreamLast as the ones before channels did.
+    if (!fetched && stream >= kChannelFirstStream) {
+        if (s->trusted) channels_.data(peer, stream, bytes, last);
+        return;
+    }
+    if (!fetched) {
         peer->close("a DATA frame for a stream that is not open");
         return;
     }
@@ -1891,7 +1996,16 @@ void Agent::onData(Peer* peer, uint16_t stream, const std::string& bytes, bool l
 
 void Agent::onEvent(Peer* peer, const std::string& event, int64_t, const json::Value& params) {
     Session* s = (Session*)peer->user;
-    if (event != "blob.error" || !s->trusted) return;   // unknown events are ignored
+    if (!s->trusted) return;
+    if (event == "channel.credit") {
+        channels_.credit(peer, params);
+        return;
+    }
+    if (event == "channel.close") {
+        channels_.closedByPhone(peer, params);
+        return;
+    }
+    if (event != "blob.error") return;   // unknown events are ignored
     json::Value stream = params.find("stream"), code = params.find("code");
     if (!fetch_.active || fetch_.session != s || !fetch_.streaming || !stream.isInteger() || stream.integer() != fetch_.stream) return;
     std::string why = code.isString() ? code.string() : std::string("io-error");
@@ -1987,8 +2101,10 @@ void Agent::jobStart(Session* s, int64_t id, const json::Value& params) {
     havePlan_ = false;
     jobOwner_ = s;
     jobAccounted_ = false;
+    stepGate_ = false;
     note("job " + job_.planId() + " started, over " + linkName(s->number));
     answer(s, id, "{\"job\":" + job_.describe() + "}");
+    holdChannels();
 }
 
 void Agent::jobCancel(Session* s, int64_t id, const json::Value& params) {
@@ -2216,7 +2332,8 @@ void Agent::filesFetch(Session* s, int64_t id, const json::Value& params) {
     Outgoing* o = new Outgoing();
     o->fd = fd;
     o->stream = s->nextStream;
-    s->nextStream = s->nextStream == 65535 ? 1 : (uint16_t)(s->nextStream + 1);
+    // The numbers above kStreamLast are the channels'.
+    s->nextStream = s->nextStream >= kStreamLast ? 1 : (uint16_t)(s->nextStream + 1);
     o->size = o->left = count;
     if (compress.string() == "deflate") o->deflater = new Deflater();
     o->package = package;
@@ -2253,43 +2370,59 @@ bool Agent::streamsWaiting() const {
 }
 
 void Agent::pumpStreams() {
-    for (size_t i = 0; i < sessions_.size(); ++i) {
-        Session* s = sessions_[i];
-        Peer* peer = s->peer;
-        // A link that is closing sends nothing more; its stream goes when the link does.
-        if (s->outgoing == 0 || !peer->open() || peer->closing()) continue;
-        size_t frame = peer->maxFrame();
-        while (s->outgoing != 0 && peer->open() && peer->queued() < 2 * frame) {
-            Outgoing* o = s->outgoing;
-            if (!o->pending.empty() && (o->pending.size() >= frame || o->read)) {
-                size_t n = o->pending.size() < frame ? o->pending.size() : frame;
-                bool last = o->read && n == o->pending.size();
-                peer->data(o->stream, o->pending.data(), n, last);
-                o->sent += n;
-                o->pending.erase(0, n);
-                if (last) endOutgoing(s, ratio(o->size, o->sent), "");
-                continue;
-            }
-            char buffer[kFileReadBytes];
-            size_t want = o->left < sizeof buffer ? (size_t)o->left : sizeof buffer;
-            ssize_t got = read(o->fd, buffer, want);
-            if (got < 0 && errno == EINTR) continue;
-            if (got <= 0) {
-                // The file was cut short since it was opened, or cannot be read.
-                std::string why = got == 0 ? "the file ended " + countOf(o->left, "byte") + " early" : std::string("read failed: ") + strerror(errno);
-                endOutgoing(s, "io-error: " + why, why);
-                break;
-            }
-            o->left -= (uint64_t)got;
-            if (o->left == 0) o->read = true;
-            if (o->deflater == 0) {
-                o->pending.append(buffer, (size_t)got);
-            } else if (!o->deflater->deflate(buffer, (size_t)got, o->read, &o->pending)) {
-                endOutgoing(s, "io-error: the compression failed", "the compression failed");
-                break;
-            }
+    for (size_t i = 0; i < sessions_.size(); ++i) pumpLink(sessions_[i]);
+}
+
+// The link's channels and its files stream take turns, a frame each, round and round, while less than two frames'
+// worth waits to be written on the link: the link's other messages, `ping` and its answer among them, wait behind
+// two frames at most, and a channel that floods holds up neither a quiet one nor the files stream.
+void Agent::pumpLink(Session* s) {
+    Peer* peer = s->peer;
+    // A link that is closing sends nothing more; its streams go when the link does.
+    if (!peer->open() || peer->closing()) return;
+    std::vector<Channel*> channels = channels_.on(peer);
+    size_t sources = channels.size() + 1, idle = 0, frame = peer->maxFrame();
+    while (idle < sources && peer->open() && !peer->closing() && peer->queued() < 2 * frame) {
+        size_t k = s->turn++ % sources;
+        bool sent = k < channels.size() ? channels_.sendOne(channels[k]) : sendFileFrame(s);
+        idle = sent ? 0 : idle + 1;
+    }
+}
+
+bool Agent::sendFileFrame(Session* s) {
+    Peer* peer = s->peer;
+    size_t frame = peer->maxFrame();
+    while (s->outgoing != 0) {
+        Outgoing* o = s->outgoing;
+        if (!o->pending.empty() && (o->pending.size() >= frame || o->read)) {
+            size_t n = o->pending.size() < frame ? o->pending.size() : frame;
+            bool last = o->read && n == o->pending.size();
+            peer->data(o->stream, o->pending.data(), n, last);
+            o->sent += n;
+            o->pending.erase(0, n);
+            if (last) endOutgoing(s, ratio(o->size, o->sent), "");
+            return true;
+        }
+        char buffer[kFileReadBytes];
+        size_t want = o->left < sizeof buffer ? (size_t)o->left : sizeof buffer;
+        ssize_t got = read(o->fd, buffer, want);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) {
+            // The file was cut short since it was opened, or cannot be read.
+            std::string why = got == 0 ? "the file ended " + countOf(o->left, "byte") + " early" : std::string("read failed: ") + strerror(errno);
+            endOutgoing(s, "io-error: " + why, why);
+            return false;
+        }
+        o->left -= (uint64_t)got;
+        if (o->left == 0) o->read = true;
+        if (o->deflater == 0) {
+            o->pending.append(buffer, (size_t)got);
+        } else if (!o->deflater->deflate(buffer, (size_t)got, o->read, &o->pending)) {
+            endOutgoing(s, "io-error: the compression failed", "the compression failed");
+            return false;
         }
     }
+    return false;
 }
 
 void Agent::endOutgoing(Session* s, const std::string& how, const std::string& error) {
@@ -2487,6 +2620,245 @@ void Agent::settingsSet(Session* s, int64_t id, const json::Value& params) {
     }
     note(linkName(s->number) + ": settings of " + m.id + ": " + changed + (after == before ? " (the file was so already)" : ""));
     answer(s, id, "{}");
+}
+
+// ---- channels -----------------------------------------------------------------------------------------------------
+
+namespace {
+
+// "org.nbtapp.ssh ssh, stream 32768": a channel, for the log.
+std::string channelText(const Channel* c) { return c->package + " " + c->name + ", stream " + number(c->stream); }
+
+}  // namespace
+
+bool Agent::channelOf(const std::string& package, const std::string& name, InstalledPackage* out, const ManifestChannel** channel,
+                      const char** code, std::string* message) {
+    std::string why;
+    if (!engine_.store().isInstalled(package)) {
+        *code = "not-found";
+        *message = "no such package is installed";
+        return false;
+    }
+    if (!engine_.store().load(package, out, &why)) {
+        *code = "internal";
+        *message = "the record of " + package + " cannot be read: " + why;
+        return false;
+    }
+    *channel = findChannel(out->manifest, name);
+    if (*channel == 0) {
+        *code = "not-found";
+        *message = package + " has no channel " + sanitizeUtf8(name.substr(0, 64), 0);
+        return false;
+    }
+    return true;
+}
+
+void Agent::channelOpen(Session* s, int64_t id, const json::Value& params) {
+    json::Value package = params.find("package"), name = params.find("channel"), credit = params.find("credit");
+    if (!package.isString() || !validPackageId(package.string()) || !name.isString() ||
+        (credit.present() && (!credit.isInteger() || credit.integer() < 1 || credit.integer() > 65535))) {
+        refuse(s, id, "bad-request", "channel.open takes a package id, a channel's name, and a credit from 1 to 65535");
+        return;
+    }
+    // The checks, in this order: who asks, for whom, whether the agent is free, what is installed, how many.
+    if (s->role == "plugin") {
+        refuse(s, id, "forbidden", "a channel is opened from a phone or with nbtctl, not by the iDrive plugin");
+        return;
+    }
+    if (params.find("app").present()) {
+        refuse(s, id, "unsupported", "this agent opens channels for NBTApps itself only, and for no other phone app");
+        return;
+    }
+    if (s->peer->maxFrame() < kChannelMaxMessage) {
+        refuse(s, id, "unsupported", "channels need a link whose frame holds " + number(kChannelMaxMessage) + " bytes");
+        return;
+    }
+    if ((job_.exists() && !job_.ended()) || inStep_ || onTrial_) {
+        refuse(s, id, "busy", onTrial_ ? "this version of the agent is on trial" : "a job is running");
+        return;
+    }
+    InstalledPackage installed;
+    const ManifestChannel* channel = 0;
+    const char* code = 0;
+    std::string message;
+    if (!channelOf(package.string(), name.string(), &installed, &channel, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    // Before anything is connected or started.
+    if (channel->switched && fs::kindOf(switchFile(platform_->runDir(), installed.manifest.id, channel->name)) != fs::kFile) {
+        refuse(s, id, "off", installed.manifest.id + " " + channel->name + " is switched off");
+        return;
+    }
+    if (channels_.on(s->peer).size() >= kChannelPerLink) {
+        refuse(s, id, "too-many", number(kChannelPerLink) + " channels are open on this link");
+        return;
+    }
+    Channel* c = new Channel();
+    c->peer = s->peer;
+    c->link = s->number;
+    c->package = installed.manifest.id;
+    c->name = channel->name;
+    c->access = channel->access;
+    c->version = installed.manifest.version;
+    c->requestId = id;
+    c->socketPath = platform_->tmpDir(c->package) + "/channels/" + c->name;
+    c->toPhone = credit.present() ? (unsigned)credit.integer() : kChannelCredit;
+    c->fromPhone = kChannelCredit;
+    // What starts the program when nothing listens: in ${app}, with a hook's environment and the channel's name.
+    c->canStart = channel->hasStart && platform_->canStartPrograms();
+    if (c->canStart) {
+        const Manifest& m = installed.manifest;
+        c->cwd = engine_.store().appDir(m);
+        c->program = c->cwd + "/" + channel->program;
+        c->args = channel->args;
+        c->env.push_back("PATH=" + platform_->hookPath());
+        c->env.push_back("NBT_PKG_ID=" + m.id);
+        c->env.push_back("NBT_PKG_VERSION=" + m.version);
+        c->env.push_back("NBT_APP_DIR=" + c->cwd);
+        c->env.push_back("NBT_DATA_DIR=" + platform_->dataDir(m.id));
+        c->env.push_back("NBT_TMP_DIR=" + platform_->tmpDir(m.id));
+        c->env.push_back("NBT_CHANNEL=" + channel->name);
+        c->log = channelsDir(platform_->tmpDir(m.id)) + "/" + channel->name + ".log";
+    }
+    // A number counting up from the last one given out on this link, and not one in use.
+    for (unsigned tries = 0; tries <= 65535u - kChannelFirstStream; ++tries) {
+        c->stream = s->nextChannel;
+        s->nextChannel = s->nextChannel == 65535 ? kChannelFirstStream : (uint16_t)(s->nextChannel + 1);
+        if (!channels_.inUse(s->peer, c->stream)) break;
+    }
+    // What the program is told first, on a line of its own.
+    json::Writer line;
+    line.beginObject().key("v").integer(1).key("channel").string(c->name).key("access").string(c->access);
+    line.key("caller").string(s->role == "phone" ? "nbtapps" : "cli");
+    if (s->role == "phone") line.key("phone").string(s->name);
+    line.key("maxMessage").integer((int64_t)kChannelMaxMessage).endObject();
+    note(linkName(s->number) + ": channel.open " + channelText(c) + ": connecting to " + c->socketPath);
+    channels_.add(c, line.text());
+}
+
+// What channel.get and channel.set answer.
+std::string Agent::channelState(const Manifest& m, const ManifestChannel& channel) const {
+    bool on = !channel.switched || fs::kindOf(switchFile(platform_->runDir(), m.id, channel.name)) == fs::kFile;
+    json::Writer w;
+    w.beginObject().key("switched").boolean(channel.switched).key("on").boolean(on);
+    w.key("open").integer(channels_.count(m.id, channel.name)).endObject();
+    return w.text();
+}
+
+void Agent::channelGet(Session* s, int64_t id, const json::Value& params) {
+    json::Value package = params.find("package"), name = params.find("channel");
+    if (!package.isString() || !validPackageId(package.string()) || !name.isString()) {
+        refuse(s, id, "bad-request", "channel.get takes a package id and a channel's name");
+        return;
+    }
+    if (inStep_) {
+        refuse(s, id, "busy", "a job is installing; the packages are changing");
+        return;
+    }
+    InstalledPackage installed;
+    const ManifestChannel* channel = 0;
+    const char* code = 0;
+    std::string message;
+    if (!channelOf(package.string(), name.string(), &installed, &channel, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    answer(s, id, channelState(installed.manifest, *channel));
+}
+
+void Agent::channelSet(Session* s, int64_t id, const json::Value& params) {
+    json::Value package = params.find("package"), name = params.find("channel"), on = params.find("on");
+    if (!package.isString() || !validPackageId(package.string()) || !name.isString() || !on.isBool()) {
+        refuse(s, id, "bad-request", "channel.set takes a package id, a channel's name and on: true or false");
+        return;
+    }
+    if (s->role == "plugin") {
+        refuse(s, id, "forbidden", "a channel is switched from a phone or with nbtctl, not from the car's screen");
+        return;
+    }
+    if ((job_.exists() && !job_.ended()) || inStep_ || onTrial_) {
+        refuse(s, id, "busy", onTrial_ ? "this version of the agent is on trial, and changes nothing until it is confirmed" : "a job is running");
+        return;
+    }
+    InstalledPackage installed;
+    const ManifestChannel* channel = 0;
+    const char* code = 0;
+    std::string message;
+    if (!channelOf(package.string(), name.string(), &installed, &channel, &code, &message)) {
+        refuse(s, id, code, message);
+        return;
+    }
+    if (!channel->switched) {
+        refuse(s, id, "bad-request", installed.manifest.id + " " + channel->name + " has no switch: it is always on");
+        return;
+    }
+    const std::string& pkg = installed.manifest.id;
+    std::string file = switchFile(platform_->runDir(), pkg, channel->name), why;
+    if (on.boolean()) {
+        if (!fs::writeFile(file, "on\n", 0600, &why)) {
+            refuse(s, id, "io-error", "the switch could not be written: " + why);
+            return;
+        }
+    } else {
+        if (!fs::removeFile(file, &why)) {
+            refuse(s, id, "io-error", "the switch could not be removed: " + why);
+            return;
+        }
+        channels_.closePackage(pkg, channel->name, "off", "switched off");
+        channels_.endPrograms(pkg, channel->name, "its channel was switched off");
+    }
+    note(linkName(s->number) + ": " + pkg + " " + channel->name + " is switched " + (on.boolean() ? "on" : "off"));
+    answer(s, id, channelState(installed.manifest, *channel));
+}
+
+// The switches and the marks of programs in the run folder whose package or channel is no longer installed go: at a
+// start, and after a job.
+void Agent::sweepChannelMarks() {
+    std::vector<InstalledPackage> installed;
+    std::vector<std::string> names;
+    if (!engine_.store().loadAll(&installed, 0) || !fs::listDir(platform_->runDir(), &names, 0)) return;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const std::string prefix = "channel-on.";
+        if (names[i].compare(0, prefix.size(), prefix) != 0) continue;
+        std::string path = platform_->runDir() + "/" + names[i];
+        bool kept = false;
+        for (size_t k = 0; k < installed.size() && !kept; ++k) {
+            const Manifest& m = installed[k].manifest;
+            for (size_t c = 0; c < m.channels.size() && !kept; ++c) {
+                kept = m.channels[c].switched && switchFile(platform_->runDir(), m.id, m.channels[c].name) == path;
+            }
+        }
+        if (!kept) {
+            fs::removeFile(path, 0);
+            note("the switch " + names[i] + " goes with its channel");
+        }
+    }
+}
+
+void Agent::channelConnected(Channel* c) {
+    Session* s = (Session*)c->peer->user;
+    json::Writer w;
+    w.beginObject().key("stream").integer(c->stream).key("maxMessage").integer((int64_t)kChannelMaxMessage);
+    w.key("credit").integer(c->fromPhone).key("version").string(c->version).endObject();
+    if (c->peer->open()) answer(s, c->requestId, w.text());
+}
+
+void Agent::channelRefused(Channel* c, const char* code, const std::string& why) {
+    Session* s = (Session*)c->peer->user;
+    if (c->peer->open()) refuse(s, c->requestId, code, c->package + " " + c->name + ": " + why);
+}
+
+void Agent::channelNote(const std::string& line) { note(line); }
+
+void Agent::channelClosed(Channel* c, const char* reason, const std::string& why) {
+    // One that never opened: its link has gone with the request, and nobody is left to answer.
+    if (c->connecting) {
+        note(linkName(c->link) + ": channel.open of " + channelText(c) + " goes unanswered: " + why);
+        return;
+    }
+    note(linkName(c->link) + ": channel " + channelText(c) + " closed" + (reason != 0 ? std::string(", ") + reason : std::string()) +
+         ": " + why);
 }
 
 }  // namespace nbt

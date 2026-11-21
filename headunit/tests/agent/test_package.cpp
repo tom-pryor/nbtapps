@@ -177,7 +177,8 @@ int main(int argc, char** argv) {
     }
 
     // 2b. What nbtpkg.py refuses to a package's author and this agent takes. A log in a folder this agent does not
-    // know: the entry is kept, never listed. A requires.app with no requires.agent: kept, and not acted on.
+    // know: the entry is kept, never listed. A requires.app with no requires.agent: kept, and not acted on. Channels
+    // with a requires.agent that lets an older agent in: taken, as an older agent would ignore them.
     json::Value skipped = root.find("skipped");
     CHECK(skipped.size() >= 4);
     for (size_t i = 0; i < skipped.size(); ++i) {
@@ -191,6 +192,8 @@ int main(int argc, char** argv) {
         const Manifest& m = package.manifest();
         if (names == "requires.app") {
             CHECK_IN(file, m.appRange == ">=0.8.0" && m.agentRange.empty());
+        } else if (names == "channels") {
+            CHECK_IN(file, m.channels.size() == 1 && m.channels[0].name == "echo" && m.agentRange == ">=1.0.0");
         } else {
             CHECK_IN(file, names == "logs[1].path");
             CHECK_IN(file, m.logs.size() == 2 && validLogPath(m.logs[0]) && logPathForm(m.logs[1]) == kLogPathSkip);

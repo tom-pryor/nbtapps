@@ -462,6 +462,71 @@ data class SerialReset(
     val forMs: Long? = null,
 )
 
+/** The result of `channel.open`. */
+@Serializable
+data class ChannelOpened(
+    /** The channel's stream on this link, from 32,768 up: its messages go both ways as DATA frames on it. */
+    val stream: Int,
+    /** The most bytes one message has, either way. */
+    val maxMessage: Int,
+    /** How many messages the phone may send before the agent grants more with `channel.credit`. */
+    val credit: Int,
+    /** The version of the package the channel is of. */
+    val version: String,
+)
+
+/** The result of `channel.get` and of `channel.set`. */
+@Serializable
+data class ChannelSwitch(
+    /** The channel has a switch (its manifest's `switch`). One that has none is always on. */
+    val switched: Boolean,
+    val on: Boolean,
+    /** How many connections of it are open, on every link. */
+    val open: Int,
+)
+
+/** The codes of the errors of `channel.open`, `channel.get` and `channel.set`. */
+object ChannelError {
+    /** No such package is installed, or it has no such channel. */
+    const val NOT_FOUND = "not-found"
+
+    /** Not for the iDrive plugin. */
+    const val FORBIDDEN = "forbidden"
+
+    /** A switched channel that is off, or was switched off while its program was being started. */
+    const val OFF = "off"
+
+    /** A job runs, or the agent is on trial after its own update. */
+    const val BUSY = "busy"
+
+    /** No program took the connection, or the one started for it did not in time. */
+    const val UNAVAILABLE = "unavailable"
+
+    /** As many channels as a link may have are open on this one. */
+    const val TOO_MANY = "too-many"
+
+    /** An agent without channels, or a link whose frame is too small for a channel's message. */
+    const val UNSUPPORTED = "unsupported"
+
+    /** A request the agent cannot read; for `channel.set`, a channel that has no switch. */
+    const val BAD_REQUEST = "bad-request"
+}
+
+/** The reasons of the agent's `channel.close`. A later agent may send another, which is shown with its code. */
+object ChannelCloseReason {
+    /** The program closed its end. Also what the phone says when it closes a channel. */
+    const val CLOSED = "closed"
+
+    /** The channel was switched off. */
+    const val OFF = "off"
+
+    /** A job installs, upgrades or removes the package. */
+    const val PACKAGE_CHANGED = "package-changed"
+
+    /** One side broke the channel's rules. */
+    const val PROTOCOL = "protocol"
+}
+
 /** How an option stands in its package's settings file, as `settings.get` says: its `state`. */
 enum class SettingState(val id: String) {
     /** The file has no line for it: the package goes by its default, or by what [SettingOption.unset] says. */

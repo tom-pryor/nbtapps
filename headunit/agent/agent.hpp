@@ -33,6 +33,9 @@
 //   checks.fix                      a check's fix, with the token of the lists the user was shown
 //   serial.reset                    has the car end the phone's Bluetooth serial link (serial_reset.hpp): see below
 //   settings.get, settings.set      the settings of an installed package (settings.hpp): see below
+//   channel.open, channel.get,      a channel to the program of an installed package (channels.hpp), and the switch
+//   channel.set                     of a switched one; with the events channel.credit and channel.close either way,
+//                                   and channel.paused and channel.resumed: see "Channels" below
 //   job.progress, job.log, job.done the agent's events, to every controller
 //   link.closing                    the agent's event to a phone whose link it is about to end; the last thing it
 //                                   says on that link
@@ -206,6 +209,68 @@
 // loses its others, a new key goes at the end, a reset takes the key's lines away. At least one key is named, and
 // none both in `set` and in `reset`, or the request is bad-request. It is refused with `busy` while a job runs and
 // on an agent on trial. The log says which keys were set and which reset, never their values.
+//
+// Channels. A package names its channels in its manifest (`channels`, manifest.hpp); a controller opens one, and
+// messages pass both ways between it and the package's program, which the agent reaches through a local socket and
+// may start for it. An agent that has them lists the capability channels in `hello`.
+//
+//   channel.open { "package", "channel", "credit"? }  -> { "stream", "maxMessage": 4096, "credit": 16, "version" }
+//   channel.get  { "package", "channel" }              -> { "switched", "on", "open" }
+//   channel.set  { "package", "channel", "on" }        -> as channel.get
+//   channel.credit { "stream", "messages" }            an event, either way: that many more messages may be sent
+//   channel.close  { "stream", "reason" }              an event, either way: the channel is closed
+//   channel.paused {}, channel.resumed {}              events, the agent's: a job began, or ended
+//
+// channel.open's `stream` is the channel's number on this link, from kChannelFirstStream to 65,535, given out counting
+// up and not used again soon. Its `credit` is what the phone may send at first; the request's `credit` (1 to 65,535,
+// kChannelCredit when left out) is what the agent may. `version` is the package's. Its errors: not-found (no such
+// package installed, or no such channel in its manifest), forbidden (the iDrive plugin), off (a switched channel that
+// is off, or is switched off before the program takes the connection), busy (a job, or an agent on trial; also an
+// open still waiting for its program when a job starts), unavailable (no program takes the connection, and none is
+// to be started, or the one started did not take it in kChannelStartWaitMs), too-many (kChannelPerLink open on this
+// link), unsupported (a phone app other than NBTApps is named, with `app`, or the link's frame is smaller than
+// kChannelMaxMessage). A channel.open with no phone app named is NBTApps itself, and may open any channel. Each
+// channel.open is answered once, whatever ends it while it waits, unless its link goes first.
+//
+// A message is one DATA frame on the channel's stream, with the last flag set, of 1 to kChannelMaxMessage bytes.
+// Each side counts what it may still send, and sends no more: a DATA frame with no last flag, an empty one, one over
+// the size or over the credit, and any frame from the phone on a channel whose access is `read`, closes that channel
+// with the reason `protocol`, and leaves the link as it is. A DATA frame or a channel.credit for a number that is not
+// open is dropped: a close and a message can cross. The agent grants the phone more as the program takes what came.
+//
+// channel.close's reasons from the agent: closed (the program closed its end), off (the channel was switched off),
+// package-changed (a job installs, upgrades or removes the package), protocol (see above), lost (said in the log
+// only: the link ended). A phone's channel.close needs no answer.
+//
+// Jobs. From job.start until the job has ended (it may be paused for its link meanwhile) every channel is held: no
+// program's socket is read or written, nothing goes to a phone, and channel.open is answered `busy`; what a phone
+// sends waits within its credit. An open still waiting for its program at job.start is answered `busy` then, and a
+// program that open started is ended unless another channel of it is open. The links that still have channels open
+// are told channel.paused at the start, and channel.resumed at the end. Before the job's first step, every channel
+// of a package the job installs, upgrades or removes is closed with `package-changed`, and a program the agent
+// started for that package is ended; the step waits until it has gone, or for 3 s. An agent on trial answers
+// channel.open and channel.set with `busy`.
+//
+// Starting a program. The agent connects to ${tmp}/channels/<name>, where the package's program listens. When nothing
+// does and the channel has `start` in its manifest, the agent starts the program once (channels.hpp): in ${app}, in
+// a process group of its own, with a hook's environment and NBT_CHANNEL, its output appended to
+// ${tmp}/channels/<name>.log; and it tries to connect every kChannelStartRetryMs for kChannelStartWaitMs, while
+// channel.open waits. An open meanwhile starts nothing more. A program that has not taken the connection by then is
+// ended, and the open is `unavailable`. The agent keeps the program's pid in its run folder,
+// channel-pid.<id>.<name>, and an agent that starts later believes it while that process still runs the program: its
+// executable has the program's file name, or, for a script, it is the interpreter of the script's #! line and leads
+// a process group of its own (programs.hpp, runsProgram). It
+// does not end a program when its channels close: a program goes when it likes. It ends one (SIGTERM to its group,
+// SIGKILL kProgramKillAfterMs later, nothing waiting for it) for a job of its package and when its channel is
+// switched off, and keeps its log under kChannelLogCapBytes, the rest in <name>.log.1, or lost when that cannot be
+// written.
+//
+// channel.get says of a channel whether it is switched (its manifest says `switch`), whether it is on (one that is not
+// switched always is) and how many connections it has open, on every link. channel.set switches a switched channel
+// on or off: forbidden to the iDrive plugin, busy while a job runs and on an agent on trial, bad-request for a
+// channel that is not switched, not-found as channel.open. Off closes its channels with `off`, answers an open still
+// waiting for its program with the error `off`, and ends a program the agent started for it. A switched channel is off until it is switched on, and the switch lives in the run folder:
+// it is off again after a power down, and nothing is written to flash for it.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdint.h>
@@ -215,6 +280,7 @@
 #include <string>
 #include <vector>
 
+#include "channels.hpp"
 #include "checks.hpp"
 #include "engine.hpp"
 #include "job.hpp"
@@ -292,7 +358,7 @@ bool capLog(const std::string& path, uint64_t capBytes);
 // The file capLog took, or empty.
 std::string cappedLog();
 
-class Agent : public PeerHandler, public JobHost {
+class Agent : public PeerHandler, public JobHost, public ChannelHost {
 public:
     // Nothing passed in is owned; all of it must outlive the agent.
     Agent(Platform* platform, const std::vector<TrustedKey>& keys, const std::string& agentVersion, Clock* clock,
@@ -312,6 +378,11 @@ public:
     void setSerialDial(SerialDial* dial) { serialDial_ = dial; }
     // A link on which a controller has connected: takes it over. The controller dialled, so it speaks first.
     void adopt(Link* link);
+    // What reaches a channel's program (channels.hpp): the program's local socket unless a test gives a stand-in; 0
+    // for none, and every channel.open is then answered `unavailable`. Not owned.
+    void setProgramEnds(ProgramEnds* ends) { channels_.setEnds(ends); }
+    // The channels that are open, for a test to look at.
+    const Channels& channels() const { return channels_; }
 
     // One turn of the loop: waits up to `timeoutMs` for a link to have something, serves every link, and runs at
     // most one install step.
@@ -362,6 +433,13 @@ public:
     virtual void jobIdle();
     virtual int64_t nowMs() { return clock_->nowMs(); }
 
+    // ChannelHost
+    virtual void channelConnected(Channel* channel);
+    virtual void channelRefused(Channel* channel, const char* code, const std::string& why);
+    virtual void channelClosed(Channel* channel, const char* reason, const std::string& why);
+    virtual int64_t channelNowMs() { return clock_->nowMs(); }
+    virtual void channelNote(const std::string& line);
+
 private:
     Agent(const Agent&);
     Agent& operator=(const Agent&);
@@ -409,10 +487,14 @@ private:
         std::map<int64_t, Asked> asked;
         Outgoing* outgoing;    // the files stream that is open, or 0
         uint16_t nextStream;   // the number the next files stream gets
+        uint16_t nextChannel;  // the number the next channel is given, if it is free
+        size_t turn;           // whose turn it is to send a frame: one of its channels, or its files stream
+        bool toldPaused;       // told channel.paused, and not yet channel.resumed
 
         Session()
             : peer(0), number(0), greeted(false), serial(false), dialled(false), local(false), trusted(false), challenged(false),
-              openedMs(0), heardMs(0), pingedMs(0), pings(0), ending(false), endingMs(0), outgoing(0), nextStream(1) {}
+              openedMs(0), heardMs(0), pingedMs(0), pings(0), ending(false), endingMs(0), outgoing(0), nextStream(1),
+              nextChannel(kChannelFirstStream), turn(0), toldPaused(false) {}
     };
     // The pairing window.
     struct Pairing {
@@ -510,8 +592,11 @@ private:
     void filesCancel(Session* s, int64_t id, const json::Value& params);
     // The log files of a package as they are now. False with the error's code and message if there is none such.
     bool logsOf(const std::string& package, std::vector<LogFile>* out, const char** code, std::string* message);
-    // Feeds the open files streams while their links take more.
+    // Feeds the open files streams and channels while their links take more: pumpLink for each link.
     void pumpStreams();
+    void pumpLink(Session* s);
+    // Queues the next DATA frame of a link's files stream, reading the file as far as that takes: true if one went.
+    bool sendFileFrame(Session* s);
     // True if a files stream could send more at once: the loop then does not wait.
     bool streamsWaiting() const;
     // Ends a session's files stream. `how` is for the log; with `error` the controller is told files.error.
@@ -531,6 +616,16 @@ private:
     void settingsSet(Session* s, int64_t id, const json::Value& params);
     // The installed record of a package that has settings. False with the error's code and message if there is none.
     bool settingsOf(const std::string& package, InstalledPackage* out, const char** code, std::string* message);
+    // Channels: see the top of this file, and channels.hpp.
+    void channelOpen(Session* s, int64_t id, const json::Value& params);
+    void channelGet(Session* s, int64_t id, const json::Value& params);
+    void channelSet(Session* s, int64_t id, const json::Value& params);
+    std::string channelState(const Manifest& m, const ManifestChannel& channel) const;
+    void sweepChannelMarks();
+    // The installed record of a package, and its channel of that name. False with the error's code and message if
+    // there is no such package or channel.
+    bool channelOf(const std::string& package, const std::string& name, InstalledPackage* out, const ManifestChannel** channel,
+                   const char** code, std::string* message);
     void autostartGet(Session* s, int64_t id);
     void autostartSet(Session* s, int64_t id, const json::Value& params);
     // Whether something would start the agent with the head unit here if it were asked to. If not: the error's
@@ -541,6 +636,11 @@ private:
     void advancePlan();
     void driveJob();
     void afterJob();
+    // Channels and jobs: see the top of this file.
+    void holdChannels();
+    bool stepMayBegin();
+    // At a start: the programs an earlier agent started for channels, which still run, by their marks.
+    void adoptPrograms(const std::vector<InstalledPackage>& installed);
     void startFetch(Session* session, bool forPlan, const std::string& sha256, uint64_t offset, uint64_t length);
     void endFetch(bool ok, std::string code, std::string message);
     void doRestart();
@@ -568,6 +668,8 @@ private:
     SerialDial* serialDial_;
     std::vector<Session*> sessions_;
     unsigned nextSession_;
+    SocketEnds socketEnds_;    // a program's end is its local socket, unless a test says otherwise
+    Channels channels_;
 
     PlanBuild* building_;
     bool havePlan_;
@@ -583,6 +685,9 @@ private:
     bool onTrial_;                   // this version waits to be confirmed
     int64_t handOverDeadlineMs_;     // 0, or when the process ends for a newer version whatever the links hold
     int64_t fetchTimeoutMs_;
+    bool stepGate_;            // the job's packages' channels are closed, and their programs told to end
+    bool stepHeld_;            // the first step waits for those programs to go
+    int64_t stepGateUntilMs_;  // and no longer than this
     FILE* log_;
     std::string ownLog_;
     std::string loggedProgress_;                     // the state, step and phase the log last named

@@ -28,7 +28,8 @@ COPY src src
 ARG VERSION=unknown
 RUN make -j"$(nproc)" agent-programs VERSION="$VERSION" \
     && mkdir /out \
-    && cp build/agent-host/nbtagent build/agent-host/nbtagent-next build/agent-host/nbtctl build/agent-host/test_* /out/
+    && cp build/agent-host/nbtagent build/agent-host/nbtagent-next build/agent-host/nbtctl build/agent-host/test_* \
+          build/agent-host/chan_* /out/
 
 # Python and the library nbtpkg signs with, for tests/make_packages.py, and nothing of the agent: built only as
 # its own image (tools/bench.py testdata), so the agent's image below stays without Python, as a head unit is.

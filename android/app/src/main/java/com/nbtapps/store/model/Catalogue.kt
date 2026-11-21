@@ -184,7 +184,8 @@ data class PackageDependency(
 enum class RiskFlag(val id: String, val label: String, val explanation: String) {
     RUNS_SCRIPTS("runs-scripts", "Runs scripts", "Runs its own scripts on the head unit during install or removal."),
     MODIFIES_SYSTEM("modifies-system", "Modifies system files", "Writes outside its own folders or replaces stock head-unit files."),
-    NEEDS_REBOOT("needs-reboot", "Needs restart", "The head unit or its HMI restarts to finish the install.");
+    NEEDS_REBOOT("needs-reboot", "Needs restart", "The head unit or its HMI restarts to finish the install."),
+    STARTS_PROGRAM("starts-program", "Starts a program", "The head unit starts a program of the package when the phone opens one of its channels.");
 
     companion object {
         fun fromId(id: String): RiskFlag? = entries.find { it.id == id }

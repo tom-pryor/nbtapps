@@ -12,6 +12,9 @@ import com.nbtapps.store.data.catalogue.CatalogueParser
 import com.nbtapps.store.data.catalogue.CatalogueState
 import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
 import com.nbtapps.store.data.catalogue.FileCatalogueSource
+import com.nbtapps.store.data.channels.ChannelClosedException
+import com.nbtapps.store.data.channels.ChannelEnd
+import com.nbtapps.store.data.channels.ChannelState
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.Link
@@ -31,6 +34,9 @@ import com.nbtapps.store.data.settings.SettingsException
 import com.nbtapps.store.data.settings.SettingsFailure
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.AutostartReason
+import com.nbtapps.store.model.ChannelCloseReason
+import com.nbtapps.store.model.ChannelError
+import com.nbtapps.store.model.ChannelSwitch
 import com.nbtapps.store.model.CheckState
 import com.nbtapps.store.model.Endpoint
 import com.nbtapps.store.model.HeadUnit
@@ -48,6 +54,7 @@ import com.nbtapps.store.model.VersionRange
 import com.nbtapps.store.ui.catalogue.DetailsState
 import com.nbtapps.store.ui.catalogue.GetState
 import com.nbtapps.store.ui.catalogue.cataloguePackageUiState
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -63,6 +70,7 @@ import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -75,6 +83,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -838,6 +847,83 @@ class RealAgentTest {
         val own = jobs.listLogs(AGENT_PACKAGE_ID).getOrThrow().files
         assertTrue(jobs.pullLogs(LogPullRequest(AGENT_PACKAGE_ID, own), "0.0.0-test").isSuccess)
         assertEquals(own.size, (jobs.logPull.value as LogPullState.Done).included)
+    }
+
+    /**
+     * The agent repo's test package with channels, whose programs the bench agent starts as they are opened: a
+     * megabyte through `echo`, in messages of every size, back byte for byte; the switch of `gated`, which is off until
+     * switched on and closes what is open when switched off; and `feed`, which the phone may only read, whose program
+     * sends its hundred messages and closes it, and which a message from the phone closes.
+     */
+    @Test
+    fun `channels of the real agent carry a megabyte through echo, follow gated's switch, and read feed`() = test {
+        assertTrue(jobs.connect("bench").isSuccess)
+        assertTrue("the agent has channels", connected().channels)
+        val chan = AgentVectors.file("packages/good/org.nbtapp.chan-1.0.0.nbtpkg").inputStream().use { store.add(it, listOf(AgentVectors.packageKey)) }
+        val plan = jobs.plan(listOf(InstallTarget("org.nbtapp.chan", "1.0.0")), emptyList(), listOf(chan)).getOrThrow()
+        assertEquals(JobState.SUCCEEDED, run(plan).job.state)
+        awaitInstalled("org.nbtapp.chan 1.0.0")
+
+        // Over a link of the test's own, beside the repository's.
+        val session = AgentSession(connector.connect(TcpEndpoint("local", 1)), scope)
+        try {
+            session.client.hello(identity.id(), identity.name)
+            suspend fun refusal(block: suspend () -> Unit): String? = try {
+                block()
+                null
+            } catch (e: RemoteException) {
+                e.code
+            }
+
+            val echo = session.openChannel("org.nbtapp.chan", "echo")
+            assertEquals("1.0.0", echo.version)
+            assertEquals(ProtocolConstants.CHANNEL_MAX_MESSAGE, echo.maxMessage)
+            val sent = Random(19).nextBytes(1024 * 1024)
+            val writer = async {
+                var at = 0
+                var size = 1
+                while (at < sent.size) {
+                    val n = minOf(size, sent.size - at)
+                    echo.send(sent.copyOfRange(at, at + n))
+                    at += n
+                    size = size * 7 % ProtocolConstants.CHANNEL_MAX_MESSAGE + 1
+                }
+            }
+            val back = ByteArrayOutputStream()
+            while (back.size() < sent.size) back.write(requireNotNull(echo.receive()) { "echo ended: ${echo.state.value}" })
+            writer.await()
+            assertArrayEquals(sent, back.toByteArray())
+            assertEquals(ChannelState.Open, echo.state.value)
+            echo.close()
+
+            // gated: off as the agent starts, so refused; on, opened, and closed by being switched off.
+            assertEquals(ChannelSwitch(switched = true, on = false, open = 0), session.client.channelGet("org.nbtapp.chan", "gated"))
+            assertEquals(ChannelError.OFF, refusal { session.openChannel("org.nbtapp.chan", "gated") })
+            assertEquals(ChannelSwitch(switched = true, on = true, open = 0), session.client.channelSet("org.nbtapp.chan", "gated", true))
+            val gated = session.openChannel("org.nbtapp.chan", "gated")
+            gated.send("hello, gated".encodeToByteArray())
+            assertEquals("HELLO, GATED", gated.receive()?.decodeToString())
+            assertEquals(ChannelSwitch(switched = true, on = true, open = 1), session.client.channelGet("org.nbtapp.chan", "gated"))
+            assertEquals(ChannelSwitch(switched = true, on = false, open = 0), session.client.channelSet("org.nbtapp.chan", "gated", false))
+            assertEquals(ChannelState.Closed(ChannelEnd.ByAgent(ChannelCloseReason.OFF)), withTimeout(10_000) { gated.state.first { it is ChannelState.Closed } })
+            assertTrue((runCatching { gated.send(byteArrayOf(1)) }.exceptionOrNull() as ChannelClosedException).end == ChannelEnd.ByAgent(ChannelCloseReason.OFF))
+            assertEquals(ChannelError.BAD_REQUEST, refusal { session.client.channelSet("org.nbtapp.chan", "echo", false) })
+            assertEquals(ChannelError.NOT_FOUND, refusal { session.openChannel("org.nbtapp.chan", "nothing") })
+
+            // feed: its program's hundred messages, more than the credit the phone gives at once, then its close.
+            val feed = session.openChannel("org.nbtapp.chan", "feed")
+            val lines = ArrayList<String>()
+            while (true) lines += feed.receive()?.decodeToString() ?: break
+            assertEquals((1..100).map { "message $it of 100" }, lines)
+            assertEquals(ChannelState.Closed(ChannelEnd.ByAgent(ChannelCloseReason.CLOSED)), feed.state.value)
+            // A message from the phone on a channel it may only read: the agent closes it, and the link stays.
+            val again = session.openChannel("org.nbtapp.chan", "feed")
+            again.send("not for feed".encodeToByteArray())
+            assertEquals(ChannelState.Closed(ChannelEnd.ByAgent(ChannelCloseReason.PROTOCOL)), withTimeout(10_000) { again.state.first { it is ChannelState.Closed } })
+            assertEquals("{}", session.peer.request("ping").toString())
+        } finally {
+            session.close("the test is over")
+        }
     }
 
     /**

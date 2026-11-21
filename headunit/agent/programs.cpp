@@ -86,6 +86,42 @@ std::string exePathOf(long pid, const char* procDir) {
 #endif
 }
 
+namespace {
+
+// The interpreter a script's first line names, without its arguments: "#!/bin/sh -e" is /bin/sh. Empty for a file
+// that is not a script, or names none by an absolute path.
+std::string interpreterOf(const std::string& path) {
+    char text[256];
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return std::string();
+    ssize_t n = read(fd, text, sizeof(text));
+    close(fd);
+    if (n < 3 || text[0] != '#' || text[1] != '!') return std::string();
+    size_t at = 2;
+    while (at < (size_t)n && (text[at] == ' ' || text[at] == '\t')) ++at;
+    size_t end = at;
+    while (end < (size_t)n && text[end] != ' ' && text[end] != '\t' && text[end] != '\n' && text[end] != '\r') ++end;
+    // A line longer than what was read names no interpreter that can be trusted.
+    if (end == (size_t)n || end == at || text[at] != '/') return std::string();
+    return std::string(text + at, end - at);
+}
+
+}  // namespace
+
+bool runsProgram(long pid, const std::string& programPath, const char* procDir) {
+    if (pid <= 0) return false;
+    std::string running = programName(exePathOf(pid, procDir).c_str());
+    if (running.empty()) return false;
+    if (running == programName(programPath.c_str())) return true;
+    std::string interpreter = interpreterOf(programPath);
+    if (interpreter.empty()) return false;
+    bool same = running == programName(interpreter.c_str());
+    char real[PATH_MAX + 1];
+    if (!same && realpath(interpreter.c_str(), real) != 0) same = running == programName(real);
+    // The agent starts each program as the leader of a group of its own, which a script's shell stays.
+    return same && getpgid((pid_t)pid) == (pid_t)pid;
+}
+
 ProgramState programState(const std::string& name, const char* procDir, unsigned* unnamed) {
     if (unnamed != 0) *unnamed = 0;
     DIR* dir = opendir(procDir);

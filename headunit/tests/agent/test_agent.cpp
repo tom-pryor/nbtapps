@@ -464,9 +464,18 @@ public:
 
 static const char kHeadUnitId[] = "000102030405060708090a0b0c0d0e0f";
 
+// A head unit in a folder, whose ${tmp} a test may put in a short folder of its own: a channel's program listens on a
+// local socket there, whose path has to fit a local socket's address, which a work folder deep in a checkout passes.
+class BenchPlatform : public HostPlatform {
+public:
+    explicit BenchPlatform(const std::string& root) : HostPlatform(root) {}
+    virtual std::string tmpDir(const std::string& id) const { return tmp.empty() ? HostPlatform::tmpDir(id) : tmp + "/" + id; }
+    std::string tmp;
+};
+
 struct Bench {
     std::string root;
-    HostPlatform platform;
+    BenchPlatform platform;
     FakeClock clock;
     FakeRandom random;
     Agent agent;
@@ -737,12 +746,13 @@ static void testHello() {
     Parsed r(b.call(p, "hello", "{\"protocolMin\":1,\"protocolMax\":7,\"role\":\"cli\",\"maxFrame\":4096,\"capabilities\":[\"zstd\"],\"extra\":{\"a\":[1]}}"));
     CHECK(integer(r.result, "protocolMin") == 1 && integer(r.result, "protocolMax") == 1 && str(r.result, "role") == "agent");
     CHECK(str(r.result, "headUnitId") == kHeadUnitId && str(r.result, "agentVersion") == "1.0.0");
-    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 5 &&
+    CHECK(integer(r.result, "maxFrame") == 65536 && r.result.find("capabilities").isArray() && r.result.find("capabilities").size() == 6 &&
           r.result.find("capabilities").at(0).string() == kCapabilityAutostart &&
           r.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature &&
           r.result.find("capabilities").at(2).string() == kCapabilityFiles &&
           r.result.find("capabilities").at(3).string() == kCapabilityChecks &&
-          r.result.find("capabilities").at(4).string() == kCapabilitySettings);
+          r.result.find("capabilities").at(4).string() == kCapabilitySettings &&
+          r.result.find("capabilities").at(5).string() == kCapabilityChannels);
     CHECK(Parsed(b.call(p, "hello", kGoodHello)).code() == "bad-state");
     // Methods that are not there.
     const char* missing[] = {"job.frobnicate", "pairing.frobnicate", ""};
@@ -2957,9 +2967,46 @@ static std::string fetchParams(const std::string& package, const std::string& pa
 }
 
 
+// The program of the channel the session opens: the test's own, in this process, which skips the agent's first line
+// and then sends back what it is given, byte for byte, so each message comes back as it went.
+class EchoEnd : public ProgramEnd {
+public:
+    EchoEnd() : lineDone_(false) {}
+    virtual Connect connect(std::string*) { return kConnected; }
+    virtual int fd() const { return -1; }
+    virtual bool read(std::string* in, size_t most) {
+        size_t n = back_.size() < most ? back_.size() : most;
+        in->append(back_, 0, n);
+        back_.erase(0, n);
+        return true;
+    }
+    virtual long write(const char* bytes, size_t len) {
+        for (size_t i = 0; i < len; ++i) {
+            if (lineDone_) back_ += bytes[i];
+            else if (bytes[i] == '\n') lineDone_ = true;
+        }
+        return (long)len;
+    }
+
+private:
+    bool lineDone_;
+    std::string back_;
+};
+
+class EchoEnds : public ProgramEnds {
+public:
+    virtual ProgramEnd* make(const std::string&) { return new EchoEnd(); }
+};
+
 static std::string sessionText() {
-    Bench b("session");
+    // Made before the agent, so that it outlasts every channel the agent has.
+    EchoEnds echo;
+    // An agent that knows channels, for the package with them near the end, whose ${tmp} is in a short folder.
+    Bench b("session", false, false, "1.7.0");
     b.platform.fakeFree = 500000000;
+    std::string tmp = "/tmp/nbt-session-" + num(getpid()), why;
+    CHECK_IN(why, fs::removeTree(tmp, &why) && fs::makeDirs(tmp, &why));
+    b.platform.tmp = tmp;
     // The car's screen: a controller on the local socket, whose link is not written down.
     Phone* screen = b.connect();
     CHECK(Parsed(b.hello(screen, kGoodHello)).result.isObject());
@@ -3029,6 +3076,26 @@ static std::string sessionText() {
     b.call(p, "settings.set", "{\"package\":\"org.nbtapp.dial\",\"set\":{\"CHIME\":false,\"DIAL_SPEED\":25},\"reset\":[\"FACE\"]}");
     b.call(p, "settings.set", "{\"package\":\"org.nbtapp.dial\",\"set\":{\"DIAL_SPEED\":51,\"FACE\":\"oval\"}}");
     b.call(p, "settings.get", "{\"package\":\"org.nbtapp.dial\",\"from\":1}");
+    // A package with channels: installed, its switched channel read, refused while it is off, switched on and off.
+    Parsed chan(b.call(p, "job.plan", planParams("org.nbtapp.chan-1.0.0", "", "org.nbtapp.chan-1.0.0")));
+    startJob(b, p, str(chan.result, "planId"));
+    const std::string gated = "\"package\":\"org.nbtapp.chan\",\"channel\":\"gated\"";
+    b.call(p, "channel.get", "{" + gated + "}");
+    b.call(p, "channel.open", "{" + gated + ",\"credit\":16}");
+    b.call(p, "channel.set", "{" + gated + ",\"on\":true}");
+    b.call(p, "channel.set", "{" + gated + ",\"on\":false}");
+    // A channel opened, echo, whose program is the test's stand-in that sends back what it is given: a message each
+    // way, and the channel closed by the phone.
+    b.agent.setProgramEnds(&echo);
+    Parsed opened(b.call(p, "channel.open", "{\"package\":\"org.nbtapp.chan\",\"channel\":\"echo\",\"credit\":16}"));
+    unsigned stream = (unsigned)integer(opened.result, "stream");
+    CHECK_IN(p->lastHeard, stream == kChannelFirstStream);
+    p->sendFrame(2, 2, stream, "hello, channel");
+    b.settle();
+    CHECK_IN(p->received[stream], p->received[stream] == "hello, channel" && p->ended.count(stream) == 1);
+    p->event("channel.close", "{\"stream\":" + num(stream) + ",\"reason\":\"closed\"}");
+    b.settle();
+    CHECK(b.agent.channels().count("org.nbtapp.chan", "echo") == 0);
     b.call(p, "system.restart", "{\"kind\":\"hmi\"}");
     // The phone's pairing is ended on the car's screen: the agent says that it closes the link, and why, and
     // closes it.
@@ -3066,7 +3133,12 @@ static std::string sessionText() {
            "# from the agent are one raw deflate stream (RFC 1951), as the zlib of the test bench's image makes it.\n"
            "# Then it installs tests/packages/dial-1.0.0, a package with settings, and reads and changes them with\n"
            "# settings.get and settings.set: one change goes through, and one is refused as `invalid`, with the\n"
-           "# keys at fault and why in the error.\n\n"
+           "# keys at fault and why in the error. Last it installs tests/packages/chan-1.0.0, a package with\n"
+           "# channels, which is why the agent here is 1.7.0, reads its switched channel with channel.get, is\n"
+           "# refused channel.open with `off`, and switches it on and off with channel.set. Then it opens the\n"
+           "# channel echo, whose program here is the test's stand-in that sends back each message as it came,\n"
+           "# sends it one message as a DATA frame on the channel's stream, gets channel.credit for it and the\n"
+           "# same message back, and closes the channel with channel.close.\n\n"
            "magic 4e42544c\n\n" +
            p->transcript;
 }
@@ -3089,7 +3161,7 @@ static void testDetachedSignature() {
         Bench b("detached");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 5 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 6 &&
                                     hello.result.find("capabilities").at(1).string() == kCapabilityDetachedSignature);
         // First the version before it, signed in the usual way: one key then verifies both, so the upgrade's key
         // matches the installed one.
@@ -3158,7 +3230,7 @@ static void testAutostart() {
         Bench b("autostart-nowhere", false, false, "1.1.0");
         Phone* p = b.phone();
         Parsed hello(p->helloReply);
-        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 5 &&
+        CHECK_IN(p->helloReply, hello.result.find("capabilities").size() == 6 &&
                                     hello.result.find("capabilities").at(0).string() == kCapabilityAutostart);
         Parsed state(b.call(p, "autostart.get", "{}"));
         CHECK(state.result.size() == 4 && !flag(state.result, "on") && !flag(state.result, "available"));
@@ -3908,7 +3980,7 @@ static void testSerialReset() {
         Bench b("serial-reset-none");
         Phone* p = b.connect();
         Parsed hello(b.call(p, "hello", kGoodHello));
-        CHECK(hello.result.find("capabilities").size() == 5 && !listsCapability(hello, kCapabilitySerialReset));
+        CHECK(hello.result.find("capabilities").size() == 6 && !listsCapability(hello, kCapabilitySerialReset));
         CHECK(Parsed(b.call(p, "serial.reset", "{}")).code() == "unsupported");
     }
     Bench b("serial-reset");
@@ -3916,8 +3988,8 @@ static void testSerialReset() {
     b.agent.setSerialReset(&reset);
     Phone* p = b.phone();
     Parsed hello(p->helloReply);
-    CHECK(hello.result.find("capabilities").size() == 6 && listsCapability(hello, kCapabilitySerialReset) &&
-          hello.result.find("capabilities").at(5).string() == kCapabilitySerialReset);
+    CHECK(hello.result.find("capabilities").size() == 7 && listsCapability(hello, kCapabilitySerialReset) &&
+          hello.result.find("capabilities").at(6).string() == kCapabilitySerialReset);
 
     // A node is open: sent. None is: armed, for as long as the listener says.
     Parsed sent(b.call(p, "serial.reset", "{}"));

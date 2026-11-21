@@ -40,6 +40,13 @@ are shell scripts that stand in for binaries.
                          that registers nothing): what the agent removes when that program is not running
   radio2-1.0.0           declares the first of radio's two services for a program of its own, so the two cannot
                          both be installed
+  chan-1.0.0             three channels (manifest `channels`), each with a program the agent starts: echo, both
+                         ways, which sends back what it gets; gated, switched, the same program with --upper; and
+                         feed, read only, which sends numbered messages. Its programs bin/chan_echo and bin/chan_feed
+                         are scripts that run the programs of the same names the test bench builds
+                         (tests/agent/chan_echo.cpp, chan_feed.cpp) and keeps beside the agent in its image. Their
+                         logs are the package's. It requires agent >=1.7.0-beta.1, the first that knows channels
+  chan-1.1.0             the same one version on: an upgrade of a package whose channels are open
   agent-1.1.0            the agent's own package, org.nbtapp.agent: ${app}/nbtagent, ${app}/nbtctl and the
                          version's launcher, ${app}/nbtlaunch.sh. Its nbtagent answers --version only, and its
                          launcher is read by the shell and never run. The launcher's test, which has to start

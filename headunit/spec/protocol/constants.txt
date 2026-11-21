@@ -92,3 +92,33 @@ capability.settings settings
 # Package settings: the most bytes one setting's value has, as it stands in the package's settings file. A `text`
 # option's maxLength is at most this.
 settings.maxValueBytes 255
+
+# An agent that lists this one has channels: a controller opens a named channel of an installed package with
+# channel.open, and messages pass both ways as DATA frames on the channel's stream number, with credits
+# (channel.credit), until either side closes it (channel.close); channel.get and channel.set say and set whether a
+# switched channel is on. The agent connects to the package's program for each channel, and may start it
+# (agent/agent.hpp has the messages). One that does not list it answers those methods with `unsupported`.
+capability.channels channels
+
+# Stream numbers. A files stream (files.fetch) and the stream of a blob.fetch take the numbers from 1 to the first of
+# these, and start again at 1 after it; a channel takes the numbers from the second up to 65,535, and starts again
+# at the second.
+stream.last 32767
+channel.firstStream 32768
+
+# A channel's messages: one message is one DATA frame, with the last flag set, of 1 to this many bytes, on every
+# link. A link whose frame does not hold that many has no channels.
+channel.maxMessage 4096
+
+# How many messages each side may send on a channel before the other grants it more with channel.credit: what the
+# agent may send when channel.open names no credit, and what the answer to channel.open gives the phone.
+channel.credit 16
+
+# The most channels open on one link at a time.
+channel.perLink 8
+
+# A channel whose program the agent starts on demand: the agent tries to connect to it every second of these, in
+# milliseconds, for the first, and answers channel.open with `unavailable` when the program has not taken the
+# connection by then.
+channel.startWaitMs 5000
+channel.startRetryMs 100

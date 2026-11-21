@@ -4,11 +4,15 @@ package com.nbtapps.store.data.link
 
 import com.nbtapps.store.AgentVectors
 import com.nbtapps.store.data.MemoryPairingKeys
+import com.nbtapps.store.data.channels.ChannelEnd
+import com.nbtapps.store.data.channels.ChannelState
 import com.nbtapps.store.data.crypto.Hex
 import com.nbtapps.store.data.json.StrictJson
 import com.nbtapps.store.data.packages.PackageArchive
 import com.nbtapps.store.data.packages.VerifiedPackage
 import com.nbtapps.store.model.AgentText
+import com.nbtapps.store.model.ChannelError
+import com.nbtapps.store.model.ChannelSwitch
 import com.nbtapps.store.model.CheckState
 import com.nbtapps.store.model.FileCompress
 import com.nbtapps.store.model.InstallTarget
@@ -195,7 +199,7 @@ class GoldenSessionTest {
                 val greeting = client.hello("5f2c9a1e07b34d6688a0c1d2e3f40516", "Pixel 9")
                 val headUnitId = requireNotNull(greeting.headUnitId)
                 assertEquals("000102030405060708090a0b0c0d0e0f", headUnitId)
-                assertEquals("1.0.0", greeting.agentVersion)
+                assertEquals("1.7.0", greeting.agentVersion)
                 assertEquals(ProtocolConstants.SERIAL_MAX_FRAME, session.peer.maxFrame)
 
                 // A phone that has not proved itself is told nothing, but its ping is answered.
@@ -215,7 +219,7 @@ class GoldenSessionTest {
                 client.auth(AgentVectors.hex("5a0f3c9d2e7b4a61c8d5e2f7a4b1c6d3")) { requireNotNull(keys.mac(headUnitId, it)) }
 
                 val info = client.info()
-                assertEquals("1.0.0", info.agentVersion)
+                assertEquals("1.7.0", info.agentVersion)
                 assertEquals(1, info.manifestVersion)
                 assertEquals(500_000_000L, info.free.staging)
                 assertEquals("none", info.restartNeeded)
@@ -387,6 +391,34 @@ class GoldenSessionTest {
                 assertEquals(listOf("DIAL_SPEED", "GREETING", "LAMP_HOST", "FACE", "LAMP_COLOUR"), rest.options.map { it.option.key })
                 assertEquals(SettingState.SET, rest.options.first().state)
                 assertEquals(SettingValue.Number(25), rest.options.first().value)
+
+                // A package with channels: installed, with the flag of the programs the agent starts for them; its
+                // switched channel read, refused while off, and switched on and off.
+                val (chanFile, chan) = verified("org.nbtapp.chan-1.0.0.nbtpkg")
+                session.blobs.offer(blobs(chanFile, chan))
+                val chanPlan = client.plan(PlanRequest(install = listOf(InstallTarget("org.nbtapp.chan", "1.0.0")), offers = listOf(offer(chan))))
+                assertEquals(listOf("starts-program"), chanPlan.flags)
+                session.blobs.jobStarted()
+                assertEquals(JobState.FETCHING, client.start(chanPlan.planId!!).state)
+                assertEquals(JobState.SUCCEEDED, (session.eventsUntilDone().last() as JobEvent.Done).result.state)
+                session.blobs.jobEnded()
+                assertEquals(ChannelSwitch(switched = true, on = false, open = 0), client.channelGet("org.nbtapp.chan", "gated"))
+                assertEquals(ChannelError.OFF, codeOf { session.openChannel("org.nbtapp.chan", "gated") })
+                assertEquals(ChannelSwitch(switched = true, on = true, open = 0), client.channelSet("org.nbtapp.chan", "gated", true))
+                assertEquals(ChannelSwitch(switched = true, on = false, open = 0), client.channelSet("org.nbtapp.chan", "gated", false))
+
+                // A channel opened, its program the agent's stand-in that sends back what it is given: a message each
+                // way, the agent's grant for the one it took, and the channel closed from here.
+                val echo = session.openChannel("org.nbtapp.chan", "echo")
+                assertEquals(ProtocolConstants.CHANNEL_FIRST_STREAM, echo.stream)
+                assertEquals(ProtocolConstants.CHANNEL_MAX_MESSAGE, echo.maxMessage)
+                assertEquals("1.0.0", echo.version)
+                echo.send("hello, channel".encodeToByteArray())
+                assertEquals("hello, channel", echo.receive()?.decodeToString())
+                assertEquals(ChannelState.Open, echo.state.value)
+                echo.close()
+                assertEquals(ChannelState.Closed(ChannelEnd.ByApp), echo.state.value)
+                assertNull(echo.receive())
 
                 client.restart("hmi")
 
