@@ -110,7 +110,21 @@
 // and a request may be sent from inside an event of the client's (GapClient::request(); DsiClient sends from the
 // library's own thread). The listener's lock is not held while it is sent, since a client may answer within the send.
 // Its answer comes the same way and is judged there; the listener's thread says what it came to, and gives it up when
-// DialConfig::repointLimitMs have passed (SppService::giveUpConnect()).
+// DialConfig::repointLimitMs have passed (SppService::giveUpConnect(), kLateDropped: a late answer to it is passed
+// over).
+//
+// A dial with no answer in DialConfig::replyLimitMs is given up, and so is one that is out when the listener stops or
+// gives up (after DialConfig::disconnectWaitMs more for its answer): the rules back the phone off and doubt the car's
+// record (DialRules::gaveUp()), and SppService gives the ServiceConnect up too, so that the next dial may go, and keeps
+// what it named (kLateTold). The car's answer that comes after all, while no ServiceConnect of the agent's is out, is
+// told as late (sppLateConnectReply()): a failure brings the re-point there as the answer to a dial that is out would,
+// and the listener's thread says it in the log and takes it for the answer to nothing, neither an ask nor a dial. A
+// late 0 means the car has a link up on the dialled instance after all, which nothing of the agent's reads: the car
+// is asked to end it (ServiceDisconnect for the phone it named) once the dial has nothing else under way. A late
+// answer that comes while a new dial of the same phone is out cannot be told from that dial's own answer, and is
+// taken as it; the new dial's own answer, should another come after it, is then dropped as another client's. A
+// listener that stops and is set up again in the same process starts with its rules idle (endDialSteps()), and a late
+// answer that comes in between or after is told as above.
 //
 // How a link of the agent's ends. The phone made the link, and the phone ends it:
 //
@@ -630,6 +644,7 @@ private:
     virtual void sppRefusedPhone(const btspp::PhoneInList& phone);
     virtual void sppDevices(const std::vector<btspp::BtDevice>& devices);
     virtual void sppConnectReply(const btspp::ServiceConnectReply& reply);
+    virtual void sppLateConnectReply(const btspp::ServiceConnectReply& reply);
     virtual void sppServiceList(const btspp::ServiceList& list);
     virtual void sppDisconnectReply(const btspp::ServiceDisconnectReply& reply);
     virtual void sppLinkEnded(const btspp::ServiceDisconnected& ended);
@@ -696,6 +711,11 @@ private:
     // `dialled` is handed to the agent to give that up (takeUndialled()).
     void dialFailed();
     void dialAnswered(const btspp::ServiceConnectReply& reply, int64_t now, RepointWent repoint);
+    struct ConnectAnswer;
+    // An answer to a dial that was given up: said, and never taken as the answer to anything that is out. A late 0
+    // leaves the link it names to be ended (startLateEnd()).
+    void lateAnswer(const ConnectAnswer& late);
+    bool startLateEnd();
     // The re-point, on the Bluetooth service's thread: sent if `reply` is a failed answer to a dial that brings one,
     // and the re-points have not stopped; and its answer, judged as it comes (`at`).
     RepointWent repointAfter(const btspp::ServiceConnectReply& reply);
@@ -830,6 +850,9 @@ private:
         ConnectAnswer(const btspp::ServiceConnectReply& r, int64_t a, RepointWent w) : reply(r), at(a), repoint(w) {}
     };
     std::vector<ConnectAnswer> connectReplies_;
+    // The late answers to dials that were given up (sppLateConnectReply()), the same way: kept apart, so that none is
+    // taken as the answer to a dial that is out.
+    std::vector<ConnectAnswer> lateReplies_;
     std::vector<std::pair<btspp::ServiceList, int64_t> > listReplies_;              // the same
     std::vector<btspp::ServiceDisconnectReply> disconnectReplies_;
     std::vector<btspp::ServiceDisconnected> dialEnds_;
@@ -853,6 +876,8 @@ private:
     double dialOpenedAt_;
     DialledLink* dialLink_;            // kDialLinked: what the listener and the link's threads share
     std::vector<std::string> cleanupPhones_;   // kDialCleanup: whom ServiceDisconnect is still to name, in turn
+    std::string lateLink_;             // the phone a late 0 named, whose link on the instance is to be ended; empty:
+                                       // none is owed
     std::string cleanupWhy_;
     double discAt_;                    // when the dial's last ServiceDisconnect went out; 0: none waits
     std::string discAddress_;

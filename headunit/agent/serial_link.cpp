@@ -1066,16 +1066,32 @@ void SerialListener::sppConnectReply(const ServiceConnectReply& reply) {
     pthread_mutex_unlock(&mu_);
 }
 
-// The answer is the car's to a dial of the agent's: SppService tells only the answer to its own ServiceConnect, and
-// every one of the agent's that names the agent's service is a dial, given up for no answer or not. A failure that
-// leaves the car's record doubtful brings the re-point, unless the re-points have stopped. The listener's lock is let
-// go before the request is sent: a client may answer it within the send, on this thread.
+// The car's answer to a dial that was given up, which came while no ServiceConnect of the agent's was out
+// (SppService::giveUpConnect(), kLateTold): the re-point first, as for the answer to a dial that is out, by the same
+// rule; then it is queued apart, for the listener's thread to say (lateAnswer()). It is never taken as the answer to
+// an ask or to a dial that is out.
+void SerialListener::sppLateConnectReply(const ServiceConnectReply& reply) {
+    if (!config_.dial.on) return;
+    int64_t at = (int64_t)(monoNow() * 1000.0);
+    RepointWent repoint = repointAfter(reply);
+    pthread_mutex_lock(&mu_);
+    lateReplies_.push_back(ConnectAnswer(reply, at, repoint));
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+}
+
+// The answer is the car's to a dial of the agent's: SppService tells only the answer to its own ServiceConnect, or a
+// late one to a dial it was told to keep when the dial was given up, and every one of the agent's that names the
+// agent's service is a dial. A failure that leaves the car's record doubtful brings the re-point, unless the
+// re-points have stopped. The listener's lock is let go before the request is sent: a client may answer it within the
+// send, on this thread.
 SerialListener::RepointWent SerialListener::repointAfter(const ServiceConnectReply& reply) {
     if (!config_.dial.on || reply.service != config_.name || !DialRules::doubtingAnswer(reply.error)) return kRepointNone;
     int64_t now = (int64_t)(monoNow() * 1000.0);
     pthread_mutex_lock(&mu_);
     bool stopped = repointStopped_;
-    // One ServiceConnect of the agent's at a time, and this answer has just ended the one that was out: none is out.
+    // One ServiceConnect of the agent's at a time, and this answer has just ended the one that was out, or (a late
+    // one) came while none was: none is out.
     bool out = rules_.repointOut();
     if (!stopped && !out) {
         rules_.repointSent(now);
@@ -2557,6 +2573,69 @@ std::vector<std::string> SerialListener::takeUndialled() {
     return taken;
 }
 
+// The car's answer to a dial that had been given up: told late (sppLateConnectReply()), or queued while the dial was
+// out and not taken as its answer, since it was given up first. A re-point it brought has gone already. It answers
+// nothing that is out, and nothing in the rules changes for it: the give-up has backed the phone off, counted the dial
+// as one with no answer and doubted the car's record. It is said as the dial's answers are: the same again for the
+// phone only counted, until something else is said for it. A late 0 says that the car has a link up on the dialled
+// instance after all, which nothing of the agent's reads, and which would hold the instance (a later dial, perhaps of
+// another phone, would be answered 2 and end it naming that phone) and the registration: the car is asked to end it,
+// naming the phone the answer named, once the dial has nothing else under way (startLateEnd()).
+void SerialListener::lateAnswer(const ConnectAnswer& late) {
+    const ServiceConnectReply& reply = late.reply;
+    pthread_mutex_lock(&mu_);
+    unsigned number = rules_.number(reply.address);
+    pthread_mutex_unlock(&mu_);
+    std::string answer =
+        reply.error == kNoError ? std::string("a rejection or a reply not read") : gapErrorText(reply.error, "");
+    std::string meaning;
+    if (reply.error == 0) {
+        meaning = "the car has a link up on the dialled instance that nothing of the agent's reads, and is asked to end "
+                  "it";
+        lateLink_ = reply.address;
+    } else if (!DialRules::doubtingAnswer(reply.error)) {
+        meaning = "nothing more comes of it";
+    } else if (late.repoint == kRepointWent) {
+        meaning = "one re-point request has been sent for it";
+    } else if (late.repoint == kRepointNotSent) {
+        meaning = "the re-point request for it could not be sent";
+    } else if (late.repoint == kRepointStopped) {
+        meaning = "no re-point request is sent for it: they have stopped in this run";
+    } else {
+        meaning = "no re-point request is sent for it: one was waiting for its answer already";
+    }
+    std::string key = "a late " + answer;
+    Repeat& last = repeats_[number];
+    if (reply.error != 0 && last.answer == key) {
+        ++last.times;
+        return;
+    }
+    std::string before;
+    if (last.times > 0) {
+        char times[160];
+        snprintf(times, sizeof times, " (%s came %u more time%s before this)", last.answer.c_str(), last.times,
+                 last.times == 1 ? "" : "s");
+        before = times;
+    }
+    last.answer = key;
+    last.times = 0;
+    say("phone %u: the car answered a dial of it late, with %s, after the dial had been given up: it answers nothing "
+        "that is out, and %s%s%s", number, answer.c_str(), meaning.c_str(), before.c_str(),
+        reply.error != 0 ? ". The same late answer again is only counted" : "");
+}
+
+// The link a late 0 named (lateAnswer()) is ended as the dial's own is, by a clean-up with ServiceDisconnect for that
+// phone on the dialled instance, once the dial has nothing else under way: false if none is owed or something is. A
+// node that has gone by then is left alone, and the clean-up ends at once.
+bool SerialListener::startLateEnd() {
+    if (lateLink_.empty() || dialPhase_ != kDialNone) return false;
+    std::string phone = lateLink_;
+    lateLink_.clear();
+    startCleanup(std::vector<std::string>(1, phone), "a link the car connected for a dial it answered after the dial "
+                                                     "had been given up");
+    return true;
+}
+
 // The car's answer to the dial. A re-point it brought has gone already (sppConnectReply()).
 void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now, RepointWent repoint) {
     pthread_mutex_lock(&mu_);
@@ -3045,13 +3124,14 @@ void SerialListener::tendDial() {
         pthread_mutex_unlock(&mu_);
         lastLinks_ = links;
     }
-    std::vector<ConnectAnswer> answers;
+    std::vector<ConnectAnswer> answers, lates;
     std::vector<std::pair<ServiceList, int64_t> > lists;
     std::vector<ServiceDisconnectReply> disconnects;
     std::vector<ServiceDisconnected> ends;
     std::vector<std::string> pairings;
     pthread_mutex_lock(&mu_);
     answers.swap(connectReplies_);
+    lates.swap(lateReplies_);
     lists.swap(listReplies_);
     disconnects.swap(disconnectReplies_);
     ends.swap(dialEnds_);
@@ -3107,12 +3187,15 @@ void SerialListener::tendDial() {
             }
         }
     }
+    // The answers were taken before the ask's: a dial that the ask's answer sends now is not answered among them.
+    bool dialWasOut = dialPhase_ == kDialWait;
+    size_t taken = 0;
     // The answers to asks, whatever the phase: one to an ask that was ended still tells that the car is free.
     tendAsk(lists, now);
     switch (dialPhase_) {
     case kDialWait:
-        for (size_t i = 0; i < answers.size() && dialPhase_ == kDialWait; ++i)
-            dialAnswered(answers[i].reply, answers[i].at, answers[i].repoint);
+        for (; dialWasOut && taken < answers.size() && dialPhase_ == kDialWait; ++taken)
+            dialAnswered(answers[taken].reply, answers[taken].at, answers[taken].repoint);
         if (dialPhase_ == kDialWait) {
             pthread_mutex_lock(&mu_);
             bool overdue = rules_.overdue(now);
@@ -3123,6 +3206,9 @@ void SerialListener::tendDial() {
                 counts_.lastResult = "no answer";
             }
             pthread_mutex_unlock(&mu_);
+            // So that the next dial may go; an answer that comes after all is told late, and still brings the
+            // re-point (lateAnswer()).
+            if (overdue) spp_.giveUpConnect(dial_.address, config_.name, SppService::kLateTold);
             if (overdue) {
                 bool there = access(config_.dial.node.c_str(), F_OK) == 0;
                 say("phone %u: no answer to the car's dial in %u s; %s is %s. The car is asked to end what may be up, "
@@ -3158,9 +3244,13 @@ void SerialListener::tendDial() {
     default:
         break;
     }
+    // What no dial that is out took: answers to a dial that was given up, and the late ones.
+    for (; taken < answers.size(); ++taken) lateAnswer(answers[taken]);
+    for (size_t i = 0; i < lates.size(); ++i) lateAnswer(lates[i]);
     // After the dial's own lines, and before the next ask: a re-point given up in time lets that go.
     tendRepoint(now);
-    if (dialPhase_ == kDialNone) maybeDial(now);
+    // A link a late 0 left up is ended before anything new is asked.
+    if (dialPhase_ == kDialNone && !startLateEnd()) maybeDial(now);
 }
 
 void SerialListener::tendRepoint(int64_t now) {
@@ -3183,8 +3273,9 @@ void SerialListener::tendRepoint(int64_t now) {
     }
     ends.swap(repointEnds_);
     pthread_mutex_unlock(&mu_);
-    // So that the next ServiceConnect may go: a late answer is then another client's (SppService::giveUpConnect()).
-    if (giveUp) spp_.giveUpConnect(kRepointAddress, kRepointService);
+    // So that the next ServiceConnect may go: a late answer is then another client's (SppService::giveUpConnect()),
+    // and not kept, as repointAnswered() would pass it over with none out anyway.
+    if (giveUp) spp_.giveUpConnect(kRepointAddress, kRepointService, SppService::kLateDropped);
     for (size_t i = 0; i < ends.size(); ++i) {
         const RepointOutcome& o = ends[i];
         std::string dial = o.dialError == kNoError ? std::string("no error code") : gapErrorText(o.dialError, "");
@@ -3270,7 +3361,7 @@ void SerialListener::endRepoint(const char* why) {
         repointEnds_.push_back(o);
     }
     pthread_mutex_unlock(&mu_);
-    if (out) spp_.giveUpConnect(kRepointAddress, kRepointService);
+    if (out) spp_.giveUpConnect(kRepointAddress, kRepointService, SppService::kLateDropped);
     tendRepoint(msOf(monoNow()));
     // A ServiceDisconnect that is owed and could not go yet: one more try, and then it is not owed any more.
     repointDisconnect_ = false;
@@ -3285,8 +3376,15 @@ void SerialListener::endDial(const char* why) {
     endRepoint(why);
 }
 
+// Whatever it ends, the rules are left idle, so that a listener set up again in the same process asks and dials as
+// before: a dial with no answer is given up as at the end of its time (DialRules::gaveUp(), counted as one with no
+// answer, and kept in SppService for a late answer, which then brings the re-point as it would have), but with no
+// clean-up after it, since a ServiceDisconnect never goes while the dial is out in the car, and with no line in the
+// problem file, since the car had less than its time; a clean-up that has not ended in its time is cut short. A link
+// that a late 0 left up (startLateEnd()) is ended here too.
 void SerialListener::endDialSteps(const char* why) {
-    if (!config_.dial.on || dialPhase_ == kDialNone) return;
+    if (!config_.dial.on) return;
+    if (dialPhase_ == kDialNone && !startLateEnd()) return;
     if (dialPhase_ == kDialAsk) {
         // An ask brings no link: it is dropped, and its answer passed over.
         pthread_mutex_lock(&mu_);
@@ -3303,13 +3401,27 @@ void SerialListener::endDialSteps(const char* why) {
             pthread_mutex_lock(&mu_);
             answers.swap(connectReplies_);
             pthread_mutex_unlock(&mu_);
-            for (size_t i = 0; i < answers.size() && dialPhase_ == kDialWait; ++i)
-                dialAnswered(answers[i].reply, answers[i].at, answers[i].repoint);
+            size_t taken = 0;
+            for (; taken < answers.size() && dialPhase_ == kDialWait; ++taken)
+                dialAnswered(answers[taken].reply, answers[taken].at, answers[taken].repoint);
+            for (; taken < answers.size(); ++taken) lateAnswer(answers[taken]);
             if (dialPhase_ == kDialWait) usleep(20000);
         }
         if (dialPhase_ == kDialWait) {
-            say("phone %u: the car's dial had no answer when %s", dial_.number, why);
+            int64_t now = msOf(monoNow());
+            pthread_mutex_lock(&mu_);
+            bool doubted = rules_.recordDoubtful();
+            if (rules_.state() == DialRules::kDialling) rules_.gaveUp(now);
+            ++counts_.noAnswer;
+            counts_.lastResult = "no answer";
+            int64_t backOff = rules_.backedOffUntil(dial_.address) - now;
+            pthread_mutex_unlock(&mu_);
+            spp_.giveUpConnect(dial_.address, config_.name, SppService::kLateTold);
             dialPhase_ = kDialNone;
+            say("phone %u: the car's dial had no answer when %s: it is given up, and the phone is not dialled by a poll "
+                "for %lld s", dial_.number, why, (long long)(backOff / 1000));
+            doubtNow(doubted, "no answer", kRepointNone);
+            dialFailed();
             return;
         }
     }
@@ -3334,6 +3446,15 @@ void SerialListener::endDialSteps(const char* why) {
         }
         tendCleanup(msOf(monoNow()), false);
         if (dialPhase_ == kDialCleanup) usleep(20000);
+    }
+    if (dialPhase_ != kDialNone) {
+        // Cut short (no time left, or the car's Bluetooth service is not attached): what the clean-up would have
+        // ended with, the rules back to idle.
+        pthread_mutex_lock(&mu_);
+        if (rules_.state() == DialRules::kUp || rules_.state() == DialRules::kEnding) rules_.ended(msOf(monoNow()));
+        pthread_mutex_unlock(&mu_);
+        cleanupPhones_.clear();
+        discAt_ = 0;
     }
     if (dialReader_ != 0) {
         dialReader_->finish();
@@ -3400,6 +3521,8 @@ void SerialListener::run() {
                 listReplies_.clear();
                 pthread_mutex_unlock(&mu_);
                 if (dialPhase_ == kDialWait || dialPhase_ == kDialAsk) dialPhase_ = kDialNone;
+                // A link a late 0 said was up is not owed an end any more: the service that had it cannot be asked.
+                lateLink_.clear();
                 if (doubted)
                     say("the car's Bluetooth service has gone: its record of phone-opened serial links starts afresh "
                         "when it comes back");

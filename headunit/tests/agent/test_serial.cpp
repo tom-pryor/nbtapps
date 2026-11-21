@@ -2859,6 +2859,219 @@ static void testRepoint() {
     }
 }
 
+// The dials of kDialled that went to the car, re-points left out.
+static unsigned dialsOfPhone(FakeGap& gap) {
+    std::vector<FakeGap::Connect> c = gap.connects();
+    unsigned n = 0;
+    for (size_t i = 0; i < c.size(); ++i)
+        if (!isRepoint(c[i]) && c[i].address == kDialled && c[i].service == "NBTApp" && c[i].instance == "nbtapp") ++n;
+    return n;
+}
+static bool dialsWithin(FakeGap& gap, unsigned n, int ms) {
+    double end = monoNow() + ms / 1000.0;
+    while (dialsOfPhone(gap) < n && monoNow() < end) pause(5);
+    return dialsOfPhone(gap) == n;
+}
+struct DialStateIs : StatusIs {
+    explicit DialStateIs(const char* s) : state(s) {}
+    virtual bool operator()(const SerialStatus& s) const { return s.dialState == state; }
+    std::string state;
+};
+struct DialsAre : StatusIs {
+    explicit DialsAre(unsigned n) : dials(n) {}
+    virtual bool operator()(const SerialStatus& s) const { return s.dials == dials; }
+    unsigned dials;
+};
+
+// A dial that is given up, for no answer in its time or as the listener stops: the next dial goes, and the car's
+// answer that comes after all is told late, never as the answer to an ask or a dial that is out.
+static void testDialGivenUp() {
+    const char* late = "phone 1: the car answered a dial of it late, with ";
+    {   // given up for no answer: the next poll's dial is sent, not refused for the one given up
+        Dialler d("given-up-next");
+        d.ours.set(std::vector<std::string>(1, kDialled));
+        d.config.dial.pollFirstMs = d.config.dial.pollLaterMs = 200;
+        d.config.dial.backOffMs = 300;
+        d.gap.answersConnect = false;
+        d.gap.answersDisconnect = true;
+        d.gap.disconnectError = 10;
+        d.start();
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 1, 2000));
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: no answer to the car's dial in 1 s", 3000));
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(st.noAnswer == 1 && st.lastResult == "no answer" && st.recordDoubtful);
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 2, 3000));
+        CHECK(!d.trace.logged("the car could not be asked to dial it"));
+        CHECK_IN(d.trace.text(), statusWithin(*d.listener, DialsAre(2), 1000));
+        st = d.listener->serialStatus();
+        CHECK(st.dialState == "dialling" && st.noAnswer == 1);
+        // The second is given up in its turn, and a third goes.
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "no answer to the car's dial in 1 s", 2, 3000));
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 3, 4000));
+        CHECK(d.listener->serialStatus().noAnswer == 2 && d.trace.count("gap repoint") == 0);
+    }
+    {   // a late 5 while nothing of the agent's is out, with an ask of the phone out: exactly one re-point, at once;
+        // said once, and the answer to neither the ask nor the dial that follows it
+        Dialler d("given-up-late-5");
+        d.ours.set(std::vector<std::string>(1, kDialled));
+        d.config.dial.pollFirstMs = d.config.dial.pollLaterMs = 200;
+        d.config.dial.backOffMs = 300;
+        d.gap.answersConnect = false;
+        d.gap.answersDisconnect = true;
+        d.gap.disconnectError = 10;
+        d.start();
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 1, 2000));
+        d.gap.answersQuery = false;   // the next ask stays out
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: no answer to the car's dial in 1 s", 3000));
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap query", 2, 3000));
+        d.trace.add("test: the dial is answered late");
+        d.gap.connectReply(kDialled, "NBTApp", 5);
+        int at = d.trace.at("test: the dial is answered late");
+        CHECK_IN(d.trace.text(), d.trace.at(kRepointItem) == at + 1);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, std::string(late) + "5 DEFAULT, after the dial had been given up: "
+                                                    "it answers nothing that is out, and one re-point request has been "
+                                                    "sent for it. The same late answer again is only counted", 2000));
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: the re-point request after the dial's answer 5 DEFAULT was "
+                                                    "answered 5 DEFAULT in ", 2000));
+        CHECK(!d.trace.logged("the car's dial answered 5"));
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(st.repoints == 1 && st.repointsExpected == 1 && st.notListening == 0 && st.noAnswer == 1);
+        CHECK(st.lastResult == "no answer" && st.dials == 1 && st.dialState != "dialling");
+        // The ask's answer (or, if the re-point ended that ask, the next one's) brings a dial, which waits for its own
+        // answer: the late one was not it.
+        d.gap.answersQuery = true;
+        d.gap.queryReply(kDialled, true);
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 2, 3000));
+        pause(300);
+        CHECK_IN(d.trace.text(), d.listener->serialStatus().dialState == "dialling");
+        // Its own answer.
+        d.gap.connectReply(kDialled, "NBTApp", 14);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (poll): the car's dial answered 14 PAGE_TIMEOUT", 2000));
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap repoint", 2, 2000));
+        CHECK(d.trace.loggedCount(late) == 1);
+        st = d.listener->serialStatus();
+        CHECK(st.notInReach == 1 && st.notListening == 0 && st.dials == 2 && st.lastResult == "PAGE_TIMEOUT");
+        CHECK(!d.trace.logged("00:11:22") && !d.trace.logged("001122"));
+    }
+    {   // a late answer that is told is told once: the same again is dropped; a late 10 brings no re-point
+        Dialler d("given-up-late-once");
+        d.gap.answersConnect = false;
+        d.gap.answersDisconnect = true;
+        d.gap.disconnectError = 10;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: no answer to the car's dial in 1 s", 3000));
+        d.gap.connectReply(kDialled, "NBTApp", 10);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, std::string(late) + "10 INVALID_PARAM, after the dial had been "
+                                                    "given up: it answers nothing that is out, and nothing more comes "
+                                                    "of it", 2000));
+        d.gap.connectReply(kDialled, "NBTApp", 5);
+        pause(300);
+        CHECK(d.trace.loggedCount(late) == 1 && d.trace.count("gap repoint") == 0);
+        CHECK(d.listener->serialStatus().repoints == 0);
+    }
+    {   // a late 0: the car has a link up on the dialled instance after all, which is not taken: the car is asked to
+        // end it, for the phone it named, and nothing of it counts as an answered dial
+        Dialler d("given-up-late-0");
+        Node node(d.dir + "/nbtapp");
+        d.gap.dialNode = &node;
+        d.gap.answersConnect = false;
+        d.gap.answersDisconnect = true;
+        d.gap.disconnectError = 10;
+        d.start();
+        node.say(kMagic);   // what the app would say: never read
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: no answer to the car's dial in 1 s", 3000));
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "ServiceDisconnect on the dialled instance answered 10 ", 2000));
+        CHECK_IN(d.trace.text(), statusWithin(*d.listener, DialStateIs("idle"), 2000));
+        pause(200);
+        CHECK(d.trace.count("gap disconnect") == 1);
+        d.gap.disconnectError = 0;   // this time it ends the link
+        node.appear();
+        d.gap.connectReply(kDialled, "NBTApp", 0);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, std::string(late) + "0 OK, after the dial had been given up: it "
+                                                    "answers nothing that is out, and the car has a link up on the "
+                                                    "dialled instance that nothing of the agent's reads, and is asked "
+                                                    "to end it", 2000));
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap disconnect", 2, 2000));
+        CHECK(d.gap.disconnect == buildServiceDisconnect("BtCtrl", "nbtapp", kDialled, "NBTApp"));
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: ServiceDisconnect on the dialled instance answered 0 OK", 2000));
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, node.path + " is not there", 2000));
+        pause(200);
+        CHECK(acceptWithin(*d.listener, 50) == 0 && !d.trace.saw("nbtapp opened") && d.trace.count("gap repoint") == 0);
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(st.answeredOk == 0 && st.noAnswer == 1 && st.leftBehind == 0 && st.dialState == "idle" && st.link == "none");
+        // Dials go on.
+        d.dial();
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 2, 2000));
+    }
+    {   // a late answer while a new dial of the same phone is out cannot be told from that dial's own: it is taken as
+        // that dial's answer, and the one after it is dropped
+        Dialler d("given-up-same-phone");
+        d.gap.answersConnect = false;
+        d.gap.answersDisconnect = true;
+        d.gap.disconnectError = 10;
+        d.start();
+        d.dial();
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: no answer to the car's dial in 1 s", 3000));
+        CHECK_IN(d.trace.text(), statusWithin(*d.listener, DialStateIs("idle"), 2000));
+        d.dial();   // a forced dial asks at once, back-off or not
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 2, 2000));
+        d.gap.connectReply(kDialled, "NBTApp", 5);   // the first dial's, late
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (asked for): the car's dial answered 5 DEFAULT", 2000));
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "gap repoint", 1, 2000));
+        d.gap.connectReply(kDialled, "NBTApp", 14);   // the second's own
+        pause(300);
+        CHECK(!d.trace.logged(late) && !d.trace.logged("PAGE_TIMEOUT") && d.trace.count("gap repoint") == 1);
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(st.dials == 2 && st.noAnswer == 1 && st.notListening == 1 && st.notInReach == 0 && st.dialState == "idle");
+    }
+    {   // the listener stops with a dial out, and is set up again in the same process: the dial was given up (the
+        // rules idle, counted as no answer, no ServiceDisconnect), the late failed answer after the set-up brings the
+        // re-point, serial.dial is not refused as busy, and polls ask and dial again
+        Dialler d("given-up-at-stop");
+        d.ours.set(std::vector<std::string>(1, kDialled));
+        d.config.dial.pollFirstMs = d.config.dial.pollLaterMs = 200;
+        d.config.dial.backOffMs = 1000;
+        d.config.dial.replyLimitMs = 60000;
+        d.gap.answersConnect = false;
+        d.start();
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 1, 2000));
+        CHECK_IN(d.trace.text(), statusWithin(*d.listener, DialStateIs("dialling"), 1000));
+        d.listener->stop();
+        CHECK_IN(d.trace.text(), d.trace.logged("phone 1: the car's dial had no answer when Bluetooth serial stops: it is "
+                                                "given up, and the phone is not dialled by a poll for 1 s"));
+        CHECK(d.trace.logged("should the car answer the dial after all, one re-point request is sent then"));
+        SerialStatus st = d.listener->serialStatus();
+        CHECK(st.dialState == "idle" && st.noAnswer == 1 && st.lastResult == "no answer" && st.recordDoubtful);
+        CHECK(d.trace.count("gap disconnect") == 0 && d.trace.count("gap repoint") == 0);
+        std::string why;
+        CHECK_IN(why, d.listener->start(&why));
+        CHECK_IN(d.trace.text(), countWithin(d.trace, "log: the serial service 'NBTApp' is registered", 2, 2000));
+        // The late answer, while the phone is still backed off: nothing of the agent's is out.
+        d.trace.add("test: the dial is answered late");
+        d.gap.connectReply(kDialled, "NBTApp", 5);
+        int at = d.trace.at("test: the dial is answered late");
+        CHECK_IN(d.trace.text(), d.trace.at(kRepointItem) == at + 1);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, std::string(late) + "5 DEFAULT", 2000));
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1: the re-point request after the dial's answer 5 DEFAULT was "
+                                                    "answered 5 DEFAULT in ", 2000));
+        CHECK(d.listener->serialStatus().repointsExpected == 1);
+        // serial.dial is taken, and its dial goes.
+        CHECK_IN(why, d.listener->dialNow(&why) == 1);
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 2, 2000));
+        d.gap.connectReply(kDialled, "NBTApp", 14);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (asked for): the car's dial answered 14 PAGE_TIMEOUT", 2000));
+        // And once the back-off is over, a poll.
+        CHECK_IN(d.trace.text(), dialsWithin(d.gap, 3, 4000));
+        d.gap.connectReply(kDialled, "NBTApp", 1);
+        CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (poll): the car's dial answered 1 TIMEOUT", 2000));
+        st = d.listener->serialStatus();
+        CHECK(st.dials == 3 && st.noAnswer == 1 && st.notInReach == 1 && st.otherAnswers == 1 && st.repoints == 3);
+        CHECK(!d.trace.logged("the car could not be asked to dial it") && !d.trace.logged("00:11:22"));
+    }
+}
+
 static unsigned registersIn(Trace& trace) { return trace.exactly("register"); }
 
 static void testRegistrationCheck() {
@@ -5222,6 +5435,7 @@ int main(int argc, char** argv) {
     testDial();
     testDialAsk();
     testRepoint();
+    testDialGivenUp();
     testRefusal();
     testAgent();
     testAgentDials();

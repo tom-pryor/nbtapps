@@ -578,8 +578,9 @@ read (an empty or short log may have no such line any more). If the car's Blueto
 does not take the registration, or the service is not registered for 20 seconds (an agent that starts with the
 head unit may be there before the car's Bluetooth service is), the agent says which it was (never attached,
 attached and no answer to the registration, or refused), takes the gate away again, and sets both up anew 30
-seconds later, and so on until the service is registered. A client of the car's Bluetooth service that fails
-once it has been made (no memory for it, or its connection thread not started) cannot be opened again: the agent
+seconds later, and so on until the service is registered. A dial of the car's that is out then is given up first
+("The car dials the phone", below), so that the dials go on as before once the service is registered again. A
+client of the car's Bluetooth service that fails once it has been made (no memory for it, or its connection thread not started) cannot be opened again: the agent
 says so once and Bluetooth serial stays off until the agent is started again. Switching Bluetooth off and on in iDrive drops the registration, and the car says nothing
 of it, so while the service is registered, no link of the agent's is up and no phone has asked for a link for 30
 seconds, the agent checks it every 30 seconds by registering it again (`--register-check <s>`, below): the car
@@ -787,7 +788,13 @@ pairing key, and nothing on the link is trusted before that.
   does not end it, the phone is backed off instead, and is not dialled again at once; with no node there, as 10. 10,
   or a request the car's Bluetooth service did not take or that could not be sent: again in 15 seconds. Any other
   answer: backed off. No answer in 95 seconds: the dial is given up, the car is asked to end what may be up, and the
-  phone is backed off.
+  phone is backed off; the next dial goes as usual. A dial that is out when Bluetooth serial stops, or is set up
+  again, has 3 seconds more for its answer and is then given up the same way, but the car is not asked to end
+  anything while the dial may still be out in it. The car's answer that comes after the dial was given up, while no
+  other request of the agent's waits for its answer, is said in the log as late and is the answer to nothing else:
+  a failure brings the re-point (below), and 0, a link up on `nbtapp` after all that nothing of the agent's reads,
+  has the car asked to end it. A late answer that comes while the agent dials the same phone again cannot be told
+  from that dial's own answer, and is taken as it.
 - **A dial that still fails.** A dial answered with anything but 0, 2 or 10, or not at all, although the phone's
   list named the agent's service, may have left the car's record of phone-opened links wrong. The log says so once,
   the problem file gets a line, and `serial.status` says `"recordDoubtful": true` until a dial is answered 0, the
@@ -798,7 +805,7 @@ pairing key, and nothing on the link is trusted before that.
   agent's instance `nbtapp` that still names the phone. The end of a later phone-opened link can then be booked
   against that entry, and the car counts one connected service too few for the phone; when that count reaches zero,
   the car closes the phone's media audio. So the moment the agent sees such an answer (also one that comes late, to a
-  dial it had given up), it sends one more ServiceConnect on `nbtapp`, with an address that belongs to no device and
+  dial it had given up, above), it sends one more ServiceConnect on `nbtapp`, with an address that belongs to no device and
   a service the instance does not serve. The car answers it with 5 within some tens of milliseconds and sends nothing
   over the air; on the way it writes that address into the agent's entry, so a link end booked against the entry
   names an address the car has no record of, and the phone's count is left alone. The record stays doubted all the

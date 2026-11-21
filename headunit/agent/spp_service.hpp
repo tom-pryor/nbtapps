@@ -721,6 +721,10 @@ public:
         // The answer to connectService(), with what it named; for a rejection, or a send that failed, error is
         // kNoError and the address and service are the ones asked for.
         virtual void sppConnectReply(const ServiceConnectReply& /*reply*/) {}
+        // A late answer: a reply read whole that names the ServiceConnect last given up with kLateTold
+        // (giveUpConnect()), which came while no ServiceConnect of ours waited. It answers nothing that is out, and is
+        // never told through sppConnectReply(); a client that does not take this event drops it, unsaid.
+        virtual void sppLateConnectReply(const ServiceConnectReply& /*reply*/) {}
         // The answer to disconnectService(), the same way.
         virtual void sppDisconnectReply(const ServiceDisconnectReply& /*reply*/) {}
         // Every ServiceListQuery reply that comes, whoever's query it answers: the car may give the one answer to
@@ -790,16 +794,38 @@ public:
     // read whole and names another service or another phone is another client's: it is not the answer, which is
     // still waited for. Nothing is logged but the first few of those: the caller says what it does. From any
     // thread.
+    //
+    // One that names the same phone and service as the connect kept by giveUpConnect(kLateTold) takes that one's
+    // place: the kept one is forgotten as this one goes out (and kept again if it could not be sent), and its late
+    // answer, should it come now, cannot be told from this one's: the first reply that names them is taken as this
+    // one's answer.
     bool connectService(const std::string& device, const std::string& instance, const std::string& address,
                         const std::string& service);
+    // What becomes of an answer to a ServiceConnect that giveUpConnect() gave up, should one come after all.
+    enum LateAnswer {
+        kLateDropped,   // another client's, as below. For a request whose late answer the caller passes over anyway
+                        // (the listener's re-point, dial_rules.hpp)
+        kLateTold       // the connect is kept, and a reply read whole that names its phone and service and comes while
+                        // no ServiceConnect of ours waits is told through sppLateConnectReply() (a dial's: its late
+                        // answer still brings the re-point)
+    };
     // Gives up the ServiceConnect that waits for its answer, if it is the one connectService() was given `address`
     // and `service` for, so that the next may go: nothing else ends one that is never answered but a rejection, a
     // failed send or the server's going. True if it was given up; false, with nothing changed, if none waits or the
-    // one that waits names another phone or service. An answer to it that comes after all is then another client's:
-    // dropped unsaid while no ServiceConnect of ours waits, and counted and left, as any other client's, while one
-    // that names another phone or service waits; one that names the same is taken as that one's answer. Nothing is
-    // logged here: the caller says what it gives up. From any thread.
-    bool giveUpConnect(const std::string& address, const std::string& service);
+    // one that waits names another phone or service. Nothing is logged here: the caller says what it gives up. From
+    // any thread.
+    //
+    // An answer to it that comes after all, with kLateDropped, is another client's: dropped unsaid while no
+    // ServiceConnect of ours waits, and counted and left, as any other client's, while one that names another phone or
+    // service waits; one that names the same is taken as that one's answer.
+    //
+    // With kLateTold the one given up is kept: one at a time, the last given up so, in memory only. Its late answer,
+    // read whole and with none of ours waiting, goes to sppLateConnectReply(), once: the connect is forgotten as it is
+    // told. It is also forgotten when a reply naming it comes while another of ours waits (which is then counted as
+    // another client's, as above), when connectService() sends one naming the same phone and service (see there), and
+    // when the server goes. A reply that cannot be read, and a rejection, name nothing, and are never told as late.
+    // A later kLateDropped give-up of another connect leaves it kept.
+    bool giveUpConnect(const std::string& address, const std::string& service, LateAnswer late);
     // ServiceListQuery: the car asks the phone at `address` (the colon form) for its services. False, with nothing
     // sent, if the server is not attached or did not take the request. Its answer, and any other reply of that id,
     // goes to sppServiceList(); one at a time is the caller's to keep to (dial_rules.hpp), since the car's answer
@@ -939,6 +965,8 @@ private:
     double disconnectReplyS_;                 // see setDisconnectReplyTime()
     bool connectOut_;                         // a ServiceConnect of ours waits for its reply
     std::string connectAddress_, connectService_;
+    bool lateKept_;                           // giveUpConnect(kLateTold): what the one given up named, for its late
+    std::string lateAddress_, lateService_;   // answer; in memory only
     std::string queryAddress_;                // the phone of the last ServiceListQuery of ours, until a reply that
                                               // names it, a rejection or the server's going; in memory only
     bool pairingInforms_;

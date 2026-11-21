@@ -61,7 +61,11 @@
 //   10, or a rejection of the request (never sent to the car, or refused by its Bluetooth service): asked and
 //       dialled again retryMs later
 //   any other answer: the phone is backed off
-//   no answer in replyLimitMs: the listener looks for the node and ends what may be there, and the phone is backed off
+//   no answer in replyLimitMs: the dial is given up (gaveUp()), the listener looks for the node and ends what may be
+//       there, and the phone is backed off. The car may still answer it later: that answer is the answer to nothing
+//       that is out, neither an ask nor a later dial (but see serial_link.hpp for one that comes while a new dial of
+//       the same phone is out); a failure brings the re-point (below), and a 0 has the listener end the link the car
+//       has up after all. A dial that is out when the listener stops is given up the same way, with no clean-up
 //
 // A dial that still fails. A dial that the car answers with anything but 0, 2 or 10, or does not answer at all, may
 // leave the car's record of phone-opened serial links wrong: the car then refuses phone-opened links (another
@@ -83,7 +87,8 @@
 // against the entry then names an address the car has no record of, and the phone's count is left alone. It does not
 // make the record right, and recordDoubtful() stays as it is. It helps only if it reaches the car before the next
 // phone-opened link ends, so it goes on the Bluetooth service's thread as soon as the answer is seen
-// (serial_link.hpp), and an answer to a dial that was given up for no answer brings it too. The car takes one
+// (serial_link.hpp), and an answer to a dial that was given up (for no answer, or as the listener stopped) brings it
+// too, by the same rule, as long as no ServiceConnect of the agent's is out when it comes. The car takes one
 // ServiceConnect of a client's at a time, so while it waits for its answer (repointWaits()), for repointLimitMs at
 // most, no ask or dial starts, and an ask that is out is ended. An answer other than 5, a 5 that took repointSlowMs or
 // longer, or none in repointLimitMs is not what is expected of the car: the listener then sends no more re-points in
@@ -293,7 +298,9 @@ public:
     static bool doubtingAnswer(uint32_t error);
     // No answer in replyLimitMs. The listener ends what may be up, and then gaveUp().
     bool overdue(int64_t now) const;
-    // The dial is given up: the phone is backed off. kIdle.
+    // The dial is given up, for no answer in its time or because the listener stops while it is out: the phone is
+    // backed off, the run of failed dials counts it, and the car's record is doubted. kIdle. The listener never gives
+    // a late answer to it to reply().
     void gaveUp(int64_t now);
     // 2, and no node: as 10, asked and dialled again retryMs later.
     void notThere(int64_t now);

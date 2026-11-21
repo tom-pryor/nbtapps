@@ -119,6 +119,7 @@ public:
     }
     virtual void sppRefusedPhone(const PhoneInList& phone) { refused.push_back(phone); }
     virtual void sppConnectReply(const ServiceConnectReply& reply) { connects.push_back(reply); }
+    virtual void sppLateConnectReply(const ServiceConnectReply& reply) { lates.push_back(reply); }
     virtual void sppDisconnectReply(const ServiceDisconnectReply& reply) { disconnects.push_back(reply); }
     virtual void sppServiceList(const ServiceList& list) { lists.push_back(list); }
     virtual void sppPairing(uint32_t informId, const std::string& address) {
@@ -158,6 +159,7 @@ public:
     std::vector<PhoneEvent> phone;
     std::vector<PhoneInList> refused;
     std::vector<ServiceConnectReply> connects;
+    std::vector<ServiceConnectReply> lates;   // sppLateConnectReply()
     std::vector<ServiceDisconnectReply> disconnects;
     std::vector<ServiceList> lists;
     std::vector<std::pair<uint32_t, std::string> > pairings;
@@ -1707,7 +1709,7 @@ int main() {
     }
 
     // 26. A ServiceConnect that is never answered is given up with giveUpConnect(), for what it named only, and the
-    //     next may go; an answer to it that comes after is another client's.
+    //     next may go; with kLateDropped (the re-point's) an answer to it that comes after is another client's.
     {
         struct Reply {
             static std::vector<uint8_t> of(const char* address, const char* service, uint32_t error) {
@@ -1719,22 +1721,24 @@ int main() {
             }
         };
         Registered r;
-        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", "Test_Other"));   // none waits
+        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", "Test_Other", SppService::kLateDropped));   // none waits
         CHECK(r.spp.connectService("BtCtrl", "testinst", "02:00:00:00:00:01", "Test_Other"));
         r.gap.took(kReqServiceConnect);
         CHECK(!r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName) && r.gap.sent.empty());
         // Not for another phone or service than the one that waits: that one stays out.
-        CHECK(!r.spp.giveUpConnect("00:11:22:33:44:55", "Test_Other"));
-        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", kName));
+        CHECK(!r.spp.giveUpConnect("00:11:22:33:44:55", "Test_Other", SppService::kLateDropped));
+        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", kName, SppService::kLateTold));
         CHECK(!r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName) && r.gap.sent.empty());
         // The address in another form is the same.
         size_t lines = r.seen.lines.size();
-        CHECK(r.spp.giveUpConnect("020000000001", "Test_Other"));
-        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", "Test_Other") && r.seen.lines.size() == lines);
-        // Its late answer with none of ours out: dropped, unsaid and untold.
+        CHECK(r.spp.giveUpConnect("020000000001", "Test_Other", SppService::kLateDropped));
+        CHECK(!r.spp.giveUpConnect("02:00:00:00:00:01", "Test_Other", SppService::kLateDropped) &&
+              r.seen.lines.size() == lines);
+        // Its late answer with none of ours out: dropped, unsaid and untold, as a late one too.
         std::vector<uint8_t> late = Reply::of("02:00:00:00:00:01", "Test_Other", 5);
         r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
-        CHECK(r.seen.connects.empty() && r.seen.lines.size() == lines && r.spp.heard().othersConnectReplies == 0);
+        CHECK(r.seen.connects.empty() && r.seen.lates.empty() && r.seen.lines.size() == lines &&
+              r.spp.heard().othersConnectReplies == 0);
         // The next goes; the late answer that comes while it waits is another client's, and that one is still out.
         CHECK(r.spp.connectService("BtCtrl", "testinst", "00:11:22:33:44:55", kName));
         r.gap.took(kReqServiceConnect);
@@ -1745,6 +1749,96 @@ int main() {
         r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &own[0], (uint32_t)own.size());
         CHECK(r.seen.connects.size() == 1 && r.seen.connects[0].error == 14 && r.seen.connects[0].service == kName);
         CHECK(!r.seen.said("00:11:22") && !r.seen.said("02:00:00"));
+    }
+
+    // 27. giveUpConnect(kLateTold), a dial's: the connect given up is kept, and its late answer, read whole and with
+    //     none of ours out, is told as late, once; never as the answer to a connect that is out.
+    {
+        const char* phone = "00:11:22:33:44:55";
+        struct Reply {
+            static std::vector<uint8_t> of(const char* address, const char* service, uint32_t error) {
+                std::vector<uint8_t> p;
+                putString(p, address);
+                putString(p, service);
+                putU32(p, error);
+                return p;
+            }
+        };
+        std::vector<uint8_t> late = Reply::of(phone, kName, 5);
+        Registered r;
+        size_t lines = r.seen.lines.size();
+        CHECK(r.spp.connectService("BtCtrl", "testinst", phone, kName));
+        r.gap.took(kReqServiceConnect);
+        CHECK(r.spp.giveUpConnect(phone, kName, SppService::kLateTold));
+        // The next goes at once.
+        CHECK(r.spp.connectService("BtCtrl", "testinst", "02:00:00:00:00:01", "Test_Other"));
+        r.gap.took(kReqServiceConnect);
+        CHECK(r.spp.giveUpConnect("02:00:00:00:00:01", "Test_Other", SppService::kLateDropped));
+        // A kLateDropped give-up of another leaves it kept; a reply that cannot be read and a rejection name nothing,
+        // and are not told as late; its own reply, its address in another form, is, once.
+        std::vector<uint8_t> cut;
+        putU32(cut, 40);   // a string longer than what follows
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &cut[0], (uint32_t)cut.size());
+        r.gap.reject(kTypeRejectedA, kReqServiceConnect);
+        CHECK(r.seen.lates.empty() && r.seen.connects.empty());
+        std::vector<uint8_t> otherForm = Reply::of("001122334455", kName, 5);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &otherForm[0], (uint32_t)otherForm.size());
+        CHECK(r.seen.lates.size() == 1 && r.seen.lates[0].error == 5 && r.seen.lates[0].service == kName &&
+              r.seen.lates[0].address == "001122334455" && r.seen.connects.empty());
+        CHECK(r.spp.heard().othersConnectReplies == 0);
+        // Told once: the same again is another client's, dropped.
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.seen.lates.size() == 1 && r.seen.connects.empty());
+        // Forgotten when the server goes.
+        CHECK(r.spp.connectService("BtCtrl", "testinst", phone, kName));
+        r.gap.took(kReqServiceConnect);
+        CHECK(r.spp.giveUpConnect(phone, kName, SppService::kLateTold));
+        r.gap.detach();
+        r.gap.up = true;
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.seen.lates.size() == 1 && r.seen.connects.empty());
+        // Forgotten when a connect naming the same phone and service goes: the first reply is that one's answer, and
+        // a second is another client's.
+        CHECK(r.spp.connectService("BtCtrl", "testinst", phone, kName));
+        r.gap.took(kReqServiceConnect);
+        CHECK(r.spp.giveUpConnect(phone, kName, SppService::kLateTold));
+        CHECK(r.spp.connectService("BtCtrl", "testinst", phone, kName));
+        r.gap.took(kReqServiceConnect);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.seen.connects.size() == 1 && r.seen.connects[0].error == 5 && r.seen.lates.size() == 1);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.seen.connects.size() == 1 && r.seen.lates.size() == 1);
+        // ...but kept again if that connect could not be sent.
+        CHECK(r.spp.connectService("BtCtrl", "testinst", phone, kName));
+        r.gap.took(kReqServiceConnect);
+        CHECK(r.spp.giveUpConnect(phone, kName, SppService::kLateTold));
+        r.gap.takes = false;
+        CHECK(!r.spp.connectService("BtCtrl", "testinst", phone, kName));
+        r.gap.takes = true;
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.seen.lates.size() == 2 && r.seen.connects.size() == 1);
+        // A reply naming it while another of ours waits: counted as another client's, not told, and forgotten; the
+        // one that waits takes its own answer.
+        CHECK(r.spp.connectService("BtCtrl", "testinst", phone, kName));
+        r.gap.took(kReqServiceConnect);
+        CHECK(r.spp.giveUpConnect(phone, kName, SppService::kLateTold));
+        CHECK(r.spp.connectService("BtCtrl", "testinst", "66:77:88:99:AA:BB", kName));
+        r.gap.took(kReqServiceConnect);
+        unsigned others = r.spp.heard().othersConnectReplies;
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.spp.heard().othersConnectReplies == others + 1 && r.seen.lates.size() == 2 &&
+              r.seen.connects.size() == 1);
+        std::vector<uint8_t> own = Reply::of("66:77:88:99:AA:BB", kName, 14);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &own[0], (uint32_t)own.size());
+        CHECK(r.seen.connects.size() == 2 && r.seen.connects[1].error == 14);
+        r.gap.events->gapMessage(kTypeResponse, kRspServiceConnect, &late[0], (uint32_t)late.size());
+        CHECK(r.seen.lates.size() == 2 && r.seen.connects.size() == 2);
+        // Nothing of it is in the log but what the server's going and the failed send say.
+        for (size_t i = lines; i < r.seen.lines.size(); ++i) {
+            const std::string& l = r.seen.lines[i];
+            CHECK_IN(l, l.find("00:11:22") == std::string::npos && l.find("001122") == std::string::npos &&
+                            l.find("66:77:88") == std::string::npos);
+        }
     }
 
     // 16. The real client is the head unit's: anywhere else it does not open, and nothing can be sent through it.

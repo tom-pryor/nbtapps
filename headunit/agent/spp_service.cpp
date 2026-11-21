@@ -76,7 +76,7 @@ SppService::SppService(GapClient* gap, Events* events)
     : gap_(gap), events_(events), type_(0), state_(kIdle), mode_(kModeOff), subscribed_(false), otherSentAt_(0),
       otherReplyS_(kOtherRemovalReplyS), unknownLeft_(0), removeError_(kNoError), clearError_(kNoError),
       disconnectOut_(false), disconnectTold_(false), disconnectQuiet_(false), disconnectSentAt_(0), disconnectReplyS_(kDisconnectReplyS),
-      connectOut_(false), pairingInforms_(false), refusalAsked_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0), checkOut_(false), checkSentAt_(0),
+      connectOut_(false), lateKept_(false), pairingInforms_(false), refusalAsked_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0), checkOut_(false), checkSentAt_(0),
       unansweredSaid_(false), restoredRun_(0), oddRun_(false) {
     pthread_mutex_init(&mu_, NULL);
 }
@@ -437,24 +437,33 @@ bool SppService::connectService(const std::string& device, const std::string& in
     if (!gap_->attached()) return false;
     pthread_mutex_lock(&mu_);
     bool busy = connectOut_;
+    // A kept connect that names the same is this one's from here: their answers cannot be told apart.
+    bool replaces = !busy && lateKept_ && lateService_ == service && addressKey(lateAddress_) == addressKey(address);
     if (!busy) {
         connectOut_ = true;
         connectAddress_ = address;
         connectService_ = service;
+        if (replaces) lateKept_ = false;
     }
     pthread_mutex_unlock(&mu_);
     if (busy) return false;
     if (send(kReqServiceConnect, buildServiceConnect(device, instance, address, service))) return true;
     pthread_mutex_lock(&mu_);
     connectOut_ = false;
+    if (replaces) lateKept_ = true;
     pthread_mutex_unlock(&mu_);
     return false;
 }
 
-bool SppService::giveUpConnect(const std::string& address, const std::string& service) {
+bool SppService::giveUpConnect(const std::string& address, const std::string& service, LateAnswer late) {
     pthread_mutex_lock(&mu_);
     bool ours = connectOut_ && connectService_ == service && addressKey(connectAddress_) == addressKey(address);
     if (ours) connectOut_ = false;
+    if (ours && late == kLateTold) {
+        lateKept_ = true;
+        lateAddress_ = connectAddress_;
+        lateService_ = connectService_;
+    }
     pthread_mutex_unlock(&mu_);
     return ours;
 }
@@ -653,7 +662,17 @@ bool SppService::handleKnown(uint32_t type, uint32_t id, const uint8_t* payload,
         if (others) n = ++heard_.othersConnectReplies;
         else connectOut_ = false;
         std::string address = connectAddress_, service = connectService_;
+        // The late answer to the connect kept by giveUpConnect(kLateTold): told only while none of ours waits, and
+        // forgotten either way once its reply has come.
+        bool namesKept =
+            lateKept_ && c.ok && c.service == lateService_ && addressKey(c.address) == addressKey(lateAddress_);
+        if (namesKept && (!out || others)) lateKept_ = false;
+        bool late = namesKept && !out;
         pthread_mutex_unlock(&mu_);
+        if (late) {
+            events_->sppLateConnectReply(c);
+            return true;
+        }
         if (!out) return true;     // another client's
         if (others) {
             if (n <= kOthersConnectLogged)
@@ -768,6 +787,7 @@ void SppService::gapDetached() {
     disconnectOut_ = false;
     disconnectTold_ = false;
     connectOut_ = false;
+    lateKept_ = false;
     queryAddress_.clear();
     refusalAsked_ = false;
     versionAsked_ = false;
