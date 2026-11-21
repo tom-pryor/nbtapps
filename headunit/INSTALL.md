@@ -28,7 +28,7 @@ The app's set-up offers both ways. With the agent installed that way, carry on f
 | The Android app | <https://catalogue.nbtapps.com/v1/app/nbtapps.apk> |
 
 Both addresses always serve the newest release. The agent zip is the agent's own package, the same file the
-app installs updates from. The examples below use agent version 1.6.0; where a path contains `1.6.0`, use the
+app installs updates from. The examples below use agent version 1.6.1; where a path contains `1.6.1`, use the
 version you downloaded (`cat /var/opt/nbtapp/agent/current` on the car shows it once installed).
 
 ## 1. Put the agent's files on the car
@@ -91,8 +91,8 @@ restarts, so carry on with step 2 before the car is switched off.
    Expect:
 
    ```
-   hu_install: nbtagent 1.6.0 ...
-   hu_install: version 1.6.0 is in /var/opt/nbtapp/agent/1.6.0, and is the one the launcher starts.
+   hu_install: nbtagent 1.6.1 ...
+   hu_install: version 1.6.1 is in /var/opt/nbtapp/agent/1.6.1, and is the one the launcher starts.
    ```
 
    The script copies the agent to `/var/opt/nbtapp/agent`, which survives a restart. It starts nothing.
@@ -110,7 +110,7 @@ It keeps running after you log out. Check that it is up:
 
 ```sh
 cat /tmp/nbtapp/log/agent.log
-/var/opt/nbtapp/agent/1.6.0/nbtctl info
+/var/opt/nbtapp/agent/1.6.1/nbtctl info
 ```
 
 `nbtctl info` prints the head unit's profile; if it says there is no agent, read the log for the reason.
@@ -155,7 +155,7 @@ no car is saved.
    same):
 
    ```sh
-   /var/opt/nbtapp/agent/1.6.0/nbtctl pair
+   /var/opt/nbtapp/agent/1.6.1/nbtctl pair
    ```
 
    It prints `code NNNNNN`. Type the six digits into the app within two minutes and tap **Pair**. `nbtctl`
@@ -247,7 +247,7 @@ Over SSH, `nbtctl checks` prints a line for each check, `nbtctl checks --list` w
 remove, and `nbtctl checks fix aa-fix` (or `system-writable`) runs that check's fix on what it finds:
 
 ```sh
-/var/opt/nbtapp/agent/1.6.0/nbtctl checks --list
+/var/opt/nbtapp/agent/1.6.1/nbtctl checks --list
 ```
 
 ## 7. The same by hand
@@ -268,7 +268,7 @@ can connect now**. Starting it again over SSH, as in step 3, does the same. Then
 The same switch over SSH:
 
 ```sh
-/var/opt/nbtapp/agent/1.6.0/nbtctl autostart on
+/var/opt/nbtapp/agent/1.6.1/nbtctl autostart on
 ```
 
 From the next start of the head unit, the plugin starts the agent about 15 seconds after iDrive comes up.
@@ -283,18 +283,26 @@ From now on:
 
 - **Packages** are installed, updated and removed from the app's catalogue.
 - **The agent updates itself**: when a newer agent is published, the app offers it on the head unit's page.
-  The new version gets one trial start; if it fails, the car goes back to the version before.
+  The new version gets one trial start; if it fails, the car goes back to the version before. An agent older
+  than 1.6.0 is updated to 1.6.0 first and to the newest version after that. Agent 1.6.1 and later need app
+  0.8.1 or later: where the app is older it says that the version needs a newer app, so update the app first.
 - **The app updates itself** from the card on its catalogue screen.
 - **Android Auto can stay on**: with agent 1.6.0 or later, the car connects to the open app by itself, even
-  while wireless Android Auto holds the car's link for phone apps.
+  while wireless Android Auto holds the car's link for phone apps. With agent 1.6.1 and app 0.8.1 or later the
+  car first asks the phone whether the app is open and connects only then, and a link that the phone opens for
+  another program, such as wireless Android Auto, is left to that program. On a car that has such a program the
+  app waits for the car, which looks for it every 10 to 30 seconds; if the car has not connected within 40
+  seconds the app says so and offers **Connect from the phone**.
 
 ## When something goes wrong
 
 | What you see | What to do |
 |---|---|
-| `hu_install: version 1.6.0 is there already` | The script never writes over an installed version. Stop the agent (`slay nbtagent`), remove that version (`rm -rf /var/opt/nbtapp/agent/1.6.0`) and run the script again |
+| `hu_install: version 1.6.1 is there already` | The script never writes over an installed version. Stop the agent (`slay nbtagent`), remove that version (`rm -rf /var/opt/nbtapp/agent/1.6.1`) and run the script again |
 | `hu_install: an update of the agent was begun and is not finished` | Start the agent (step 3) and let it finish the update, then try again |
 | The app cannot connect, or the set-up stops at connecting | Check the agent runs: **NBTApp**, **Start the agent** on the car's screen, or `nbtctl info` over SSH. With agent 1.6.0 or later, show the pairing code on the car (**NBTApp**, **Pair a phone**, or `nbtctl pair` over SSH) and keep the app open: the car connects to it by itself within a few seconds, with wireless Android Auto on or off. If it still does not connect, send with your report: the text of **Copy diagnostics** on the app's page that says the connect failed; the output of `nbtctl serial status` (agent 1.6.0 or later); the agent's log, `/tmp/nbtapp/log/agent.log`; and the problem file, `/var/opt/nbtapp/serial-problems.log`, if there is one (`cat` prints each). None of these holds a phone's Bluetooth address |
+| The app says **The car didn't connect to this app within 40 s** | On a car that has another program using the links the phone opens, such as wireless Android Auto, the app waits for the car to connect. Check that the agent runs and that the phone is connected to the car over Bluetooth, then connect again; or tap **Connect from the phone**, which opens the link from the phone's side |
+| The phone's music over Bluetooth stops, or wireless Android Auto stops connecting, while the phone is paired with NBTApp | Update the agent to 1.6.1 or later and the app to 0.8.1 or later. Agent 1.6.0 had the car dial the phone also while the app was closed, and a dial that fails can leave the car's Bluetooth with a wrong record of the phone's links |
 | **Start with the car**, or the **Setting up** card, stopped with a reason | Put right what it names (the phone's internet connection, the link to the head unit) and tap **Retry**. Or do step 7 by hand |
 | The app says a thing on the head unit **needs a look** | The checks found something that was put onto the car by hand. **Show** opens the head unit's page, which lists it under **Checks** with its fix; see step 6 |
 | The agent no longer starts with the car | After three starts in a row in which the agent did not keep running for five minutes, the plugin stops trying. The card in the app says so; tap **Have the car try again**. Over SSH: `rm /var/opt/nbtapp/agent/autostart.boots` |
