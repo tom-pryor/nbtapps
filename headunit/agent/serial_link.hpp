@@ -102,7 +102,7 @@
 // listener opens the node when the car answers 0, and a link whose phone says the magic bytes within
 // DialConfig::magicWaitMs of the open is the agent's, with no gate, no hold and no let-go: nobody else's link is on
 // that node. A link that does not open with them is ended at once by the car (ServiceDisconnect), and the phone is
-// left alone by polls for a while. The dialled link is a serial link like any other for the agent.
+// left alone by polls and its own requests for a while. The dialled link is a serial link like any other for the agent.
 //
 // How a link of the agent's ends. The phone made the link, and the phone ends it:
 //
@@ -183,6 +183,8 @@ typedef long (*NodeWriteFn)(int fd, const void* buf, size_t len);
 unsigned serialLinksOpen();
 // How many of those are a link the car dialled (SerialListener): on its own node, which no gate is in front of.
 unsigned dialledLinksOpen();
+// Whether one of them that a phone opened, not the car, has the node `path` open.
+bool phoneLinkOn(const std::string& path);
 // Waits until none is, for `ms` at most. False if some still are.
 bool waitForSerialLinks(int ms);
 
@@ -588,9 +590,10 @@ public:
 
     // serial.reset (serial_reset.hpp). With a node open, the one being decided on, a link of the agent's or one
     // that is read to its end, ServiceDisconnect goes to the car kSerialResetDelayMs later, if such a node is still
-    // there then: if none is, the link has ended meanwhile, nothing is sent, the log and the problem file say so, and
-    // the reset is done. A node kept open, unread, for another program does not count: the car would end that
-    // program's link. With none, the next link
+    // there then: if none is, the link has ended meanwhile, or the listener has let it go to another program, nothing
+    // is sent, the log and the problem file say which, and the reset is done. A node kept open, unread, for another
+    // program does not count: the car would end that program's link. What counts is what this process reads, not
+    // what the node tracker says, which starts afresh each time the listener is set up again. With none, the next link
     // whose node opens within SerialConfig::resetArmedMs is ended at the open, with no decide step, and its node read
     // until the link ends; once. The log says how long after ServiceDisconnect a node that was open then went, or
     // that the link was still up kSerialResetWatchMs after it. One ServiceDisconnect is out at a time: while
@@ -647,13 +650,15 @@ private:
     // Opens node `node`, whose link the rule has left to another program for `rule`, and primes it for that program.
     void primeForOther(int node, const std::string& rule);
     // Node `node` is not the agent's link, and another program may read it: the tracker leaves it alone from now on,
-    // so that nothing takes it for one of the listener's (serial.reset). mu_ held.
+    // so that nothing takes it for one of the listener's. mu_ held.
     void handedOver(int node) { tracker_.leaveAlone(node); }
     void keep(int node, int fd, NodeReader* reader, const char* what);
     enum Closing { kEndedOnly, kAllButUp, kEvery };
     void closeKept(Closing which);
     void tendLetGo();
     void tendReset();
+    // The nodes that are there and that the listener or the agent reads now (serial.reset).
+    void readNodes(bool nodes[btspp::NodeTracker::kNodes]);
     void watchNodes(const bool nodes[btspp::NodeTracker::kNodes], double from);
     void updateHold();
     void waitForPass();
@@ -719,6 +724,7 @@ private:
         double at;
         const char* what;   // what became of the link, for the log: "let go", "ended at its open", "primed for
                             // another program"
+        double handedAt;    // when the listener stopped reading it and left it to another program; 0: it did not
     };
 
     NodeGate* gate_;
@@ -734,6 +740,7 @@ private:
     std::vector<LetGo> letGo_;   // the listener's thread, and stop() once that has ended
     double watchFrom_;           // the listener's thread: when ServiceDisconnect went out for watched_; 0: none
     bool watched_[btspp::NodeTracker::kNodes];
+    int decidingNode_;           // the listener's thread: the node being decided on; -1: none
 
     // What serial.reset asked for, for the listener's thread to do.
     struct Reset {

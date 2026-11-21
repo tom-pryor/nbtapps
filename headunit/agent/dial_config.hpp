@@ -32,14 +32,15 @@ struct DialConfig {
                                  // after the device list first showed it connected: the car's own media component asks
                                  // for the phone's services as its audio connects, and one ask at a time is answered
     unsigned signalAskMs;        // a phone's requests for a serial link bring one ask of that phone this often at most
+                                 // (and one more, once, after an ask of theirs that was ended before its answer)
     unsigned pairingRoundMs;     // while the pairing window is open: every phone there is dialled in turn, a round this
                                  // often
     unsigned replyLimitMs;       // a dial with no answer for this long is given up, and its phone backed off
     unsigned retryMs;            // a dial answered 10, or 2 with no node, or whose request was rejected: the phone is
                                  // asked and dialled again this much later
     unsigned backOffMs;          // a dial that failed or had no answer, or on which something that is not the app
-    unsigned backOffMostMs;      // answered: the phone is left alone by polls this long, twice as long each time it
-                                 // happens again, up to this
+    unsigned backOffMostMs;      // answered: the phone is left alone by polls and by its own requests this long, twice
+                                 // as long each time it happens again, up to this
     unsigned magicWaitMs;        // the dialled link: how long the app's magic bytes may take from the open of its node.
                                  // Longer than a phone-opened link's: the app has to accept the link before it writes
     unsigned disconnectWaitMs;   // how long the answer to a ServiceDisconnect of the dial's is waited for; one of any
@@ -105,11 +106,12 @@ inline std::string describeDial(const DialConfig& c) {
              "services, and dials it only if they name the agent's: an ask has %u ms to be answered, one with no "
              "answer or an error is as one that does not name it and holds nothing back, no poll and no request of "
              "the phone's asks it within %u ms of its connecting to the car, and its requests bring one ask of it every "
-             "%u ms at most. The app's magic bytes are waited for %u ms; a dial with no answer is given up after %u s, "
-             "and one answered 10, or BUSY with no link left behind, or whose request the car's Bluetooth service did "
-             "not take, is tried again after %u s; a phone whose dial the car answered with another failure or did not "
-             "answer, on whose UUID something else answers, or whose link left behind the car does not end, is left "
-             "alone by polls for %u s, twice as long each time up to %u s, until a dialled link of the agent's comes "
+             "%u ms at most, and one more after an ask of theirs that was ended before its answer. The app's magic "
+             "bytes are waited for %u ms; a dial with no answer is given up after %u s, and one answered 10, or BUSY "
+             "with no link left behind, or whose request the car's Bluetooth service did not take, is tried again "
+             "after %u s; a phone whose dial the car answered with another failure or did not answer, on whose UUID "
+             "something else answers, or whose link left behind the car does not end, is left alone by polls and by "
+             "its own requests for %u s, twice as long each time up to %u s, until a dialled link of the agent's comes "
              "up for it or its connection changes. After %u dials of a phone in a row that gave the agent no link, a "
              "link the phone opens itself is no longer left to another program, until a dialled link of the agent's "
              "reaches it again. A dialled link that the agent ends has %u ms "

@@ -2206,24 +2206,29 @@ static void testDial() {
         d.config.dial.signalWaitMs = 300;
         d.config.dial.pollLaterMs = 3600000;
         d.config.dial.pollFirstMs = 3600000;
+        d.config.dial.backOffMs = 1500;
         d.gap.connectError = 5;
         d.gap.phones.push_back(carPhone("66:77:88:99:AA:BB", kConnConnected, 8));
         d.start();
         CHECK_IN(d.trace.text(), sawWithin(d.trace, "phone 1 (poll): the car's dial answered 5 DEFAULT", 2000));
+        double failed = monoNow();
         pause(300);
         CHECK(d.trace.count("gap connect") == 1);   // the other phone is not the agent's
         // The phone asks the car for a link and none of the agent's comes: dialled signalWaitMs after the request,
-        // held back or not, while the request is still pending (linkWaitMs, 3 s); serial.dial is busy meanwhile.
+        // while the request is still pending (linkWaitMs, 3 s), but not before the back-off that the failed dial
+        // brought is over; serial.dial is busy meanwhile.
         double asked = monoNow();
         d.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
         std::string why;
         CHECK(d.listener->dialNow(&why) == 0 && why == "a link of the agent's is up, or a dial is out");
+        pause(500);
+        CHECK(d.trace.count("gap connect") == 1);   // its time has run, and it is still backed off
         // The same answer as the last: counted, not said again.
         double end = monoNow() + 3.0;
         while (d.trace.count("gap connect") < 2 && monoNow() < end) pause(5);
         double after = monoNow() - asked;
         CHECK(d.trace.count("gap connect BtCtrl nbtapp 00:11:22:33:44:55") == 2);
-        CHECK_IN(d.trace.text(), after >= 0.29 && after < 1.5);
+        CHECK_IN(d.trace.text(), monoNow() - failed >= 1.45 && after < 2.5);
         pause(100);
         CHECK(d.trace.loggedCount("phone 1 (") == 1);
         // Not for a phone that is not the agent's.
@@ -4585,6 +4590,77 @@ static void testReset() {
     CHECK(!trace.saw("Test Phone") && !trace.saw("AABBCCDDEEFF"));
     listener.stop();
     CHECK(listener.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetFailed);
+
+    {   // The listener gives up and is set up again while a link of the agent's that the phone opened is up: its node
+        // tracker starts afresh then, with that node as someone else's, and serial.reset still ends the link, which
+        // the agent reads.
+        std::string again = freshFolder("reset-again");
+        Trace t;
+        LinksGone linksGone;
+        FakeGap g(&t);
+        FakeGate gt(&t);
+        SerialConfig c = configFor(again);
+        c.registerMs = 300;
+        c.retryMs = 500;
+        g.answersDisconnect = true;
+        SerialListener l(&g, &gt, &t, c);
+        CHECK_IN(why, l.start(&why));
+        g.attach();
+        CHECK_IN(t.text(), sawWithin(t, "the serial service 'NBTApp' is registered", 2000));
+        Node node(again + "/btspp", 0);
+        g.phone(kInfServiceRequest, kCarSerialService);
+        node.appear();
+        Link* up = dialled(l, node, t);
+        g.detach();
+        CHECK_IN(t.text(), sawWithin(t, "went away and has not come back: Bluetooth serial is off", 3000));
+        CHECK_IN(t.text(), sawWithin(t, "setting Bluetooth serial up again", 3000));
+        g.attach();
+        CHECK_IN(t.text(), countWithin(t, "the serial service 'NBTApp' is registered", 2, 3000));
+        exchange(node, up, "still", "noch");
+        CHECK(l.resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetSent);
+        CHECK_IN(t.text(), sawWithin(t, "serial.reset: ServiceDisconnect sent, ", 2000));
+        CHECK(t.count("gap disconnect") == 1 && !t.saw("no serial node of the listener's"));
+        node.hangUp();
+        node.vanish();
+        CHECK_IN(t.text(), sawWithin(t, "serial.reset: " + node.path + " went ", 2000));
+        CHECK(endsWithin(up, 3000));
+        delete up;
+        l.stop();
+    }
+    {   // serial.reset while a link is decided on, and the link is let go to another program in the delay: nothing
+        // goes to the car, which would end that program's link, and the log and the problem file say so truly
+        std::string pdir = freshFolder("reset-left-problems");
+        ProblemLog leftProblems(pdir + "/serial-problems.log", "1.0.0 (build test)");
+        Letting lt("reset-left");
+        lt.config.decideMs = 3000;
+        lt.listener = new SerialListener(&lt.gap, &lt.gate, &lt.trace, lt.config);
+        lt.services.setRemover(lt.listener);
+        lt.listener->setServices(&lt.services);
+        lt.listener->setProblemLog(&leftProblems);
+        CHECK_IN(why, lt.listener->start(&why));
+        lt.gap.attach();
+        CHECK_IN(lt.trace.text(), sawWithin(lt.trace, "the serial service 'NBTApp' is registered", 2000));
+        Node node(lt.dir + "/btspp", 0);
+        node.held = true;
+        lt.gap.phone(kInfServiceRequest, kCarSerialService);
+        node.appear();
+        CHECK_IN(lt.trace.text(), sawWithin(lt.trace, "btspp0 opened", 3000));
+        CHECK(lt.listener->resetSerialLink("", "", "", &forMs, &why) == SerialReset::kResetSent);
+        node.send("\x10\x20\x30\x40 another app's opening");
+        CHECK_IN(lt.trace.text(), sawWithin(lt.trace, "btspp0 let go ", 2000));
+        CHECK_IN(lt.trace.text(), sawWithin(lt.trace, "serial.reset: the link was let go to another program ", 2000));
+        CHECK(lt.trace.saw(" ms after serial.reset was asked for, and is that program's now: nothing is sent to the "
+                           "car, which would end that program's link"));
+        CHECK(!lt.trace.saw("gap disconnect") && !lt.trace.saw("no serial node of the listener's"));
+        std::string pfile = pdir + "/serial-problems.log";
+        double until = monoNow() + 3.0;
+        while (testutil::readFile(pfile).find("nothing was sent") == std::string::npos && monoNow() < until) pause(10);
+        CHECK_IN(testutil::readFile(pfile), testutil::readFile(pfile).find(
+                                                ": serial.reset: the link was let go to another program before "
+                                                "ServiceDisconnect was to go, so nothing was sent\n") != std::string::npos);
+        node.vanish();
+        CHECK_IN(lt.trace.text(), sawWithin(lt.trace, "btspp0: the link ended ", 2000));
+    }
 }
 
 // What nbtagent's dial options are made of, and what the agent's first log line says of the dial.

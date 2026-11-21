@@ -73,11 +73,22 @@ const int kPumpTickMs = kNodeTickMs;
 pthread_mutex_t gPumpsMu = PTHREAD_MUTEX_INITIALIZER;
 unsigned gPumps = 0;     // links whose node is still open
 unsigned gDialled = 0;   // of those, the ones the car dialled
+// Of those, the nodes of the ones phones opened, an entry for each link: a node may be in twice for a moment, as one
+// link's threads end and the next link's start. Never freed: a link's threads may still end as the process
+// does, after the destructors of its statics have run.
+std::vector<std::string>* const gPhoneNodes = new std::vector<std::string>();
 
-void countPump(int by, bool dialled) {
+void countPump(int by, bool dialled, const std::string& path) {
     pthread_mutex_lock(&gPumpsMu);
     gPumps += by;
     if (dialled) gDialled += by;
+    std::vector<std::string>& nodes = *gPhoneNodes;
+    if (!dialled && by > 0) nodes.push_back(path);
+    for (size_t i = 0; !dialled && by < 0 && i < nodes.size(); ++i) {
+        if (nodes[i] != path) continue;
+        nodes.erase(nodes.begin() + (long)i);
+        break;
+    }
     pthread_mutex_unlock(&gPumpsMu);
 }
 
@@ -337,8 +348,9 @@ void* pumpUp(void* arg) {
         p->dial->setEnded();
         p->dial->release();
     }
+    std::string path = p->path;
     delete p;
-    countPump(-1, dialled);   // last: nothing of the link is touched after this
+    countPump(-1, dialled, path);   // last: nothing of the link is touched after this
     return NULL;
 }
 
@@ -380,7 +392,7 @@ static Link* startLink(NodeReader* reader, const std::string& path, SerialLog* l
     setsockopt(pair[0], SOL_SOCKET, SO_RCVBUF, &room, sizeof(room));
     setsockopt(pair[1], SOL_SOCKET, SO_SNDBUF, &room, sizeof(room));
 
-    countPump(1, dial != NULL);
+    countPump(1, dial != NULL, path);
     Pump* p = new Pump();
     p->reader = reader;
     p->node = reader->fd();
@@ -411,7 +423,7 @@ static Link* startLink(NodeReader* reader, const std::string& path, SerialLog* l
         close(pair[0]);
         close(pair[1]);
         delete p;
-        countPump(-1, dial != NULL);
+        countPump(-1, dial != NULL, path);
         if (dial != NULL) dial->release();
         return 0;
     }
@@ -442,6 +454,15 @@ unsigned dialledLinksOpen() {
     unsigned n = gDialled;
     pthread_mutex_unlock(&gPumpsMu);
     return n;
+}
+
+bool phoneLinkOn(const std::string& path) {
+    pthread_mutex_lock(&gPumpsMu);
+    bool on = false;
+    const std::vector<std::string>& nodes = *gPhoneNodes;
+    for (size_t i = 0; i < nodes.size() && !on; ++i) on = nodes[i] == path;
+    pthread_mutex_unlock(&gPumpsMu);
+    return on;
 }
 
 bool waitForSerialLinks(int ms) {
@@ -640,7 +661,8 @@ void SppNodeGate::detach() {
 SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, const SerialConfig& config)
     : gate_(gate), log_(log), services_(0), serverLook_(0), config_(config), primer_(config.nodeCalls), spp_(gap, this),
       wakeRead_(-1), wakeWrite_(-1),
-      hasThread_(false), watchFrom_(0), stop_(false), active_(false), tracker_(config.requestWindowS), hotUntil_(0),
+      hasThread_(false), watchFrom_(0), decidingNode_(-1), stop_(false), active_(false),
+      tracker_(config.requestWindowS), hotUntil_(0),
       reqAt_(0), refused_(0), deciding_(false), held_(false), holdWhy_(0), reading_(0), resetHotUntil_(0), askedAt_(0),
       checkedAt_(0), opened_(false), final_(false), unattachedSince_(0), everAttached_(false), attachSaid_(false), lookDone_(false),
       scannedAt_(0), refusalCount_(0), refusalNode_(RefusalFacts::kNoNode), refusalAt_(0), handLookAt_(0), ours_(0),
@@ -856,6 +878,7 @@ void SerialListener::shutDown() {
     bool held = held_;
     held_ = false;
     deciding_ = false;
+    decidingNode_ = -1;
     reqAt_ = 0;
     pthread_mutex_unlock(&mu_);
     if (held) gate_->release();
@@ -1225,6 +1248,27 @@ void SerialListener::watchNodes(const bool nodes[NodeTracker::kNodes], double fr
     if (!any) say("serial.reset: no serial node was there when ServiceDisconnect went out");
 }
 
+// On the listener's thread: the nodes that are there now and that a reader of this process reads, the listener's or
+// the agent's. Those are the node being decided on, one that was let go and is read with what comes dropped (or was
+// ended at its open), and the node of a link of the agent's that a phone opened, whether or not the listener has
+// been set up again since that link came. Not a node kept open, unread, for another program, nor one that was read
+// and then left to such a program: that is that program's link, and the car would end it.
+void SerialListener::readNodes(bool nodes[NodeTracker::kNodes]) {
+    bool present[NodeTracker::kNodes];
+    scanNodes(present);
+    for (int i = 0; i < NodeTracker::kNodes; ++i) nodes[i] = false;
+    if (decidingNode_ >= 0 && decidingNode_ < NodeTracker::kNodes) nodes[decidingNode_] = true;
+    for (size_t k = 0; k < letGo_.size(); ++k) {
+        const LetGo& kept = letGo_[k];
+        if (kept.reader != 0 && !kept.reader->ended() && kept.node >= 0 && kept.node < NodeTracker::kNodes)
+            nodes[kept.node] = true;
+    }
+    for (int i = 0; i < NodeTracker::kNodes; ++i) {
+        if (!nodes[i] && present[i]) nodes[i] = phoneLinkOn(nodePath(i));
+        nodes[i] = nodes[i] && present[i];
+    }
+}
+
 // On the listener's thread, at every pass and during the decide step: what serial.reset asked for that is due, and
 // what has come of a ServiceDisconnect so far.
 void SerialListener::tendReset() {
@@ -1241,21 +1285,19 @@ void SerialListener::tendReset() {
         say("serial.reset: no serial link came within %u s to be ended at its open: nothing is asked any more",
             config_.resetArmedMs / 1000);
     if (due || waited) {
-        // The nodes this listener opened, that are there now. Someone else's are not watched, and neither is one the
-        // listener keeps open for another program, which the tracker has as someone else's (handedOver()).
+        // The nodes that are there and read in this process (readNodes()), which are watched once ServiceDisconnect
+        // has gone. Someone else's are not, and neither is one the listener keeps open for another program. What the
+        // agent holds counts, not what the node tracker says: the tracker starts afresh when the listener is set up
+        // again, with every node there as someone else's, and a link of the agent's may still be up then.
         bool present[NodeTracker::kNodes];
-        scanNodes(present);
+        readNodes(present);
         bool any = false;
-        pthread_mutex_lock(&mu_);
-        for (int i = 0; i < NodeTracker::kNodes; ++i) {
-            present[i] = present[i] && tracker_.state(i) == NodeTracker::kOurs;
-            any = any || present[i];
-        }
-        pthread_mutex_unlock(&mu_);
-        // The node that was open when serial.reset was asked for has gone since, in the delay or while another
-        // ServiceDisconnect waited: the link has ended. Nothing is sent then, and the reset is done, with nothing to
-        // watch. A ServiceDisconnect for the phone-opened link when the car has no live link there can hold that
-        // instance up for well over a minute, which keeps phones' links out for as long.
+        for (int i = 0; i < NodeTracker::kNodes; ++i) any = any || present[i];
+        // None is there any more, in the delay or while another ServiceDisconnect waited: the link has ended, or the
+        // listener has let it go to another program since. Nothing is sent then, and the reset is done, with nothing
+        // to watch. A ServiceDisconnect for the phone-opened link when the car has no live link there can hold that
+        // instance up for well over a minute, which keeps phones' links out for as long; for a link that another
+        // program has, it would end that program's link.
         bool waits = false, sent = false;
         if (any) {
             // One ServiceDisconnect at a time: while another waits for its answer, this one waits its turn, which
@@ -1266,7 +1308,20 @@ void SerialListener::tendReset() {
         pthread_mutex_lock(&mu_);
         if (reset_.askedAt == asked.askedAt) reset_.waiting = waits;   // unless a later serial.reset took its place
         pthread_mutex_unlock(&mu_);
-        if (!any) {
+        // A node that the listener left to another program after serial.reset was asked for, and that is still there.
+        double leftAt = 0;
+        for (size_t k = 0; !any && k < letGo_.size(); ++k) {
+            const LetGo& kept = letGo_[k];
+            if (kept.handedAt > 0 && kept.handedAt >= asked.askedAt && access(nodePath(kept.node).c_str(), F_OK) == 0)
+                leftAt = kept.handedAt;
+        }
+        if (!any && leftAt > 0) {
+            say("serial.reset: the link was let go to another program %.0f ms after serial.reset was asked for, and is "
+                "that program's now: nothing is sent to the car, which would end that program's link",
+                (leftAt - asked.askedAt) * 1000.0);
+            problem("reset-not-sent", "serial.reset: the link was let go to another program before ServiceDisconnect "
+                                      "was to go, so nothing was sent");
+        } else if (!any) {
             say("serial.reset: no serial node of the listener's is there any more, %.0f ms after it was asked for: the "
                 "link has ended, so nothing is sent to the car", (now - asked.askedAt) * 1000.0);
             problem("reset-not-sent", "serial.reset: the link had ended before ServiceDisconnect was to go, so nothing "
@@ -1549,6 +1604,7 @@ void SerialListener::letGo(NodeReader* reader, int node, const std::string& path
             log_->line(path + head + why + "). " + putBackText(all.size(), back) +
                        ", and its node is kept open, unread, until the link ends, for another reader: " + reason);
             keep(node, fd, 0, "let go");
+            letGo_.back().handedAt = letGo_.back().at;
             return;
         }
         if (fd >= 0) close(fd);
@@ -1557,7 +1613,10 @@ void SerialListener::letGo(NodeReader* reader, int node, const std::string& path
                                          : "Nothing could be put back: ";
         log_->line(path + head + why + ") and closed: " + (there ? "its node is still there" : "its node went with the close") +
                    ". It is closed for another reader: " + reason + ". " + lost + failed);
-        if (there) keep(node, -1, 0, "let go");   // until its node goes
+        if (there) {
+            keep(node, -1, 0, "let go");   // until its node goes
+            letGo_.back().handedAt = letGo_.back().at;
+        }
         return;
     }
     reader->drain();
@@ -1576,6 +1635,7 @@ void SerialListener::keep(int node, int fd, NodeReader* reader, const char* what
     kept.reader = reader;
     kept.at = monoNow();
     kept.what = what;
+    kept.handedAt = 0;
     letGo_.push_back(kept);
     if (reader != 0) {
         pthread_mutex_lock(&mu_);
@@ -1616,6 +1676,7 @@ void SerialListener::tendLetGo() {
         uint64_t dropped = kept.reader->dropped();
         kept.reader->finish();
         kept.reader = 0;
+        kept.handedAt = monoNow();
         pthread_mutex_lock(&mu_);
         --reading_;
         handedOver(kept.node);
@@ -1688,6 +1749,7 @@ void SerialListener::take(int node, const std::string& address) {
     double reqAt = reqAt_;
     reqAt_ = 0;
     deciding_ = true;
+    decidingNode_ = node;
     holdWhy_ = "a link's node has been opened";
     pthread_mutex_unlock(&mu_);
     if (reqAt > 0) say("%s opened %.0f ms after the phone's request", path.c_str(), (openedAt - reqAt) * 1000.0);
@@ -1731,6 +1793,7 @@ void SerialListener::take(int node, const std::string& address) {
         }
         pthread_mutex_lock(&mu_);
         deciding_ = false;
+        decidingNode_ = -1;
         holdWhy_ = "the link is ended at its open";
         pthread_mutex_unlock(&mu_);
         updateHold();
@@ -1741,6 +1804,7 @@ void SerialListener::take(int node, const std::string& address) {
     std::string why;
     uint64_t leftOver = 0;
     Decided found = decide(reader, path, openedAt, &first, &leftOver, &why);
+    decidingNode_ = -1;   // from here the node is the agent's link, or in letGo_, or closed
     // Of a link that is let go they go where the rest of what was read goes: letGo() says.
     if (leftOver > 0)
         say("%s: %llu B left over from an earlier link came first, as whole frames, and were %s", path.c_str(),
@@ -2174,9 +2238,9 @@ void SerialListener::maybeDial(int64_t now) {
         dialPhase_ = kDialAsk;   // the log says it with the answer
         return;
     }
-    // Not sent: as an ask answered with an error.
+    // Not sent: as an ask answered with an error, which cost the car nothing.
     pthread_mutex_lock(&mu_);
-    DialRules::Listing what = rules_.listing(d.address, kNoError, false, facts, now);
+    DialRules::Listing what = rules_.notSent(now);
     pthread_mutex_unlock(&mu_);
     listed(what, 0, kAskNotSent, now, now);
 }

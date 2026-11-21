@@ -43,7 +43,11 @@
 // of two queries that meet, one fails. So for settleMs after the device list first shows a phone connected
 // (connection rising to 2 or more, or at 2 or more in the first list that comes), no poll, retry or afresh dial asks
 // it, and the ask its own request brings waits until then. A forced round and the pairing window ask at once. A
-// phone's requests bring one ask of it every signalAskMs at most: a request's time that runs out sooner brings none.
+// phone's requests bring one ask of it every signalAskMs at most, counted from an ask that went to the car: a
+// request's time that runs out sooner brings none. An ask that could not be sent cost the car nothing and does not
+// count. One that went and was ended before its answer came (by another phone's request, say) did cost a query, and
+// counts, but gives the phone's requests one more ask in that time, once: so a phone whose asks other requests keep
+// ending is asked twice in signalAskMs at most, and no more.
 //
 // What the car answers to the dial (GapErrorCode, spp_service.hpp), and what comes of it:
 //
@@ -89,8 +93,10 @@
 // What brings an ask, and so a dial, in this order:
 //   a round that is under way      one phone after the other, the rest of a round that one of the below began
 //   the phone's own request        a phone that asked the car for a serial link, and got no link of the agent's
-//                                  within signalWaitMs: asked then, or once its settle time is over, whatever else
-//                                  holds it back from polls, and whether or not its request is still pending
+//                                  within signalWaitMs: asked then, or once its settle time and its back-off are
+//                                  over, a retry that is due later notwithstanding, and whether or not its request is
+//                                  still pending. A back-off is not cut short by requests: a phone whose dial has just
+//                                  failed would otherwise be dialled again at every request
 //   the pairing window             while it is open, every phone that is connected and paired with the car, whether or
 //                                  not it is the agent's, every pairingRoundMs: that is how a new phone's app is reached
 //   a retry                        retryMs after a dial answered 10, or 2 with no node there, or whose request was
@@ -207,8 +213,8 @@ public:
 
     // The triggers. A phone asked the car for a serial link, for any service (`address`, as the request gave it):
     // if no link of the agent's comes within DialConfig::signalWaitMs, and the phone is eligible, it is asked then
-    // (or once it has settled), whatever holds it back from polls. One that names no phone brings no ask, and is no
-    // phone's own for keepAsking().
+    // (or once it has settled and its back-off is over), whether or not a retry is due later. One that names no phone
+    // brings no ask, and is no phone's own for keepAsking().
     void phoneAsked(const std::string& address, int64_t now);
     // A link of the agent's, of either kind, came: what a phone asked for is answered.
     void linkCame();
@@ -238,6 +244,9 @@ public:
     // whether the services named the agent's own, `facts` as they are now. It counts only while asking, for the
     // phone asked. A listed phone is dialled only if what brought the ask still holds (kNoLongerDue otherwise).
     Listing listing(const std::string& address, uint32_t error, bool listed, const Facts& facts, int64_t now);
+    // The ask that next() gave could not be sent to the car: as an ask with an error (kNoListing). It cost the car
+    // nothing, so an ask a phone's request brought does not count against that phone's requests (signalAskMs).
+    Listing notSent(int64_t now);
     // No answer in askLimitMs: listingLost() then, which is kNoListing.
     bool askOverdue(int64_t now) const;
     Listing listingLost(int64_t now);
@@ -287,7 +296,7 @@ public:
     // are said when its record is right: the doubt goes.
     void phoneLinkEnded();
 
-    // The back-off of a phone: 0 if it has none, or the time until which polls leave it alone.
+    // The back-off of a phone: 0 if it has none, or the time until which polls and its own requests leave it alone.
     int64_t backedOffUntil(const std::string& address) const;
     // How long the next back-off of the phone will be.
     int64_t nextBackOffMs(const std::string& address) const;
@@ -297,6 +306,15 @@ public:
     bool troubled(const std::string& address) const;
 
 private:
+    // The asks a phone's requests have brought, for the rule that they bring one every signalAskMs at most.
+    struct SignalAsks {
+        bool asked;               // a request of its brought an ask that went to the car, at `at`
+        int64_t at;
+        bool spare;               // an ask a request of its brought since `at` was ended before its answer came: one
+                                  // more may go before signalAskMs are over
+        bool spareUsed;           // that one more has gone
+        SignalAsks() : asked(false), at(0), spare(false), spareUsed(false) {}
+    };
     struct PhoneState {
         int64_t backOffMs;        // the next back-off; 0: none has been
         int64_t backOffUntil;
@@ -305,11 +323,9 @@ private:
         unsigned misses;          // asks in a row with an error or no answer
         unsigned dialFails;       // dials in a row that gave the agent no link
         int64_t settleUntil;      // its settle time ends then
-        bool signalAsked;         // its request has brought an ask, at signalAskAt
-        int64_t signalAskAt;
+        SignalAsks signals;
         PhoneState()
-            : backOffMs(0), backOffUntil(0), retryAt(0), trouble(false), misses(0), dialFails(0), settleUntil(0),
-              signalAsked(false), signalAskAt(0) {}
+            : backOffMs(0), backOffUntil(0), retryAt(0), trouble(false), misses(0), dialFails(0), settleUntil(0) {}
     };
     PhoneState& phone(const std::string& address);
     const PhoneState* find(const std::string& address) const;
@@ -343,6 +359,8 @@ private:
                                                  // brought it, or the dial it is the afresh ask after
     std::string endedAsk_;                      // an ask that was ended, which may still be out in the car, until
     int64_t endedAskUntil_;                      // its answer comes or this time
+    SignalAsks signalsBefore_;                   // the asking phone's record before the ask a request brought: put
+                                                 // back if that ask could not be sent (notSent())
     bool doubtful_;                              // recordDoubtful()
 };
 

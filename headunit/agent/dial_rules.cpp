@@ -155,8 +155,9 @@ bool DialRules::takeFromRound(int64_t now, const Facts& facts, Dial* out) {
     return false;
 }
 
-// A phone that asked for a link, and has none of the agent's after its time: once, after its settle time, and not
-// again within signalAskMs of the last ask a request of its brought.
+// A phone that asked for a link, and has none of the agent's after its time: once, after its settle time and its
+// back-off, and not again within signalAskMs of the last ask a request of its brought that went to the car, but for
+// one more if an ask in that time was ended before its answer came.
 bool DialRules::signalDue(int64_t now, const Facts& facts, Dial* out) {
     if (signal_.empty() || now - signalAt_ < (int64_t)config_.signalWaitMs) return false;
     const Presence::Phone* p = presence_.find(signal_);
@@ -165,23 +166,43 @@ bool DialRules::signalDue(int64_t now, const Facts& facts, Dial* out) {
         return false;
     }
     PhoneState& s = phone(p->address);
-    if (s.signalAsked && now - s.signalAskAt < (int64_t)config_.signalAskMs) {
+    bool counted = s.signals.asked && now - s.signals.at < (int64_t)config_.signalAskMs;
+    if (counted && !s.signals.spare) {
         signal_.clear();
         return false;
     }
-    if (settling(p->address, now)) return false;   // it waits
+    // It waits: for its settle time, and for a back-off after a failed dial, which its requests do not cut short.
+    if (settling(p->address, now) || now < s.backOffUntil) return false;
     signal_.clear();
-    s.signalAsked = true;
-    s.signalAskAt = now;
+    signalsBefore_ = s.signals;
+    if (counted) {
+        s.signals.spare = false;
+        s.signals.spareUsed = true;
+    } else {
+        s.signals = SignalAsks();
+        s.signals.asked = true;
+        s.signals.at = now;
+    }
     start(*p, kSignal, now, out);
     return true;
 }
 
 // The ask that is out is ended: its answer may still come, and no other ask goes until it has or its time is over.
+// One that a phone's request brought gives that phone's requests one more ask in their signalAskMs, once: it went to
+// the car, so it counts, but its answer was not waited for.
 void DialRules::endAsk(int64_t) {
     endedAsk_ = current_.address;
     endedAskUntil_ = current_.askedAt + config_.askLimitMs;
     state_ = kIdle;
+    if (current_.why != kSignal) return;
+    SignalAsks& c = phone(current_.address).signals;
+    if (c.asked && !c.spareUsed) c.spare = true;
+}
+
+DialRules::Listing DialRules::notSent(int64_t now) {
+    if (state_ != kAsking) return kNotThisAsk;
+    if (current_.why == kSignal) phone(current_.address).signals = signalsBefore_;
+    return missed(now);
 }
 
 bool DialRules::keepAsking(const Facts& facts, int64_t now) {
