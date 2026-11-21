@@ -2283,12 +2283,32 @@ class JobRepositoryTest {
         return jobs
     }
 
+    /**
+     * Holds the link of [jobs] in use from now until the test ends, and returns once the use has begun. Out of sight, the
+     * end of a use has the app leave, which gives up a connect that has not yet returned, and a connect that succeeds
+     * starts the checks as it ends ([JobRepository.ensureChecked]), which are such a use: with this one held, theirs
+     * ends with the link still in use. Taken where the test's connect is known to be under way, since while busy the
+     * app listens for the car's link whenever it has neither a link nor a connect.
+     */
+    private suspend fun inUseFromHere(jobs: JobRepository) {
+        val begun = CompletableDeferred<Unit>()
+        scope.launch {
+            jobs.usingLink {
+                begun.complete(Unit)
+                CompletableDeferred<Unit>().await()
+            }
+        }
+        begun.await()
+    }
+
     @Test
     fun `a connect to a head unit whose agent leaves the phone's own links only listens, and takes the car's link`() = test {
         val jobs = leftCar(left = true)
         dialler.onConnect = { leaves(it, true) }
 
         val connecting = async { jobs.connect("bt") }
+        until("the connect listens") { dialler.listenOnly.isNotEmpty() }
+        inUseFromHere(jobs)
         val agent = dialIn()
 
         assertTrue(connecting.await().isSuccess)
@@ -2316,8 +2336,18 @@ class JobRepositoryTest {
         assertTrue(jobs.connectFromPhone("bt").isFailure)
         assertFalse((jobs.connection.value as ConnectionState.Failed).listenedOnly)
         dialler.unreachable = null
+        // Held at its dial, so that the link is put in use while the connect runs: see [inUseFromHere].
+        val dial = CountDownLatch(1)
+        dialler.onConnect = { agent ->
+            leaves(agent, true)
+            dial.await(30, TimeUnit.SECONDS)
+        }
+        val fromPhone = async { jobs.connectFromPhone("bt") }
+        until("the phone's own connect dials") { dialler.listenOnly.size == 3 }
+        inUseFromHere(jobs)
+        dial.countDown()
 
-        assertTrue(jobs.connectFromPhone("bt").isSuccess)
+        assertTrue(fromPhone.await().isSuccess)
         assertEquals(listOf(true, false, false), dialler.listenOnly)
         assertEquals(1, dialler.agents.size)
         // The agent still says so: the next connect only listens again.
@@ -2467,6 +2497,7 @@ class JobRepositoryTest {
         val connecting = async { jobs.connect("bt") }
         until("the phone's link asked hello") { dialler.agents.firstOrNull()?.requestsOf("hello")?.isNotEmpty() == true }
         val phones = dialler.agents.first()
+        inUseFromHere(jobs)
         calling.set(true)
         val car = dialIn()
 
@@ -2507,6 +2538,7 @@ class JobRepositoryTest {
         // Given up after its wait: the pause before the next link has begun.
         assertTrue("the phone's silent link stayed open", phones.phoneLeft())
         assertTrue("nothing listens in the pause", dialler.listening.value > 0)
+        inUseFromHere(jobs)
         calling.set(true)
         val car = dialIn()
 
