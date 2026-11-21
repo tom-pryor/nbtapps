@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.OutputStream
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
 plugins {
     alias(libs.plugins.android.application)
     // Kotlin support is built into AGP 9; only compiler plugins are applied here.
@@ -105,4 +111,74 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+}
+
+// The unit tests against the real agent (AgentBench and the tests that use it) depend on things Gradle does not see
+// by itself: environment variables, files of the agent repo (headunit/) and of the catalogue repo, and the bench
+// image in Docker. They are declared below as inputs of the unit tests, so that the tests run again when one of them
+// changes and are up to date when none has. The image counts by its id, so that an image built again under the same
+// name counts as a change too.
+
+/** The id of a Docker image, or "none" when Docker or the image is not there: the tests that need it then skip. */
+abstract class DockerImageId : ValueSource<String, DockerImageId.Parameters> {
+    interface Parameters : ValueSourceParameters {
+        val image: Property<String>
+        val path: Property<String>
+    }
+
+    @get:Inject
+    abstract val exec: ExecOperations
+
+    override fun obtain(): String {
+        // Docker is looked for on the PATH of this build, which the tests are given, and not on the PATH the Gradle
+        // daemon started with, which it would otherwise be found on.
+        val docker = parameters.path.get().split(File.pathSeparator).filter { it.isNotEmpty() }
+            .map { File(it, "docker") }.firstOrNull { it.canExecute() } ?: return "none"
+        val out = ByteArrayOutputStream()
+        val asked = runCatching {
+            exec.exec {
+                commandLine(docker.path, "image", "inspect", "--format", "{{.Id}}", parameters.image.get())
+                standardOutput = out
+                errorOutput = OutputStream.nullOutputStream()
+                isIgnoreExitValue = true
+            }
+        }.getOrNull()
+        return if (asked?.exitValue == 0) out.toString().trim() else "none"
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    // Read when the task runs, not when it is configured, so that a change of one keeps the configuration cache.
+    // The tests resolve a relative path from the module folder, as these do.
+    val moduleDir = projectDir
+    fun variable(name: String) = providers.environmentVariable(name).filter { it.isNotEmpty() }
+    fun folder(name: String, otherwise: String) = variable(name).orElse(otherwise).map { moduleDir.resolve(it).normalize() }
+
+    // What the tests read, and what the agent repo's tools/bench.py reads for them.
+    for (name in listOf("NBT_AGENT_REPO", "NBT_BENCH_IMAGE", "NBT_REQUIRE_BENCH", "NBT_CATALOGUE_REPO")) {
+        inputs.property(name, variable(name).orElse(""))
+    }
+    inputs.property("benchImageId", providers.of(DockerImageId::class) {
+        parameters.image.set(variable("NBT_BENCH_IMAGE").orElse("nbtapp-bench"))
+        parameters.path.set(providers.environmentVariable("PATH").orElse(""))
+    })
+
+    // The agent repo's files the tests read themselves: the version AgentBench expects, bench.py, the vectors and keys
+    // AgentVectorsInSyncTest compares, and the package tool RealAgentTest makes a large package with. Then what
+    // `tools/bench.py testdata` makes the test packages from, which is the list the agent repo's Makefile makes its
+    // own test data from, and the Dockerfile of the image it makes them in. The agent's sources are not here: the
+    // tests run the agent of the bench image, whose id is the input above.
+    val agentFiles = listOf(
+        "agent/version.hpp", "tools/bench.py", "tools/bench/Dockerfile", "spec", "tests/keys", "tests/packages",
+        "tests/make_packages.py", "tools/nbtpkg.py", "tools/plugin_pkg.py", "tools/agent_pkg.py",
+        "plugin/NbtApp.manifest", "plugin/NbtApp.xml", "plugin/package/manifest.json.in",
+    )
+    inputs.files(folder("NBT_AGENT_REPO", "../../headunit").map { repo -> agentFiles.map { repo.resolve(it) } })
+        .withPropertyName("agentRepoFiles")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    // OfficialCatalogueTest compares the app's keys and address with these, when the catalogue repo is there.
+    val catalogueFiles = listOf("keys/index.pub", "keys/package.pub", "tools/publish.py")
+    inputs.files(folder("NBT_CATALOGUE_REPO", "../../../nbtapps-catalogue").map { repo -> catalogueFiles.map { repo.resolve(it) } })
+        .withPropertyName("catalogueRepoFiles")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 }
