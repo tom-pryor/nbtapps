@@ -24,11 +24,19 @@ COPY agent agent
 COPY tests/agent tests/agent
 # The plugin's headers that need no HU Framework: test_plugin runs them against the agent.
 COPY src src
+# Everything but the two programs that carry the version is built before the version is declared. The version
+# changes with every commit and every edit anywhere in the checkout, the app's too, and a new value makes Docker run
+# every step after its declaration again. So a change outside what goes into the build here compiles only nbtagent
+# and nbtagent-next again, the only programs here that depend on the Makefile's build/version, and the library and
+# the test programs come from Docker's cache.
+RUN make -j"$(nproc)" agent-programs -o build/agent-host/nbtagent -o build/agent-host/nbtagent-next \
+    && mkdir /out \
+    && cp build/agent-host/nbtctl build/agent-host/test_* /out/
 # The image has no git, so the version comes from outside, as in build.sh.
 ARG VERSION=unknown
 RUN make -j"$(nproc)" agent-programs VERSION="$VERSION" \
-    && mkdir /out \
-    && cp build/agent-host/nbtagent build/agent-host/nbtagent-next build/agent-host/nbtctl build/agent-host/test_* /out/
+    && mkdir /out-versioned \
+    && cp build/agent-host/nbtagent build/agent-host/nbtagent-next /out-versioned/
 
 # Python and the library nbtpkg signs with, for tests/make_packages.py, and nothing of the agent: built only as
 # its own image (tools/bench.py testdata), so the agent's image below stays without Python, as a head unit is.
@@ -40,5 +48,6 @@ RUN apt-get update \
 # The agent's image: the last stage, so the one a plain `docker build` makes.
 FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 COPY --from=build /out/ /opt/nbtagent/
+COPY --from=build /out-versioned/ /opt/nbtagent/
 # Fails the build here, and not a test later, if the image lacks a library the programs need.
 RUN /opt/nbtagent/nbtagent --version && /opt/nbtagent/nbtagent-next --version && /opt/nbtagent/test_sha256
