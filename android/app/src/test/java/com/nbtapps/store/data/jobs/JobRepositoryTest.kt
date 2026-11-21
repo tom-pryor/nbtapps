@@ -1253,7 +1253,9 @@ class JobRepositoryTest {
         } as ConnectionState.Connected
         assertEquals(listOf("org.nbtapp.plugin"), back.installed.map { it.id })
         assertEquals(Autostart(on = false, available = true), back.autostart)
-        assertEquals(listOf("org.nbtapp.plugin"), headUnits.headUnit("car").first()?.profile?.installed?.map { it.id })
+        // The profile is saved just after the connection shows it.
+        val saved = withTimeoutOrNull(10_000) { headUnits.headUnit("car").first { it?.profile?.installed?.isNotEmpty() == true } }
+        assertEquals(listOf("org.nbtapp.plugin"), saved?.profile?.installed?.map { it.id })
         // Read once before the job's end was known, and once after.
         assertEquals(
             listOf("hello", "info.get", "packages.list", "autostart.get", "job.status", "job.status", "info.get", "packages.list", "autostart.get"),
