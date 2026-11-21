@@ -181,4 +181,12 @@ tasks.withType<Test>().configureEach {
     inputs.files(folder("NBT_CATALOGUE_REPO", "../../../nbtapps-catalogue").map { repo -> catalogueFiles.map { repo.resolve(it) } })
         .withPropertyName("catalogueRepoFiles")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+
+    // The test classes are shared out among several test JVMs at a time. They share nothing on this machine that
+    // they write: each takes temporary folders of its own, and each agent that RealAgentTest and DebugTcpLinkTest
+    // start is a container of its own with its socket in such a folder, DebugTcpLinkTest's also on a port that the
+    // system hands out. Past four JVMs the suite is no quicker, since it then takes about as long as
+    // JobRepositoryTest alone; half the processors leaves the rest of the machine, a CI runner's too, to the bench's
+    // containers and everything else.
+    maxParallelForks = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4)
 }
