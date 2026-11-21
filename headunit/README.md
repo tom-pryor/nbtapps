@@ -1179,9 +1179,11 @@ What an agent accepts of its own package:
   (`agent/embedded_keys.hpp`).
 - Files in `${app}` and `${data}` only, with `${app}/nbtagent` as a program and `${app}/nbtlaunch.sh` beside it.
   It cannot be removed.
-- From the agent it names in `requires.agent`. The package of this repo names 1.1.0, the first version whose
-  folder holds a launcher: the versions before it were for trials, and a head unit that has one is installed
-  anew with `hu_install.sh`.
+- From the agent it names in `requires.agent`. The package of this repo names 1.6.0, the first version that
+  knows `requires.app`, in which it names the app that goes with it. A head unit with an agent from 1.1.0, the
+  first version whose folder holds a launcher, to 1.5.1 updates to 1.6.0 first, which names 1.1.0 and which the
+  app offers as the newest version that runs there, and then to the newest. The versions before 1.1.0 were for
+  trials, and a head unit that has one is installed anew with `hu_install.sh`.
 
 A `job.status` from the iDrive plugin does not confirm a version: the plugin would reach an agent that no phone
 can. `nbtctl status` does, as a person at the console.

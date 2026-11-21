@@ -3,7 +3,7 @@
   "id": "org.nbtapp.agent",
   "name": "NBTApp agent",
   "version": "@VERSION@",
-  "requires": { "agent": ">=1.1.0" },
+  "requires": { "agent": ">=1.6.0", "app": ">=0.8.1" },
   "install": {
     "files": [
       { "src": "payload/nbtagent", "dest": "${app}/nbtagent", "mode": "0755" },
