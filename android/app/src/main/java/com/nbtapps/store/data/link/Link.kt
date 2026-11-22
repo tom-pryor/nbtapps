@@ -70,6 +70,20 @@ interface LinkConnector {
      */
     suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link = connect(endpoint, dials)
 
+    /**
+     * Knocks at the head unit at [endpoint], whose agent lists [ProtocolConstants.CAPABILITY_SERIAL_KNOCK]
+     * ([com.nbtapps.store.model.HeadUnit.serialKnock]), and returns the link its car then opens to the phone: no link of
+     * the phone's own is made. [bursts] is how many bursts of knocks are made at most, or null for the connector's own
+     * number. With [fallback], the knock is the one burst a connect to a head unit whose agent dials, and is not known
+     * to dial only when knocked, makes where it had no link at all, before it fails (`JobRepository`): the diagnostics
+     * say so. Only Bluetooth serial knocks: see [BluetoothSerialLinkConnector]. Any other connector connects as to an
+     * agent that dials.
+     *
+     * @throws KnockUnansweredException if no link of the car's came after the knocks.
+     * @throws NoCarLinkException if the phone cannot listen for it.
+     */
+    suspend fun knock(endpoint: Endpoint, bursts: Int? = null, fallback: Boolean = false): Link = connect(endpoint, dials = true)
+
     /** Whether [accept] can bring a link that the head unit at [endpoint] opens to the phone. Only Bluetooth serial can. */
     fun accepts(endpoint: Endpoint): Boolean = false
 
@@ -104,6 +118,9 @@ class LinkConnectors(private val connectors: List<LinkConnector>) : LinkConnecto
     override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link =
         connectorFor(endpoint).connect(endpoint, dials, listenOnly)
 
+    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: Boolean): Link =
+        connectorFor(endpoint).knock(endpoint, bursts, fallback)
+
     override fun accepts(endpoint: Endpoint): Boolean = connectors.any { it.accepts(endpoint) }
 
     /** Through the first connector that accepts any of [endpoints], for those it accepts. */
@@ -120,7 +137,13 @@ class LinkConnectors(private val connectors: List<LinkConnector>) : LinkConnecto
 class LinkClosedException(message: String) : IOException(message)
 
 /**
- * A connect that only waited for the head unit's link ([LinkConnector.connect] with `listenOnly`) and had none in its
- * time. The message is shown to the user, who may then have the phone connect itself.
+ * A connect that only waited for the head unit's link ([LinkConnector.connect] with `listenOnly`), or knocked for it
+ * ([LinkConnector.knock]), and had none. The message is shown to the user, who may then have the phone connect itself.
  */
-class NoCarLinkException(message: String) : IOException(message)
+open class NoCarLinkException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
+/**
+ * A connect that knocked ([LinkConnector.knock]) and had no link from the car after all its knocks. What the user is
+ * told is the caller's to say, as it knows how the phone and the car stand: the message here says only what happened.
+ */
+class KnockUnansweredException(message: String) : NoCarLinkException(message)

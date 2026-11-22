@@ -265,6 +265,14 @@ private fun JobContent(
                 }
                 IgnitionNotice()
             }
+            view.linkLost && view.waitedOut -> Section("The agent hasn't come back") {
+                Text(
+                    "The head unit's agent didn't connect to the app after its restart, and the app has stopped waiting. " +
+                        "Connect again to see how the update went, and check that the phone is connected to the car over Bluetooth.",
+                )
+                Button(onClick = viewModel::reconnect) { Text("Connect again") }
+                if (uiState.fromPhone) OutlinedButton(onClick = viewModel::connectFromPhone) { Text(CONNECT_FROM_PHONE) }
+            }
             view.linkLost -> Section("The link was lost") {
                 Text(
                     when (job.state) {

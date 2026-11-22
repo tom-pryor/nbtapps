@@ -20,15 +20,15 @@ class LinkDiagnosticsTest {
         LinkTry(at = 0, path = LinkTry.Path.DIAL, outcome = outcome, millis = 10, facts = facts)
 
     @Test
-    fun `the last fifty tries are kept, oldest first, with when they ended`() {
+    fun `the last two hundred tries are kept, oldest first, with when they ended`() {
         var clock = 1_000L
         val diagnostics = SerialDiagnostics(wallClock = { clock++ })
-        repeat(60) { diagnostics.record(LinkTry.Path.DIAL, LinkTry.Outcome.FAILED, millis = it.toLong(), failure = IOException("try $it")) }
+        repeat(210) { diagnostics.record(LinkTry.Path.DIAL, LinkTry.Outcome.FAILED, millis = it.toLong(), failure = IOException("try $it")) }
 
         val kept = diagnostics.tries()
-        assertEquals(50, kept.size)
+        assertEquals(200, kept.size)
         assertEquals("try 10", kept.first().message)
-        assertEquals("try 59", kept.last().message)
+        assertEquals("try 209", kept.last().message)
         assertEquals(1_010L, kept.first().at)
         assertEquals("IOException", kept.first().error)
     }

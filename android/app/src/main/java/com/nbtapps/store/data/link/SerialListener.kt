@@ -21,7 +21,8 @@ class AcceptedLink(val address: String, val link: Link)
  * that another program holding the car's one link for phone-opened links does not keep the app out.
  *
  * Whoever wants such a link waits in [accept], for the addresses it takes one from: a connect for its car, whether it
- * dials too or only listens; a connect whose links of the phone's go unanswered, from the first wait for an answer on
+ * dials too, only listens, or knocks, for the whole of its knocking (an agent that lists
+ * [ProtocolConstants.CAPABILITY_SERIAL_KNOCK] dials only when knocked, and its link is to go to the connect that knocked); a connect whose links of the phone's go unanswered, from the first wait for an answer on
  * one until its greeting is over, a wait again as soon as one has been given a link, so that the phone listens through
  * the pauses between those links too; the app at rest for every car it has saved. A link handed over says that the car opened it ([Link.openedByCar]). However many wait, there is one listener on the phone, open while anyone waits
  * and closed when the last of them is done, and one link goes to one of them. A link from an address nobody waits

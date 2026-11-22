@@ -13,6 +13,7 @@ import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.Blob
 import com.nbtapps.store.data.link.IncomingLink
 import com.nbtapps.store.data.link.JobEvent
+import com.nbtapps.store.data.link.KnockUnansweredException
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkClosedException
 import com.nbtapps.store.data.link.LinkConnector
@@ -147,8 +148,8 @@ sealed interface ConnectionState {
 
     /**
      * The last attempt failed, or the link was lost. [reason] is for the user. [listenedOnly]: the connect only waited
-     * for the car's link and none came ([NoCarLinkException]), so the user may have the phone connect itself
-     * ([JobRepository.connectFromPhone]).
+     * for the car's link, or knocked for it, and none came ([NoCarLinkException]), so the user may have the phone
+     * connect itself ([JobRepository.connectFromPhone]).
      */
     data class Failed(val headUnitId: String, val reason: String, val listenedOnly: Boolean = false) : ConnectionState
 }
@@ -193,6 +194,11 @@ data class JobView(
      * itself to see how the job went: see [Rejoin]. It ends in the job as the head unit has it, or in [linkLost].
      */
     val reconnecting: Boolean = false,
+    /**
+     * With [linkLost]: the app's own wait to connect again after the agent restarted ran out of time with no link
+     * ([JobRepository.rejoin]), rather than being ended by the user or by a link that failed.
+     */
+    val waitedOut: Boolean = false,
 ) {
     val ended: Boolean get() = job.ended
 
@@ -247,6 +253,13 @@ class Rejoin(
     val pauseMs: Long = 3_000,
     /** From the end of the link: after this long no further connect is begun, and the user is left to connect. */
     val giveUpAfterMs: Long = 45_000,
+    /**
+     * To a head unit whose agent dials only when knocked ([HeadUnit.serialKnock]), each connect is one burst of knocks,
+     * and one begins this long after the one before began, or as soon as that one is over where it took longer.
+     */
+    val knockEveryMs: Long = 3_000,
+    /** As [giveUpAfterMs], to such a head unit: its agent comes back only to a knock, which the app keeps making until then. */
+    val knockGiveUpAfterMs: Long = 90_000,
 )
 
 /** How asking the car to end this phone's Bluetooth serial link went: see [JobRepository.resetSerial]. */
@@ -317,6 +330,21 @@ fun interface JobKeeper {
  * tried, where the car's link does not come ([ConnectionState.Failed.listenedOnly]); the user may then have the phone
  * connect itself, once ([connectFromPhone]). A link the phone does open while the car may dial gives way to the car's
  * link where that comes before the agent answers it ([greet]).
+ *
+ * An agent that lists [ProtocolConstants.CAPABILITY_SERIAL_KNOCK] ([HeadUnit.serialKnock], kept from every `hello`)
+ * has the car dial the phone only when the app knocks. Every connect to such a head unit knocks ([LinkConnector.knock])
+ * in place of all of that: the user's, the app's own on coming back and after a reset, and its wait after the agent
+ * restarted ([rejoin]). The phone's own link is then made only where the user asks for it ([connectFromPhone]), which
+ * is offered where a knock brought no link, with what the phone can tell of why ([knockFailure]).
+ *
+ * What is saved of a head unit is learnt from its `hello`, so one whose agent another phone has since updated to one
+ * that dials only when knocked still says that it dials and does not take knocks, and a connect the old way may never
+ * reach it. So a connect to such a head unit, the same paths as above but [connectFromPhone], that comes to its end
+ * with no link at all, neither the phone's own nor the car's, makes one burst of knocks before it fails
+ * ([knockBeforeFailing]). A car's link that comes of it is greeted as any the car opens, and its `hello` saves that the
+ * agent takes knocks; where none comes, the connect fails as it would have without the knock. A link that came up and
+ * then failed, as one whose `hello` had no answer, brings no knock, and neither does a connect that was cancelled or
+ * given up as the app left the foreground.
  */
 class JobRepository(
     private val headUnits: HeadUnitRepository,
@@ -352,6 +380,12 @@ class JobRepository(
      * come goes by it ([quietFailure]).
      */
     private val carsHolding: StateFlow<Set<String>> = MutableStateFlow(emptySet()),
+    /**
+     * Whether the car at a Bluetooth address has a media audio connection to the phone now, or null where the phone
+     * cannot tell: [com.nbtapps.store.data.PhoneBluetooth.mediaAudio]. What the user is told of a knock that brought no
+     * link goes by it ([knockFailure]).
+     */
+    private val mediaAudio: (address: String) -> Boolean? = { null },
     /** Where a link's end, and what came of a link the car opened, are said. */
     private val log: LinkLog = LinkLog.NONE,
 ) {
@@ -477,9 +511,10 @@ class JobRepository(
     suspend fun connect(headUnitId: String): Result<Unit> = connect(headUnitId, fromPhone = false)
 
     /**
-     * [connect], once, the way a head unit whose agent leaves the phone's own links alone is not connected to
-     * ([HeadUnit.phoneOpenedLeft]): the phone dials the car as well as listening for it. For the user to ask for where
-     * a connect that only listened had no link ([ConnectionState.Failed.listenedOnly]); nothing else does it.
+     * [connect], once, the way a head unit whose agent leaves the phone's own links alone ([HeadUnit.phoneOpenedLeft]),
+     * or dials when knocked ([HeadUnit.serialKnock]), is not connected to: the phone dials the car, with the link's magic
+     * bytes and `hello`, as well as listening for it. For the user to ask for where a connect that only listened or
+     * knocked had no link ([ConnectionState.Failed.listenedOnly]); nothing else does it.
      */
     suspend fun connectFromPhone(headUnitId: String): Result<Unit> = connect(headUnitId, fromPhone = true)
 
@@ -521,15 +556,21 @@ class JobRepository(
     /**
      * What [connect] does, with [connectLock] held. When [quiet], it is one of the app's own tries, after the agent
      * restarted or on coming back to the foreground: a failure is the caller's to publish, and the state stays
-     * [ConnectionState.Connecting]. With [fromPhone], the phone dials the car where it would otherwise only listen
-     * ([connectFromPhone]).
+     * [ConnectionState.Connecting]. With [fromPhone], the phone dials the car where it would otherwise only listen or
+     * knock ([connectFromPhone]). [knockBursts] is as for [attemptOver].
      */
-    private suspend fun attempt(headUnitId: String, quiet: Boolean, incoming: IncomingLink? = null, fromPhone: Boolean = false): Result<Unit> {
+    private suspend fun attempt(
+        headUnitId: String,
+        quiet: Boolean,
+        incoming: IncomingLink? = null,
+        fromPhone: Boolean = false,
+        knockBursts: Int? = null,
+    ): Result<Unit> {
         attempting.update { it + 1 }
         // A link the car opened, until it is the first link greeted. One that is never used is closed.
         var spare: Link? = incoming?.link
         try {
-            return attemptOver(headUnitId, quiet, incoming?.endpoint, fromPhone) { spare.also { spare = null } }
+            return attemptOver(headUnitId, quiet, incoming?.endpoint, fromPhone, knockBursts) { spare.also { spare = null } }
         } finally {
             spare?.close()
             attempting.update { it - 1 }
@@ -538,14 +579,23 @@ class JobRepository(
 
     /**
      * What [attempt] does. Where [only] is given, that endpoint alone is tried, and its first link is the one
-     * [given] gives, if any: a link the car opened. [fromPhone] is as for [attempt].
+     * [given] gives, if any: a link the car opened. [fromPhone] is as for [attempt]. [knockBursts]: how many bursts a
+     * knock makes, to a head unit whose agent dials when knocked ([HeadUnit.serialKnock]), where not the connector's own.
      */
-    private suspend fun attemptOver(headUnitId: String, quiet: Boolean, only: Endpoint?, fromPhone: Boolean, given: () -> Link?): Result<Unit> {
+    private suspend fun attemptOver(
+        headUnitId: String,
+        quiet: Boolean,
+        only: Endpoint?,
+        fromPhone: Boolean,
+        knockBursts: Int?,
+        given: () -> Link?,
+    ): Result<Unit> {
         drop("The app connected again")
         val saved = headUnits.headUnit(headUnitId).first()
             ?: return Result.failure(IOException("That head unit is no longer saved"))
-        // For this connect only: what is saved is changed by the next `info.get` alone.
-        val unit = if (fromPhone) saved.copy(phoneOpenedLeft = false) else saved
+        // For this connect only: what is saved is changed by the next `hello` and `info.get` alone. The phone's own
+        // link, which neither a knock nor a connect that only listens makes.
+        val unit = if (fromPhone) saved.copy(phoneOpenedLeft = false, serialKnock = false) else saved
         connectionState.value = ConnectionState.Connecting(headUnitId)
         val failures = ArrayList<Pair<Endpoint, String>>()
         // A connect that only listened, and had no link from the car: see [ConnectionState.Failed.listenedOnly].
@@ -555,14 +605,26 @@ class JobRepository(
             val endpoints = if (only != null) listOf(only) else unit.endpoints.filter(connector::supports).inConnectOrder()
             for (endpoint in endpoints) {
                 opened = null
+                // Whether this endpoint has had a link of any kind in this connect, the car's or the phone's.
+                var linked = false
                 val reason = try {
-                    val paired = dial(unit, endpoint, given()) { opened = it }
+                    val paired = try {
+                        dial(unit, endpoint, given(), knockBursts) { session ->
+                            opened = session
+                            if (session != null) linked = true
+                        }
+                    } catch (e: IOException) {
+                        // The one place where a connect that had no link at all is told from one whose link failed.
+                        val knocked = if (linked) null else knockBeforeFailing(unit, endpoint, fromPhone)
+                        // The car's link the knock brought, greeted as any link the car opened; or the failure as it was.
+                        dial(unit, endpoint, knocked ?: throw e, knockBursts) { opened = it }
+                    }
                     return if (paired) Result.success(Unit) else Result.failure(PairingNeeded())
                 } catch (e: RemoteException) {
                     AgentText.request(e.code)
                 } catch (e: IOException) {
                     if (e is NoCarLinkException) listenedOnly = true
-                    e.message ?: "The head unit couldn't be reached"
+                    if (e is KnockUnansweredException) knockFailure(endpoint) else e.message ?: "The head unit couldn't be reached"
                 }
                 opened?.let { abandon(it, reason) }
                 // A link that failed after it was shown as connected, as one whose `job.status` got no answer, is not.
@@ -583,6 +645,42 @@ class JobRepository(
         }
         if (!quiet) connectionState.value = ConnectionState.Failed(headUnitId, reason, listenedOnly)
         return Result.failure(if (listenedOnly) NoCarLinkException(reason) else IOException(reason))
+    }
+
+    /**
+     * The one burst of knocks ([LinkConnector.knock], with `fallback`) that a connect to [unit] over [endpoint] makes
+     * where it had no link at all, before it fails: for a head unit whose agent dials ([HeadUnit.serialDial]) and is
+     * not known to dial only when knocked ([HeadUnit.serialKnock]). Its agent may have been updated since, by another
+     * phone, to one that dials only when knocked; the phone would then never connect, and never learn that it knocks,
+     * unless its own link happened to get through. The car's link the knock brings, or null where none is made
+     * ([fromPhone], another kind of endpoint) or none came: the connect then fails as it would have without it.
+     */
+    private suspend fun knockBeforeFailing(unit: HeadUnit, endpoint: Endpoint, fromPhone: Boolean): Link? {
+        if (fromPhone || !unit.serialDial || unit.serialKnock || !connector.accepts(endpoint)) return null
+        log.line("the connect had no link, and the agent dials: the app knocks once, as to an agent that dials only when knocked")
+        return try {
+            connector.knock(endpoint, bursts = 1, fallback = true).also { log.line("the knock brought the car's link") }
+        } catch (e: IOException) {
+            log.line("the knock brought no link either: the connect fails as it was")
+            null
+        }
+    }
+
+    /**
+     * What the user is told where a connect knocked at [endpoint] and the car's link did not come. Where the phone says
+     * that the car has no media audio connection to it, that is the likely cause: the car then turns the phone's
+     * requests down, and no knock reaches the agent. The phone's own connect is offered after either
+     * ([ConnectionState.Failed.listenedOnly]), as the last thing to try.
+     */
+    private fun knockFailure(endpoint: Endpoint): String {
+        val audio = (endpoint as? SerialEndpoint)?.let { serial ->
+            try {
+                mediaAudio(serial.address)
+            } catch (e: RuntimeException) {
+                null
+            }
+        }
+        return (if (audio == false) KNOCK_NO_MEDIA_AUDIO else KNOCK_NO_LINK) + " " + KNOCK_FROM_PHONE
     }
 
     /**
@@ -788,6 +886,11 @@ class JobRepository(
      * until [Rejoin.giveUpAfterMs] have passed since the link ended; then the link is shown as failed, and the
      * user connects. A phone the new agent wants paired first is left at that. [connect] and [disconnect] end
      * the wait.
+     *
+     * To a head unit whose agent dials only when knocked ([HeadUnit.serialKnock]), each connect is one burst of
+     * knocks, one every [Rejoin.knockEveryMs], until [Rejoin.knockGiveUpAfterMs]; a link the car opens in between is
+     * taken as at any other time ([take]), which ends the wait. The job is then shown as one whose wait is over
+     * ([JobView.waitedOut]), so that the screen says so and what to do.
      */
     private suspend fun rejoin(headUnitId: String) {
         val began = clock()
@@ -796,29 +899,38 @@ class JobRepository(
         // The last try only listened, and the car's link did not come: see [ConnectionState.Failed.listenedOnly].
         var listenedOnly: Boolean
         while (true) {
+            // As saved now: a `hello` since the restart may have changed it.
+            val knocks = headUnits.headUnit(headUnitId).first()?.serialKnock == true
+            val tried = clock()
             val result = connectLock.withLock {
                 // Taking a free lock asks nothing of the caller: one that was told to stop must not connect.
                 currentCoroutineContext().ensureActive()
-                attempt(headUnitId, quiet = true)
+                attempt(headUnitId, quiet = true, knockBursts = if (knocks) 1 else null)
             }
             if (result.isSuccess) return
             if (result.exceptionOrNull() is PairingNeeded) return lost(headUnitId)
             failure = result.exceptionOrNull()?.message.orEmpty()
             listenedOnly = result.exceptionOrNull() is NoCarLinkException
-            if (clock() - began + rejoin.pauseMs >= rejoin.giveUpAfterMs) break
-            delay(rejoin.pauseMs)
+            val pause = if (knocks) (rejoin.knockEveryMs - (clock() - tried)).coerceAtLeast(0) else rejoin.pauseMs
+            val giveUpAfter = if (knocks) rejoin.knockGiveUpAfterMs else rejoin.giveUpAfterMs
+            if (clock() - began + pause >= giveUpAfter) break
+            delay(pause)
         }
         connectLock.withLock {
             currentCoroutineContext().ensureActive()
-            lost(headUnitId)
+            lost(headUnitId, waitedOut = true)
             connectionState.value =
                 ConnectionState.Failed(headUnitId, "The head unit's agent hasn't answered since it restarted. $failure".trim(), listenedOnly)
         }
     }
 
-    /** The job the app was connecting again for, if any, is one whose link was lost. */
-    private fun lost(headUnitId: String) = jobState.update { view ->
-        if (view != null && view.reconnecting && view.headUnitId == headUnitId) view.copy(reconnecting = false, linkLost = true) else view
+    /** The job the app was connecting again for, if any, is one whose link was lost; with [waitedOut], as [rejoin] gave up. */
+    private fun lost(headUnitId: String, waitedOut: Boolean = false) = jobState.update { view ->
+        if (view != null && view.reconnecting && view.headUnitId == headUnitId) {
+            view.copy(reconnecting = false, linkLost = true, waitedOut = waitedOut)
+        } else {
+            view
+        }
     }
 
     /**
@@ -1404,12 +1516,23 @@ class JobRepository(
      * waits for its answer, is the next round's link, and is counted as the link it stands for would have been: it
      * ends the pause, as there is no link of the phone's for the car to take down. So the tries stay as many as before.
      * Nothing is left listening, and no link of the car's open, however the greeting ends.
+     *
+     * To a head unit whose agent dials only when knocked ([HeadUnit.serialKnock]), each link is the car's that a knock
+     * brings ([LinkConnector.knock], with [knockBursts]), and is greeted as any link the car opened is; [HeadUnit.phoneOpenedLeft]
+     * decides nothing, and no link of the phone's own is made.
      */
-    private suspend fun greet(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit, tries: Tries): Pair<AgentSession, Hello> =
+    private suspend fun greet(
+        unit: HeadUnit,
+        endpoint: Endpoint,
+        first: Link?,
+        knockBursts: Int?,
+        holding: (AgentSession?) -> Unit,
+        tries: Tries,
+    ): Pair<AgentSession, Hello> =
         coroutineScope {
             val carLinks = CarLinks(endpoint, this)
             try {
-                rounds(unit, endpoint, first, holding, tries, carLinks)
+                rounds(unit, endpoint, first, knockBursts, holding, tries, carLinks)
             } finally {
                 // Nothing listens, and no link of the car's that came is left open, however the greeting ends. The
                 // scope waits for the listening to have stopped.
@@ -1418,7 +1541,15 @@ class JobRepository(
         }
 
     /** The rounds of [greet], each over one link, with [carLinks] listening from the first link of the phone's on. */
-    private suspend fun rounds(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit, tries: Tries, carLinks: CarLinks): Pair<AgentSession, Hello> {
+    private suspend fun rounds(
+        unit: HeadUnit,
+        endpoint: Endpoint,
+        first: Link?,
+        knockBursts: Int?,
+        holding: (AgentSession?) -> Unit,
+        tries: Tries,
+        carLinks: CarLinks,
+    ): Pair<AgentSession, Hello> {
         // A link the car opened in the place of a silent one of the phone's, for the next round.
         var carLink: Link? = null
         try {
@@ -1430,7 +1561,11 @@ class JobRepository(
                 val link = replacing
                     ?: came
                     ?: first.takeIf { tries.opened == 0 }
-                    ?: connector.connect(endpoint, unit.serialDial, listenOnly = unit.serialDial && unit.phoneOpenedLeft)
+                    ?: if (unit.serialKnock) {
+                        connector.knock(endpoint, knockBursts)
+                    } else {
+                        connector.connect(endpoint, unit.serialDial, listenOnly = unit.serialDial && unit.phoneOpenedLeft)
+                    }
                 if (replacing == null) tries.opened++
                 val next = AgentSession(link, scope, now = clock).also(holding)
                 val last = next.kind != Link.SERIAL || tries.opened >= greeting.serialTries
@@ -1615,12 +1750,12 @@ class JobRepository(
      * may be one the agent no longer serves, as a `hello` with no answer may be, so another is opened as [greet] does,
      * within the same [Greeting.serialTries]; on any other link the connect fails.
      */
-    private suspend fun dial(unit: HeadUnit, endpoint: Endpoint, first: Link?, holding: (AgentSession?) -> Unit): Boolean {
+    private suspend fun dial(unit: HeadUnit, endpoint: Endpoint, first: Link?, knockBursts: Int?, holding: (AgentSession?) -> Unit): Boolean {
         var stale = false
         var given = first
         var tries = Tries()
         while (true) {
-            val (next, hello) = greet(unit, endpoint, given.also { given = null }, holding, tries)
+            val (next, hello) = greet(unit, endpoint, given.also { given = null }, knockBursts, holding, tries)
             try {
                 return open(unit, endpoint, next, hello, stale)
             } catch (e: StaleKey) {
@@ -1648,9 +1783,11 @@ class JobRepository(
         if (unit.headUnitId != null && unit.headUnitId != hello.headUnitId) {
             throw ProtocolException("This isn't the head unit saved as ${unit.name}. Add it as a new one.")
         }
-        // Kept from every `hello`, for how long the next connect waits: see [HeadUnit.serialDial].
+        // Kept from every `hello`, for how the next connect is made: see [HeadUnit.serialDial] and [HeadUnit.serialKnock].
+        // From what is saved, not from [unit], which a connect from the phone changed for itself.
         val dials = ProtocolConstants.CAPABILITY_SERIAL_DIAL in hello.capabilities
-        if (unit.serialDial != dials) headUnits.update(unit.id) { it.copy(serialDial = dials) }
+        val knocks = ProtocolConstants.CAPABILITY_SERIAL_KNOCK in hello.capabilities
+        headUnits.update(unit.id) { if (it.serialDial == dials && it.serialKnock == knocks) it else it.copy(serialDial = dials, serialKnock = knocks) }
         val agentId = requireNotNull(hello.headUnitId)
         if (keys.has(agentId)) answered("auth") { prove(next, agentId) }
         // The first thing asked also tells whether the agent takes this phone as it is.
@@ -1774,12 +1911,12 @@ class JobRepository(
         val found = answered("job.status", limited) { current.client.status() }.job
         if (found == null) {
             // A job of ours that had not ended is gone with the head unit's staging area.
-            if (known != null && !known.ended) jobState.value = known.copy(forgotten = true, linkLost = false, reconnecting = false)
+            if (known != null && !known.ended) jobState.value = known.copy(forgotten = true, linkLost = false, reconnecting = false, waitedOut = false)
             return
         }
         val same = known?.takeIf { it.planId == found.planId }
         var view = (same ?: JobView(found.planId, headUnitId, plan = null, job = found))
-            .copy(job = found, linkLost = false, forgotten = false, reconnecting = false)
+            .copy(job = found, linkLost = false, forgotten = false, reconnecting = false, waitedOut = false)
         var after = same?.job?.seq ?: 0
         val replayed = ArrayList<JobLog>()
         while (true) {
@@ -1849,7 +1986,7 @@ class JobRepository(
                 // The wait is there to be ended before anything shows it: a disconnect that follows what is shown
                 // finds it.
                 rejoining.set(scope.launch { rejoin(headUnitId) })
-                jobState.update { if (unfinished(it)) it?.copy(reconnecting = true, linkLost = false) else it }
+                jobState.update { if (unfinished(it)) it?.copy(reconnecting = true, linkLost = false, waitedOut = false) else it }
                 connectionState.value = ConnectionState.Connecting(headUnitId)
                 return@withLock null
             }
@@ -1864,7 +2001,7 @@ class JobRepository(
                 }
             }
             // The job is marked first, so whoever sees the failed connection also sees what it did to the job.
-            jobState.update { if (unfinished(it)) it?.copy(linkLost = true) else it }
+            jobState.update { if (unfinished(it)) it?.copy(linkLost = true, waitedOut = false) else it }
             ConnectionState.Failed(headUnitId, reason).also { connectionState.value = it }
         }
         if (failed != null && told == null) offAfter(current, failed)
@@ -1877,7 +2014,8 @@ class JobRepository(
         // An event already seen: replayed by job.status, or sent while that was being answered.
         if (same != null && event.seq <= same.job.seq) return@update known
         when (event) {
-            is JobEvent.Progress -> view.copy(job = event.job.copy(seq = event.seq), linkLost = false, forgotten = false, reconnecting = false)
+            is JobEvent.Progress ->
+                view.copy(job = event.job.copy(seq = event.seq), linkLost = false, forgotten = false, reconnecting = false, waitedOut = false)
             is JobEvent.Log -> view.copy(job = view.job.copy(seq = event.seq), log = (view.log + event.log).takeLast(MAX_LOG_LINES))
             is JobEvent.Done -> view.copy(job = view.job.copy(state = event.result.state, seq = event.seq, result = event.result))
         }
@@ -1892,7 +2030,7 @@ class JobRepository(
         val current = session ?: return
         session = null
         current.close(reason)
-        jobState.update { it?.takeIf { view -> !view.ended }?.copy(linkLost = true) ?: it }
+        jobState.update { it?.takeIf { view -> !view.ended }?.copy(linkLost = true, waitedOut = false) ?: it }
     }
 
     /**
@@ -1938,6 +2076,16 @@ class JobRepository(
 
         const val NO_SERIAL_RESET = "This head unit's agent can't reset the Bluetooth link. Update the agent first."
         const val RESET_WHILE_JOB = "Wait for the job to finish, then try again."
+
+        /** A knock that brought no link from the car, where the car has no media audio connection to the phone: see [knockFailure]. */
+        const val KNOCK_NO_MEDIA_AUDIO = "The car didn't connect to this app. It has no media audio connection to this phone: " +
+            "choose this phone in the car's media menu to reconnect it, then connect again."
+
+        /** A knock that brought no link from the car otherwise. */
+        const val KNOCK_NO_LINK = "The car didn't connect to this app. Check that the agent is running and the car is in range."
+
+        /** After either, the phone's own connect, the last thing to try. */
+        const val KNOCK_FROM_PHONE = "If it still fails, try Connect from the phone, which can interrupt another app's link to the car."
 
         /** Why a link the phone opened is closed when a link the car opened takes its place: see [greet]. */
         const val CAR_LINK_TAKEN = "The car's link was taken in its place"

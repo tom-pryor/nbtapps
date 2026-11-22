@@ -60,6 +60,14 @@ interface PhoneBluetooth {
     fun refreshConnected()
 
     /**
+     * Whether the device at [address] has a media audio (A2DP) connection to this phone at this moment, as the phone's
+     * audio profile says: read now, each time, and apart from [connected], which also counts hands-free. Null where the
+     * phone cannot tell: Bluetooth off or not allowed, the profile not yet at hand, or an address that is not one.
+     * Nothing here opens a connection.
+     */
+    fun mediaAudio(address: String): Boolean? = null
+
+    /**
      * Whether Bluetooth is on and the app may use it ([access] is [BluetoothAccess.ON]), as [refreshConnected] last
      * found: so from its first call it follows Bluetooth being switched on and off, while the app's process runs.
      */
@@ -224,6 +232,23 @@ class AndroidPhoneBluetooth @Inject constructor(
         } catch (e: SecurityException) {
             // The permission went between the check and the call.
             emptySet()
+        }
+    }
+
+    @SuppressLint("MissingPermission") // checked by access()
+    override fun mediaAudio(address: String): Boolean? {
+        if (access() != BluetoothAccess.ON) return null
+        // Asked for here too, where nothing has read the connections yet; the answer is then known from the next call.
+        askForProxies()
+        val audio = synchronized(lock) { proxies[BluetoothProfile.A2DP] } ?: return null
+        return try {
+            val device = adapter?.getRemoteDevice(address.uppercase()) ?: return null
+            audio.getConnectionState(device) == BluetoothProfile.STATE_CONNECTED
+        } catch (e: SecurityException) {
+            // The permission went between the check and the call.
+            null
+        } catch (e: IllegalArgumentException) {
+            null
         }
     }
 
