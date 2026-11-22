@@ -26,6 +26,8 @@ data class TryFacts(
     val carConnected: Boolean? = null,
     /** The phone is paired with the car. */
     val bonded: Boolean? = null,
+    /** The car had a media audio connection to the phone ([com.nbtapps.store.data.PhoneBluetooth.mediaAudio]). */
+    val mediaAudio: Boolean? = null,
 )
 
 /** One try at a Bluetooth serial link, of either way it comes up, for the diagnostics. It holds no address. */
@@ -43,6 +45,8 @@ data class LinkTry(
     val error: String? = null,
     val message: String? = null,
     val facts: TryFacts = TryFacts(),
+    /** Which of several it was, as a knock's burst and attempt: words that follow the path in [describe]. */
+    val detail: String? = null,
 ) {
     enum class Path(val label: String) {
         /** The phone dialled the car. */
@@ -59,6 +63,21 @@ data class LinkTry(
          * listened. See [BluetoothSerialLinkConnector].
          */
         LISTEN_ONLY("listen-only connect"),
+
+        /** One connect of a knock's: the phone knocked at the agent ([BluetoothSerialLinkConnector.knock]). */
+        KNOCK("knock"),
+
+        /** A burst of a knock's connects that had no link from the car. */
+        KNOCK_BURST("knock burst"),
+
+        /** A connect that knocked, and what came of it: the car's link, or none. Its time is from its start. */
+        KNOCK_CONNECT("knocking connect"),
+
+        /**
+         * As [KNOCK_CONNECT], for the one burst a connect to a head unit whose agent dials, and is not known to dial
+         * only when knocked, makes where it had no link at all: see [LinkConnector.knock]'s `fallback`.
+         */
+        FALLBACK_KNOCK_CONNECT("knocking connect made because the agent dials and the connect had no link,"),
     }
 
     enum class Outcome(val label: String) {
@@ -74,13 +93,24 @@ data class LinkTry(
         /** A listen-only connect took the car's link. */
         TAKEN("took the car's link"),
 
-        /** A listen-only connect had no link from the car in its time. */
+        /** A listen-only connect, or a knock's burst or connect, had no link from the car in its time. */
         NO_LINK("had no link from the car"),
+
+        /** A knock's connect came up, and the knock's magic bytes were sent on it. */
+        KNOCKED("came up, and the knock was sent"),
+
+        /** A knock's connect failed where the phone had found the agent's channel on the car: the car refused it. */
+        REFUSED("refused"),
+
+        /** Given up because the connect it was part of was cancelled, or had its link. */
+        CANCELLED("cancelled"),
     }
 
     /** One line, as the diagnostics and the log have it. */
     fun describe(): String = buildString {
-        append(path.label).append(' ').append(outcome.label)
+        append(path.label)
+        detail?.let { append(' ').append(it) }
+        append(' ').append(outcome.label)
         millis?.let { append(" after ").append(it).append(" ms") }
         if (error != null) {
             append(": ").append(error)
@@ -91,6 +121,7 @@ data class LinkTry(
             facts.channel?.let { if (it < 0) "no channel" else "channel $it" },
             facts.carConnected?.let { if (it) "car connected" else "car not connected" },
             facts.bonded?.let { if (it) "paired" else "not paired" },
+            facts.mediaAudio?.let { if (it) "media audio connected" else "no media audio" },
         )
         if (known.isNotEmpty()) append(" (").append(known.joinToString(", ")).append(')')
     }
@@ -103,14 +134,22 @@ data class LinkTry(
 class SerialDiagnostics(
     /** The app's version, Android's and the phone's model, in one line, as [report] begins with them. */
     private val about: String = "",
-    private val capacity: Int = 50,
+    /** Enough for the knocks of the app's own wait after an agent's restart, which come to several lines each. */
+    private val capacity: Int = 200,
     private val wallClock: () -> Long = System::currentTimeMillis,
 ) {
     private val kept = ArrayDeque<LinkTry>()
 
     /** A try that ended now, as [LinkTry] with its time filled in: kept, and returned. */
-    fun record(path: LinkTry.Path, outcome: LinkTry.Outcome, millis: Long? = null, failure: Throwable? = null, facts: TryFacts = TryFacts()): LinkTry {
-        val entry = LinkTry(wallClock(), path, outcome, millis, failure?.let { it::class.java.simpleName }, failure?.message, facts)
+    fun record(
+        path: LinkTry.Path,
+        outcome: LinkTry.Outcome,
+        millis: Long? = null,
+        failure: Throwable? = null,
+        facts: TryFacts = TryFacts(),
+        detail: String? = null,
+    ): LinkTry {
+        val entry = LinkTry(wallClock(), path, outcome, millis, failure?.let { it::class.java.simpleName }, failure?.message, facts, detail)
         synchronized(kept) {
             kept.addLast(entry)
             while (kept.size > capacity) kept.removeFirst()

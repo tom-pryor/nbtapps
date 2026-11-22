@@ -10,6 +10,7 @@ import com.nbtapps.store.data.link.Frame
 import com.nbtapps.store.data.link.FrameCodec
 import com.nbtapps.store.data.link.FrameReader
 import com.nbtapps.store.data.link.IncomingLink
+import com.nbtapps.store.data.link.KnockUnansweredException
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.MemoryLink
@@ -710,6 +711,28 @@ class FakeConnector(
         this.dials += dials
         return withTimeoutOrNull(listenOnlyMs) { accept(listOf(endpoint)).link }
             ?: throw NoCarLinkException("The car didn't connect to this app")
+    }
+
+    /** Each knock, with the bursts it was asked for (null: the connector's own number), in order. */
+    val knocks = CopyOnWriteArrayList<Int?>()
+
+    /** Whether each knock of [knocks] was a connect's one burst before it fails (`fallback`), in the same order. */
+    val fallbacks = CopyOnWriteArrayList<Boolean>()
+
+    /** How long a knock waits for the car's link ([dialIn]) before it fails, in milliseconds. */
+    @Volatile
+    var knockMs = 10_000L
+
+    /**
+     * As the app's serial connector: over [serial], no link of the phone's, only one the car opens ([dialIn]) while the
+     * knock listens for it, and [KnockUnansweredException] where none comes in [knockMs]. Over TCP, a connect.
+     */
+    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: Boolean): Link {
+        knocks += bursts
+        fallbacks += fallback
+        if (!serial) return connect(endpoint, dials = true)
+        return withTimeoutOrNull(knockMs) { accept(listOf(endpoint)).link }
+            ?: throw KnockUnansweredException("The car didn't connect to this app after it knocked")
     }
 
     override fun supports(endpoint: Endpoint): Boolean = if (serial) endpoint is SerialEndpoint else endpoint is TcpEndpoint

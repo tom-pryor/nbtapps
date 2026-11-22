@@ -41,14 +41,16 @@ class AndroidSerialRadio @Inject constructor(
     }
 
     /**
-     * Android's error code where it has one, the RFCOMM channel the socket found, and whether the car is connected to
-     * the phone and paired with it. Nothing of it may fail the try it is about: what cannot be read is left out.
+     * Android's error code where it has one, the RFCOMM channel the socket found, whether the car is connected to the
+     * phone and paired with it, and whether it has media audio to the phone. Nothing of it may fail the try it is about:
+     * what cannot be read is left out.
      */
     override fun inspect(address: String, socket: SerialSocket?, failure: Throwable?): TryFacts = TryFacts(
         errorCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) errorCodeOf(failure) else null,
         channel = (socket as? Socket)?.channel(),
         carConnected = runCatching { address.uppercase() in bluetooth.connected.value }.getOrNull(),
         bonded = runCatching { bluetooth.pairedDevices().any { it.address.equals(address, ignoreCase = true) } }.getOrNull(),
+        mediaAudio = runCatching { bluetooth.mediaAudio(address) }.getOrNull(),
     )
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)

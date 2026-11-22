@@ -208,6 +208,7 @@ abstract class AppModule {
             // Read now, which also begins following Bluetooth being switched on and off.
             bluetoothOn = bluetooth.also { it.refreshConnected() }.on,
             carsHolding = bluetooth.connected,
+            mediaAudio = bluetooth::mediaAudio,
             log = AndroidLinkLog,
         )
 
