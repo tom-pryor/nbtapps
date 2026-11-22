@@ -796,6 +796,28 @@ class BluetoothSerialLinkConnectorTest {
     }
 
     @Test
+    fun `a knock's connect that hears nothing while the phone is connected to the car does not end the knock`() = live {
+        // On real threads: the connect that hears nothing blocks one until its time is up.
+        val radio = FakeRadio { attempt -> if (attempt == 1) FakeSocket(blocks = true) else FakeSocket("Connection refused") }
+        // The car is there: the phone holds a connection to it, and the car left the first request without an answer.
+        radio.facts = { _, _ -> TryFacts(carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+        val connector = BluetoothSerialLinkConnector(
+            radio, SerialConnectTimes(knockTryMillis = 300, knockSettleMillis = 50), diagnostics = diagnostics, listener = SerialListener(radio),
+        )
+
+        val failure = knockFailure(connector, bursts = 1)
+
+        // The burst went on to its last connect, and the knock failed as one the car did not answer, not as a car away.
+        assertTrue("$failure", failure is KnockUnansweredException && !failure.carAway)
+        val knocks = diagnostics.tries().filter { it.path == LinkTry.Path.KNOCK }
+        assertEquals(LinkTry.Outcome.NO_ANSWER, knocks.first().outcome)
+        assertEquals(5, knocks.size)
+        assertEquals(5, radio.sockets.size)
+        assertTrue(radio.fakeSockets.all { it.closes.get() >= 1 })
+    }
+
+    @Test
     fun `a knock where the phone cannot listen fails as a link that cannot come, and is no unanswered knock`() = runTest {
         val radio = FakeRadio { FakeSocket("refused") }
         radio.listenFailure = "The phone refused to listen"

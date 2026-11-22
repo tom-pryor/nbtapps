@@ -115,7 +115,8 @@ class SerialConnectTimes(
     val knockHoldMillis: Long = ProtocolConstants.SERIAL_KNOCK_HOLD_MS,
     /**
      * The most one of a knock's connects is given to come up or fail. Most fail or come up well within it; one that has
-     * no answer in it has not reached the car, and ends the knock ([BluetoothSerialLinkConnector.knock]).
+     * no answer in it, while the phone has no connection to the car that it can tell of, has not reached the car, and
+     * ends the knock ([BluetoothSerialLinkConnector.knock]).
      */
     val knockTryMillis: Long = 5_000,
     /** How many bursts a knock makes at most, where its caller does not say. */
@@ -389,10 +390,12 @@ class BluetoothSerialLinkConnector(
      * kept in the diagnostics, in one line: a connect that is cancelled after its line, as one that came up is in its
      * hold, has no second.
      *
-     * Whether it reached the car: false where it had no answer in its time, or failed while the phone had no connection
-     * to the car ([TryFacts.carConnected] false); then the car is off or out of range, and the knock ends ([knock]). One
-     * that came up, was refused by the car, or failed while the phone was connected to the car, or could not tell, did.
-     * Any other failure is no failure of the knock, which goes on.
+     * Whether it reached the car: false where it failed while the phone had no connection to the car
+     * ([TryFacts.carConnected] false), or had no answer in its time while the phone had none or could not tell; then the
+     * car is off or out of range, and the knock ends ([knock]). One that came up or was refused by the car did, and so
+     * did one that failed while the phone was connected to the car or could not tell. One that had no answer while the
+     * phone was connected to the car did too: the car is there, and leaves a request without an answer at times, as
+     * after a dial of its own that failed. Any other failure is no failure of the knock, which goes on.
      */
     private suspend fun knockOnce(address: String, came: CompletableDeferred<Link>, which: String): Boolean {
         val began = now()
@@ -424,7 +427,11 @@ class BluetoothSerialLinkConnector(
                 else -> LinkTry.Outcome.FAILED
             }
             note(outcome, e, facts)
-            return outcome == LinkTry.Outcome.REFUSED || (outcome == LinkTry.Outcome.FAILED && facts.carConnected != false)
+            return when (outcome) {
+                LinkTry.Outcome.REFUSED -> true
+                LinkTry.Outcome.NO_ANSWER -> facts.carConnected == true
+                else -> facts.carConnected != false
+            }
         } catch (e: CancellationException) {
             made?.closeQuietly()
             if (!noted) note(LinkTry.Outcome.CANCELLED, null, TryFacts())
