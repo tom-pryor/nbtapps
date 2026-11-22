@@ -1629,8 +1629,7 @@ void Agent::writeSerial(json::Writer& w, Session* s) {
     w.key("checks").integer(st.checks).key("checksRestored").integer(st.checksRestored).key("refusals").integer(st.refusals);
     w.key("leftUnread").integer(st.leftUnread).key("putBack").integer(st.putBack);
     w.key("knocksByMarker").integer(st.knocksByMarker);
-    w.key("knocksIgnoredNotOurs").integer(st.knocksIgnoredNotOurs).key("knocksIgnoredQuiet").integer(st.knocksIgnoredQuiet);
-    w.key("knocksIgnoredBusy").integer(st.knocksIgnoredBusy);
+    w.key("knocksIgnoredQuiet").integer(st.knocksIgnoredQuiet).key("knocksIgnoredBusy").integer(st.knocksIgnoredBusy);
     w.key("knocksIgnoredNotDialable").integer(st.knocksIgnoredNotDialable);
     w.key("knockDials").integer(st.knockDials).key("knockDialsFailed").integer(st.knockDialsFailed);
     w.key("refusalsNoAudio").integer(st.refusalsNoAudio);

@@ -41,10 +41,31 @@ uint32_t monoSec() { return (uint32_t)monoNow(); }
 
 void closeOnExec(int fd) { fcntl(fd, F_SETFD, fcntl(fd, F_GETFD, 0) | FD_CLOEXEC); }
 
+// A line of the log, whole however long it is: vsnprintf() says how long it would be, and a line that does not fit
+// the first buffer is made again in one of that size (each pass with its own copy of `ap`). A C library that answers
+// -1 for a line too long gets twice the room each time, up to kMostLine; past that, which no line of the agent's
+// comes near, what fits is kept.
+const size_t kMostLine = 65536;
 std::string format(const char* fmt, va_list ap) {
     char line[512];
-    vsnprintf(line, sizeof(line), fmt, ap);
-    return line;
+    va_list again;
+    va_copy(again, ap);
+    int n = vsnprintf(line, sizeof(line), fmt, again);
+    va_end(again);
+    if (n >= 0 && (size_t)n < sizeof(line)) return std::string(line, (size_t)n);
+    size_t room = n >= 0 ? (size_t)n + 1 : 2 * sizeof(line);
+    for (;;) {
+        std::vector<char> big(room);
+        va_copy(again, ap);
+        n = vsnprintf(&big[0], room, fmt, again);
+        va_end(again);
+        if (n >= 0 && (size_t)n < room) return std::string(&big[0], (size_t)n);
+        if (n < 0 && room >= kMostLine) {
+            big[room - 1] = 0;
+            return std::string(&big[0]);
+        }
+        room = n >= 0 ? (size_t)n + 1 : 2 * room;
+    }
 }
 
 // True once `fd` has something to read or `ms` are over; *ready says which. For the link's socket pair: a node is
@@ -666,8 +687,6 @@ const char* knockEndText(DialRules::KnockEnd end) {
     case DialRules::kNoKnock: return "no knock";
     case DialRules::kKnockWaits: return "and the car dials it as soon as nothing else of the agent's is under way";
     case DialRules::kKnockDialled: return "and the car dials it now";
-    case DialRules::kKnockNotOurs:
-        return "ignored: it is not one of the agent's phones, and the pairing window is closed";
     case DialRules::kKnockQuiet:
         return "ignored: it came in the phone's quiet time after a dial that a knock brought had failed";
     case DialRules::kKnockBusy:
@@ -1074,7 +1093,7 @@ void SerialListener::pairingWindow(bool open) {
         say("the pairing window is open: every phone connected to the car and paired with it is dialled in turn, every "
             "%u s", config_.dial.pairingRoundMs / 1000);
     else if (config_.dial.knock)
-        say("the pairing window has closed: the car dials the agent's own phones only, when they knock");
+        say("the pairing window has closed: the car dials a phone when its app knocks");
     else
         say("the pairing window has closed: the car dials the agent's own phones only");
 }
@@ -2321,7 +2340,6 @@ SerialStatus SerialListener::serialStatus() {
     s.refusals = refused_;
     const DialRules::KnockCounts& k = rules_.knockCounts();
     s.knocksByMarker = k.byMarker;
-    s.knocksIgnoredNotOurs = k.ignoredNotOurs;
     s.knocksIgnoredQuiet = k.ignoredQuiet;
     s.knocksIgnoredBusy = k.ignoredBusy;
     s.knocksIgnoredNotDialable = k.ignoredNotDialable;
@@ -2801,6 +2819,13 @@ void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now,
     pthread_mutex_unlock(&mu_);
     std::string answer = reply.error == kNoError ? std::string("a rejection") : gapErrorText(reply.error, "");
     bool stale = r == DialRules::kLookForNode && access(config_.dial.node.c_str(), F_OK) == 0;
+    // BUSY with no node there: as 10. Set before the line is made, which says what comes of it (a knock's dial gets
+    // its quiet time here).
+    if (r == DialRules::kLookForNode && !stale) {
+        pthread_mutex_lock(&mu_);
+        rules_.notThere(now);
+        pthread_mutex_unlock(&mu_);
+    }
     std::string meaning;
     char line[96];
     // A dial that failed is not made again soon: it may have left the car's record wrong (dial_rules.hpp). With the
@@ -2877,9 +2902,6 @@ void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now,
                           kCleanBusy);
             return;
         }
-        pthread_mutex_lock(&mu_);
-        rules_.notThere(now);
-        pthread_mutex_unlock(&mu_);
         break;
     default:
         break;
@@ -3122,14 +3144,14 @@ void SerialListener::tendCleanup(int64_t now, bool afterReset) {
     if (cleanupKind_ == kCleanBusy && there) rules_.notEnded(now);
     else rules_.ended(now);
     // A link left behind when the agent started is gone, or as gone as the car will make it: the phones are dialled
-    // afresh.
+    // afresh, or with the knock when their app knocks (DialRules::afresh()).
     if (cleanupKind_ == kCleanStart) rules_.afresh();
     int64_t backOff = rules_.backedOffUntil(dial_.address) - now;
     pthread_mutex_unlock(&mu_);
     if (left) leftOutcome(there);
     if (cleanupKind_ == kCleanStart && !cleanupQuiet_)
-        say("the link left behind on %s is %s: the car dials the phones afresh", path.c_str(),
-            there ? "still there, and is left alone" : "ended");
+        say("the link left behind on %s is %s: %s", path.c_str(), there ? "still there, and is left alone" : "ended",
+            config_.dial.knock ? "the phones are dialled when their app knocks" : "the car dials the phones afresh");
     if (cleanupKind_ == kCleanBusy && there && !cleanupQuiet_) {
         if (config_.dial.knock)
             say("phone %u is not dialled again at once: %s", dial_.number, knockAfter(now, true).c_str());

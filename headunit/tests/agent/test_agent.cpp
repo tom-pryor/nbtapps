@@ -3941,12 +3941,12 @@ static void testSerialDial() {
     CHECK(integer(st.result, "phonesPresent") == 2 && integer(st.result, "phonesEligible") == 1);
     CHECK(str(st.result, "dial") == "on" && str(st.result, "dialState") == "idle" && str(st.result, "lastResult") == "DEFAULT");
     CHECK(str(st.result, "link") == "none" && integer(st.result.find("counts"), "dials") == 3);
-    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 31);
+    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 30);
     // The knock: the mode, and its counts.
     CHECK(st.result.find("knock").isBool() && st.result.find("knock").boolean());
     const json::Value counts = st.result.find("counts");
     CHECK(integer(counts, "knocksByMarker") == 6);
-    CHECK(integer(counts, "knocksIgnoredNotOurs") == 0 && integer(counts, "knocksIgnoredQuiet") == 1);
+    CHECK(!counts.find("knocksIgnoredNotOurs").present() && integer(counts, "knocksIgnoredQuiet") == 1);
     CHECK(integer(counts, "knocksIgnoredBusy") == 0 && integer(counts, "knocksIgnoredNotDialable") == 1);
     CHECK(integer(counts, "knockDials") == 5 && integer(counts, "knockDialsFailed") == 1);
     CHECK(integer(counts, "refusalsNoAudio") == 3);

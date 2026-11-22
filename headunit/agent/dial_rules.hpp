@@ -28,13 +28,18 @@
 // media audio connection to the phone), its app cannot knock. What becomes of a knock:
 //
 //   from a phone that is not in the car's device list connected and paired with it, or has pairing trouble: ignored
-//   from a phone that is not one of the agent's, while the pairing window is closed: ignored
 //   in the phone's quiet time: ignored
 //   while a link of the agent's is up, or a dial of that phone is out or up: ignored, as one that adds nothing
 //   while a phone's request is pending, a link is being decided on, a dial of another phone is out, the re-point
 //   waits, the service is not registered or the device list has not come: it waits, knockWaitMs at most, and is
 //   ignored after that
 //   otherwise: the car dials the phone at once (kKnock), with ServiceConnect and no ask
+//
+// A knock from a phone that is not one of the agent's is dialled as any other, whether or not the pairing window is
+// open: a phone that the agent has forgotten, or whose app holds a key the agent no longer has, only knocks, and is
+// otherwise never dialled, never reaches `hello` and `auth`, and is never told that it needs pairing. The knock says
+// that the phone's app listens, so the dial does not go to a phone that would not take it, and `auth` on the dialled
+// link decides what the phone may do there, as it does on a link the phone opens itself.
 //
 // The knocks of the connects of one burst of the app's that come up one after another are one knock: the second
 // finds the first waiting, or its dial out or up, and adds nothing; after a dial that failed it finds the quiet time.
@@ -219,8 +224,7 @@ public:
         kNoKnock,          // the knock is not taken: DialConfig::knock is off
         kKnockWaits,       // taken: the dial goes as soon as it may (next())
         kKnockDialled,     // its dial has gone (a KnockNews of next()'s)
-        kKnockNotOurs,     // ignored: not a phone of the agent's, and the pairing window is closed
-        kKnockQuiet,       // ignored: in the phone's quiet time after a knock's dial that failed
+        kKnockQuiet,      // ignored: in the phone's quiet time after a knock's dial that failed
         kKnockBusy,        // ignored: a link of the agent's is up, a dial of that phone is out or up or its knock
                            // waits already, or it waited knockWaitMs in vain
         kKnockNotDialable  // ignored: it names no phone, or one that is not connected to the car and paired with it,
@@ -236,12 +240,11 @@ public:
     // The knocks so far, for serial.status.
     struct KnockCounts {
         unsigned byMarker;                                                // knocks seen
-        unsigned ignoredNotOurs, ignoredQuiet, ignoredBusy, ignoredNotDialable;
+        unsigned ignoredQuiet, ignoredBusy, ignoredNotDialable;
         unsigned dials, dialsFailed;                                      // dials knocks brought, and of those the
                                                                           // ones that gave the agent no link
         KnockCounts()
-            : byMarker(0), ignoredNotOurs(0), ignoredQuiet(0), ignoredBusy(0), ignoredNotDialable(0), dials(0),
-              dialsFailed(0) {}
+            : byMarker(0), ignoredQuiet(0), ignoredBusy(0), ignoredNotDialable(0), dials(0), dialsFailed(0) {}
     };
     // What an answer to ServiceListQuery asks of the listener.
     enum Listing {
