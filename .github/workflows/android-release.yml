@@ -156,7 +156,7 @@ jobs:
             echo
             echo "$file SHA-256: \`$(cut -d ' ' -f 1 "$file.sha256")\`"
             echo
-            echo "Not published yet: android/tools/sign.sh $VERSION signs it, adds nbtapps-$VERSION.apk and publishes."
+            echo "Not published yet: android/tools/sign.sh $VERSION --notes FILE signs it, adds nbtapps-$VERSION.apk and the notes in FILE, and publishes."
           } > ../notes.md
           gh release create "$TAG" --draft --verify-tag --title "NBTApps $VERSION" --notes-file ../notes.md \
             "$file" "$file.sha256"

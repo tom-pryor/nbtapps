@@ -29,22 +29,34 @@ commit (`tools/compare_apks.py`).
    tools/build_release.sh
    ```
 
-5. Sign and publish:
+5. Write the release's notes, what is new for the user, in a file outside the repo, one note on each line. They
+   are what the release on GitHub, the app and the changelog say of it, so they keep to the catalogue's rule for
+   notes: no blank line, none over 200 characters, no control character.
+6. Sign and publish:
 
    ```
-   tools/sign.sh 0.4.1 --compare release/nbtapps-0.4.1-unsigned.apk     # or without --compare
+   tools/sign.sh 0.4.1 --notes ~/notes-0.4.1.txt --compare release/nbtapps-0.4.1-unsigned.apk   # or without --compare
    ```
 
-   It downloads the draft's APK and checks it against its SHA-256, checks the APK (this app, that version, not
+   It checks the notes first, before it looks at the key or GitHub, and refuses a file that breaks the rule. It
+   downloads the draft's APK and checks it against its SHA-256, checks the APK (this app, that version, not
    debuggable, aligned, unsigned), with `--compare` requires your build to be the same bytes, signs it (schemes v2
    and v3, the entries left as they are), and checks the signature: it verifies, one signer, the release
-   certificate. It leaves `release/nbtapps-<version>.apk` and `release/release.json`, then asks before it adds the
-   APK to the draft and publishes it. Nothing on GitHub changes until you say yes.
-6. Record the release in the catalogue repo from `release/release.json` and the APK (`tools/nbtcat.py set-app`,
-   then publish). Phones see it on their next catalogue refresh.
+   certificate. It leaves `release/nbtapps-<version>.apk`, `release/release.json` and a copy of the notes,
+   `release/notes.txt`. Then it shows the text the release will have on GitHub: the notes under "What's new", a
+   link to the changelog, and below a line the build and what was signed. It asks before it adds the APK to the
+   draft and publishes it with that text. Nothing on GitHub changes until you say yes.
+7. Record the release in the catalogue repo from `release/release.json`, which takes the notes from
+   `release/notes.txt` beside it (`tools/nbtcat.py set-app`). Write the changelog into this repo from there
+   (`tools/nbtcat.py changelog --out ../nbtapps-mono/CHANGELOG.md`) and commit it here, then publish the catalogue.
+   Phones see the release on their next catalogue refresh.
 
 `tools/sign.sh VERSION --from FILE` signs an unsigned APK you have here and leaves GitHub out: for a trial, or if
-GitHub is not to be used.
+GitHub is not to be used. `--notes` is optional there; without it no `release/notes.txt` is left, and one from an
+earlier run is removed.
+
+[CHANGELOG.md](../CHANGELOG.md) at the top of this repo holds every release of the app, the agent and the plugin.
+It is made in the catalogue repo from the notes recorded there, and never edited by hand.
 
 ## A dry run
 
