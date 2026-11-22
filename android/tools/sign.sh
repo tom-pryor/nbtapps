@@ -3,8 +3,13 @@
 # Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 # Signs a release of the app with the release key, on this machine: the key is never on GitHub.
 #
-#   tools/sign.sh VERSION [--compare FILE]              the draft release android-vVERSION on GitHub
-#   tools/sign.sh VERSION --from FILE [--compare FILE]  an unsigned APK here; GitHub is left out
+#   tools/sign.sh VERSION --notes FILE [--compare FILE]    the draft release android-vVERSION on GitHub
+#   tools/sign.sh VERSION --from FILE [--notes FILE]       an unsigned APK here; GitHub is left out
+#                 [--compare FILE]
+#
+# --notes FILE: the release's notes, what is new, one on each line. They are checked first, before the key or
+# GitHub is looked at, by the catalogue's rule for notes: no blank line, none over 200 characters, no control
+# character. They are what the release on GitHub says is new, and what the catalogue repo records with it.
 #
 # From GitHub: downloads the unsigned APK that the Android release workflow left in the draft release, and checks
 # it against its SHA-256. Then, either way:
@@ -14,8 +19,10 @@
 #   - signs it with apksigner, which asks for the key's password. Signature schemes v2 and v3; the entries are
 #     left as they are, so the signed APK is the unsigned one byte for byte with the signature added
 #   - checks the signature as a phone would: it verifies, there is one signer, and it is the release certificate
-#   - leaves release/nbtapps-VERSION.apk and release/release.json, which the catalogue repo records a release from
-# From GitHub, last: asks, then adds the signed APK to the draft release and publishes it.
+#   - leaves release/nbtapps-VERSION.apk and release/release.json, which the catalogue repo records a release from,
+#     and with --notes release/notes.txt, a copy of FILE, beside them
+# From GitHub, last: shows the text the release will have (the notes, a link to the changelog, the build and what
+# was signed), asks, then adds the signed APK to the draft release and publishes it.
 #
 # The key: ~/.config/nbtapps/keys/android-release.properties, or the file NBTAPPS_SIGNING names, says where the
 # store is and which key in it (storeFile, keyAlias). It must not hold a password. android/RELEASING.md says more.
@@ -29,7 +36,7 @@ signing=${NBTAPPS_SIGNING:-"$HOME/.config/nbtapps/keys/android-release.propertie
 release_cert=843dd6519def36860dfff183634424753b00a059846d6e2662ba608bff04d587
 
 usage() {
-    echo "usage: tools/sign.sh VERSION [--from FILE] [--compare FILE]" >&2
+    echo "usage: tools/sign.sh VERSION [--notes FILE] [--from FILE] [--compare FILE]" >&2
     exit 2
 }
 
@@ -38,16 +45,24 @@ want=$1
 shift
 from=
 compare=
+notes=
 while [ $# -gt 0 ]; do
     case $1 in
         --from) [ $# -ge 2 ] || usage; from=$2; shift 2 ;;
         --compare) [ $# -ge 2 ] || usage; compare=$2; shift 2 ;;
+        --notes) [ $# -ge 2 ] || usage; notes=$2; shift 2 ;;
         *) usage ;;
     esac
 done
 printf '%s\n' "$want" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || fail "not a version: '$want'"
 tag="android-v$want"
 [ -z "$compare" ] || [ -f "$compare" ] || fail "no file $compare to compare with"
+# The notes, before the key or GitHub: a release on GitHub never says what the catalogue would then refuse.
+if [ -n "$notes" ]; then
+    check_notes "$notes"
+elif [ -z "$from" ]; then
+    fail "a release on GitHub needs its notes: --notes FILE, what is new, one note on each line"
+fi
 
 # The key. The properties file's values are read, never shown; a password in it is refused.
 [ -f "$signing" ] || fail "no $signing: android/RELEASING.md says what goes in it"
@@ -134,34 +149,43 @@ cat > "$out/release.json" <<JSON
   "file": "$file"
 }
 JSON
+# Beside release.json, where the catalogue repo's set-app reads it. Through a file of its own, in case FILE is
+# that copy already; with no notes, the copy of an earlier release goes.
+if [ -n "$notes" ]; then
+    cp "$notes" "$out/notes.txt.part"
+    mv "$out/notes.txt.part" "$out/notes.txt"
+else
+    rm -f "$out/notes.txt"
+fi
 
 echo
 echo "release $version (version code $code), signed, $size bytes"
 echo "  $signed"
 echo "  $out/release.json"
+[ -z "$notes" ] || echo "  $out/notes.txt"
 echo "  SHA-256 $sha"
 [ -z "$from" ] || exit 0
 
+# The release's text: what is new, then the draft's text, whose line that says it is not published yet goes (cat
+# -s closes the gap it leaves), and what was signed. It is shown before the question, as it will be public.
+body="$out/github/notes.md"
+(cd "$here" && gh release view "$tag" --json body --jq .body) > "$out/github/draft.md"
+release_body "$notes" "$out/github/draft.md" "$file" "$sha" "$cert" > "$body"
+echo
+echo "The release's text on GitHub:"
+echo
+cat "$body"
 echo
 printf 'Add %s to the draft release %s and publish it? [y/N] ' "$file" "$tag"
 read -r answer
 case $answer in
     y | Y | yes) ;;
     *)
-        echo "Not published. tools/sign.sh $want signs it again; the draft is as it was."
+        echo "Not published. tools/sign.sh $want --notes FILE signs it again; the draft is as it was."
         exit 0
         ;;
 esac
 
-# The draft's notes say it is not published yet: that line goes (cat -s closes the gap it leaves), and what was
-# signed takes its place.
-notes="$out/github/notes.md"
-(cd "$here" && gh release view "$tag" --json body --jq .body) | grep -v '^Not published yet' | cat -s > "$notes"
-{
-    echo "$file SHA-256: \`$sha\`"
-    echo
-    echo "Signed with the release certificate, SHA-256 \`$cert\`."
-} >> "$notes"
 (cd "$here" && gh release upload "$tag" "$signed" --clobber)
-(cd "$here" && gh release edit "$tag" --draft=false --notes-file "$notes")
-echo "Published $tag. The catalogue repo records it from $out/release.json."
+(cd "$here" && gh release edit "$tag" --draft=false --notes-file "$body")
+echo "Published $tag. The catalogue repo records it from $out/release.json and the notes beside it, $out/notes.txt."
