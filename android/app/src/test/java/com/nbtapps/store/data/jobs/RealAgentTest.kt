@@ -855,7 +855,9 @@ class RealAgentTest {
         assertEquals(JobState.SUCCEEDED, run(plan).job.state)
         awaitInstalled("org.nbtapp.dial 1.0.0")
         assertTrue("packages.list says it has settings", connected().installed.single().settings)
-        assertTrue("and so does the saved profile", headUnits.headUnit("bench").first()?.profile?.installed?.single()?.settings == true)
+        // The profile is saved after the connection says so, so it is waited for.
+        val kept = withTimeoutOrNull(10_000) { headUnits.headUnit("bench").first { it?.profile?.installed?.singleOrNull()?.settings == true } }
+        assertTrue("and so does the saved profile", kept != null)
 
         val conf = File(root, "data/org.nbtapp.dial/dial.conf")
         val first = jobs.loadSettings("bench", "org.nbtapp.dial").getOrThrow()
