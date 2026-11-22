@@ -691,6 +691,8 @@ void Agent::confirmTrial(Session* s) {
     onTrial_ = false;
     note(linkName(s->number) + ": a controller has reached this version of the agent, " + agentVersion_ +
          ". It is confirmed, and is the one the launcher starts from now on");
+    // The car no longer dials the phones for the trial.
+    if (serialDial_ != 0) serialDial_->agentOnTrial(false);
     // The step that placed this version gets its commit line now, and is finished.
     bool recovered = false;
     StepReport report;
@@ -1190,6 +1192,8 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     w.string(kCapabilityDetachedSignature).string(kCapabilityFiles).string(kCapabilityChecks).string(kCapabilitySettings);
     if (serialReset_ != 0) w.string(kCapabilitySerialReset);
     if (serialDial_ != 0 && serialDial_->dialOn()) w.string(kCapabilitySerialDial);
+    // The car dials a phone when its app knocks: only with the dial, which the app's knock is for.
+    if (serialDial_ != 0 && serialDial_->dialOn() && serialDial_->knockOn()) w.string(kCapabilitySerialKnock);
     w.endArray().endObject();
     // What `auth` signs: the two payloads as they travel. The reply's is what respond() sends for this result.
     const std::string& asked = peer->incoming();
@@ -1609,7 +1613,7 @@ void Agent::writeSerial(json::Writer& w, Session* s) {
     for (size_t i = 0; i < st.stack.size(); ++i) w.string(sanitizeUtf8(st.stack[i].substr(0, 64), 0));
     w.endArray();
     w.key("phonesPresent").integer(st.phonesPresent).key("phonesEligible").integer(st.phonesEligible);
-    w.key("dial").string(st.dialOn ? "on" : "off").key("dialState").string(st.dialState);
+    w.key("dial").string(st.dialOn ? "on" : "off").key("knock").boolean(st.knock).key("dialState").string(st.dialState);
     w.key("lastResult").string(st.lastResult).key("link").string(st.link);
     w.key("recordDoubtful").boolean(st.recordDoubtful).key("repointStopped").boolean(st.repointStopped);
     // For the phone on this link; a link that knows no address (the bench's TCP) is never left.
@@ -1624,6 +1628,12 @@ void Agent::writeSerial(json::Writer& w, Session* s) {
     w.key("repointsUnexpected").integer(st.repointsUnexpected).key("repointsNotSent").integer(st.repointsNotSent);
     w.key("checks").integer(st.checks).key("checksRestored").integer(st.checksRestored).key("refusals").integer(st.refusals);
     w.key("leftUnread").integer(st.leftUnread).key("putBack").integer(st.putBack);
+    w.key("knocksByMarker").integer(st.knocksByMarker);
+    w.key("knocksIgnoredNotOurs").integer(st.knocksIgnoredNotOurs).key("knocksIgnoredQuiet").integer(st.knocksIgnoredQuiet);
+    w.key("knocksIgnoredBusy").integer(st.knocksIgnoredBusy);
+    w.key("knocksIgnoredNotDialable").integer(st.knocksIgnoredNotDialable);
+    w.key("knockDials").integer(st.knockDials).key("knockDialsFailed").integer(st.knockDialsFailed);
+    w.key("refusalsNoAudio").integer(st.refusalsNoAudio);
     w.endObject();
     w.key("problems").beginObject().key("recorded").integer(st.problemsRecorded);
     w.key("counted").integer(st.problemsCounted).endObject();

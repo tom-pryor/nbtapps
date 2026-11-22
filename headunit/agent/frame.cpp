@@ -11,6 +11,7 @@
 namespace nbt {
 
 const uint8_t kLinkMagic[kLinkMagicBytes] = {'N', 'B', 'T', 'L'};
+const uint8_t kKnockMagic[kLinkMagicBytes] = {'N', 'B', 'T', 'K'};
 
 namespace {
 

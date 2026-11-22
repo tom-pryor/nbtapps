@@ -46,6 +46,21 @@ object ProtocolConstants {
      */
     const val SERIAL_LINGER_MS = 5_000L
 
+    /**
+     * The knock, to an agent that lists [CAPABILITY_SERIAL_KNOCK]: such an agent has the car dial a phone when that
+     * phone's app knocks, and not otherwise. The app, listening for the car's link, makes up to [SERIAL_KNOCK_ATTEMPTS]
+     * connects to the agent's service, [SERIAL_KNOCK_GAP_MS] after each that fails: several, because one may fail on
+     * the phone while another app's link to the car is up. One that comes up is sent [SERIAL_KNOCK_MAGIC] and nothing
+     * else, and is kept until the car's link has come or [SERIAL_KNOCK_HOLD_MS] have passed: see
+     * [BluetoothSerialLinkConnector]. The agent takes those bytes at the start of a link the phone opened as the
+     * knock. A connect that the car refuses reaches no agent, so while the car refuses the phone's links (it does so
+     * while it has no media audio connection to the phone) the app cannot knock.
+     */
+    const val SERIAL_KNOCK_MAGIC = "NBTK"
+    const val SERIAL_KNOCK_ATTEMPTS = 5
+    const val SERIAL_KNOCK_GAP_MS = 250L
+    const val SERIAL_KNOCK_HOLD_MS = 1_000L
+
     /** Pairing a phone: the car's screen shows a code of this many digits, which the user types into the app. */
     const val PAIRING_CODE_DIGITS = 6
 
@@ -102,6 +117,12 @@ object ProtocolConstants {
      * `hello` follows. Only an agent whose Bluetooth serial listener dials lists it.
      */
     const val CAPABILITY_SERIAL_DIAL = "serial-dial"
+
+    /**
+     * A capability: the agent has the car dial a phone when its app knocks ([SERIAL_KNOCK_MAGIC]). The app knocks only
+     * at an agent that lists it, and such an agent also lists [CAPABILITY_SERIAL_DIAL].
+     */
+    const val CAPABILITY_SERIAL_KNOCK = "serial-knock"
 
     /**
      * A capability: the agent has `settings.get` and `settings.set`, which give and change the settings an installed

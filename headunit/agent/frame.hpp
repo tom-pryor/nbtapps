@@ -37,6 +37,9 @@ const uint8_t kFlagLast = 2;         // DATA only
 
 const size_t kLinkMagicBytes = 4;
 extern const uint8_t kLinkMagic[kLinkMagicBytes];   // "NBTL"
+// The knock's magic bytes (protocol_constants.hpp, kSerialKnockMagic): a link a phone opens that carries them and
+// nothing else is that phone's knock, never a link of frames (serial_link.hpp).
+extern const uint8_t kKnockMagic[kLinkMagicBytes];   // "NBTK"
 
 struct Frame {
     uint8_t type, flags;

@@ -169,12 +169,26 @@
 // serial.status is `unsupported`. Otherwise:
 //
 //   { "listener": true, "registered": true, "checkedMsAgo": 12000, "stack": [ "...", ... ],
-//     "phonesPresent": 1, "phonesEligible": 1, "dial": "on", "dialState": "idle", "lastResult": "DEFAULT",
-//     "link": "none", "recordDoubtful": false, "repointStopped": false, "phoneOpenedLeft": false, "counts": { "dials",
-//     "answeredOk", "notListening", "notInReach", "busy", "otherAnswers", "noAnswer", "notTheApp", "leftBehind", "asks",
-//     "asksListed", "asksNotListed", "asksNoAnswer", "askErrors", "repoints", "repointsExpected", "repointsUnexpected",
-//     "repointsNotSent", "checks", "checksRestored", "refusals", "leftUnread", "putBack" },
+//     "phonesPresent": 1, "phonesEligible": 1, "dial": "on", "knock": true, "dialState": "idle",
+//     "lastResult": "DEFAULT", "link": "none", "recordDoubtful": false, "repointStopped": false, "phoneOpenedLeft": false,
+//     "counts": { "dials", "answeredOk", "notListening", "notInReach", "busy", "otherAnswers", "noAnswer", "notTheApp",
+//     "leftBehind", "asks", "asksListed", "asksNotListed", "asksNoAnswer", "askErrors", "repoints", "repointsExpected",
+//     "repointsUnexpected", "repointsNotSent", "checks", "checksRestored", "refusals", "leftUnread", "putBack",
+//     "knocksByMarker", "knocksIgnoredNotOurs", "knocksIgnoredQuiet", "knocksIgnoredBusy", "knocksIgnoredNotDialable",
+//     "knockDials", "knockDialsFailed", "refusalsNoAudio" },
 //     "problems": { "recorded", "counted" } }
+//
+// knock is true while the car dials a phone when it knocks, and otherwise only in the pairing window, at serial.dial
+// and while the agent is on trial (nbtagent --dial-knock, dial_rules.hpp); false with the knock off or the dial off.
+// knocksByMarker counts the knocks seen, by the knock's magic bytes on a link a phone opened; knocksIgnoredNotOurs,
+// knocksIgnoredQuiet, knocksIgnoredBusy and knocksIgnoredNotDialable the ones that brought no dial: from a phone not
+// the agent's while the pairing window was closed, in the phone's quiet time after a knock's dial that failed, while
+// a link of the agent's was up or that phone's dial was out or up or its knock waited already (or it waited for its
+// dial too long), and from a phone the car could not dial (not connected and paired, pairing trouble, or no phone
+// named); knockDials the dials knocks brought, and knockDialsFailed those of them that gave the agent no link.
+// refusalsNoAudio counts the refusals of a phone's link whose look at the car's device list (the first refusal, and
+// every 20th) found the phone connected with no service connected: no media audio, while which the car refuses a
+// phone's own links, and so its app cannot knock.
 //
 // checkedMsAgo is absent before the service has first been registered. dial is on or off (nbtagent --dial);
 // dialState is idle, asking (the car asks the phone for its services before a dial), dialling, up or ending;
@@ -341,9 +355,13 @@ public:
     void addListener(Listener* listener);
     // What serial.reset asks; 0, which is how it starts, for an agent without Bluetooth serial. Not owned.
     void setSerialReset(SerialReset* reset) { serialReset_ = reset; }
-    // What the car dialling a phone is told of (serial_dial.hpp): the pairing window. 0, which is how it starts, for
-    // an agent without it. Not owned.
-    void setSerialDial(SerialDial* dial) { serialDial_ = dial; }
+    // What the car dialling a phone is told of (serial_dial.hpp): the pairing window, and whether this version is on
+    // trial, which it is told at once and again when the version is confirmed. 0, which is how it starts, for an
+    // agent without it. Not owned.
+    void setSerialDial(SerialDial* dial) {
+        serialDial_ = dial;
+        if (dial != 0) dial->agentOnTrial(onTrial_);
+    }
     // A link on which a controller has connected: takes it over. The controller dialled, so it speaks first.
     void adopt(Link* link);
 

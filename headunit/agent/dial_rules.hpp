@@ -14,6 +14,54 @@
 // whose node is /dev/<instance>. The agent always uses the one instance kDialInstance, so its dialled link has the
 // node /dev/nbtapp, which nothing else uses. The phone's app listens on the agent's UUID, and accepts.
 //
+// The rules go one of two ways, by DialConfig::knock: the knock (`nbtagent --dial-knock on`, the default), or the ask
+// and the polls (`--dial-knock off`), as before the knock, which the rest of this comment after "The knock" is about.
+// The answers to a dial, the re-point and the clean-up of a link left behind are the same either way.
+//
+// The knock. The car fetches only the first records of a phone's service list, and on current phones an app's own
+// record comes after them, so a list may never name the agent's service while the app listens; and a dial that the
+// app does not take may cost the phone its media audio at the car (the re-point, below). So the car dials a phone only
+// when its app has just said that it listens: it knocks (constants.txt, serial.knockMagic). The app opens a link of
+// its own and writes the knock's magic bytes into it and nothing else: the listener takes those bytes as the knock of
+// the phone whose request brought the link, and lets the link go (serial_link.hpp), knocked(). A request that the car
+// refuses brings no link, and so no knock: while the car refuses the phone's own links (it does so while it has no
+// media audio connection to the phone), its app cannot knock. What becomes of a knock:
+//
+//   from a phone that is not in the car's device list connected and paired with it, or has pairing trouble: ignored
+//   from a phone that is not one of the agent's, while the pairing window is closed: ignored
+//   in the phone's quiet time: ignored
+//   while a link of the agent's is up, or a dial of that phone is out or up: ignored, as one that adds nothing
+//   while a phone's request is pending, a link is being decided on, a dial of another phone is out, the re-point
+//   waits, the service is not registered or the device list has not come: it waits, knockWaitMs at most, and is
+//   ignored after that
+//   otherwise: the car dials the phone at once (kKnock), with ServiceConnect and no ask
+//
+// The knocks of the connects of one burst of the app's that come up one after another are one knock: the second
+// finds the first waiting, or its dial out or up, and adds nothing; after a dial that failed it finds the quiet time.
+// A phone's request for a serial link is no knock, whatever becomes of it: in this way it brings no ask and no dial
+// (phoneAsked() takes nothing). A dial a knock brought that gives the agent no link (any answer but 0, BUSY with a
+// link left behind, no answer, something that is not the app) brings the re-point as any failed dial does, and the
+// phone's quiet time: its knocks are ignored for knockQuietMs. It is not backed off: the quiet time takes the place
+// of the back-off, which only polls and requests went by.
+//
+// Besides the knock, in this way the car dials only: the pairing window's rounds, every phone connected to the car
+// and paired with it in turn every pairingRoundMs; serial.dial's round (force()); a phone whose link left behind a
+// dial has just ended (stale()); and while this version of the agent is on trial (Facts::onTrial) and no link of the
+// agent's is up, a round of the agent's phones that are there every trialDialMs, so that an update is never left
+// waiting for a phone whose app does not know to knock. Each with ServiceConnect at once, and no ask: a list cannot be
+// trusted to name the app. No poll, no ask, no retry, and no round of the phones afresh after a link left behind at
+// the start (afresh()): the phones knock.
+//
+// The trial's rounds go on for trialDialForMs only, so that an update nobody confirms (the app closed, the phone gone)
+// does not bring a failed dial every trialDialMs for as long as the agent runs. The time is counted from the first
+// next() that finds the agent on trial, the service registered and the car's device list come, whatever else holds a
+// round back then, so that a slow start of the car's Bluetooth takes none of it; the service going and coming back
+// later does not start it again. When it is up, the rest of a round under way is dropped (a dial that is out runs to
+// its answer), takeTrialOver() is true once, for the log, and from then on the rules go as if the agent were not on
+// trial: a phone is dialled when its app knocks. A trial that is confirmed ends the rounds as before. Facts that say
+// the agent is not on trial end the count, and so does trialEnded(), so a new trial (the flag true again, or a new
+// process) has its own trialDialForMs, and its first round at the first chance.
+//
 // The ask. Before every dial, whatever brings it, the car is asked for the phone's services (ServiceListQuery,
 // spp_service.hpp), and the state is kAsking. The phone's app publishes the agent's service only while it listens,
 // so the answer says whether a dial would be taken. An ask does no harm, and may be repeated as often as polls
@@ -164,8 +212,37 @@ public:
         kUp,          // the car has the link: its node is being read, or is the agent's link
         kEnding       // it is being ended: ServiceDisconnect, and what comes of it
     };
-    // Why a phone is asked, and dialled, now.
-    enum Why { kForced, kPoll, kSignal, kPairing, kRetry, kAfresh };
+    // Why a phone is asked, and dialled, now. kKnock and kTrial only with the knock (DialConfig::knock).
+    enum Why { kForced, kPoll, kSignal, kPairing, kRetry, kAfresh, kKnock, kTrial };
+    // What became of a knock: the knock's magic bytes on a link a phone opened.
+    enum KnockEnd {
+        kNoKnock,          // the knock is not taken: DialConfig::knock is off
+        kKnockWaits,       // taken: the dial goes as soon as it may (next())
+        kKnockDialled,     // its dial has gone (a KnockNews of next()'s)
+        kKnockNotOurs,     // ignored: not a phone of the agent's, and the pairing window is closed
+        kKnockQuiet,       // ignored: in the phone's quiet time after a knock's dial that failed
+        kKnockBusy,        // ignored: a link of the agent's is up, a dial of that phone is out or up or its knock
+                           // waits already, or it waited knockWaitMs in vain
+        kKnockNotDialable  // ignored: it names no phone, or one that is not connected to the car and paired with it,
+                           // or has had pairing trouble
+    };
+    // A knock that next() dialled or ignored, for the log.
+    struct KnockNews {
+        unsigned number;
+        KnockEnd end;
+        int64_t waitedMs;
+        KnockNews() : number(0), end(kKnockWaits), waitedMs(0) {}
+    };
+    // The knocks so far, for serial.status.
+    struct KnockCounts {
+        unsigned byMarker;                                                // knocks seen
+        unsigned ignoredNotOurs, ignoredQuiet, ignoredBusy, ignoredNotDialable;
+        unsigned dials, dialsFailed;                                      // dials knocks brought, and of those the
+                                                                          // ones that gave the agent no link
+        KnockCounts()
+            : byMarker(0), ignoredNotOurs(0), ignoredQuiet(0), ignoredBusy(0), ignoredNotDialable(0), dials(0),
+              dialsFailed(0) {}
+    };
     // What an answer to ServiceListQuery asks of the listener.
     enum Listing {
         kNotThisAsk,     // not the answer to this ask (another phone, an ask that was ended, or none out): nothing
@@ -205,7 +282,14 @@ public:
                                          // is still looked for
         bool pairingOpen;                // the agent's pairing window is open
         std::vector<std::string> ours;   // the paired phones' addresses (phones.hpp)
-        Facts() : registered(false), linkOfOurs(false), requestPending(false), pairingOpen(false) {}
+        // For the knock: of linkOfOurs, whether a link a phone opened is being decided on (deciding), and whether a
+        // link of the agent's is up or opened and not yet taken by the agent (linkUp); and whether this version of
+        // the agent is on trial, not yet confirmed (agent_home.hpp), whose rounds go for trialDialForMs only (see the
+        // top of this file).
+        bool deciding, linkUp, onTrial;
+        Facts()
+            : registered(false), linkOfOurs(false), requestPending(false), pairingOpen(false), deciding(false),
+              linkUp(false), onTrial(false) {}
     };
 
     explicit DialRules(const DialConfig& config);
@@ -243,7 +327,7 @@ public:
     // The triggers. A phone asked the car for a serial link, for any service (`address`, as the request gave it):
     // if no link of the agent's comes within DialConfig::signalWaitMs, and the phone is eligible, it is asked then
     // (or once it has settled and its back-off is over), whether or not a retry is due later. One that names no phone
-    // brings no ask, and is no phone's own for keepAsking().
+    // brings no ask, and is no phone's own for keepAsking(). With the knock, nothing: a request is no knock.
     void phoneAsked(const std::string& address, int64_t now);
     // A link of the agent's, of either kind, came: what a phone asked for is answered.
     void linkCame();
@@ -251,15 +335,38 @@ public:
     void linkEnded(int64_t now);
     // When the next poll is due.
     int64_t nextPollAt() const { return nextPollAt_; }
-    // A round of asks now to each phone that is eligible: after a link left behind has been ended.
+    // A round of asks now to each phone that is eligible: after a link left behind has been ended. With the knock,
+    // nothing: the phones knock.
     void afresh();
+
+    // The knock (see the top of this file); with DialConfig::knock off, these take nothing and give kNoKnock.
+    // A phone knocked at `now`: kKnockWaits if its dial is to go, or why the knock is ignored.
+    KnockEnd knocked(const std::string& address, int64_t now);
+    // The knocks next() has dialled or ignored since the last call.
+    std::vector<KnockNews> takeKnockNews();
+    const KnockCounts& knockCounts() const { return knockCounts_; }
+    // Until when the phone's knocks are ignored; 0: they are not.
+    int64_t quietUntil(const std::string& address) const;
+    // How many knocks wait for their dial.
+    size_t knocksWaiting() const { return knocks_.size(); }
+    // The trial's rounds (see the top of this file): whether their trialDialForMs have run out since the last call,
+    // once for each trial, for the log; whether they are over for this trial; and when their time began (0 while it
+    // has not).
+    bool takeTrialOver();
+    bool trialDialsOver() const { return trialOver_; }
+    // The trial has ended (confirmed): as facts that say so, for a listener that is told of it between two next(), so
+    // that a trial after it still has its own time.
+    void trialEnded();
+    int64_t trialDialsFrom() const { return trialClock_ ? trialFrom_ : 0; }
 
     // The ask to make now, if one is due: ServiceListQuery for out->address, and the state is kAsking from here. One
     // ask or dial at a time, and none while a link of the agent's is up or being decided on, while the service is
     // not registered, while an ask that was ended may still be out in the car, or while the re-point waits for its
     // answer (repointWaits()); while a phone's request is pending, only the ask of the phone that asked, once its time
     // has run. A link of the agent's, a pending request or the registration's going ends the round, and the ask that
-    // is out (keepAsking()); the re-point ends the ask that is out.
+    // is out (keepAsking()); the re-point ends the ask that is out. With the knock it is the dial to make now, with no
+    // ask: ServiceConnect for out->address, and the state is kDialling from here; none while a phone's request is
+    // pending either, and the knocks it dials or ignores are told by takeKnockNews().
     bool next(int64_t now, const Facts& facts, Dial* out);
     State state() const { return state_; }
     // The ask or dial that is out or up, while the state is not kIdle.
@@ -374,9 +481,16 @@ private:
         unsigned misses;          // asks in a row with an error or no answer
         unsigned dialFails;       // dials in a row that gave the agent no link
         int64_t settleUntil;      // its settle time ends then
+        int64_t quietUntil;       // the knock: its knocks are ignored until then
         SignalAsks signals;
         PhoneState()
-            : backOffMs(0), backOffUntil(0), retryAt(0), trouble(false), misses(0), dialFails(0), settleUntil(0) {}
+            : backOffMs(0), backOffUntil(0), retryAt(0), trouble(false), misses(0), dialFails(0), settleUntil(0),
+              quietUntil(0) {}
+    };
+    // A knock that waits for its dial.
+    struct Knock {
+        std::string address;
+        int64_t at;
     };
     PhoneState& phone(const std::string& address);
     const PhoneState* find(const std::string& address) const;
@@ -388,6 +502,12 @@ private:
     Listing missed(int64_t now);
     void endAsk(int64_t now);
     void fastPolls(int64_t now);
+    bool nextKnockMode(int64_t now, const Facts& facts, Dial* out);
+    bool trialDials(int64_t now, const Facts& facts);
+    void judgeKnocks(int64_t now, const Facts& facts);
+    void ignore(const Knock& k, KnockEnd why, int64_t now);
+    void knockFailed(int64_t now);
+    void count(KnockEnd why);
 
     DialConfig config_;
     btspp::Presence presence_;
@@ -415,6 +535,17 @@ private:
     bool doubtful_;                              // recordDoubtful()
     bool repointOut_;                            // repointOut(), since repointAt_
     int64_t repointAt_;
+    // The knock.
+    std::vector<Knock> knocks_;                  // waiting for their dial, in the order they came; one to a phone
+    std::vector<KnockNews> knockNews_;           // for takeKnockNews()
+    KnockCounts knockCounts_;
+    bool knockDial_;                             // the dial that is out or up was brought by a knock (afresh after a
+                                                 // link left behind included): a failure brings the quiet time
+    int64_t nextTrialAt_;                        // the next round while the agent is on trial; 0: at the first chance
+    bool trialClock_;                            // the trial's trialDialForMs are counted, from trialFrom_
+    int64_t trialFrom_;
+    bool trialOver_;                             // they have run out: the trial brings no more rounds
+    bool trialOverNews_;                         // for takeTrialOver()
 };
 
 }  // namespace nbt

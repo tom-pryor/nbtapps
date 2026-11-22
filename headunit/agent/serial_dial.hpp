@@ -24,7 +24,8 @@ struct SerialStatus {
     unsigned phonesPresent;            // phones connected to the car, in its device list
     unsigned phonesEligible;           // of those, the ones the car may dial now: paired with it, and the agent's
     bool dialOn;                       // the car dials phones in this run (nbtagent --dial)
-    std::string dialState;             // idle, asking, dialling, up, ending
+    bool knock;                        // and only when they knock (nbtagent --dial-knock, dial_rules.hpp)
+    std::string dialState;           // idle, asking, dialling, up, ending
     std::string lastResult;            // what the last dial came to: the car's answer by its name (OK, DEFAULT, BUSY,
                                        // PAGE_TIMEOUT, ...), "rejected", "no answer", "not the app"; "none" before one
     std::string link;                  // the agent's serial links up: none, phone-opened, dialled, both
@@ -45,15 +46,27 @@ struct SerialStatus {
     // as they were when that could not be done (serial_link.hpp). putBack: the links on which bytes the agent had
     // read were put back into the node's queue for another program, by the rule's priming or when a link was let go.
     unsigned leftUnread, putBack;
+    // The knocks (dial_rules.hpp): seen by their magic bytes; ignored, as not the agent's phone while the pairing
+    // window is closed, in the phone's quiet time, while something of the agent's was under way (a link up, the
+    // phone's dial out or its knock waiting already, or a wait for its dial that ran out), or for a phone that cannot
+    // be dialled (not connected to the car and paired with it, pairing trouble, no phone named); the dials knocks
+    // brought, and of those the ones that gave the agent no link.
+    unsigned knocksByMarker, knocksIgnoredNotOurs, knocksIgnoredQuiet, knocksIgnoredBusy, knocksIgnoredNotDialable,
+        knockDials, knockDialsFailed;
+    // The refusals whose look at the car's device list (the first, and every 20th) found the phone connected with no
+    // service connected: no media audio, while which the car refuses a phone's own links.
+    unsigned refusalsNoAudio;
     unsigned problemsRecorded;        // lines written to the problem file in this run (serial_link.hpp)
     unsigned problemsCounted;          // problems that were not written, only counted
     SerialStatus()
-        : registered(false), checkedMsAgo(-1), phonesPresent(0), phonesEligible(0), dialOn(false), dialState("idle"),
-          lastResult("none"), link("none"), recordDoubtful(false), repointStopped(false), dials(0), answeredOk(0),
-          notListening(0), notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0), leftBehind(0), asks(0),
-          asksListed(0), asksNotListed(0), asksNoAnswer(0), askErrors(0), repoints(0), repointsExpected(0),
-          repointsUnexpected(0), repointsNotSent(0), checks(0), checksRestored(0), refusals(0),
-          leftUnread(0), putBack(0), problemsRecorded(0), problemsCounted(0) {}
+        : registered(false), checkedMsAgo(-1), phonesPresent(0), phonesEligible(0), dialOn(false), knock(false),
+          dialState("idle"), lastResult("none"), link("none"), recordDoubtful(false), repointStopped(false), dials(0),
+          answeredOk(0), notListening(0), notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0),
+          leftBehind(0), asks(0), asksListed(0), asksNotListed(0), asksNoAnswer(0), askErrors(0), repoints(0),
+          repointsExpected(0), repointsUnexpected(0), repointsNotSent(0), checks(0), checksRestored(0), refusals(0),
+          leftUnread(0), putBack(0), knocksByMarker(0), knocksIgnoredNotOurs(0), knocksIgnoredQuiet(0),
+          knocksIgnoredBusy(0), knocksIgnoredNotDialable(0), knockDials(0), knockDialsFailed(0), refusalsNoAudio(0),
+          problemsRecorded(0), problemsCounted(0) {}
 };
 
 class SerialDial {
@@ -62,8 +75,14 @@ public:
     // The agent's pairing window has opened, or has closed: while it is open every phone that is connected to the
     // car and paired with it is dialled in turn, for a new phone's app to be reached and paired.
     virtual void pairingWindow(bool open) = 0;
-    // Whether the car dials phones in this run at all.
+    // Whether the car dials phones in this run at all, and whether only when they knock (dial_rules.hpp).
     virtual bool dialOn() = 0;
+    virtual bool knockOn() = 0;
+    // Whether this version of the agent is on trial, not yet confirmed (agent.hpp): with the knock, the car dials the
+    // agent's phones while it is, whether they knock or not, for a limited time (DialConfig::trialDialForMs) and
+    // then only when they knock. The agent says so when it is given the listener, and
+    // again when the version is confirmed.
+    virtual void agentOnTrial(bool onTrial) = 0;
     // A round of dials now, to each phone connected to the car and paired with it: how many phones that is. 0 with
     // *why, and *code as an error of the protocol's ("busy" while a link of the agent's is up or a dial is out,
     // "not-found" with no such phone, "io-error" when the car cannot be asked).

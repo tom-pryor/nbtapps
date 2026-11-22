@@ -3837,7 +3837,7 @@ static bool listsCapability(const Parsed& hello, const char* name) {
 // What the agent tells the car's dialling of, and asks of it.
 class FakeDial : public SerialDial {
 public:
-    FakeDial() : on(true), phones(1), code("not-found"), dials(0) {
+    FakeDial() : on(true), knock(true), phones(1), code("not-found"), dials(0) {
         status.registered = true;
         status.checkedMsAgo = 12000;
         status.stack.push_back("Stack 1.0");
@@ -3859,9 +3859,18 @@ public:
         status.repointsNotSent = 1;
         status.repointStopped = true;
         status.problemsCounted = 4;
+        status.knock = true;
+        status.knocksByMarker = 6;
+        status.knocksIgnoredQuiet = 1;
+        status.knocksIgnoredNotDialable = 1;
+        status.knockDials = 5;
+        status.knockDialsFailed = 1;
+        status.refusalsNoAudio = 3;
     }
     virtual void pairingWindow(bool open) { said += open ? "open " : "closed "; }
     virtual bool dialOn() { return on; }
+    virtual bool knockOn() { return knock; }
+    virtual void agentOnTrial(bool onTrial) { trial += onTrial ? "on trial " : "not on trial "; }
     virtual unsigned dialNow(std::string* why, const char** c) {
         ++dials;
         if (phones == 0) {
@@ -3881,7 +3890,8 @@ public:
         return taken;
     }
     std::string said;
-    bool on;
+    std::string trial;                    // what agentOnTrial() was told, in order
+    bool on, knock;
     unsigned phones;
     const char* code;
     unsigned dials;
@@ -3895,6 +3905,7 @@ static void testSerialDial() {
     Bench b("serial-dial");
     FakeDial dial;
     b.agent.setSerialDial(&dial);
+    CHECK(dial.trial == "not on trial ");   // told at once
     Phone* ctl = b.connect();
     CHECK(Parsed(b.hello(ctl, kGoodHello)).result.isObject());
     // Opened, closed by its controller.
@@ -3911,10 +3922,16 @@ static void testSerialDial() {
     CHECK(Parsed(b.call(p, "pairing.issue", codeParams(code))).result.isObject());
     CHECK(dial.said == "open closed open closed open closed ");
 
-    // The capability, while the dial is on.
-    CHECK(listsCapability(Parsed(b.hello(b.connect(), kGoodHello)), kCapabilitySerialDial));
+    // The capability, while the dial is on; the knock's, while the dial is on with knocks.
+    Parsed both(b.hello(b.connect(), kGoodHello));
+    CHECK(listsCapability(both, kCapabilitySerialDial) && listsCapability(both, kCapabilitySerialKnock));
+    dial.knock = false;
+    Parsed dialOnly(b.hello(b.connect(), kGoodHello));
+    CHECK(listsCapability(dialOnly, kCapabilitySerialDial) && !listsCapability(dialOnly, kCapabilitySerialKnock));
+    dial.knock = true;
     dial.on = false;
-    CHECK(!listsCapability(Parsed(b.hello(b.connect(), kGoodHello)), kCapabilitySerialDial));
+    Parsed none(b.hello(b.connect(), kGoodHello));
+    CHECK(!listsCapability(none, kCapabilitySerialDial) && !listsCapability(none, kCapabilitySerialKnock));
     dial.on = true;
 
     // serial.status, and the same in info.get: counts and names.
@@ -3924,7 +3941,15 @@ static void testSerialDial() {
     CHECK(integer(st.result, "phonesPresent") == 2 && integer(st.result, "phonesEligible") == 1);
     CHECK(str(st.result, "dial") == "on" && str(st.result, "dialState") == "idle" && str(st.result, "lastResult") == "DEFAULT");
     CHECK(str(st.result, "link") == "none" && integer(st.result.find("counts"), "dials") == 3);
-    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 23);
+    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 31);
+    // The knock: the mode, and its counts.
+    CHECK(st.result.find("knock").isBool() && st.result.find("knock").boolean());
+    const json::Value counts = st.result.find("counts");
+    CHECK(integer(counts, "knocksByMarker") == 6);
+    CHECK(integer(counts, "knocksIgnoredNotOurs") == 0 && integer(counts, "knocksIgnoredQuiet") == 1);
+    CHECK(integer(counts, "knocksIgnoredBusy") == 0 && integer(counts, "knocksIgnoredNotDialable") == 1);
+    CHECK(integer(counts, "knockDials") == 5 && integer(counts, "knockDialsFailed") == 1);
+    CHECK(integer(counts, "refusalsNoAudio") == 3);
     CHECK(integer(st.result.find("counts"), "repoints") == 3 && integer(st.result.find("counts"), "repointsExpected") == 2);
     CHECK(integer(st.result.find("counts"), "repointsUnexpected") == 1 &&
           integer(st.result.find("counts"), "repointsNotSent") == 1 && st.result.find("repointStopped").boolean());
@@ -3980,6 +4005,25 @@ static void testSerialDial() {
     CHECK(Parsed(b.call(ctl, "serial.status", "{}")).code() == "unsupported");
     CHECK(Parsed(b.call(ctl, "serial.dial", "{}")).code() == "unsupported");
     CHECK(b.call(ctl, "info.get", "{}").find("\"serial\":{\"listener\":false}") != std::string::npos);
+
+    // A version on trial tells the listener so as it is given it, and again once a controller has confirmed it.
+    const std::string root = gWork + "/serial-dial-trial";
+    {
+        Bench first("serial-dial-trial");
+    }
+    makeHome(root, "1.0.0");
+    put(root + "/agent/1.1.0/nbtagent", "#!/bin/sh\necho \"nbtagent 1.1.0 (build stand-in)\"\n", 0755);
+    put(root + "/agent/trial.started", "1.1.0\n");
+    {
+        Bench t("serial-dial-trial", true, false, "1.1.0");
+        FakeDial onTrial;
+        t.agent.setSerialDial(&onTrial);
+        CHECK(t.agent.onTrial() && onTrial.trial == "on trial ");
+        Phone* p = t.phone();
+        CHECK(Parsed(t.call(p, "job.status", "{}")).result.isObject());
+        CHECK(!t.agent.onTrial() && onTrial.trial == "on trial not on trial ");
+        t.agent.setSerialDial(0);
+    }
 }
 
 // A link the phone opened and one the car dialled, both up: the first to finish hello stays, and the other is told

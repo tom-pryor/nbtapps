@@ -447,8 +447,24 @@ public:
         std::string all;
         for (size_t i = 0; i < programs.size(); ++i) all += (i ? ", " : "") + programs[i];
         trace_->add("gate hold " + all);
+        pthread_mutex_lock(&mu_);
+        held_ = programs;
+        pthread_mutex_unlock(&mu_);
     }
-    virtual void release() { trace_->add("gate release"); }
+    virtual void release() {
+        trace_->add("gate release");
+        pthread_mutex_lock(&mu_);
+        held_.clear();
+        pthread_mutex_unlock(&mu_);
+    }
+    // Whether an open by `program` would be refused now, as the hold stands (the car's media process aside).
+    bool refuses(const std::string& program) {
+        pthread_mutex_lock(&mu_);
+        bool refused = false;
+        for (size_t i = 0; i < held_.size(); ++i) refused = refused || held_[i] == program;
+        pthread_mutex_unlock(&mu_);
+        return refused;
+    }
     virtual bool sawOtherOpen(double since, std::string* who) {
         pthread_mutex_lock(&mu_);
         bool saw = otherAt != 0 && otherAt >= since;
@@ -471,6 +487,7 @@ public:
 
 private:
     Trace* trace_;
+    std::vector<std::string> held_;   // the programs the hold refuses; empty: no hold
 };
 
 // ---- a serial node, and the phone at its far end ------------------------------------------------------------------
@@ -992,6 +1009,8 @@ static SerialConfig configFor(const std::string& dir) {
     c.lingerMs = 300;
     c.checkMs = 0;   // testRegistrationCheck() turns it on
     c.dial.on = false;   // the car dialling the phone has tests of its own, which turn it on
+    // and dials as before the knock (--dial-knock off) in them: the knock's tests turn it on (knockConfig())
+    c.dial.knock = false;
     c.dial.settleMs = 0;   // a phone in the first device list is asked at once; the settle time has a test of its own
     return c;
 }
@@ -1496,11 +1515,17 @@ static void testRefusal() {
     pause(450);
     gap.phone(kInfServiceRequest, kCarSerialService);
     gap.phone(kInfServiceRequestError, kCarSerialService);
+    // Connected with no service connected: the line says that the phone has no media audio at the car, and the status
+    // counts it.
     CHECK_IN(trace.text(), trace.saw("the car refused the phone's link (1 so far). In the car's device list the phone is "
-                                     "connected (connection 2), security 7. A serial node is there already and is not "
-                                     "the agent's: the car takes one phone-opened serial link at a time. Other causes, "
-                                     "in the order to look at them: the iDrive Bluetooth pairing menu is open"));
-    CHECK(trace.exactly("device list") == 1);
+                                     "connected (connection 2), security 7. So the car has no media audio connection to "
+                                     "the phone, and the car refuses the phone's own serial links while it has none, "
+                                     "so the phone's app cannot knock meanwhile: the driver can connect it again by "
+                                     "choosing the phone in the car's media menu. A serial node is there already and "
+                                     "is not the agent's: the car takes one phone-opened serial link at a time. Other "
+                                     "causes, in the order to look at them: the iDrive Bluetooth pairing menu is "
+                                     "open"));
+    CHECK(trace.exactly("device list") == 1 && listener.serialStatus().refusalsNoAudio == 1);
     // The 2nd to 19th are not looked into or said; the 20th is.
     for (int i = 2; i <= 20; ++i) {
         gap.phone(kInfServiceRequest, kCarSerialService);
@@ -1508,6 +1533,9 @@ static void testRefusal() {
     }
     CHECK_IN(trace.text(), trace.exactly("device list") == 2 && trace.count("the car refused the phone's link (") == 2 &&
                                trace.saw("the car refused the phone's link (20 so far)"));
+    // Said, and counted, with the line only: not for every refusal.
+    CHECK(trace.count("no media audio connection") == 2 && listener.serialStatus().refusalsNoAudio == 2 &&
+          listener.serialStatus().refusals == 20);
     // A device list that does not come: the line is said without it, after the time.
     gap.answersList = false;
     other.vanish();
@@ -1519,6 +1547,7 @@ static void testRefusal() {
     CHECK(!trace.saw("(40 so far)"));
     CHECK_IN(trace.text(), sawWithin(trace, "the car refused the phone's link (40 so far). The car's device list did not "
                                             "come in 3 s.", 4000));
+    CHECK(listener.serialStatus().refusalsNoAudio == 2);
     CHECK(!trace.saw("Test Phone") && !trace.saw("AA:BB") && !trace.saw("AABB"));
     listener.stop();
     {   // a refusal is a problem for the problem file: the first one only
@@ -3146,6 +3175,9 @@ public:
         char frame[32];
         snprintf(frame, sizeof frame, " maxFrame=%lld", maxFrame.isInteger() ? (long long)maxFrame.integer() : -1LL);
         got[id] = std::string("ok") + (role.isString() ? " role=" + role.string() + frame : std::string());
+        json::Value listed = result.find("capabilities");
+        if (role.isString()) caps.clear();
+        for (size_t i = 0; listed.isArray() && i < listed.size(); ++i) caps += " " + listed.at(i).string();
     }
     virtual void onEvent(Peer*, const std::string& name, int64_t, const json::Value& params) {
         json::Value reason = params.find("reason");
@@ -3155,6 +3187,7 @@ public:
 
     std::map<int64_t, std::string> got;
     std::vector<std::string> events;   // each event's name, and its reason if it has one
+    std::string caps;                  // the capabilities of the last hello answered, each after a space
     unsigned pings;
 };
 
@@ -3436,6 +3469,9 @@ static void testAgentDials() {
         Answered answered(&dialled);
         CHECK_IN(car.trace.text(), turnsUntil(car.agent, apps, answered, 3000));
         CHECK(dialled.answers.got[dialled.helloId] == "ok role=agent maxFrame=4096");
+        // The dial's capability; with --dial-knock off, not the knock's.
+        CHECK_IN(dialled.answers.caps, has(dialled.answers.caps + " ", " serial-dial ") &&
+                                           !has(dialled.answers.caps, "serial-knock"));
         // The phone-opened link, from the same phone: hello later, and ended.
         Node opened(car.dir + "/btspp", 0);
         car.connect(opened);
@@ -3480,6 +3516,7 @@ static void testAgentDials() {
         Answered answered(&app);
         CHECK(turnsUntil(car.agent, apps, answered, 3000));
         CHECK(app.answers.got[app.helloId] == "ok role=agent maxFrame=4096");
+        CHECK_IN(app.answers.caps, !has(app.answers.caps, "serial-dial") && !has(app.answers.caps, "serial-knock"));
         pause(300);
         CHECK(!car.trace.saw("gap connect") && !car.trace.saw("device list") && !car.trace.logged("phone 1"));
         CHECK(!car.trace.logged("pairing window") && car.listener.serialStatus().dialOn == false);
@@ -5222,9 +5259,43 @@ static void testDialOptions() {
             CHECK_IN(bad[i], !parseDialPoll(bad[i], &d) && d.pollFirstMs == 10000);
         }
     }
+    {   // --dial-knock on|off
+        bool on = false;
+        CHECK(parseDialKnock("on", &on) && on && parseDialKnock("off", &on) && !on);
+        on = true;
+        CHECK(!parseDialKnock("", &on) && !parseDialKnock(0, &on) && !parseDialKnock("On", &on) &&
+              !parseDialKnock("1", &on) && !parseDialKnock("off ", &on) && on);
+    }
+    {   // the start-up line with the knock, the default: the values in effect, and no poll or ask
+        DialConfig c;
+        CHECK(c.on && c.knock);
+        std::string line = describeDial(c);
+        CHECK_IN(line, has(line, "when the phone's app knocks, and otherwise only while the pairing window is open, at "
+                                 "serial.dial and while this version of the agent is on trial (--dial-knock on)"));
+        CHECK_IN(line, has(line, "a link the phone opens that starts with the knock's magic bytes within the decide "
+                                 "time is that phone's knock, and a phone's request for a serial link is no knock, "
+                                 "whatever becomes of it.") &&
+                           has(line, "waits 4000 ms at most") && has(line, "ignored for 3000 ms") &&
+                           has(line, "No poll, and no ask of a phone's services") &&
+                           has(line, "every phone there is dialled every 5 s") &&
+                           has(line, "every phone of the agent's there every 5 s, for 120 s from when the trial is "
+                                     "known, the serial service registered and the car's device list come; after "
+                                     "that, until the version is confirmed, a phone is dialled when its app knocks") &&
+                           has(line, "magic bytes are waited for 3000 ms") && has(line, "given up after 95 s") &&
+                           has(line, "/dev/nbtapp") && has(line, "one re-point request goes on the same instance") &&
+                           !has(line, "polls every") && !has(line, "02:00"));
+        c.trialDialMs = 7000;
+        c.trialDialForMs = 300000;
+        c.knockQuietMs = 2500;
+        CHECK(has(describeDial(c), "every phone of the agent's there every 7 s, for 300 s from when") &&
+              has(describeDial(c), "an answer other than 5 within 500 ms stops these requests for the rest of the run") &&
+              has(describeDial(c), "ignored for 2500 ms"));
+    }
     {   // the start-up line says the values in effect
         DialConfig c;
+        c.knock = false;
         std::string line = describeDial(c);
+        CHECK_IN(line, has(line, "with no knock (--dial-knock off)"));
         CHECK_IN(line, has(line, "polls every 10 s for 120 s after such a phone connects or a link of the agent's ends, "
                                  "then every 30 s; at once when the phone asks for a link and no link of the agent's "
                                  "comes in 1000 ms; every phone there every 5 s while the pairing window is open"));
@@ -5272,6 +5343,19 @@ static void testOptions() {
     SerialConfig config;
     CHECK(config.decideMs == (unsigned)kSerialDecideMs);
     CHECK(config.nodeCalls.queued == 0 && config.nodeCalls.inject == 0);   // the platform's
+    // With the knock, the default: every link a phone opens is read, and the knock's bytes are its knock.
+    CHECK_IN(describeSerialDecide(config),
+             describeSerialDecide(config) ==
+                 "a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after "
+                 "any whole frames left over from an earlier link. Any other is let go. If a program declared for a "
+                 "serial service is running, the gate has seen another program open the node, or a program of software "
+                 "put on by hand is running, what was read from it is put back into its node, which stays open, unread, "
+                 "until the link ends, for the program it belongs to; where that cannot be done, its node is closed for "
+                 "that program. Otherwise it is read until the link ends or one of those signs comes. A link that opens "
+                 "with the knock's magic bytes there instead is the phone's knock: nothing is written into it, the car "
+                 "is to dial the phone that opened it, and its node is read, with what comes dropped, until the link "
+                 "ends. Every link a phone opens is read so, whoever the phone is");
+    config.dial.knock = false;
     CHECK(describeSerialDecide(config) ==
           "a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any "
           "whole frames left over from an earlier link. Any other is let go. If a program declared for a serial "
@@ -5321,12 +5405,22 @@ static void testOptions() {
         f.phone.connection = 2;
         f.phone.security = 7;
         f.node = RefusalFacts::kNodeOther;
-        CHECK(describeRefusal(20, f) ==
-              "the car refused the phone's link (20 so far). In the car's device list the phone is connected "
-              "(connection 2), security 7. A serial node is there already and is not the agent's: the car takes one "
-              "phone-opened serial link at a time. Other causes, in the order to look at them: the iDrive Bluetooth "
-              "pairing menu is open; the ignition is off; the phone's pairing with the car is broken or missing; the "
-              "car's coding does not allow serial links for phones");
+        CHECK(refusalNoMediaAudio(f));
+        CHECK_IN(describeRefusal(20, f),
+                 describeRefusal(20, f) ==
+                     "the car refused the phone's link (20 so far). In the car's device list the phone is connected "
+                     "(connection 2), security 7. So the car has no media audio connection to the phone, and the car "
+                     "refuses the phone's own serial links while it has none, so the phone's app cannot knock "
+                     "meanwhile: the driver can connect it again by choosing the phone in the car's media menu. A "
+                     "serial node is there already and is not the agent's: the car "
+                     "takes one phone-opened serial link at a time. Other causes, in the order to look at them: the "
+                     "iDrive Bluetooth pairing menu is open; the ignition is off; the phone's pairing with the car is "
+                     "broken or missing; the car's coding does not allow serial links for phones");
+        // A service connected (its media audio): no such sentence.
+        f.phone.connection = 3;
+        CHECK(!refusalNoMediaAudio(f) && !has(describeRefusal(20, f), "media audio") &&
+              has(describeRefusal(20, f), "the phone is service connected (connection 3), security 7. A serial node"));
+        f.phone.connection = 2;
         f.phone.listed = false;
         f.node = RefusalFacts::kNodeOurs;
         CHECK(describeRefusal(40, f) ==
@@ -5419,6 +5513,476 @@ static void testOptions() {
           "while a link is being decided on or is the agent's, the gate also refuses opens by otherd, radiod");
 }
 
+// ---- the knock ----------------------------------------------------------------------------------------------------
+
+// A listener with the knock on, as it is by default, the tests' short times and the test's calls on a node; phone
+// kDialled, one of the agent's that a dialled link has reached before (so that without the knock the rule would leave
+// its own links unread while a program declared for a serial service runs), connected to the car and paired with
+// it; the dialled node, which comes up when the car's dial is answered 0. `other`: radiod is declared for a serial
+// service, and runs.
+struct Knocker {
+    Trace trace;
+    LinksGone gone;
+    FakeGap gap;
+    FakeGate gate;
+    std::string dir;
+    Machine machine;
+    Store store;
+    SerialServices services;
+    PhoneAddressList ours;
+    Node dialNode;
+    SerialConfig config;
+    SerialListener* listener;
+
+    explicit Knocker(const std::string& name, bool other = false)
+        : gap(&trace), gate(&trace), dir(freshFolder(name)), machine(dir + "/root"), store(&machine),
+          services(&machine, &store, &trace), dialNode(dir + "/nbtapp"), listener(0) {
+        config = configFor(dir);
+        config.dial.on = true;
+        config.dial.knock = true;
+        config.dial.node = dir + "/nbtapp";
+        config.dial.magicWaitMs = 400;
+        config.dial.disconnectWaitMs = 500;
+        config.dial.replyLimitMs = 1000;
+        config.dial.knockQuietMs = 2000;
+        config.dial.knockWaitMs = 1500;
+        config.dial.trialDialMs = 700;
+        config.dial.pairingRoundMs = 500;
+        config.nodeCalls = heldCalls();
+        config.readNode = &heldRead;
+        gap.phones.push_back(carPhone(kDialled, kConnConnected, 7));
+        gap.dialNode = &dialNode;
+        ours.set(std::vector<std::string>(1, kDialled), std::vector<std::string>(1, kDialled));
+        if (other) {
+            services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+            machine.running = "radiod";
+        }
+    }
+    ~Knocker() {
+        if (listener != 0) {
+            listener->stop();
+            services.setRemover(0);
+            delete listener;
+        }
+        if (getenv("NBT_TEST_TRACE") != 0) fprintf(stderr, "---- %s\n%s", dir.c_str(), trace.text().c_str());
+    }
+    void start() {
+        listener = new SerialListener(&gap, &gate, &trace, config);
+        listener->setPhoneAddresses(&ours);
+        services.setRemover(listener);
+        listener->setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener->start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the car's device list: phone 1 is connected", 2000));
+    }
+    // The phone asks for a serial link; `refused`: and the car refuses it.
+    void request(bool refused) {
+        gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        if (refused) gap.phone(kInfServiceRequestError, kCarSerialService, "001122334455");
+    }
+    // The phone opens a link on `node` that says `bytes` first.
+    void opens(Node& node, const std::string& bytes) {
+        request(false);
+        node.appear();
+        if (!bytes.empty()) node.say(bytes);
+    }
+};
+
+static const std::string kKnock("NBTK");
+
+static void testKnock() {
+    {   // by marker: a phone-opened link with the knock's bytes. Nothing is written into it, it is let go, read and
+        // dropped until the phone ends it, and the car dials that phone at once, with no ask
+        Knocker k("knock-marker");
+        k.start();
+        pause(300);
+        CHECK(k.gap.connects().empty() && !k.trace.saw("gap query"));   // nothing by itself: no poll, no ask
+        k.dialNode.say(kMagic);   // the app listens, and says the magic bytes once it has the car's link
+        Node knock(k.dir + "/btspp", 0);
+        k.opens(knock, kKnock);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp0: it opened with the knock's magic bytes ", 3000));
+        CHECK_IN(k.trace.text(), k.trace.saw("phone 1's knock, and the car dials it as soon as nothing else of the "
+                                             "agent's is under way. Nothing is written into the link"));
+        Link* link = acceptWithin(*k.listener, 3000);
+        CHECK_IN(k.trace.text(), link != 0 && link->dialledByCar() && link->phoneAddress() == kDialled);
+        CHECK(readFrom(link, kMagic.size(), 3000) == kMagic);
+        CHECK(k.trace.logged("phone 1 knocked by the knock's magic bytes, and the car dials it now"));
+        CHECK(k.trace.logged("phone 1 (the phone knocked): the car's dial answered 0 OK in "));
+        CHECK(dialsOfPhone(k.gap) == 1 && k.gap.connects().size() == 1 && !k.trace.saw("gap query"));
+        bool closed = false;
+        CHECK(knock.hear(1, 200, &closed).empty() && !closed);   // not a byte into the knock, and not closed
+        knock.say("whatever the phone sends on it");
+        SerialStatus st = k.listener->serialStatus();
+        CHECK(st.knock && st.knocksByMarker == 1 && st.knockDials == 1 &&
+              st.knockDialsFailed == 0 && st.dials == 1 && st.asks == 0 && st.link == "dialled" && st.leftUnread == 0);
+        CHECK(!k.listener->phoneOpenedLeft(kDialled));
+        // The app ends the knock's link: its node goes, and was never the agent's link or another program's.
+        knock.hangUp();
+        knock.vanish();
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp0: the link ended ", 3000) &&
+                                     k.trace.saw("s after it was let go as a knock; "));
+        CHECK(acceptWithin(*k.listener, 100) == 0);
+        k.dialNode.vanish();
+        k.dialNode.hangUp();
+        k.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+        CHECK(endsWithin(link, 3000));
+        delete link;
+        CHECK(!k.trace.logged("00:11:22") && !k.trace.logged("001122") && !k.trace.logged("Test Phone"));
+    }
+    {   // the magic bytes on a phone-opened link: the agent's, as ever, with no dial; and every link a phone opens is
+        // read, though without the knock this phone's would be left unread for radiod. Other bytes: put back for
+        // radiod, as without the knock
+        Knocker k("knock-read", true);
+        k.start();
+        CHECK(!k.listener->phoneOpenedLeft(kDialled));
+        Node mine(k.dir + "/btspp", 0);
+        k.request(false);
+        mine.appear();
+        Link* link = dialled(*k.listener, mine, k.trace);
+        CHECK(!link->dialledByCar() && k.trace.saw("btspp0: it opened with the magic bytes, so the link is the agent's"));
+        CHECK(!k.trace.saw("left to another program") && k.listener->serialStatus().leftUnread == 0);
+        mine.hangUp();
+        CHECK(endsWithin(link, 3000));
+        delete link;
+        mine.vanish();
+        pause(450);
+        const std::string opening = "\x10\x20\x30\x40 another app's opening";
+        Node other(k.dir + "/btspp", 1);
+        other.held = true;
+        k.request(false);
+        other.send(opening);
+        other.appear();
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp1 let go ", 3000));
+        CHECK_IN(k.trace.text(), k.trace.saw(" B read from it were put back, in the order they came") &&
+                                     k.listener->serialStatus().putBack == 1);
+        CHECK(OtherProgram(other).reads(opening.size(), 2000) == opening);
+        pause(300);
+        CHECK(k.gap.connects().empty() && !k.trace.saw("gap query") && k.listener->serialStatus().knocksByMarker == 0);
+        other.vanish();
+    }
+    {   // requests the car refuses bring no byte, and so no knock: five from one phone 250 ms apart, the app's own
+        // gap, bring no dial, no ask and no knock count; the refusal's line says that the app cannot knock meanwhile
+        Knocker k("knock-refused");
+        k.start();
+        k.dialNode.say(kMagic);
+        double next = monoNow();
+        for (int i = 0; i < 5; ++i) {
+            while (monoNow() < next) pause(5);
+            next += 0.25;
+            k.request(true);
+        }
+        const std::string noAudio = "So the car has no media audio connection to the phone, and the car refuses the "
+                                    "phone's own serial links while it has none, so the phone's app cannot knock "
+                                    "meanwhile: the driver can connect it again by choosing the phone in the car's "
+                                    "media menu. ";
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, noAudio, 3000));
+        pause(1000);
+        SerialStatus st = k.listener->serialStatus();
+        CHECK_IN(k.trace.text(), k.gap.connects().empty() && !k.trace.saw("gap query") && st.asks == 0 &&
+                                     st.dials == 0 && st.knockDials == 0 && st.knocksByMarker == 0);
+        CHECK(st.knocksIgnoredNotOurs == 0 && st.knocksIgnoredQuiet == 0 && st.knocksIgnoredBusy == 0 &&
+              st.knocksIgnoredNotDialable == 0 && st.refusals == 5 && st.refusalsNoAudio == 1);
+        CHECK(!k.trace.logged("knocked") && acceptWithin(*k.listener, 100) == 0);
+    }
+    {   // a storm of requests from one phone, 400 to 700 ms apart, some taken and ended with no byte, some refused,
+        // and nothing knocks: no dial and no ask at all
+        Knocker k("knock-storm");
+        k.start();
+        const int gaps[] = {400, 550, 700, 450, 600, 500, 650, 400, 700, 550, 450, 600};
+        const int n = (int)(sizeof gaps / sizeof gaps[0]);
+        double next = monoNow();
+        unsigned taken = 0;
+        for (int i = 0; i < n; ++i) {
+            while (monoNow() < next) pause(5);
+            next += gaps[i] / 1000.0;
+            if (i % 3 == 0) {
+                Node node(k.dir + "/btspp", taken++);
+                k.opens(node, std::string());
+                CHECK_IN(k.trace.text(), sawWithin(k.trace, node.path + " let go ", 3000));
+                node.hangUp();
+                node.vanish();
+            } else {
+                k.request(true);
+            }
+        }
+        while (monoNow() < next) pause(5);
+        SerialStatus st = k.listener->serialStatus();
+        CHECK_IN(k.trace.text(), k.gap.connects().empty() && !k.trace.saw("gap query") && st.asks == 0 &&
+                                     st.dials == 0 && st.knockDials == 0 && st.knocksByMarker == 0);
+        CHECK(st.refusals == (unsigned)(n - (int)taken) && !k.trace.logged("knocked"));
+    }
+    {   // a knock's dial that fails: the re-point, as for any failed dial, and the quiet time; a knock in it is
+        // ignored; after it a knock is dialled again
+        Knocker k("knock-failed");
+        k.gap.connectError = 5;
+        k.start();
+        Node first(k.dir + "/btspp", 0);
+        k.opens(first, kKnock);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, kRepointItem, 3000));
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "phone 1 (the phone knocked): the car's dial answered 5 DEFAULT in ", 2000));
+        CHECK(k.trace.logged("its app is not listening on the agent's service, or something else went wrong; its "
+                             "knocks are ignored for ") && !k.trace.logged("by a poll"));
+        Node second(k.dir + "/btspp", 1);
+        k.opens(second, kKnock);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp1: it opened with the knock's magic bytes ", 3000) &&
+                                     k.trace.saw("phone 1's knock, ignored: it came in the phone's quiet time"));
+        pause(300);
+        CHECK(dialsOfPhone(k.gap) == 1);
+        SerialStatus st = k.listener->serialStatus();
+        CHECK(st.knockDials == 1 && st.knockDialsFailed == 1 && st.knocksIgnoredQuiet == 1 && st.knocksByMarker == 2 &&
+              st.repoints == 1 && st.recordDoubtful);
+        // Its quiet time over, the next knock is dialled; the app listens now.
+        pause(2000);
+        k.gap.connectError = 0;
+        k.dialNode.say(kMagic);
+        Node third(k.dir + "/btspp", 2);
+        k.opens(third, kKnock);
+        CHECK_IN(k.trace.text(), dialsWithin(k.gap, 2, 3000));
+        Link* link = acceptWithin(*k.listener, 3000);
+        CHECK_IN(k.trace.text(), link != 0 && link->dialledByCar());
+        CHECK(k.listener->serialStatus().knockDials == 2 && k.listener->serialStatus().knockDialsFailed == 1);
+        k.dialNode.vanish();
+        k.dialNode.hangUp();
+        k.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+        CHECK(endsWithin(link, 3000));
+        delete link;
+        first.vanish();
+        second.vanish();
+        third.vanish();
+    }
+    {   // the pairing window's rounds: every phone there in turn, the agent's or not, with no ask
+        Knocker k("knock-pairing");
+        k.ours.set(std::vector<std::string>());
+        k.gap.connectError = 5;
+        k.start();
+        pause(300);
+        CHECK(k.gap.connects().empty());
+        k.listener->pairingWindow(true);
+        CHECK_IN(k.trace.text(), dialsWithin(k.gap, 2, 2500));
+        CHECK(k.trace.logged("phone 1 (pairing window): the car's dial answered 5 DEFAULT") && !k.trace.saw("gap query"));
+        k.listener->pairingWindow(false);
+        pause(100);
+        unsigned n = dialsOfPhone(k.gap);
+        pause(1000);
+        CHECK(dialsOfPhone(k.gap) == n && k.listener->serialStatus().knockDials == 0);
+    }
+    {   // on trial: the agent's phones that are there, every trialDialMs, with no ask, until the version is confirmed
+        Knocker k("knock-trial");
+        k.gap.connectError = 5;
+        k.start();
+        pause(300);
+        CHECK(k.gap.connects().empty());
+        k.listener->agentOnTrial(true);
+        CHECK(k.trace.logged("this version of the agent is on trial: the car dials the agent's phones that are there, "
+                             "every 700 ms while no link of the agent's is up"));
+        CHECK_IN(k.trace.text(), dialsWithin(k.gap, 2, 2500));
+        CHECK(k.trace.logged("phone 1 (the agent is on trial): the car's dial answered 5 DEFAULT") &&
+              !k.trace.saw("gap query"));
+        k.listener->agentOnTrial(false);
+        CHECK(k.trace.logged("this version of the agent is confirmed"));
+        pause(100);
+        unsigned n = dialsOfPhone(k.gap);
+        pause(1500);
+        CHECK(dialsOfPhone(k.gap) == n);
+    }
+    {   // on trial for trialDialForMs only: dials that fail until then, one line when the time is up and no trial dial
+        // after it, a knock dialled as at any other time; a new trial has its own time
+        Knocker k("knock-trial-time");
+        k.config.dial.trialDialForMs = 2000;
+        // Not marked `dialled`: the failed dials then hand nothing to the agent (dialFailed()), and the knock's link
+        // is the first thing the listener hands over.
+        k.ours.set(std::vector<std::string>(1, kDialled));
+        k.gap.connectError = 5;
+        k.start();
+        k.listener->agentOnTrial(true);
+        CHECK(k.trace.logged("this version of the agent is on trial: the car dials the agent's phones that are there, "
+                             "every 700 ms while no link of the agent's is up, for 2 s from when the serial service is "
+                             "registered and the car's device list has come, or until it is confirmed if that is "
+                             "sooner"));
+        const std::string over = "this version of the agent is still on trial after 2 s of the trial's dials: the car no "
+                                 "longer dials the agent's phones by itself for this trial, and dials a phone when its "
+                                 "app knocks";
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, over, 6000));
+        CHECK_IN(k.trace.text(), dialsOfPhone(k.gap) >= 2 &&
+                                     k.trace.logged("phone 1 (the agent is on trial): the car's dial answered 5 DEFAULT"));
+        unsigned n = dialsOfPhone(k.gap);
+        pause(1500);
+        CHECK(dialsOfPhone(k.gap) == n && k.trace.loggedCount(over) == 1);
+        // Still on trial: the phone's knock is dialled.
+        k.gap.connectError = 0;
+        k.dialNode.say(kMagic);
+        Node knock(k.dir + "/btspp", 0);
+        k.opens(knock, kKnock);
+        Link* link = acceptWithin(*k.listener, 3000);
+        CHECK_IN(k.trace.text(), link != 0 && link->dialledByCar() &&
+                                     k.trace.logged("phone 1 knocked by the knock's magic bytes, and the car dials it now"));
+        CHECK(dialsOfPhone(k.gap) == n + 1);
+        knock.hangUp();
+        knock.vanish();
+        k.dialNode.vanish();
+        k.dialNode.hangUp();
+        k.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+        CHECK(endsWithin(link, 3000));
+        delete link;
+        // Confirmed, and then a new trial: its own time, with trial dials again, and the line again once it is up.
+        k.gap.connectError = 5;
+        k.listener->agentOnTrial(false);
+        k.listener->agentOnTrial(true);
+        CHECK_IN(k.trace.text(), dialsWithin(k.gap, n + 2, 3000) && countWithin(k.trace, over, 2, 6000));
+        CHECK(k.trace.loggedCount(over) == 2);
+        CHECK(!k.trace.logged("00:11:22") && !k.trace.logged("001122"));
+    }
+    {   // on trial, while a link of the agent's is up: no trial dial
+        Knocker k("knock-trial-up");
+        k.start();
+        k.dialNode.say(kMagic);
+        k.listener->agentOnTrial(true);
+        Link* link = acceptWithin(*k.listener, 3000);
+        CHECK_IN(k.trace.text(), link != 0 && link->dialledByCar());
+        pause(1600);
+        CHECK(dialsOfPhone(k.gap) == 1);
+        k.dialNode.vanish();
+        k.dialNode.hangUp();
+        k.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+        CHECK(endsWithin(link, 3000));
+        delete link;
+    }
+    {   // --dial-knock off: the knock's bytes are no knock, and the link is let go as any other
+        Knocker k("knock-off");
+        k.config.dial.knock = false;
+        k.ours.set(std::vector<std::string>());   // no poll dials it
+        k.start();
+        Node node(k.dir + "/btspp", 0);
+        k.opens(node, kKnock);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp0 let go ", 3000));
+        CHECK(!k.trace.saw("knock's") && !k.trace.saw("knocked") && !k.listener->serialStatus().knock &&
+              dialsOfPhone(k.gap) == 0);
+        node.vanish();
+    }
+    {   // the agent behind it lists the knock's capability in hello, with the dial's
+        Car car;
+        car.listener.stop();
+        SerialConfig config = configFor(car.dir);
+        config.dial.on = true;
+        config.dial.knock = true;
+        config.dial.node = car.dir + "/nbtapp";
+        Node node(config.dial.node);
+        car.gap.dialNode = &node;
+        car.gap.phones.push_back(carPhone(kDialled, kConnConnected, 7));
+        SerialListener listener(&car.gap, &car.gate, &car.trace, config);
+        PhoneAddressList* ours = car.agent.phoneAddresses();
+        ours->set(std::vector<std::string>(1, kDialled));
+        listener.setPhoneAddresses(ours);
+        car.agent.addListener(&listener);
+        car.agent.setSerialDial(&listener);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        car.gap.attach();
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "the car's device list: phone 1 is connected", 3000));
+        Node knock(car.dir + "/btspp", 0);
+        car.gap.phone(kInfServiceRequest, kCarSerialService, "001122334455");
+        knock.appear();
+        knock.say(kKnock);
+        CHECK_IN(car.trace.text(), sawWithin(car.trace, "gap connect BtCtrl nbtapp 00:11:22:33:44:55 NBTApp", 3000));
+        PhoneApp app(node);
+        CHECK(car.sessionsWithin(1, 3000));
+        app.hello("1");
+        std::vector<PhoneApp*> apps(1, &app);
+        Answered answered(&app);
+        CHECK_IN(car.trace.text(), turnsUntil(car.agent, apps, answered, 3000));
+        CHECK_IN(app.answers.caps, has(app.answers.caps + " ", " serial-dial ") &&
+                                       has(app.answers.caps + " ", " serial-knock "));
+        app.peer->close("done");
+        node.vanish();
+        car.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+        CHECK(car.sessionsWithin(0, 3000));
+        knock.hangUp();
+        knock.vanish();
+        car.agent.setSerialDial(0);
+        listener.stop();
+        CHECK(waitForSerialLinks(3000));
+    }
+}
+
+// The gate's hold with a program declared for a serial service (radiod): a phone's knock keeps it on from the
+// phone's request until the phone ends the knock's link, with no time limit, whatever the car's dialled link does.
+static void testKnockHold() {
+    const std::string on = "gate: opens by radiod are refused as well from now on ";
+    const std::string off = "gate: opens by radiod are passed on again ";
+    const std::string ended = off + "(the phone's knock link has ended)";
+    {   // a knock, the car's dialled link coming up while the knock's link is up, and a second knock right after
+        Knocker k("knock-hold", true);
+        k.start();
+        CHECK(!k.gate.refuses("radiod") && !k.trace.saw("gate hold"));
+        k.dialNode.say(kMagic);
+        Node knock(k.dir + "/btspp", 0);
+        k.opens(knock, kKnock);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, on + "(a phone has asked for a link)", 2000));
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp0: it opened with the knock's magic bytes ", 3000));
+        // The car's dialled link comes up while the knock's is up: the hold stays on.
+        Link* link = acceptWithin(*k.listener, 3000);
+        CHECK_IN(k.trace.text(), link != 0 && link->dialledByCar());
+        CHECK(readFrom(link, kMagic.size(), 3000) == kMagic);
+        // Well past the wait for a request's link: no time limit while the knock's link is up.
+        pause(1500);
+        CHECK_IN(k.trace.text(), k.gate.refuses("radiod") && k.trace.count("gate hold") == 1 &&
+                                     k.trace.count("gate release") == 0 && !k.trace.logged("are passed on again"));
+        bool closed = false;
+        CHECK(knock.hear(1, 200, &closed).empty() && !closed);   // nothing came into the knock's link
+        // The phone ends the knock's link: the hold goes off, though the dialled link stays up.
+        knock.hangUp();
+        knock.vanish();
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, ended, 1500));
+        CHECK(!k.gate.refuses("radiod") && k.trace.count("gate release") == 1 &&
+              k.trace.at("btspp0: the link ended ") < k.trace.at("gate release"));
+        exchange(k.dialNode, link, "still up", "noch da");
+        CHECK(k.trace.count("gate hold") == 1 && k.trace.count("gate release") == 1);
+
+        // A second knock right after: held again throughout, and off again at its end.
+        Node second(k.dir + "/btspp", 1);
+        k.opens(second, kKnock);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp1: it opened with the knock's magic bytes ", 3000));
+        pause(700);
+        CHECK_IN(k.trace.text(), k.gate.refuses("radiod") && k.trace.count("gate hold") == 2 &&
+                                     k.trace.count("gate release") == 1 && k.trace.loggedCount(off) == 1);
+        second.hangUp();
+        second.vanish();
+        CHECK_IN(k.trace.text(), countWithin(k.trace, ended, 2, 1500));
+        pause(500);
+        CHECK(!k.gate.refuses("radiod") && k.trace.count("gate hold") == 2 && k.trace.count("gate release") == 2);
+        // Nothing of the two is left in the hold: a request the car refuses has it on and off again.
+        k.request(true);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, off + "(the car refused the phone's link)", 2000));
+        CHECK(!k.gate.refuses("radiod") && k.trace.count("gate hold") == 3 && k.trace.count("gate release") == 3);
+
+        k.dialNode.vanish();
+        k.dialNode.hangUp();
+        k.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+        CHECK(endsWithin(link, 3000));
+        delete link;
+        CHECK(!k.trace.logged("00:11:22") && !k.trace.logged("001122"));
+    }
+    {   // the listener stops with a knock's link up: the hold goes off, as for a link of the agent's, and then the gate
+        Knocker k("knock-hold-stop", true);
+        k.ours.set(std::vector<std::string>());   // a knock of nobody's: no dial
+        k.start();
+        Node knock(k.dir + "/btspp", 0);
+        k.opens(knock, kKnock);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp0: it opened with the knock's magic bytes ", 3000));
+        pause(300);
+        CHECK(k.gate.refuses("radiod") && k.trace.count("gate release") == 0 && dialsOfPhone(k.gap) == 0);
+        k.listener->stop();
+        CHECK_IN(k.trace.text(), !k.gate.refuses("radiod") && k.trace.count("gate release") == 1 &&
+                                     k.trace.saw("gate detach"));
+        CHECK(k.trace.saw("btspp0: the link was still up ") &&
+              k.trace.saw("s after it was let go as a knock, and its node is closed as the listener stops"));
+        CHECK(k.trace.at("gate release") < k.trace.at("gate detach") && !k.trace.logged(ended));
+        knock.hangUp();
+        knock.vanish();
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) gWork = argv[1];
     // As the agent has it: a link whose other side has gone shows as an error, not as a signal.
@@ -5448,6 +6012,8 @@ int main(int argc, char** argv) {
     testLeftUnread();
     testPhoneOpenedLeft();
     testUndialled();
+    testKnock();
+    testKnockHold();
     printf("test_serial: ok\n");
     return 0;
 }

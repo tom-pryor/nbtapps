@@ -40,6 +40,12 @@ object FrameCodec {
     /** `NBTL`: what the side that dialled sends before its first frame. */
     val MAGIC: ByteArray get() = byteArrayOf(0x4E, 0x42, 0x54, 0x4C)
 
+    /**
+     * `NBTK`: the knock's magic bytes ([ProtocolConstants.SERIAL_KNOCK_MAGIC]), all that a knock's link of the phone's
+     * carries. No frame follows them.
+     */
+    val KNOCK_MAGIC: ByteArray get() = ProtocolConstants.SERIAL_KNOCK_MAGIC.toByteArray(Charsets.US_ASCII)
+
     fun encode(type: Int, flags: Int, stream: Int, payload: ByteArray, offset: Int = 0, length: Int = payload.size): ByteArray {
         val out = ByteArray(HEADER_BYTES + length + CHECK_BYTES)
         out[0] = type.toByte()
