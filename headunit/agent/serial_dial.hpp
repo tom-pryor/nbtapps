@@ -46,13 +46,12 @@ struct SerialStatus {
     // as they were when that could not be done (serial_link.hpp). putBack: the links on which bytes the agent had
     // read were put back into the node's queue for another program, by the rule's priming or when a link was let go.
     unsigned leftUnread, putBack;
-    // The knocks (dial_rules.hpp): seen by their magic bytes; ignored, as not the agent's phone while the pairing
-    // window is closed, in the phone's quiet time, while something of the agent's was under way (a link up, the
-    // phone's dial out or its knock waiting already, or a wait for its dial that ran out), or for a phone that cannot
-    // be dialled (not connected to the car and paired with it, pairing trouble, no phone named); the dials knocks
-    // brought, and of those the ones that gave the agent no link.
-    unsigned knocksByMarker, knocksIgnoredNotOurs, knocksIgnoredQuiet, knocksIgnoredBusy, knocksIgnoredNotDialable,
-        knockDials, knockDialsFailed;
+    // The knocks (dial_rules.hpp): seen by their magic bytes; ignored, in the phone's quiet time, while something of
+    // the agent's was under way (a link up, the phone's dial out or its knock waiting already, or a wait for its dial
+    // that ran out), or for a phone that cannot be dialled (not connected to the car and paired with it, pairing
+    // trouble, no phone named); the dials knocks brought, and of those the ones that gave the agent no link.
+    unsigned knocksByMarker, knocksIgnoredQuiet, knocksIgnoredBusy, knocksIgnoredNotDialable, knockDials,
+        knockDialsFailed;
     // The refusals whose look at the car's device list (the first, and every 20th) found the phone connected with no
     // service connected: no media audio, while which the car refuses a phone's own links.
     unsigned refusalsNoAudio;
@@ -64,8 +63,7 @@ struct SerialStatus {
           answeredOk(0), notListening(0), notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0),
           leftBehind(0), asks(0), asksListed(0), asksNotListed(0), asksNoAnswer(0), askErrors(0), repoints(0),
           repointsExpected(0), repointsUnexpected(0), repointsNotSent(0), checks(0), checksRestored(0), refusals(0),
-          leftUnread(0), putBack(0), knocksByMarker(0), knocksIgnoredNotOurs(0), knocksIgnoredQuiet(0),
-          knocksIgnoredBusy(0), knocksIgnoredNotDialable(0), knockDials(0), knockDialsFailed(0), refusalsNoAudio(0),
+          leftUnread(0), putBack(0), knocksByMarker(0), knocksIgnoredQuiet(0), knocksIgnoredBusy(0), knocksIgnoredNotDialable(0), knockDials(0), knockDialsFailed(0), refusalsNoAudio(0),
           problemsRecorded(0), problemsCounted(0) {}
 };
 

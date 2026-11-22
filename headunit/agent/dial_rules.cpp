@@ -228,7 +228,6 @@ bool DialRules::keepAsking(const Facts& facts, int64_t now) {
 
 void DialRules::count(KnockEnd why) {
     switch (why) {
-    case kKnockNotOurs: ++knockCounts_.ignoredNotOurs; break;
     case kKnockQuiet: ++knockCounts_.ignoredQuiet; break;
     case kKnockBusy: ++knockCounts_.ignoredBusy; break;
     case kKnockNotDialable: ++knockCounts_.ignoredNotDialable; break;
@@ -286,8 +285,8 @@ void DialRules::ignore(const Knock& k, KnockEnd why, int64_t now) {
 }
 
 // The knocks that wait and can no longer bring a dial: a link of the agent's is up, the phone is not there to dial,
-// it is not the agent's while the pairing window is closed, or it has waited knockWaitMs. A device list that has not
-// come yet tells nothing of the phone: the knock waits for it.
+// or it has waited knockWaitMs. Whether the phone is one of the agent's does not count (see the top of
+// dial_rules.hpp). A device list that has not come yet tells nothing of the phone: the knock waits for it.
 void DialRules::judgeKnocks(int64_t now, const Facts& facts) {
     for (size_t i = 0; i < knocks_.size();) {
         Knock k = knocks_[i];
@@ -295,7 +294,6 @@ void DialRules::judgeKnocks(int64_t now, const Facts& facts) {
         KnockEnd why = kKnockWaits;
         if (facts.linkUp) why = kKnockBusy;
         else if (presence_.known() && (p == 0 || !Presence::dialable(*p) || troubled(k.address))) why = kKnockNotDialable;
-        else if (p != 0 && !eligible(*p, facts)) why = kKnockNotOurs;
         else if (now - k.at >= (int64_t)config_.knockWaitMs) why = kKnockBusy;
         if (why == kKnockWaits) {
             ++i;
@@ -374,7 +372,7 @@ bool DialRules::nextKnockMode(int64_t now, const Facts& facts, Dial* out) {
         }
         knockFailed(now);
     }
-    // The first knock that waits: judgeKnocks() has just found its phone there, dialable and eligible.
+    // The first knock that waits: judgeKnocks() has just found its phone there and dialable, the agent's or not.
     while (!knocks_.empty()) {
         Knock k = knocks_.front();
         knocks_.erase(knocks_.begin());

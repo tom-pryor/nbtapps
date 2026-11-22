@@ -1252,26 +1252,45 @@ static void testKnock() {
         CHECK(r.reply(kOne, kService, kService, 5, 2700) == DialRules::kNotListening);
         CHECK(r.quietUntil(kOne) == 2700 + 3000 && r.knockCounts().dials == 1 && r.knockCounts().dialsFailed == 1);
     }
-    {   // whose knock: not the agent's, unless the pairing window is open; not there to dial; no phone at all
+    {   // whose knock: any phone's that is there to dial, one of the agent's or not, with the pairing window open or
+        // closed; not there to dial, the agent's or not; no phone at all
         DialRules r(knocks());
         present(r, 1000, true);
         DialRules::Dial d;
+        // Phone two is not the agent's (facts(): phone one is), and the pairing window is closed: dialled.
         CHECK(r.knocked(kTwo, 2000) == DialRules::kKnockWaits);
-        CHECK(!r.next(2000, facts(), &d) && newsIs(r, DialRules::kKnockNotOurs, 2));
-        DialRules::Facts open = facts();
+        d = knockDial(r, 2000, facts(), DialRules::kKnock);
+        CHECK(d.address == kTwo && newsIs(r, DialRules::kKnockDialled, 2));
+        CHECK(r.reply(kTwo, kService, kService, 0, 2100) == DialRules::kOpenNode);
+        r.linkUp(2200);
+        r.ending();
+        r.ended(2300);
+        // No phone is the agent's at all: the same.
+        CHECK(r.knocked(kOne, 3000) == DialRules::kKnockWaits);
+        d = knockDial(r, 3000, facts(0), DialRules::kKnock);
+        CHECK(d.address == kOne && newsIs(r, DialRules::kKnockDialled, 1));
+        CHECK(r.reply(kOne, kService, kService, 0, 3100) == DialRules::kOpenNode);
+        r.linkUp(3200);
+        r.ending();
+        r.ended(3300);
+        DialRules::Facts open = facts(0);
         open.pairingOpen = true;
-        r.knocked(kTwo, 3000);
+        r.knocked(kTwo, 4000);
         // The pairing window's round would come to it too; the knock goes first.
-        d = knockDial(r, 3000, open, DialRules::kKnock);
+        d = knockDial(r, 4000, open, DialRules::kKnock);
         CHECK(d.address == kTwo);
-        CHECK(r.knocked("", 4000) == DialRules::kKnockNotDialable);
-        CHECK(r.knockCounts().ignoredNotOurs == 1 && r.knockCounts().ignoredNotDialable == 1);
+        CHECK(r.knocked("", 5000) == DialRules::kKnockNotDialable);
+        CHECK(r.knockCounts().dials == 3 && r.knockCounts().ignoredNotDialable == 1 &&
+              r.knockCounts().ignoredBusy == 0 && r.knockCounts().ignoredQuiet == 0);
+        // A phone that is not connected to the car, not paired with it with its key, or that has lost its pairing:
+        // ignored as one that cannot be dialled, whether it is the agent's (i < 3) or not.
         uint32_t lists[][2] = {{kConnInRange, 7}, {kConnConnected, kSecurityKeyMissing}, {kConnConnected, 0}};
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 6; ++i) {
             DialRules s(knocks());
-            present(s, 1000, false, lists[i][0], lists[i][1]);
+            present(s, 1000, false, lists[i % 3][0], lists[i % 3][1]);
             CHECK(s.knocked(kOne, 2000) == DialRules::kKnockWaits);
-            CHECK(!s.next(2000, facts(), &d) && newsIs(s, DialRules::kKnockNotDialable, 1));
+            CHECK_IN(num((size_t)i), !s.next(2000, i < 3 ? facts() : facts(kTwo), &d) &&
+                                         newsIs(s, DialRules::kKnockNotDialable, 1) && s.state() == DialRules::kIdle);
         }
         DialRules s(knocks());
         present(s, 1000);
