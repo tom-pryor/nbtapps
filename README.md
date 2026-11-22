@@ -34,6 +34,8 @@ NBTApps has two parts, and you need both: **NBTApps for Android** on your phone 
   [Support](https://nbtapps.com/support/)).
 - **Setting up the Agent:** [headunit/INSTALL.md](headunit/INSTALL.md) walks through it. It starts from a root
   shell on the head unit, which it doesn’t cover how to get.
+- **What’s new:** [CHANGELOG.md](CHANGELOG.md) lists what changed in each release of the app, the Agent and the
+  iDrive plugin.
 
 ## Community packages
 
