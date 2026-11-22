@@ -42,6 +42,20 @@ serial.decideMs 500
 # the agent's log says so.
 serial.lingerMs 5000
 
+# The knock. An agent that lists the capability serial-knock has the car dial a phone when that phone's app knocks
+# (and while a pairing code shows, or for a time after a new version of the agent starts on trial), and not
+# otherwise. To knock, a phone app that listens for the car's link makes up to knockAttempts connects to the agent's
+# service, knockGapMs after each that fails, in milliseconds; there are several because one may fail on the phone
+# while another app's link to the car is up. A connect that comes up is sent the knock's magic bytes and nothing
+# else, and is kept until the car's link has come or knockHoldMs have passed; the agent writes nothing into it. The
+# agent takes the knock's magic bytes at the start of a link a phone opened, within decideMs, as that phone's knock,
+# and lets the link go. A connect that the car refuses reaches no agent, so where the car refuses a phone's links (it
+# does so while it has no media audio connection to that phone) a knock cannot be made.
+serial.knockMagic NBTK
+serial.knockAttempts 5
+serial.knockGapMs 250
+serial.knockHoldMs 1000
+
 # Pairing a phone (the plan document, "Enrolment on the car's screen"). The car's screen shows a code of this many
 # digits, which the user types into the phone app; `pairing.issue` carries it.
 pairing.codeDigits 6
@@ -84,6 +98,9 @@ capability.serialReset serial-reset
 # if it listens there. The link is the agent's as one the phone opened is: it opens with the phone's magic bytes,
 # and `hello` follows. Only an agent whose Bluetooth serial listener dials lists it.
 capability.serialDial serial-dial
+# An agent that lists this one dials a phone when its app knocks: see serial.knockMagic above. A phone app knocks
+# only at an agent that lists it, and such an agent also lists serial-dial.
+capability.serialKnock serial-knock
 # An agent that lists this one has settings.get and settings.set, which give and change the settings an installed
 # package's manifest names in `settings` (spec/manifest.schema.json). One that does not list it answers them with
 # `unsupported`.

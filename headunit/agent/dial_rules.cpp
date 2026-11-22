@@ -13,7 +13,8 @@ namespace nbt {
 DialRules::DialRules(const DialConfig& config)
     : config_(config), nextPollAt_(0), fastUntil_(0), signalAt_(0), pairingWasOpen_(false), nextPairingAt_(0),
       state_(kIdle), stale_(false), okAt_(0), roundWhy_(kForced), forcedAsk_(false), endedAskUntil_(0),
-      doubtful_(false), repointOut_(false), repointAt_(0) {}
+      doubtful_(false), repointOut_(false), repointAt_(0), knockDial_(false), nextTrialAt_(0), trialClock_(false),
+      trialFrom_(0), trialOver_(false), trialOverNews_(false) {}
 
 void DialRules::fastPolls(int64_t now) {
     fastUntil_ = now + config_.pollFirstForMs;
@@ -21,6 +22,7 @@ void DialRules::fastPolls(int64_t now) {
 }
 
 void DialRules::phoneAsked(const std::string& address, int64_t now) {
+    if (config_.knock) return;
     // The request that is pending now, whoever's: one that names no phone is nobody's own.
     askedBy_ = addressKey(address);
     if (askedBy_.empty()) return;
@@ -75,6 +77,9 @@ void DialRules::serviceGone() {
     presence_.forget();
     round_.clear();
     if (state_ == kAsking || state_ == kDialling) state_ = kIdle;
+    // A knock that waits is for a car that can no longer be asked to dial; the next comes afresh.
+    knocks_.clear();
+    knockDial_ = false;
     // What it had out went with it, and a service that comes back starts with a record of its own.
     endedAsk_.clear();
     doubtful_ = false;
@@ -118,12 +123,13 @@ unsigned DialRules::force() {
 }
 
 void DialRules::afresh() {
+    if (config_.knock) return;
     round_.clear();
     roundWhy_ = kAfresh;
     for (size_t i = 0; i < presence_.phones().size(); ++i) round_.push_back(presence_.phones()[i].address);
 }
 
-// The ask of a phone, for whatever reason: kAsking.
+// The ask of a phone, for whatever reason: kAsking. With the knock, the dial itself: kDialling.
 void DialRules::start(const Presence::Phone& p, Why why, int64_t now, Dial* out) {
     std::string colon;
     current_ = Dial();
@@ -133,7 +139,10 @@ void DialRules::start(const Presence::Phone& p, Why why, int64_t now, Dial* out)
     current_.askedAt = now;
     current_.at = now;
     forcedAsk_ = why == kForced;
-    state_ = kAsking;
+    state_ = config_.knock ? kDialling : kAsking;
+    // A dial afresh after a link left behind goes on for what brought the dial before it.
+    if (why != kAfresh) knockDial_ = why == kKnock;
+    if (why == kKnock) ++knockCounts_.dials;
     // An ask of the phone, for whatever reason, is the retry that may have been due.
     phone(p.address).retryAt = 0;
     *out = current_;
@@ -215,7 +224,197 @@ bool DialRules::keepAsking(const Facts& facts, int64_t now) {
     return false;
 }
 
+// ---- the knock ---------------------------------------------------------------------------------------------------
+
+void DialRules::count(KnockEnd why) {
+    switch (why) {
+    case kKnockNotOurs: ++knockCounts_.ignoredNotOurs; break;
+    case kKnockQuiet: ++knockCounts_.ignoredQuiet; break;
+    case kKnockBusy: ++knockCounts_.ignoredBusy; break;
+    case kKnockNotDialable: ++knockCounts_.ignoredNotDialable; break;
+    default: break;
+    }
+}
+
+DialRules::KnockEnd DialRules::knocked(const std::string& address, int64_t now) {
+    if (!config_.knock) return kNoKnock;
+    ++knockCounts_.byMarker;
+    std::string key = addressKey(address);
+    if (key.empty()) {
+        count(kKnockNotDialable);
+        return kKnockNotDialable;
+    }
+    // A knock in the quiet time brings no dial.
+    const PhoneState* s = find(address);
+    if (s != 0 && now < s->quietUntil) {
+        count(kKnockQuiet);
+        return kKnockQuiet;
+    }
+    // The phone's dial is out or up, or its knock waits already: this one adds nothing. That is how the connects of a
+    // burst that come up one after another bring one dial.
+    bool same = state_ != kIdle && addressKey(current_.address) == key;
+    for (size_t i = 0; i < knocks_.size() && !same; ++i) same = addressKey(knocks_[i].address) == key;
+    if (same) {
+        count(kKnockBusy);
+        return kKnockBusy;
+    }
+    Knock k;
+    k.address = address;
+    k.at = now;
+    knocks_.push_back(k);
+    return kKnockWaits;
+}
+
+std::vector<DialRules::KnockNews> DialRules::takeKnockNews() {
+    std::vector<KnockNews> news;
+    news.swap(knockNews_);
+    return news;
+}
+
+int64_t DialRules::quietUntil(const std::string& address) const {
+    const PhoneState* s = find(address);
+    return s == 0 ? 0 : s->quietUntil;
+}
+
+void DialRules::ignore(const Knock& k, KnockEnd why, int64_t now) {
+    count(why);
+    KnockNews n;
+    n.number = presence_.number(k.address);
+    n.end = why;
+    n.waitedMs = now - k.at;
+    knockNews_.push_back(n);
+}
+
+// The knocks that wait and can no longer bring a dial: a link of the agent's is up, the phone is not there to dial,
+// it is not the agent's while the pairing window is closed, or it has waited knockWaitMs. A device list that has not
+// come yet tells nothing of the phone: the knock waits for it.
+void DialRules::judgeKnocks(int64_t now, const Facts& facts) {
+    for (size_t i = 0; i < knocks_.size();) {
+        Knock k = knocks_[i];
+        const Presence::Phone* p = presence_.known() ? presence_.find(k.address) : 0;
+        KnockEnd why = kKnockWaits;
+        if (facts.linkUp) why = kKnockBusy;
+        else if (presence_.known() && (p == 0 || !Presence::dialable(*p) || troubled(k.address))) why = kKnockNotDialable;
+        else if (p != 0 && !eligible(*p, facts)) why = kKnockNotOurs;
+        else if (now - k.at >= (int64_t)config_.knockWaitMs) why = kKnockBusy;
+        if (why == kKnockWaits) {
+            ++i;
+            continue;
+        }
+        knocks_.erase(knocks_.begin() + (long)i);
+        ignore(k, why, now);
+    }
+}
+
+// A dial a knock brought gave the agent no link: the phone's knocks are ignored for a while. No back-off: the
+// quiet time takes its place.
+void DialRules::knockFailed(int64_t now) {
+    if (!knockDial_) return;
+    knockDial_ = false;
+    ++knockCounts_.dialsFailed;
+    phone(current_.address).quietUntil = now + config_.knockQuietMs;
+}
+
+bool DialRules::takeTrialOver() {
+    bool news = trialOverNews_;
+    trialOverNews_ = false;
+    return news;
+}
+
+// The trial has ended: a trial after it has its own time, and its first round at the first chance.
+void DialRules::trialEnded() {
+    trialClock_ = false;
+    trialOver_ = false;
+    trialOverNews_ = false;
+    nextTrialAt_ = 0;
+}
+
+// Whether the trial brings rounds now: the agent is on trial, and trialDialForMs have not passed since the first
+// moment a round could go, the service registered and the car's device list come (see the top of dial_rules.hpp).
+// Facts that say it is not on trial end the count.
+bool DialRules::trialDials(int64_t now, const Facts& facts) {
+    if (!facts.onTrial) {
+        trialEnded();
+        return false;
+    }
+    if (trialOver_) return false;
+    if (!trialClock_) {
+        if (!facts.registered || !presence_.known()) return false;
+        trialClock_ = true;
+        trialFrom_ = now;
+    }
+    if (now - trialFrom_ < (int64_t)config_.trialDialForMs) return true;
+    trialOver_ = true;
+    trialOverNews_ = true;
+    return false;
+}
+
+// With the knock: a dial, with no ask, for a knock, a round of the pairing window's, serial.dial's or the trial's, or
+// a phone whose link left behind has just been ended; nothing else.
+bool DialRules::nextKnockMode(int64_t now, const Facts& facts, Dial* out) {
+    if (facts.linkOfOurs || facts.requestPending) round_.clear();
+    // A round the trial brought ends with the trial, or with the trial's time for rounds.
+    bool trial = trialDials(now, facts);
+    if (!trial && roundWhy_ == kTrial) round_.clear();
+    judgeKnocks(now, facts);
+    if (state_ != kIdle || !facts.registered || facts.linkOfOurs || !presence_.known()) return false;
+    // The car takes one ServiceConnect of the agent's at a time.
+    if (repointWaits(now)) return false;
+    // A phone's request that is pending may bring a link of the agent's, or a knock: nothing goes until it has.
+    if (facts.requestPending) return false;
+    if (stale_) {
+        // A link that was left behind has just been ended: its phone at once, once, for what brought the dial.
+        stale_ = false;
+        const Presence::Phone* p = presence_.find(current_.address);
+        if (p != 0 && Presence::dialable(*p) && !troubled(p->address)) {
+            bool forced = forcedAsk_;
+            start(*p, kAfresh, now, out);
+            forcedAsk_ = forced;
+            return true;
+        }
+        knockFailed(now);
+    }
+    // The first knock that waits: judgeKnocks() has just found its phone there, dialable and eligible.
+    while (!knocks_.empty()) {
+        Knock k = knocks_.front();
+        knocks_.erase(knocks_.begin());
+        const Presence::Phone* p = presence_.find(k.address);
+        if (p == 0) continue;
+        KnockNews n;
+        n.number = p->number;
+        n.end = kKnockDialled;
+        n.waitedMs = now - k.at;
+        knockNews_.push_back(n);
+        start(*p, kKnock, now, out);
+        return true;
+    }
+    if (takeFromRound(now, facts, out)) return true;
+    // The pairing window: every phone there, in turn.
+    if (facts.pairingOpen && (!pairingWasOpen_ || now >= nextPairingAt_)) {
+        nextPairingAt_ = now + config_.pairingRoundMs;
+        round_.clear();
+        roundWhy_ = kPairing;
+        for (size_t i = 0; i < presence_.phones().size(); ++i) round_.push_back(presence_.phones()[i].address);
+        pairingWasOpen_ = true;
+        if (takeFromRound(now, facts, out)) return true;
+    }
+    if (!facts.pairingOpen) pairingWasOpen_ = false;
+    // On trial: the agent's phones that are there, in turn, so that the app that waits for the new version is
+    // reached whether or not it knocks; for trialDialForMs.
+    if (trial && now >= nextTrialAt_) {
+        nextTrialAt_ = now + config_.trialDialMs;
+        round_.clear();
+        roundWhy_ = kTrial;
+        for (size_t i = 0; i < presence_.phones().size(); ++i) {
+            if (eligible(presence_.phones()[i], facts)) round_.push_back(presence_.phones()[i].address);
+        }
+        if (takeFromRound(now, facts, out)) return true;
+    }
+    return false;
+}
+
 bool DialRules::next(int64_t now, const Facts& facts, Dial* out) {
+    if (config_.knock) return nextKnockMode(now, facts, out);
     // A link of the agent's has come, or may be coming: what is left of a round is not wanted any more, nor the ask.
     if (facts.linkOfOurs || facts.requestPending) round_.clear();
     if (state_ == kAsking) keepAsking(facts, now);
@@ -352,9 +551,11 @@ DialRules::Reply DialRules::reply(const std::string& address, const std::string&
     }
     state_ = kIdle;
     if (error == 2) return kLookForNode;
-    // A rejection of the request was never the car's answer, and 10 does no harm: tried again a while later.
+    // A rejection of the request was never the car's answer, and 10 does no harm: tried again a while later. With
+    // the knock there are no retries: one a knock brought gives the phone its quiet time, as any failure does.
     if (!doubtingAnswer(error)) {
-        phone(current_.address).retryAt = now + config_.retryMs;
+        if (knockDial_) knockFailed(now);
+        else phone(current_.address).retryAt = now + config_.retryMs;
         return kRetryLater;
     }
     // A failure the car answered, after the phone listed the service: its record may be wrong from here on, and the
@@ -378,14 +579,17 @@ void DialRules::gaveUp(int64_t now) {
     doubtful_ = true;
 }
 
-// A dial of the current phone that gave the agent no link: the phone is backed off, and the run is counted.
+// A dial of the current phone that gave the agent no link: the phone is backed off, or for a dial a knock brought
+// given its quiet time, and the run is counted.
 void DialRules::dialFailed(int64_t now) {
-    backOff(current_.address, now);
+    if (knockDial_) knockFailed(now);
+    else backOff(current_.address, now);
     ++phone(current_.address).dialFails;
 }
 
 void DialRules::notThere(int64_t now) {
-    phone(current_.address).retryAt = now + config_.retryMs;
+    if (knockDial_) knockFailed(now);
+    else phone(current_.address).retryAt = now + config_.retryMs;
     state_ = kIdle;
 }
 
@@ -394,7 +598,8 @@ void DialRules::stale() { state_ = kEnding; stale_ = true; }
 void DialRules::notEnded(int64_t now) {
     // Dialled again at once, it would find the same link, and the car would be asked in vain once more.
     stale_ = false;
-    backOff(current_.address, now);
+    if (knockDial_) knockFailed(now);
+    else backOff(current_.address, now);
     state_ = kIdle;
 }
 
@@ -410,6 +615,7 @@ void DialRules::linkUp(int64_t) {
     s.backOffUntil = 0;
     s.dialFails = 0;
     state_ = kUp;
+    knockDial_ = false;
 }
 
 void DialRules::notTheApp(int64_t now) {

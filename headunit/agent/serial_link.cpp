@@ -658,18 +658,43 @@ void SppNodeGate::detach() {
 
 // ---- the listener ------------------------------------------------------------------------------------------------
 
+namespace {
+
+// What became of a knock (DialRules::knocked()), for the log.
+const char* knockEndText(DialRules::KnockEnd end) {
+    switch (end) {
+    case DialRules::kNoKnock: return "no knock";
+    case DialRules::kKnockWaits: return "and the car dials it as soon as nothing else of the agent's is under way";
+    case DialRules::kKnockDialled: return "and the car dials it now";
+    case DialRules::kKnockNotOurs:
+        return "ignored: it is not one of the agent's phones, and the pairing window is closed";
+    case DialRules::kKnockQuiet:
+        return "ignored: it came in the phone's quiet time after a dial that a knock brought had failed";
+    case DialRules::kKnockBusy:
+        return "ignored: a link of the agent's is up, the phone's dial is out or up or its knock waits already, or it "
+               "waited for its dial too long";
+    case DialRules::kKnockNotDialable:
+        return "ignored: the phone is not connected to the car and paired with it, or has had pairing trouble, or the "
+               "knock names no phone";
+    }
+    return "?";
+}
+
+}  // namespace
+
 SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, const SerialConfig& config)
     : gate_(gate), log_(log), services_(0), serverLook_(0), config_(config), primer_(config.nodeCalls), spp_(gap, this),
       wakeRead_(-1), wakeWrite_(-1),
       hasThread_(false), watchFrom_(0), decidingNode_(-1), stop_(false), active_(false),
       tracker_(config.requestWindowS), hotUntil_(0),
-      reqAt_(0), refused_(0), deciding_(false), held_(false), holdWhy_(0), reading_(0), resetHotUntil_(0), askedAt_(0),
+      reqAt_(0), refused_(0), deciding_(false), held_(false), holdWhy_(0), reading_(0), knockLinks_(0),
+      resetHotUntil_(0), askedAt_(0),
       checkedAt_(0), opened_(false), final_(false), unattachedSince_(0), everAttached_(false), attachSaid_(false), lookDone_(false),
       scannedAt_(0), refusalCount_(0), refusalNode_(RefusalFacts::kNoNode), refusalAt_(0), handLookAt_(0), ours_(0),
       rules_(config.dial), dialPhase_(kDialNone), dialReader_(0), dialOpenedAt_(0), dialLink_(0), discAt_(0),
       discAnswered_(false), discError_(0), staleAtStart_(false), cleanupKind_(kCleanOwn), leftFailing_(false),
       leftTimes_(0), cleanupQuiet_(false), leftPhase_(kLeftNone), leftAt_(0), leftTried_(false), pairingOpen_(false),
-      checkedAtShared_(0), lastLinks_(0), problems_(0), restoredSeen_(0), problemsSaid_(false), repointNumber_(0),
+      onTrial_(false), checkedAtShared_(0), lastLinks_(0), problems_(0), restoredSeen_(0), problemsSaid_(false), repointNumber_(0),
       repointDialError_(0), repointStopped_(false), repointDisconnect_(false) {
     for (int i = 0; i < NodeTracker::kNodes; ++i) {
         watched_[i] = false;
@@ -956,8 +981,9 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
         }
         // The car is dialled for that phone if no link of the agent's comes of it: the car names the same service
         // for a link to the agent's UUID as for any other, so whose UUID it was for cannot be told. That is how the
-        // app is reached when the phone's own link is left to another program.
-        if (config_.dial.on) rules_.phoneAsked(address, (int64_t)(now * 1000.0));
+        // app is reached when the phone's own link is left to another program. With the knock, a request brings
+        // nothing of the kind, whatever becomes of it: only the knock's magic bytes on its link are a knock.
+        if (config_.dial.on && !config_.dial.knock) rules_.phoneAsked(address, (int64_t)(now * 1000.0));
     } else if (what == SppService::kPhoneRefused) {
         if (maybeOurs) {
             tracker_.onRefused(true);
@@ -1047,6 +1073,8 @@ void SerialListener::pairingWindow(bool open) {
     if (open)
         say("the pairing window is open: every phone connected to the car and paired with it is dialled in turn, every "
             "%u s", config_.dial.pairingRoundMs / 1000);
+    else if (config_.dial.knock)
+        say("the pairing window has closed: the car dials the agent's own phones only, when they knock");
     else
         say("the pairing window has closed: the car dials the agent's own phones only");
 }
@@ -1203,8 +1231,10 @@ void SerialListener::sayRefusal(RefusalFacts::List list, const PhoneInList& phon
     refusalAt_ = 0;
     unsigned count = refusalCount_;
     f.node = refusalNode_;
+    if (waits && refusalNoMediaAudio(f)) ++counts_.refusalsNoAudio;
     pthread_mutex_unlock(&mu_);
-    if (waits) say("%s", describeRefusal(count, f).c_str());
+    // Whole: the line is longer than say() takes.
+    if (waits) log_->line(describeRefusal(count, f));
 }
 
 // On the listener's thread: a refusal whose device list has not come in time is said without it.
@@ -1467,11 +1497,11 @@ std::string joined(const std::vector<std::string>& names) {
 }  // namespace
 
 // Turns the gate's hold on or off, as things stand: it is on while a phone's request waits for its node (not one
-// whose link is left to another program: leftToOther()), while a link is being decided on, and while a link of the
-// agent's is up. The programs it holds off are the ones declared for a serial service at the moment it goes on; with
-// none declared there is no hold. From the listener's thread and the Bluetooth service's: whichever of them makes
-// the change gives holdWhy_ as the reason in the log, which is what was last put there together with a change of
-// what the hold goes by.
+// whose link is left to another program: leftToOther()), while a link is being decided on, while a link of the
+// agent's is up, and while a phone's knock link is, with no time limit (knockLinks_). The programs it holds off are
+// the ones declared for a serial service at the moment it goes on; with none declared there is no hold. From the
+// listener's thread and the Bluetooth service's: whichever of them makes the change gives holdWhy_ as the reason in
+// the log, which is what was last put there together with a change of what the hold goes by.
 void SerialListener::updateHold() {
     if (services_ == 0) return;
     // A link the car dialled is on a node of its own: the gate has nothing to hold off for it.
@@ -1485,7 +1515,9 @@ void SerialListener::updateHold() {
         bool waiting = reqAt_ > 0 && monoNow() < hotUntil_;
         bool expired = reqAt_ > 0 && !waiting;
         if (expired) reqAt_ = 0;   // its node has not come: a later link is not this request's
-        bool want = active_ && (deciding_ || up != 0 || waiting);
+        bool want = active_ && (deciding_ || up != 0 || waiting || knockLinks_ != 0);
+        const char* onWhy = deciding_ || up != 0 || waiting ? "a link of the agent's is up"
+                                                            : "a phone's knock link is up";
         if (want == held_) {
             pthread_mutex_unlock(&mu_);
             return;
@@ -1509,7 +1541,7 @@ void SerialListener::updateHold() {
             gate_->hold(programs);
             pthread_mutex_unlock(&mu_);
             say("gate: opens by %s are refused as well from now on (%s)", joined(programs).c_str(),
-                why != 0 ? why : "a link of the agent's is up");
+                why != 0 ? why : onWhy);
             return;
         }
         pthread_mutex_unlock(&mu_);
@@ -1524,14 +1556,17 @@ namespace {
 // What the bytes at `p` are, as the start of what came on a link.
 enum Opening {
     kOpenMagic,       // the magic bytes
-    kOpenMagicPart,   // the start of them, and no more yet
+    kOpenMagicPart,   // the start of them, or of the knock's, and no more yet
+    kOpenKnock,       // the knock's magic bytes (only where `knock` is asked for)
     kOpenFrame,       // a whole frame of the protocol with a good check value, of *frameBytes
     kOpenFramePart,   // what may be the start of one
     kOpenOther        // neither
 };
 
-Opening judgeOpening(const uint8_t* p, size_t n, size_t* frameBytes) {
+// `knock`: the knock's magic bytes count too (DialConfig::knock), on a link a phone opened.
+Opening judgeOpening(const uint8_t* p, size_t n, size_t* frameBytes, bool knock) {
     size_t m = n < kLinkMagicBytes ? n : kLinkMagicBytes;
+    if (knock && memcmp(p, kKnockMagic, m) == 0) return m == kLinkMagicBytes ? kOpenKnock : kOpenMagicPart;
     if (memcmp(p, kLinkMagic, m) == 0) return m == kLinkMagicBytes ? kOpenMagic : kOpenMagicPart;
     const size_t most = kFrameHeaderBytes + kMaxFramePayload + kFrameCheckBytes;
     FrameDecoder frames;
@@ -1554,13 +1589,15 @@ Opening judgeOpening(const uint8_t* p, size_t n, size_t* frameBytes) {
 // *leftOver and passed over, and the magic bytes are looked for after them, within the same time.
 //
 // kOurs: the magic bytes came, at the start or after such leftovers, and *first holds what was read from them on.
-// kLetGo: anything else came, or nothing did, before or after such leftovers: the link is another program's, or
-// nobody's, and *first holds all that was read, leftovers too, in order. Leftovers alone do not make it the agent's:
-// another program's link may have the agent's old bytes in front of it, and letGo() gives it to that program as it
-// gives any other. kEnded: the link ended first. *why says which, for the log. Nothing is written.
+// kKnock, with the knock on (DialConfig::knock): the knock's magic bytes came there instead, and *first holds what
+// was read from them on. kLetGo: anything else came, or nothing did, before or after such leftovers: the link is
+// another program's, or nobody's, and *first holds all that was read, leftovers too, in order. Leftovers alone do not
+// make it the agent's: another program's link may have the agent's old bytes in front of it, and letGo() gives it to
+// that program as it gives any other. kEnded: the link ended first. *why says which, for the log. Nothing is written.
 SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::string& path, double openedAt,
                                                std::vector<uint8_t>* first, uint64_t* leftOver, std::string* why) {
     const double by = openedAt + config_.decideMs / 1000.0;
+    const bool knock = config_.dial.on && config_.dial.knock;
     std::vector<uint8_t> got;
     size_t at = 0;   // where what has not been passed over as leftovers starts
     *leftOver = 0;
@@ -1568,14 +1605,14 @@ SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::st
         Opening o = kOpenMagicPart;
         while (at < got.size()) {
             size_t frame = 0;
-            o = judgeOpening(&got[at], got.size() - at, &frame);
+            o = judgeOpening(&got[at], got.size() - at, &frame, knock);
             if (o != kOpenFrame) break;
             at += frame;
             *leftOver += frame;
         }
-        if (at < got.size() && o == kOpenMagic) {
+        if (at < got.size() && (o == kOpenMagic || o == kOpenKnock)) {
             first->assign(got.begin() + (long)at, got.end());
-            return kOurs;
+            return o == kOpenMagic ? kOurs : kKnock;
         }
         if (at < got.size() && o == kOpenOther) {
             *why = *leftOver > 0 ? "after the leftovers came bytes that are neither a frame nor the magic bytes"
@@ -1597,7 +1634,9 @@ SerialListener::Decided SerialListener::decide(NodeReader* reader, const std::st
                 return kLetGo;
             }
             *why = got.empty() ? "nothing came from the phone in that time"
-                               : (o == kOpenMagicPart ? "only a part of the magic bytes came in that time"
+                               : (o == kOpenMagicPart ? (knock ? "only a part of the magic bytes or the knock's came "
+                                                                 "in that time"
+                                                               : "only a part of the magic bytes came in that time")
                                                       : "it did not open with the magic bytes in that time");
             return kLetGo;
         }
@@ -1728,6 +1767,7 @@ void SerialListener::keep(int node, int fd, NodeReader* reader, const char* what
     kept.at = monoNow();
     kept.what = what;
     kept.handedAt = 0;
+    kept.knock = false;
     letGo_.push_back(kept);
     if (reader != 0) {
         pthread_mutex_lock(&mu_);
@@ -1783,8 +1823,10 @@ void SerialListener::tendLetGo() {
 
 // The nodes that are not the agent's link and whose link has ended since: a node that is read or kept open is
 // closed. kEvery: every one of them, the listener's thread having ended. kAllButUp: the same, except that a node
-// whose link is still up goes on being read, or kept open for another program.
+// whose link is still up goes on being read, or kept open for another program. This is the one place an entry leaves
+// letGo_: a knock's that does takes its part in the hold away, at once.
 void SerialListener::closeKept(Closing which) {
+    bool knockEnded = false;
     for (size_t i = 0; i < letGo_.size();) {
         const LetGo kept = letGo_[i];
         std::string path = nodePath(kept.node);
@@ -1795,9 +1837,14 @@ void SerialListener::closeKept(Closing which) {
             continue;
         }
         letGo_.erase(letGo_.begin() + (long)i);
-        if (kept.reader != 0) {
+        if (kept.reader != 0 || kept.knock) {
             pthread_mutex_lock(&mu_);
-            --reading_;
+            if (kept.reader != 0) --reading_;
+            if (kept.knock && knockLinks_ > 0) {
+                --knockLinks_;
+                knockEnded = true;
+                if (ended) holdWhy_ = "the phone's knock link has ended";
+            }
             pthread_mutex_unlock(&mu_);
         }
         uint64_t dropped = 0;
@@ -1821,6 +1868,8 @@ void SerialListener::closeKept(Closing which) {
             say("%s is gone, %.1f s after it was %s and closed", path.c_str(), after, kept.what);
         }
     }
+    // Here, and not only at the end of the listener's pass: the hold goes off as soon as the knock's end is seen.
+    if (knockEnded) updateHold();
 }
 
 // Opens node `node`, which has just become a link that may be ours, and hands it to the agent if what the phone
@@ -1908,6 +1957,27 @@ void SerialListener::take(int node, const std::string& address) {
         // Counted as up from here, which keeps the hold on.
         link = newSerialLink(reader, path, log_, first, config_.lingerMs, address);
         if (link == 0) holdWhy = "the link could not be set up";
+    } else if (found == kKnock) {
+        // The phone's knock: nothing is written into the link, and it is let go. The app ends it; until then its
+        // node is read, with what comes dropped, and never handed to another program, whose link it is not: the
+        // hold stays on for it (knockLinks_, counted below in the step that ends deciding_, so that the hold never
+        // goes off in between) until closeKept() finds that the link has ended.
+        reader->drain();
+        keep(node, -1, reader, "let go as a knock");
+        letGo_.back().knock = true;
+        pthread_mutex_lock(&mu_);
+        DialRules::KnockEnd end = rules_.knocked(address, (int64_t)(monoNow() * 1000.0));
+        unsigned number = addressKey(address).empty() ? 0 : rules_.number(address);
+        pthread_cond_signal(&wake_);
+        pthread_mutex_unlock(&mu_);
+        char whose[48] = "a knock that names no phone";
+        if (number != 0) snprintf(whose, sizeof whose, "phone %u's knock", number);
+        char after[64];
+        snprintf(after, sizeof after, " %.0f ms after the open: ", (monoNow() - openedAt) * 1000.0);
+        log_->line(path + ": it opened with the knock's magic bytes" + after + whose + ", " + knockEndText(end) +
+                   ". Nothing is written into the link, and its node is read, with what comes dropped, until the "
+                   "phone ends it");
+        holdWhy = "the link was a phone's knock";
     } else if (found == kLetGo) {
         letGo(reader, node, path, openedAt, why, first);
         holdWhy = "the link was let go";
@@ -1917,6 +1987,7 @@ void SerialListener::take(int node, const std::string& address) {
         holdWhy = "the link ended before it was decided on";
     }
     pthread_mutex_lock(&mu_);
+    if (found == kKnock) ++knockLinks_;
     deciding_ = false;
     holdWhy_ = holdWhy;
     if (link != 0) ready_.push_back(link);
@@ -2031,6 +2102,12 @@ void SerialListener::primeForOther(int node, const std::string& rule) {
 bool SerialListener::leftToOther(const std::string& address, std::string* why) {
     if (!config_.dial.on) {
         *why = "the car does not dial phones in this run";
+        return false;
+    }
+    // With the knock every link a phone opens is read: it may be the phone's knock, which is how the car comes to
+    // dial it at all.
+    if (config_.dial.knock) {
+        *why = "the car dials a phone when it knocks, so every link a phone opens is read";
         return false;
     }
     if (ours_ == 0 || !ours_->has(address)) {
@@ -2182,6 +2259,8 @@ const char* whyName(DialRules::Why why) {
     case DialRules::kPairing: return "pairing window";
     case DialRules::kRetry: return "retried";
     case DialRules::kAfresh: return "afresh, after a link left behind";
+    case DialRules::kKnock: return "the phone knocked";
+    case DialRules::kTrial: return "the agent is on trial";
     }
     return "?";
 }
@@ -2192,7 +2271,7 @@ Opening judgeStart(const std::vector<uint8_t>& got, size_t* at, uint64_t* leftOv
     Opening o = kOpenMagicPart;
     while (*at < got.size()) {
         size_t frame = 0;
-        o = judgeOpening(&got[*at], got.size() - *at, &frame);
+        o = judgeOpening(&got[*at], got.size() - *at, &frame, false);
         if (o != kOpenFrame) break;
         *at += frame;
         *leftOver += frame;
@@ -2240,8 +2319,17 @@ SerialStatus SerialListener::serialStatus() {
     s.recordDoubtful = rules_.recordDoubtful();
     s.repointStopped = repointStopped_;
     s.refusals = refused_;
+    const DialRules::KnockCounts& k = rules_.knockCounts();
+    s.knocksByMarker = k.byMarker;
+    s.knocksIgnoredNotOurs = k.ignoredNotOurs;
+    s.knocksIgnoredQuiet = k.ignoredQuiet;
+    s.knocksIgnoredBusy = k.ignoredBusy;
+    s.knocksIgnoredNotDialable = k.ignoredNotDialable;
+    s.knockDials = k.dials;
+    s.knockDialsFailed = k.dialsFailed;
     pthread_mutex_unlock(&mu_);
     s.dialOn = config_.dial.on;
+    s.knock = config_.dial.on && config_.dial.knock;
     s.stack = heard.version;
     s.checks = checks.sent;
     s.checksRestored = checks.restored;
@@ -2309,21 +2397,61 @@ DialRules::Facts SerialListener::dialFacts() {
     if (ours_ != 0) facts.ours = ours_->get();
     pthread_mutex_lock(&mu_);
     facts.pairingOpen = pairingOpen_;
+    facts.deciding = deciding_;
+    facts.linkUp = !ready_.empty();
+    facts.onTrial = onTrial_;
     pthread_mutex_unlock(&mu_);
+    facts.linkUp = facts.linkUp || serialLinksOpen() != 0;
     return facts;
+}
+
+// The agent's thread: the version on trial, or confirmed. The listener's thread acts on it.
+void SerialListener::agentOnTrial(bool onTrial) {
+    pthread_mutex_lock(&mu_);
+    bool changed = onTrial_ != onTrial;
+    onTrial_ = onTrial;
+    // A trial that ends ends the count of its time for dials now: one that follows before the next look has its own.
+    if (changed && !onTrial) rules_.trialEnded();
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+    if (!changed || !config_.dial.on || !config_.dial.knock) return;
+    if (onTrial)
+        say("this version of the agent is on trial: the car dials the agent's phones that are there, every %u ms while "
+            "no link of the agent's is up, for %u s from when the serial service is registered and the car's device "
+            "list has come, or until it is confirmed if that is sooner", config_.dial.trialDialMs,
+            config_.dial.trialDialForMs / 1000);
+    else
+        say("this version of the agent is confirmed: the car no longer dials the agent's phones for the trial");
 }
 
 // The next ask, if one is due: ServiceListQuery for the phone, and the dial once its answer names the agent's
 // service. A phone's pending request holds back every ask but the one it brings itself, signalWaitMs after it
-// (DialRules::next()).
+// (DialRules::next()). With the knock, the dial itself, with no ask; and what became of the knocks.
 void SerialListener::maybeDial(int64_t now) {
     DialRules::Facts facts = dialFacts();
     DialRules::Dial d;
     pthread_mutex_lock(&mu_);
     bool due = rules_.next(now, facts, &d);
+    bool dialNow = due && rules_.state() == DialRules::kDialling;
+    std::vector<DialRules::KnockNews> news = rules_.takeKnockNews();
+    bool trialOver = rules_.takeTrialOver();
     pthread_mutex_unlock(&mu_);
+    if (trialOver)
+        say("this version of the agent is still on trial after %u s of the trial's dials: the car no longer dials the "
+            "agent's phones by itself for this trial, and dials a phone when its app knocks",
+            config_.dial.trialDialForMs / 1000);
+    for (size_t i = 0; i < news.size(); ++i) {
+        const DialRules::KnockNews& n = news[i];
+        char waited[64] = "";
+        if (n.waitedMs > 0) snprintf(waited, sizeof waited, " (%lld ms after the knock)", (long long)n.waitedMs);
+        say("phone %u knocked by the knock's magic bytes, %s%s", n.number, knockEndText(n.end), waited);
+    }
     if (!due) return;
     dial_ = d;
+    if (dialNow) {
+        sendDial(now);
+        return;
+    }
     if (spp_.queryServices(d.address)) {
         pthread_mutex_lock(&mu_);
         ++counts_.asks;
@@ -2497,8 +2625,25 @@ void SerialListener::sendDial(int64_t now) {
     pthread_mutex_lock(&mu_);
     rules_.reply(dial_.address, config_.name, config_.name, kNoError, now);
     pthread_mutex_unlock(&mu_);
+    if (config_.dial.knock) {
+        say("phone %u: the car could not be asked to dial it (%s): %s", dial_.number, whyName(dial_.why),
+            knockAfter(now, true).c_str());
+        return;
+    }
     say("phone %u: the car could not be asked to dial it (%s): again in %u s", dial_.number, whyName(dial_.why),
         config_.dial.retryMs / 1000);
+}
+
+std::string SerialListener::knockAfter(int64_t now, bool it) {
+    pthread_mutex_lock(&mu_);
+    int64_t quiet = rules_.quietUntil(dial_.address) - now;
+    pthread_mutex_unlock(&mu_);
+    char text[160];
+    if (quiet > 0)
+        snprintf(text, sizeof text, "%s knocks are ignored for %lld ms", it ? "its" : "the phone's", (long long)quiet);
+    else
+        snprintf(text, sizeof text, "%s is dialled again when its app knocks", it ? "it" : "the phone");
+    return text;
 }
 
 // A dial that failed although the phone's service list named the agent's service: the car's record of phone-opened
@@ -2528,13 +2673,15 @@ void SerialListener::doubtNow(bool before, const std::string& answer, RepointWen
             : "That record may stay wrong; should the car answer the dial after all, one re-point request is sent then, "
               "so that the end of such a link that the car books against the agent's instance is not counted against "
               "the phone's connected services";
-    say("phone %u: the car's dial came to %s although the phone's service list named the agent's service. Such a dial "
-        "may leave the car's record of phone-opened serial links wrong, and the car may then refuse such links, another "
-        "program's too, after one of them ends. %s; serial.status says the record is doubted until a dial is answered "
-        "0, the car says that such a link ended, or its Bluetooth service goes", dial_.number, answer.c_str(), sent);
+    // With the knock no ask went before the dial.
+    const char* listed = config_.dial.knock ? "" : " although the phone's service list named the agent's service";
+    say("phone %u: the car's dial came to %s%s. Such a dial may leave the car's record of phone-opened serial links "
+        "wrong, and the car may then refuse such links, another program's too, after one of them ends. %s; "
+        "serial.status says the record is doubted until a dial is answered 0, the car says that such a link ended, or "
+        "its Bluetooth service goes", dial_.number, answer.c_str(), listed, sent);
     char text[200];
-    snprintf(text, sizeof text, "phone %u: the car's dial came to %s after the phone listed the agent's service: the "
-             "car's record of phone-opened links may be wrong", dial_.number, answer.c_str());
+    snprintf(text, sizeof text, "phone %u: the car's dial came to %s%s: the car's record of phone-opened links may be "
+             "wrong", dial_.number, answer.c_str(), config_.dial.knock ? "" : " after the phone listed the agent's service");
     problem("record-doubtful", text);
 }
 
@@ -2656,19 +2803,27 @@ void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now,
     bool stale = r == DialRules::kLookForNode && access(config_.dial.node.c_str(), F_OK) == 0;
     std::string meaning;
     char line[96];
-    // A dial that failed is not made again soon: it may have left the car's record wrong (dial_rules.hpp).
+    // A dial that failed is not made again soon: it may have left the car's record wrong (dial_rules.hpp). With the
+    // knock, the phone is dialled when it knocks next, out of its quiet time if the dial was a knock's.
     snprintf(line, sizeof line, "it is not dialled by a poll for %lld s", (long long)(backOff / 1000));
-    std::string backedOff = line;
+    std::string backedOff = config_.dial.knock ? knockAfter(now, true) : std::string(line);
     switch (r) {
     case DialRules::kOpenNode: meaning = "the link is up"; break;
     case DialRules::kLookForNode:
         meaning = stale ? "a link on the instance is up already"
-                        : "a link on the instance is up already, and its node is not there: again later";
+                        : config_.dial.knock ? "a link on the instance is up already, and its node is not there; " +
+                                                   backedOff
+                                             : "a link on the instance is up already, and its node is not there: again "
+                                               "later";
         break;
     case DialRules::kNotListening:
         // The ask before it listed the agent's service: the app stopped listening since, or something else failed.
-        meaning = "the phone did not take the link, although its service list named the agent's service just before: "
-                  "its app may have stopped listening since, or something else went wrong; " + backedOff;
+        // With the knock there was no ask: the app does not listen, or no longer.
+        meaning = config_.dial.knock
+                      ? "the phone did not take the link: its app is not listening on the agent's service, or something "
+                        "else went wrong; " + backedOff
+                      : "the phone did not take the link, although its service list named the agent's service just "
+                        "before: its app may have stopped listening since, or something else went wrong; " + backedOff;
         break;
     case DialRules::kUnreachable:
         meaning = "the phone is not in reach, and " + backedOff;
@@ -2678,7 +2833,7 @@ void SerialListener::dialAnswered(const ServiceConnectReply& reply, int64_t now,
         break;
     default:
         snprintf(line, sizeof line, "again in %u s", config_.dial.retryMs / 1000);
-        meaning = line;
+        meaning = config_.dial.knock ? backedOff : std::string(line);
         break;
     }
     // One line for the dial, with its answer; the same answer to this phone again is only counted, and the next line
@@ -2777,8 +2932,12 @@ void SerialListener::readMagic(int64_t now) {
         int64_t backOff = rules_.backedOffUntil(dial_.address) - now;
         pthread_mutex_unlock(&mu_);
         dialPhase_ = kDialNone;
-        say("phone %u: %s closed %.0f ms after the open, before the app said anything: the phone is not dialled by a "
-            "poll for %lld s", dial_.number, path.c_str(), after, (long long)(backOff / 1000));
+        if (config_.dial.knock)
+            say("phone %u: %s closed %.0f ms after the open, before the app said anything: %s", dial_.number,
+                path.c_str(), after, knockAfter(now, false).c_str());
+        else
+            say("phone %u: %s closed %.0f ms after the open, before the app said anything: the phone is not dialled by "
+                "a poll for %lld s", dial_.number, path.c_str(), after, (long long)(backOff / 1000));
         dialFailed();
         return;
     }
@@ -2826,11 +2985,14 @@ void SerialListener::readMagic(int64_t now) {
     ++counts_.notTheApp;
     counts_.lastResult = "not the app";
     pthread_mutex_unlock(&mu_);
+    char held[200];
+    if (config_.dial.knock) snprintf(held, sizeof held, "%s", knockAfter(now, false).c_str());
+    else snprintf(held, sizeof held, "the phone is not dialled by a poll for %lld s", (long long)(backOff / 1000));
     say("phone %u: something answered on the agent's UUID that is not the app: %s. The car is asked to end the link, "
-        "and the phone is not dialled by a poll for %lld s", dial_.number,
+        "and %s", dial_.number,
         other ? "the link did not open with the magic bytes"
               : (dialGot_.empty() ? "nothing came in the time" : "the magic bytes did not come in the time"),
-        (long long)(backOff / 1000));
+        held);
     char text[160];
     snprintf(text, sizeof text, "phone %u: something answered on the agent's UUID that is not the app", dial_.number);
     problem("dial-not-the-app", text);
@@ -2968,9 +3130,13 @@ void SerialListener::tendCleanup(int64_t now, bool afterReset) {
     if (cleanupKind_ == kCleanStart && !cleanupQuiet_)
         say("the link left behind on %s is %s: the car dials the phones afresh", path.c_str(),
             there ? "still there, and is left alone" : "ended");
-    if (cleanupKind_ == kCleanBusy && there && !cleanupQuiet_)
-        say("phone %u is not dialled again at once, and not by a poll for %lld s", dial_.number,
-            (long long)(backOff / 1000));
+    if (cleanupKind_ == kCleanBusy && there && !cleanupQuiet_) {
+        if (config_.dial.knock)
+            say("phone %u is not dialled again at once: %s", dial_.number, knockAfter(now, true).c_str());
+        else
+            say("phone %u is not dialled again at once, and not by a poll for %lld s", dial_.number,
+                (long long)(backOff / 1000));
+    }
     cleanupKind_ = kCleanOwn;
     cleanupQuiet_ = false;
     cleanupHeld_.clear();
@@ -3211,9 +3377,11 @@ void SerialListener::tendDial() {
             if (overdue) spp_.giveUpConnect(dial_.address, config_.name, SppService::kLateTold);
             if (overdue) {
                 bool there = access(config_.dial.node.c_str(), F_OK) == 0;
+                std::string held = config_.dial.knock ? knockAfter(now, false)
+                                                      : std::string("the phone is not dialled by a poll for a while");
                 say("phone %u: no answer to the car's dial in %u s; %s is %s. The car is asked to end what may be up, "
-                    "and the phone is not dialled by a poll for a while", dial_.number,
-                    config_.dial.replyLimitMs / 1000, config_.dial.node.c_str(), there ? "there" : "not there");
+                    "and %s", dial_.number, config_.dial.replyLimitMs / 1000, config_.dial.node.c_str(),
+                    there ? "there" : "not there", held.c_str());
                 char text[160];
                 snprintf(text, sizeof text, "phone %u: no answer to the car's dial in %u s", dial_.number,
                          config_.dial.replyLimitMs / 1000);
@@ -3418,8 +3586,12 @@ void SerialListener::endDialSteps(const char* why) {
             pthread_mutex_unlock(&mu_);
             spp_.giveUpConnect(dial_.address, config_.name, SppService::kLateTold);
             dialPhase_ = kDialNone;
-            say("phone %u: the car's dial had no answer when %s: it is given up, and the phone is not dialled by a poll "
-                "for %lld s", dial_.number, why, (long long)(backOff / 1000));
+            if (config_.dial.knock)
+                say("phone %u: the car's dial had no answer when %s: it is given up, and %s", dial_.number, why,
+                    knockAfter(now, false).c_str());
+            else
+                say("phone %u: the car's dial had no answer when %s: it is given up, and the phone is not dialled by a "
+                    "poll for %lld s", dial_.number, why, (long long)(backOff / 1000));
             doubtNow(doubted, "no answer", kRepointNone);
             dialFailed();
             return;

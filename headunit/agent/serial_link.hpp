@@ -12,8 +12,8 @@
 // until the link has opened with the protocol's magic bytes (peer.hpp), and a link that opens otherwise is let go
 // without a byte sent. That matters because the stack does not say whose link a node holds. It names the car's own
 // serial service in every request, for a link to our UUID too, so every link a phone opens is looked at, and what
-// the phone says first decides whether it is ours; but for a link that a rule leaves to another program, which the
-// agent only primes for that program and does not read (below).
+// the phone says first decides whether it is ours, or the phone's knock; but for a link that a rule leaves to another
+// program with the knock off, which the agent only primes for that program and does not read (below).
 //
 // What is understood about the node shapes the code (node_reader.hpp has the details):
 //
@@ -43,9 +43,13 @@
 //     holds the other end of the pair as an ordinary link of kind "serial".
 //
 // Another program on the car that takes serial links (a second service with a reader of its own) meets the same
-// node for the same links: the stack gives one node to whatever link comes. Three things keep the two apart:
+// node for the same links: the stack gives one node to whatever link comes. Three things keep the two apart (the
+// first with the knock off only, `nbtagent --dial-knock off`):
 //
-//   * The rule. A link a phone opens is left to another program, never read by the agent, and no hold put on for
+//   * The rule. With the knock (DialConfig::knock, the default) there is none: every link a phone opens is opened
+//     at once and decided on, whoever the phone is, since it may be that phone's knock (dial_rules.hpp), and
+//     leftToOther() and phoneOpenedLeft() are false. With the knock off, a link a phone opens is left to another
+//     program, never read by the agent, and no hold put on for
 //     the phone's request that brings it, when all three of these hold, at the request and again when its node
 //     appears: the car dials (SerialConfig::dial); a program declared for a serial service runs, or may
 //     (SerialServices::readers()); and the phone that asked is one of the agent's whose app a link the car dialled
@@ -71,7 +75,14 @@
 //   * The decide step. The listener's thread takes what the reader brings, for kSerialDecideMs from the open at
 //     most. Whole frames of this protocol at its start are what an earlier link of the agent's left: they are
 //     counted, dropped and said in the log, and the magic bytes are looked for after them. A link that opens with
-//     the magic bytes, so, is the agent's, and goes to the agent with those bytes. Any other link is let go, with
+//     the magic bytes, so, is the agent's, and goes to the agent with those bytes. With the knock, one that opens
+//     with the knock's magic bytes there instead (frame.hpp, kKnockMagic; a part of either waits for the rest
+//     within the same time) is the knock of the phone whose request the node was matched to
+//     (NodeTracker::takenAddress()): nothing is written into it, it is let go, and its node is read, with what comes
+//     dropped, until the link ends, as a link nobody else reads is, but whatever signs of another reader come: the
+//     phone's app ends it, and it is nobody else's link. The rules have the car dial that phone (dial_rules.hpp,
+//     DialRules::knocked()). A link with no such request, or one that named no phone, is a knock of nobody's,
+//     counted and ignored. Any other link is let go, with
 //     no byte written into it, and that includes one on which the leftovers are followed by anything else, or by
 //     nothing in the time: another program's link may have the agent's old bytes in front of it. If another
 //     program may read it (a program declared for a serial service runs, or may run; the gate has seen another
@@ -86,7 +97,9 @@
 //     behind, so the list of other programs' services is swept then (serial_services.hpp).
 //   * The hold. From a phone's request until its link has been let go, and for as long as a link of the agent's is
 //     up, the gate also refuses the opens of the programs that are declared for a serial service, so that none of
-//     them takes a link's first bytes or writes into a link of the agent's. Their looks at the node are passed on.
+//     them takes a link's first bytes or writes into a link of the agent's. A phone's knock keeps the hold on until
+//     the phone ends its link, so that no such program writes into it, with no time limit: while it is up the car
+//     has no other phone-opened link for such a program to take. Their looks at the node are passed on.
 //     A request whose link the rule leaves to another program puts no hold on: that program's opens pass at once.
 //     The gate refuses the car's media process all the same.
 //
@@ -96,9 +109,17 @@
 //
 // The car can also dial the phone (dial_rules.hpp, SerialConfig::dial): the listener asks the car's Bluetooth service
 // to open a serial link to the agent's service on a phone of the agent's, on the car's instance kDialInstance, whose
-// node, /dev/nbtapp, no other link uses, once the phone's service list, which the car is asked for first, has named
-// that service. The phone's app listens on the agent's UUID and accepts the link. The ServiceListChanged informs
-// that each such ask brings change nothing here: they are only counted (spp_service.hpp). The
+// node, /dev/nbtapp, no other link uses. With the knock (the default) that is when the phone has knocked, by the
+// knock's magic bytes on a link it opened (the decide step, above): a phone's request is no knock, whatever becomes
+// of it, and brings no ask; and in the pairing window, at serial.dial and while the agent is on trial
+// (agentOnTrial()), for DialConfig::trialDialForMs of the trial at most, after which the log says that the car no
+// longer dials by itself for the trial; with ServiceConnect at once, and no ask. With the knock off, once the
+// phone's service list, which the car is asked for first, has named that service, at polls and at the phone's
+// requests. Where the car refuses a phone's request and its device list shows that phone connected with no service
+// connected, the line for the refusal says that the car has no media audio connection to it, while which it refuses
+// the phone's own links, and so its app cannot knock (refusalNoMediaAudio()). The phone's app listens on the agent's
+// UUID and accepts the link. The ServiceListChanged informs that each such ask brings change nothing here: they are
+// only counted (spp_service.hpp). The
 // listener opens the node when the car answers 0, and a link whose phone says the magic bytes within
 // DialConfig::magicWaitMs of the open is the agent's, with no gate, no hold and no let-go: nobody else's link is on
 // that node. A link that does not open with them is ended at once by the car (ServiceDisconnect), and the phone is
@@ -453,12 +474,16 @@ inline std::string describeSerialDecide(const SerialConfig& config) {
            "a program of software put on by hand is running, what was read from it is put back into its node, which "
            "stays open, unread, until the link ends, for the program it belongs to; where that cannot be done, its "
            "node is closed for that program. Otherwise it is read until the link ends or one of those signs comes" +
-           (config.dial.on ? ". A link that a phone of the agent's opens, whose app a link the car dialled has "
-                             "reached, is not read at all while a program declared for a serial service is "
-                             "running, or may be: it is left to that program, its node primed for it with one read "
-                             "that does not wait and kept open, unread, until the link ends, and the app is reached "
-                             "by the dial"
-                           : "");
+           (config.dial.on && config.dial.knock
+                ? ". A link that opens with the knock's magic bytes there instead is the phone's knock: nothing is "
+                  "written into it, the car is to dial the phone that opened it, and its node is read, with what comes "
+                  "dropped, until the link ends. Every link a phone opens is read so, whoever the phone is"
+            : config.dial.on ? ". A link that a phone of the agent's opens, whose app a link the car dialled has "
+                               "reached, is not read at all while a program declared for a serial service is "
+                               "running, or may be: it is left to that program, its node primed for it with one read "
+                               "that does not wait and kept open, unread, until the link ends, and the app is reached "
+                               "by the dial"
+                             : "");
 }
 
 // What becomes of a link of the agent's when the agent ends it.
@@ -512,6 +537,14 @@ struct RefusalFacts {
 // How long the device list is waited for after a refusal.
 const unsigned kRefusalListWaitMs = 3000;
 
+// Whether the device list shows the refused phone connected to the car with no service connected (connection 2):
+// the car refuses a phone's own serial links while it has no media audio connection to that phone, and so its app
+// cannot knock.
+inline bool refusalNoMediaAudio(const RefusalFacts& f) {
+    return f.list == RefusalFacts::kListRead && f.phone.ok && f.phone.error == 0 && f.phone.known && f.phone.listed &&
+           f.phone.connection == btspp::kConnConnected;
+}
+
 // The log's line for the `count`th refusal of a link that may be the agent's: what was found, then the other
 // causes, in the order to look at them. Never a phone's name or address.
 inline std::string describeRefusal(unsigned count, const RefusalFacts& f) {
@@ -537,6 +570,10 @@ inline std::string describeRefusal(unsigned count, const RefusalFacts& f) {
         snprintf(text, sizeof text, "In the car's device list the phone is %s (connection %u), security %u. ",
                  btspp::connectionName(f.phone.connection), f.phone.connection, f.phone.security);
         s += text;
+        if (refusalNoMediaAudio(f))
+            s += "So the car has no media audio connection to the phone, and the car refuses the phone's own serial "
+                 "links while it has none, so the phone's app cannot knock meanwhile: the driver can connect it again "
+                 "by choosing the phone in the car's media menu. ";
     }
     if (f.node == RefusalFacts::kNodeOther)
         s += "A serial node is there already and is not the agent's: the car takes one phone-opened serial link at a "
@@ -592,6 +629,8 @@ public:
     // SerialDial (serial_dial.hpp). From any thread.
     virtual void pairingWindow(bool open);
     virtual bool dialOn() { return config_.dial.on; }
+    virtual bool knockOn() { return config_.dial.on && config_.dial.knock; }
+    virtual void agentOnTrial(bool onTrial);
     virtual unsigned dialNow(std::string* why, const char** code);
     virtual SerialStatus serialStatus();
     virtual bool phoneOpenedLeft(const std::string& address);
@@ -660,8 +699,8 @@ private:
     void lookForLinks();
     // `address`: the phone's, from the request the node was matched to (NodeTracker::takenAddress()).
     void take(int node, const std::string& address);
-    // What the decide step found.
-    enum Decided { kOurs, kLetGo, kEnded };
+    // What the decide step found. kKnock: the phone's knock (DialConfig::knock).
+    enum Decided { kOurs, kKnock, kLetGo, kEnded };
     Decided decide(NodeReader* reader, const std::string& path, double openedAt, std::vector<uint8_t>* first,
                    uint64_t* leftOver, std::string* why);
     // `read`: all that decide() read from the link, in order.
@@ -710,6 +749,9 @@ private:
     // After a dial of dial_'s phone that gave the agent no link: at kDialFailsToUnmark in a row, a phone that is
     // `dialled` is handed to the agent to give that up (takeUndialled()).
     void dialFailed();
+    // With the knock: what follows for dial_'s phone after a dial that gave the agent no link, for the log: its
+    // knocks ignored for a while, or its next knock dialled. `it`: the line names the phone "it", not "the phone".
+    std::string knockAfter(int64_t now, bool it);
     void dialAnswered(const btspp::ServiceConnectReply& reply, int64_t now, RepointWent repoint);
     struct ConnectAnswer;
     // An answer to a dial that was given up: said, and never taken as the answer to anything that is out. A late 0
@@ -768,6 +810,7 @@ private:
         const char* what;   // what became of the link, for the log: "let go", "ended at its open", "primed for
                             // another program"
         double handedAt;    // when the listener stopped reading it and left it to another program; 0: it did not
+        bool knock;         // the phone's knock: counted in knockLinks_ until it leaves letGo_
     };
 
     NodeGate* gate_;
@@ -814,6 +857,8 @@ private:
     // The nodes in letGo_ that are open still and read by the listener: not one kept open, unread, for another
     // program, which is that program's link and no node of the listener's (serial.reset).
     unsigned reading_;
+    // The knock links in letGo_, whose node is read until the phone ends the link: the hold stays on for them.
+    unsigned knockLinks_;
     Reset reset_;
     double resetHotUntil_;       // until then the thread looks without a pause, for serial.reset
     double askedAt_;             // when a phone last asked for a link, for any service; 0: never
@@ -901,6 +946,7 @@ private:
     double leftAt_;                    // when it began
     bool leftTried_;                   // since the last set-up or registration
     bool pairingOpen_;                 // mu_: the agent's pairing window is open
+    bool onTrial_;                     // mu_: this version of the agent is on trial (agentOnTrial())
     // What serial.status counts (mu_), and when the registration was last checked or registered.
     SerialStatus counts_;
     double checkedAtShared_;

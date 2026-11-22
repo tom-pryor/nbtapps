@@ -26,6 +26,13 @@ const int64_t kSerialSilenceMs = 30000;
 const int64_t kSerialDecideMs = 500;
 const int64_t kSerialLingerMs = 5000;
 
+// The knock (constants.txt says what each is): the bytes a phone app's knock link carries, and nothing else
+// (frame.hpp has them as bytes); and how the app knocks.
+const char* const kSerialKnockMagic = "NBTK";
+const unsigned kSerialKnockAttempts = 5;
+const int64_t kSerialKnockGapMs = 250;
+const int64_t kSerialKnockHoldMs = 1000;
+
 const unsigned kPairingCodeDigits = 6;
 const int64_t kPairingWindowSeconds = 120;
 const unsigned kPairingTries = 3;
@@ -50,6 +57,10 @@ const char* const kCapabilitySerialReset = "serial-reset";
 // UUID, and the agent takes that link as it takes one the phone opens. Only an agent whose Bluetooth serial listener
 // has the dial on (nbtagent --dial) lists it.
 const char* const kCapabilitySerialDial = "serial-dial";
+// A capability: the car dials a phone of this agent's when that phone's app knocks (constants.txt,
+// serial.knockMagic), and, but for the pairing window and a version on trial, not otherwise. Only an agent whose
+// Bluetooth serial listener has the dial on with knocks (nbtagent --dial-knock) lists it, and it lists serial-dial too.
+const char* const kCapabilitySerialKnock = "serial-knock";
 // A capability: this agent has settings.get and settings.set, for the settings a package's manifest names
 // (settings.hpp).
 const char* const kCapabilitySettings = "settings";

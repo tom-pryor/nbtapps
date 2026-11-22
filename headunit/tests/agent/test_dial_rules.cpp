@@ -29,9 +29,11 @@ static BtDevice device(const char* address, uint32_t connection, uint32_t securi
     return d;
 }
 
-// The defaults, with no settle time: the tests of what came before the ask leave it out.
+// The defaults with the knock off (`--dial-knock off`), as the rules were before the knock, which the tests up to
+// testKnock() are about; and with no settle time: the tests of what came before the ask leave it out.
 static DialConfig plain() {
     DialConfig c;
+    c.knock = false;
     c.settleMs = 0;
     return c;
 }
@@ -1150,7 +1152,371 @@ static void testRepoint() {
     }
 }
 
+// ---- the knock ----------------------------------------------------------------------------------------------------
+
+// The knock's rules: the defaults, with the knock on.
+static DialConfig knocks() {
+    DialConfig c;
+    CHECK(c.knock);
+    return c;
+}
+
+// The knock's dial next() gives: out at once, with no ask.
+static DialRules::Dial knockDial(DialRules& r, int64_t now, const DialRules::Facts& f, DialRules::Why why) {
+    DialRules::Dial d;
+    CHECK(r.next(now, f, &d));
+    CHECK(r.state() == DialRules::kDialling && d.why == why);
+    return d;
+}
+
+// The news of next() since the last look: one knock, ended so.
+static bool newsIs(DialRules& r, DialRules::KnockEnd end, unsigned number) {
+    std::vector<DialRules::KnockNews> n = r.takeKnockNews();
+    return n.size() == 1 && n[0].end == end && n[0].number == number;
+}
+
+static void testKnock() {
+    {   // no ask and no poll: a phone of the agent's that is there is never dialled by itself, nor by its requests
+        DialRules r(knocks());
+        present(r, 1000, true);
+        DialRules::Dial d;
+        for (int64_t t = 1000; t < 1000 + 600000; t += 5000) {
+            r.phoneAsked(kOne, t);
+            CHECK(!r.next(t, facts(kOne, kTwo), &d) && r.state() == DialRules::kIdle);
+        }
+        r.afresh();   // nor afresh after a link left behind at the start
+        CHECK(!r.next(700000, facts(kOne, kTwo), &d));
+        CHECK(r.knockCounts().dials == 0 && r.knocksWaiting() == 0);
+    }
+    {   // a knock gives a dial at once, with no ask; a failed one brings the quiet time and no back-off, and the
+        // car's record is doubted as for any dial that failed (the re-point follows it in the listener)
+        DialRules r(knocks());
+        present(r, 1000);
+        CHECK(r.knocked(kOne, 2000) == DialRules::kKnockWaits && r.knocksWaiting() == 1);
+        DialRules::Dial d = knockDial(r, 2000, facts(), DialRules::kKnock);
+        CHECK(d.address == kOne && newsIs(r, DialRules::kKnockDialled, 1));
+        CHECK(r.reply(kOne, kService, kService, 5, 2100) == DialRules::kNotListening);
+        CHECK(r.state() == DialRules::kIdle && r.recordDoubtful() && r.backedOffUntil(kOne) == 0 && !r.heldBack(kOne, 2100));
+        CHECK(r.quietUntil(kOne) == 2100 + 3000 && r.dialFailures(kOne) == 1);
+        // In the quiet time, to its last moment: ignored.
+        CHECK(r.knocked(kOne, 3000) == DialRules::kKnockQuiet);
+        CHECK(r.knocked(kOne, 2100 + 3000 - 1) == DialRules::kKnockQuiet);
+        CHECK(!r.next(5150, facts(), &d));
+        // After it, a knock goes.
+        CHECK(r.knocked(kOne, 2100 + 3000) == DialRules::kKnockWaits);
+        knockDial(r, 6500, facts(), DialRules::kKnock);
+        CHECK(r.reply(kOne, kService, kService, 0, 6600) == DialRules::kOpenNode);
+        r.linkUp(6700);
+        const DialRules::KnockCounts& k = r.knockCounts();
+        CHECK(k.byMarker == 4 && k.ignoredQuiet == 2 && k.dials == 2 && k.dialsFailed == 1);
+        // Its link up: its knocks add nothing.
+        CHECK(r.knocked(kOne, 7000) == DialRules::kKnockBusy && r.knockCounts().ignoredBusy == 1);
+    }
+    {   // every way a knock's dial gives no link brings the quiet time, never the back-off or a retry
+        for (int way = 0; way < 6; ++way) {
+            std::string what = "way " + num((size_t)way);
+            DialRules r(knocks());
+            present(r, 1000);
+            r.knocked(kOne, 2000);
+            knockDial(r, 2000, facts(), DialRules::kKnock);
+            int64_t at = 3000;
+            if (way == 0) CHECK_IN(what, r.reply(kOne, kService, kService, 14, at) == DialRules::kUnreachable);
+            if (way == 1) CHECK_IN(what, r.reply(kOne, kService, kService, 10, at) == DialRules::kRetryLater);
+            if (way == 2) CHECK_IN(what, r.reply(kOne, kService, kService, kNoError, at) == DialRules::kRetryLater);
+            if (way == 3) r.gaveUp(at);
+            if (way == 4) {
+                CHECK_IN(what, r.reply(kOne, kService, kService, 0, 2500) == DialRules::kOpenNode);
+                r.notTheApp(at);
+                r.ended(at);
+            }
+            if (way == 5) {
+                CHECK_IN(what, r.reply(kOne, kService, kService, 2, 2500) == DialRules::kLookForNode);
+                r.notThere(at);
+            }
+            CHECK_IN(what, r.state() == DialRules::kIdle && r.quietUntil(kOne) == at + 3000);
+            CHECK_IN(what, r.backedOffUntil(kOne) == 0 && r.knockCounts().dialsFailed == 1);
+            DialRules::Dial d;
+            CHECK_IN(what, !r.next(at + 15000, facts(), &d) && !r.next(at + 600000, facts(), &d));
+        }
+    }
+    {   // a link left behind: ended, and the phone dialled again at once for its knock; that dial failing is the
+        // knock's one failure
+        DialRules r(knocks());
+        present(r, 1000);
+        r.knocked(kOne, 2000);
+        knockDial(r, 2000, facts(), DialRules::kKnock);
+        CHECK(r.reply(kOne, kService, kService, 2, 2100) == DialRules::kLookForNode);
+        r.stale();
+        r.ended(2500);
+        knockDial(r, 2600, facts(), DialRules::kAfresh);
+        CHECK(r.reply(kOne, kService, kService, 5, 2700) == DialRules::kNotListening);
+        CHECK(r.quietUntil(kOne) == 2700 + 3000 && r.knockCounts().dials == 1 && r.knockCounts().dialsFailed == 1);
+    }
+    {   // whose knock: not the agent's, unless the pairing window is open; not there to dial; no phone at all
+        DialRules r(knocks());
+        present(r, 1000, true);
+        DialRules::Dial d;
+        CHECK(r.knocked(kTwo, 2000) == DialRules::kKnockWaits);
+        CHECK(!r.next(2000, facts(), &d) && newsIs(r, DialRules::kKnockNotOurs, 2));
+        DialRules::Facts open = facts();
+        open.pairingOpen = true;
+        r.knocked(kTwo, 3000);
+        // The pairing window's round would come to it too; the knock goes first.
+        d = knockDial(r, 3000, open, DialRules::kKnock);
+        CHECK(d.address == kTwo);
+        CHECK(r.knocked("", 4000) == DialRules::kKnockNotDialable);
+        CHECK(r.knockCounts().ignoredNotOurs == 1 && r.knockCounts().ignoredNotDialable == 1);
+        uint32_t lists[][2] = {{kConnInRange, 7}, {kConnConnected, kSecurityKeyMissing}, {kConnConnected, 0}};
+        for (int i = 0; i < 3; ++i) {
+            DialRules s(knocks());
+            present(s, 1000, false, lists[i][0], lists[i][1]);
+            CHECK(s.knocked(kOne, 2000) == DialRules::kKnockWaits);
+            CHECK(!s.next(2000, facts(), &d) && newsIs(s, DialRules::kKnockNotDialable, 1));
+        }
+        DialRules s(knocks());
+        present(s, 1000);
+        s.knocked(kTwo, 2000);   // not in the car's list at all
+        CHECK(!s.next(2000, facts(kOne, kTwo), &d) && newsIs(s, DialRules::kKnockNotDialable, 2));
+    }
+    {   // what it waits for, and for how long: a phone's request that is pending, a link being decided on, another
+        // phone's dial, the service, the device list; a link of the agent's that is up has it ignored
+        DialRules r(knocks());
+        present(r, 1000, true);
+        DialRules::Dial d;
+        r.knocked(kOne, 2000);
+        DialRules::Facts f = facts();
+        f.requestPending = true;
+        CHECK(!r.next(2000, f, &d) && r.knocksWaiting() == 1);
+        f.requestPending = false;
+        f.deciding = f.linkOfOurs = true;
+        CHECK(!r.next(2500, f, &d) && r.knocksWaiting() == 1);
+        f.deciding = f.linkOfOurs = false;
+        f.registered = false;
+        CHECK(!r.next(3000, f, &d) && r.knocksWaiting() == 1);
+        d = knockDial(r, 3100, facts(), DialRules::kKnock);
+        CHECK(newsIs(r, DialRules::kKnockDialled, 1));
+        // While its dial is out: the other phone's knock waits, and goes once it has failed.
+        r.knocked(kTwo, 3200);
+        CHECK(!r.next(3300, facts(kOne, kTwo), &d) && r.knocksWaiting() == 1);
+        r.reply(kOne, kService, kService, 5, 3400);
+        d = knockDial(r, 3500, facts(kOne, kTwo), DialRules::kKnock);
+        CHECK(d.address == kTwo && newsIs(r, DialRules::kKnockDialled, 2));
+        // Up: a knock from the other phone is ignored once the link counts as the agent's.
+        r.reply(kTwo, kService, kService, 0, 3600);
+        r.linkUp(3700);
+        r.knocked(kOne, 9000);   // its quiet time is over
+        f = facts(kOne, kTwo);
+        f.linkUp = f.linkOfOurs = true;
+        CHECK(!r.next(9000, f, &d) && newsIs(r, DialRules::kKnockBusy, 1));
+        r.ending();
+        r.ended(9500);
+        // One that waits too long is ignored.
+        r.knocked(kOne, 10000);
+        f = facts(kOne, kTwo);
+        f.requestPending = true;
+        CHECK(!r.next(10000 + 4000 - 1, f, &d) && r.knocksWaiting() == 1);
+        CHECK(!r.next(10000 + 4000, f, &d) && newsIs(r, DialRules::kKnockBusy, 1) && r.knocksWaiting() == 0);
+        // No device list yet: it waits for one.
+        DialRules s(knocks());
+        s.knocked(kOne, 1000);
+        CHECK(!s.next(1000, facts(), &d) && s.knocksWaiting() == 1);
+        present(s, 1500);
+        knockDial(s, 1500, facts(), DialRules::kKnock);
+    }
+    {   // the connects of one burst that come up one after another bring one dial: the second finds the first
+        // waiting, or its dial out
+        DialRules r(knocks());
+        present(r, 1000);
+        DialRules::Dial d;
+        CHECK(r.knocked(kOne, 2000) == DialRules::kKnockWaits);
+        DialRules::Facts f = facts();
+        f.requestPending = true;   // the next connect's request
+        CHECK(!r.next(2010, f, &d));
+        CHECK(r.knocked(kOne, 2300) == DialRules::kKnockBusy);
+        knockDial(r, 2400, facts(), DialRules::kKnock);
+        CHECK(r.knocked(kOne, 3100) == DialRules::kKnockBusy);
+        CHECK(!r.next(3200, facts(), &d) && r.knockCounts().dials == 1 && r.knockCounts().ignoredBusy == 2);
+    }
+    {   // the pairing window's rounds and serial.dial, with no ask: every phone in turn
+        DialRules r(knocks());
+        present(r, 1000, true);
+        DialRules::Facts f = facts();
+        f.pairingOpen = true;
+        DialRules::Dial d = knockDial(r, 2000, f, DialRules::kPairing);
+        CHECK(d.address == kOne);
+        r.reply(kOne, kService, kService, 5, 2100);
+        d = knockDial(r, 2200, f, DialRules::kPairing);
+        CHECK(d.address == kTwo && r.quietUntil(kOne) == 0);   // no knock's dial: no quiet time
+        r.reply(kTwo, kService, kService, 5, 2300);
+        CHECK(!r.next(2400, f, &d));
+        knockDial(r, 2000 + 5000, f, DialRules::kPairing);
+        r.reply(kOne, kService, kService, 14, 7100);
+        CHECK(!r.next(7200, facts(), &d));   // closed: the rest of the round is not the agent's
+        CHECK(r.force() == 2);
+        d = knockDial(r, 8000, facts(), DialRules::kForced);
+        CHECK(r.knockCounts().dials == 0);
+    }
+    {   // on trial: the agent's phones that are there, every trialDialMs, while no link of the agent's is up, and
+        // no more once the version is confirmed
+        DialRules r(knocks());
+        present(r, 1000, true);
+        DialRules::Facts f = facts(kOne, kTwo);
+        f.onTrial = true;
+        DialRules::Dial d = knockDial(r, 2000, f, DialRules::kTrial);
+        CHECK(d.address == kOne);
+        r.reply(kOne, kService, kService, 5, 2100);
+        d = knockDial(r, 2200, f, DialRules::kTrial);
+        CHECK(d.address == kTwo);
+        r.reply(kTwo, kService, kService, 5, 2300);
+        CHECK(!r.next(2400, f, &d) && !r.next(6999, f, &d));
+        d = knockDial(r, 7000, f, DialRules::kTrial);
+        CHECK(r.reply(kOne, kService, kService, 0, 7100) == DialRules::kOpenNode);
+        r.linkUp(7200);
+        f.linkUp = f.linkOfOurs = true;
+        CHECK(!r.next(13000, f, &d));
+        r.ending();
+        r.ended(14000);
+        f.linkUp = f.linkOfOurs = false;
+        knockDial(r, 14000, f, DialRules::kTrial);   // overdue since the link came: at once
+        r.reply(kOne, kService, kService, 5, 14100);
+        f.onTrial = false;   // confirmed: the rest of the round goes too
+        CHECK(!r.next(14200, f, &d) && !r.next(30000, f, &d));
+        // Only the agent's phones.
+        DialRules s(knocks());
+        present(s, 1000, true);
+        DialRules::Facts g = facts(kTwo);
+        g.onTrial = true;
+        d = knockDial(s, 2000, g, DialRules::kTrial);
+        CHECK(d.address == kTwo);
+        s.reply(kTwo, kService, kService, 5, 2100);
+        CHECK(!s.next(2200, g, &d));
+    }
+}
+
+// The trial's rounds for trialDialForMs only (dial_rules.hpp, "The trial's rounds go on for trialDialForMs only").
+static void testTrialTime() {
+    CHECK(DialConfig().trialDialForMs == 120000);
+    DialConfig c = knocks();
+    c.trialDialForMs = 20000;
+    {   // rounds every trialDialMs, each dial failing, and none once the time is up: the rest of a round under way
+        // is dropped, the log is told once, and a knock is dialled as when the agent is not on trial
+        DialRules r(c);
+        present(r, 1000, true);
+        DialRules::Facts f = facts(kOne, kTwo);
+        f.onTrial = true;
+        DialRules::Dial d;
+        for (int64_t round = 2000; round < 22000; round += 5000) {
+            d = knockDial(r, round, f, DialRules::kTrial);
+            CHECK(d.address == kOne && r.trialDialsFrom() == 2000 && !r.trialDialsOver());
+            if (round == 17000) {
+                // Phone two is still to come in this round when the time runs out.
+                CHECK(r.reply(kOne, kService, kService, 5, 21999) == DialRules::kNotListening);
+                break;
+            }
+            CHECK(r.reply(kOne, kService, kService, 5, round + 100) == DialRules::kNotListening);
+            d = knockDial(r, round + 200, f, DialRules::kTrial);
+            CHECK(d.address == kTwo);
+            CHECK(r.reply(kTwo, kService, kService, 14, round + 300) == DialRules::kUnreachable);
+            CHECK(!r.next(round + 400, f, &d) && !r.next(round + 4999, f, &d) && !r.takeTrialOver());
+        }
+        CHECK(r.dialFailures(kOne) == 4 && r.dialFailures(kTwo) == 3 && r.recordDoubtful());
+        CHECK(!r.next(22000, f, &d) && r.state() == DialRules::kIdle);
+        CHECK(r.trialDialsOver() && r.takeTrialOver() && !r.takeTrialOver());
+        for (int64_t t = 22000; t < 22000 + 600000; t += 1000) CHECK(!r.next(t, f, &d));
+        CHECK(!r.takeTrialOver());
+        // Still on trial: a knock is dialled as at any other time.
+        CHECK(r.knocked(kOne, 700000) == DialRules::kKnockWaits);
+        d = knockDial(r, 700000, f, DialRules::kKnock);
+        CHECK(d.address == kOne);
+        CHECK(r.reply(kOne, kService, kService, 5, 700100) == DialRules::kNotListening);
+        CHECK(!r.next(700200, f, &d) && !r.next(800000, f, &d));
+        // A dial of the trial's that is out when the time runs out runs to its answer; the round goes no further.
+        DialRules s(c);
+        present(s, 1000, true);
+        d = knockDial(s, 2000, f, DialRules::kTrial);
+        CHECK(!s.next(30000, f, &d) && s.state() == DialRules::kDialling && s.trialDialsOver() && s.takeTrialOver());
+        CHECK(s.reply(kOne, kService, kService, 5, 30100) == DialRules::kNotListening);
+        CHECK(!s.next(30200, f, &d) && !s.next(60000, f, &d));
+    }
+    {   // the clock starts at the first next() that finds the trial, the service registered and the car's device
+        // list come, whatever else holds a round back then; not at the rules' start
+        DialRules r(c);
+        DialRules::Facts f = facts();
+        f.onTrial = true;
+        f.registered = false;
+        DialRules::Dial d;
+        CHECK(!r.next(1000, f, &d) && r.trialDialsFrom() == 0);
+        present(r, 50000);
+        CHECK(!r.next(60000, f, &d) && r.trialDialsFrom() == 0);   // no service yet
+        f.registered = true;
+        DialRules::Facts noList = f;
+        DialRules s(c);
+        CHECK(!s.next(70000, noList, &d) && s.trialDialsFrom() == 0);   // no device list yet
+        f.linkOfOurs = f.linkUp = true;   // a link of the agent's holds the round back, not the clock
+        CHECK(!r.next(100000, f, &d) && r.trialDialsFrom() == 100000);
+        f.linkOfOurs = f.linkUp = false;
+        d = knockDial(r, 110000, f, DialRules::kTrial);
+        r.reply(kOne, kService, kService, 5, 110100);
+        d = knockDial(r, 115100, f, DialRules::kTrial);
+        r.reply(kOne, kService, kService, 5, 115200);
+        CHECK(!r.next(120000 - 1, f, &d) && !r.trialDialsOver());
+        CHECK(!r.next(120000, f, &d) && r.trialDialsOver() && r.takeTrialOver());
+        // The service going and coming back does not start it again.
+        r.serviceGone();
+        present(r, 130000);
+        CHECK(!r.next(130000, f, &d) && r.trialDialsOver() && !r.takeTrialOver());
+    }
+    {   // a confirmed trial ends the count with nothing to say; a new trial has its own time, and its first round at
+        // the first chance
+        DialRules r(c);
+        present(r, 1000);
+        DialRules::Facts f = facts();
+        f.onTrial = true;
+        DialRules::Dial d = knockDial(r, 2000, f, DialRules::kTrial);
+        r.reply(kOne, kService, kService, 5, 2100);
+        CHECK(!r.next(22000, f, &d) && r.takeTrialOver());
+        f.onTrial = false;   // confirmed after the time
+        CHECK(!r.next(23000, f, &d) && !r.trialDialsOver() && r.trialDialsFrom() == 0 && !r.takeTrialOver());
+        f.onTrial = true;   // a new trial
+        d = knockDial(r, 24000, f, DialRules::kTrial);
+        CHECK(r.trialDialsFrom() == 24000 && !r.trialDialsOver());
+        r.reply(kOne, kService, kService, 5, 24100);
+        knockDial(r, 29000, f, DialRules::kTrial);
+        r.reply(kOne, kService, kService, 5, 29100);
+        f.onTrial = false;   // confirmed in its time: nothing for the log
+        CHECK(!r.next(30000, f, &d) && !r.takeTrialOver() && !r.next(60000, f, &d));
+        f.onTrial = true;   // and another
+        for (int64_t round = 61000; round < 81000; round += 5000) {
+            knockDial(r, round, f, DialRules::kTrial);
+            r.reply(kOne, kService, kService, 5, round + 100);
+        }
+        CHECK(!r.next(81000 - 1, f, &d) && !r.trialDialsOver() && r.trialDialsFrom() == 61000);
+        CHECK(!r.next(81000, f, &d) && r.trialDialsOver() && r.takeTrialOver());
+    }
+    {   // --dial-knock off: the trial changes nothing, and has no time of its own
+        DialConfig off = plain();
+        off.trialDialForMs = 20000;
+        DialRules onTrial(off), not_(off);
+        present(onTrial, 1000, true);
+        present(not_, 1000, true);
+        DialRules::Facts f = facts(kOne, kTwo), g = facts(kOne, kTwo);
+        f.onTrial = true;
+        for (int64_t t = 1000; t < 400000; t += 500) {
+            DialRules::Dial a, b;
+            bool da = onTrial.next(t, f, &a), db = not_.next(t, g, &b);
+            std::string at = "at " + num((size_t)t);
+            CHECK_IN(at, da == db && onTrial.state() == not_.state());
+            if (!da) continue;
+            CHECK_IN(at, a.address == b.address && a.why == b.why && a.why != DialRules::kTrial);
+            CHECK_IN(at, onTrial.listing(a.address, 0, false, f, t) == not_.listing(b.address, 0, false, g, t));
+        }
+        CHECK(!onTrial.takeTrialOver() && !onTrial.trialDialsOver() && onTrial.trialDialsFrom() == 0);
+    }
+}
+
 int main() {
+    testKnock();
+    testTrialTime();
     testRepoint();
     testAnswers();
     testAsk();

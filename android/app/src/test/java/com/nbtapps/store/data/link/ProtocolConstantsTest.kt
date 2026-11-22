@@ -39,6 +39,10 @@ class ProtocolConstantsTest {
         "serial.silenceMs" to ProtocolConstants.SERIAL_SILENCE_MS.toString(),
         "serial.decideMs" to ProtocolConstants.SERIAL_DECIDE_MS.toString(),
         "serial.lingerMs" to ProtocolConstants.SERIAL_LINGER_MS.toString(),
+        "serial.knockMagic" to ProtocolConstants.SERIAL_KNOCK_MAGIC,
+        "serial.knockAttempts" to ProtocolConstants.SERIAL_KNOCK_ATTEMPTS.toString(),
+        "serial.knockGapMs" to ProtocolConstants.SERIAL_KNOCK_GAP_MS.toString(),
+        "serial.knockHoldMs" to ProtocolConstants.SERIAL_KNOCK_HOLD_MS.toString(),
         "pairing.codeDigits" to ProtocolConstants.PAIRING_CODE_DIGITS.toString(),
         "pairing.windowSeconds" to ProtocolConstants.PAIRING_WINDOW_SECONDS.toString(),
         "pairing.tries" to ProtocolConstants.PAIRING_TRIES.toString(),
@@ -50,6 +54,7 @@ class ProtocolConstantsTest {
         "capability.checks" to ProtocolConstants.CAPABILITY_CHECKS,
         "capability.serialReset" to ProtocolConstants.CAPABILITY_SERIAL_RESET,
         "capability.serialDial" to ProtocolConstants.CAPABILITY_SERIAL_DIAL,
+        "capability.serialKnock" to ProtocolConstants.CAPABILITY_SERIAL_KNOCK,
         "capability.settings" to ProtocolConstants.CAPABILITY_SETTINGS,
         "settings.maxValueBytes" to ProtocolConstants.SETTINGS_MAX_VALUE_BYTES.toString(),
     )
@@ -75,6 +80,13 @@ class ProtocolConstantsTest {
         // The agent's log says a link is still up, after its own end closed, well before the app's keep-alive would
         // end it. So the app has to end the link when `link.closing` comes, which SerialSessionTest holds it to.
         assertTrue(ProtocolConstants.SERIAL_LINGER_MS in 1 until ProtocolConstants.SERIAL_SILENCE_MS)
+        // A knock is more than one connect, since one may fail on the phone while another app's link is up, and the
+        // one that comes up is held past the agent's decide step; the knock's magic bytes are four, as the link's are,
+        // and not the same.
+        assertTrue(ProtocolConstants.SERIAL_KNOCK_ATTEMPTS >= 2 && ProtocolConstants.SERIAL_KNOCK_GAP_MS > 0)
+        assertTrue(ProtocolConstants.SERIAL_KNOCK_HOLD_MS > ProtocolConstants.SERIAL_DECIDE_MS)
+        assertEquals(ProtocolConstants.SERIAL_KNOCK_MAGIC, String(FrameCodec.KNOCK_MAGIC, Charsets.US_ASCII))
+        assertFalse(FrameCodec.KNOCK_MAGIC.contentEquals(FrameCodec.MAGIC))
         // A package's serial service may have neither the agent's name nor the car's.
         assertFalse(ManifestParser.isSerialServiceName(ProtocolConstants.SERIAL_SERVICE_NAME))
         assertFalse(ManifestParser.isSerialServiceName("SPP"))

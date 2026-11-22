@@ -271,6 +271,8 @@ CONSTANTS = {
     "serial.serviceName": "name", "serial.serviceUuid": "uuid", "serial.maxFrame": "number",
     "serial.pingAfterMs": "number", "serial.silenceMs": "number", "serial.decideMs": "number",
     "serial.lingerMs": "number",
+    "serial.knockMagic": "name", "serial.knockAttempts": "number", "serial.knockGapMs": "number",
+    "serial.knockHoldMs": "number",
     "pairing.codeDigits": "number", "pairing.windowSeconds": "number", "pairing.tries": "number",
     "pairing.pauseSeconds": "number", "auth.nonceBytes": "number",
     "capability.autostart": "name",
@@ -279,6 +281,7 @@ CONSTANTS = {
     "capability.checks": "name",
     "capability.serialReset": "name",
     "capability.serialDial": "name",
+    "capability.serialKnock": "name",
     "capability.settings": "name",
     "settings.maxValueBytes": "number",
 }
@@ -319,6 +322,12 @@ def check_constants():
         fail("constants.txt: serial.decideMs is not well below the time a link may be silent")
     if not 1000 <= values["serial.lingerMs"] < values["serial.silenceMs"]:
         fail("constants.txt: serial.lingerMs gives a phone no time to end its link, or more than a silent link gets")
+    if len(values["serial.knockMagic"]) != 4 or values["serial.knockMagic"] == "NBTL":
+        fail("constants.txt: serial.knockMagic is not four bytes other than the link's magic bytes")
+    if values["serial.knockAttempts"] < 2:
+        fail("constants.txt: a knock is one connect, which may fail on the phone while another app's link is up")
+    if values["serial.knockHoldMs"] <= values["serial.decideMs"]:
+        fail("constants.txt: serial.knockHoldMs ends a knock link before the agent has decided on it")
     return values
 
 

@@ -217,6 +217,9 @@ static void testStream() {
     CHECK(full.next(&frame, &why) == FrameDecoder::kFrame && frame.payload == largest && frame.last());
 
     CHECK(memcmp(kLinkMagic, "NBTL", 4) == 0);
+    // The knock's bytes are the protocol's, and differ from the link's.
+    CHECK(memcmp(kKnockMagic, kSerialKnockMagic, kLinkMagicBytes) == 0 && strlen(kSerialKnockMagic) == kLinkMagicBytes);
+    CHECK(memcmp(kKnockMagic, kLinkMagic, kLinkMagicBytes) != 0);
 }
 
 // ---- the vectors file ---------------------------------------------------------------------------------------------

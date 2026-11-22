@@ -60,6 +60,10 @@ int main(int argc, char** argv) {
     code["serial.silenceMs"] = num(kSerialSilenceMs);
     code["serial.decideMs"] = num(kSerialDecideMs);
     code["serial.lingerMs"] = num(kSerialLingerMs);
+    code["serial.knockMagic"] = kSerialKnockMagic;
+    code["serial.knockAttempts"] = num(kSerialKnockAttempts);
+    code["serial.knockGapMs"] = num(kSerialKnockGapMs);
+    code["serial.knockHoldMs"] = num(kSerialKnockHoldMs);
     code["pairing.codeDigits"] = num(kPairingCodeDigits);
     code["pairing.windowSeconds"] = num(kPairingWindowSeconds);
     code["pairing.tries"] = num(kPairingTries);
@@ -71,6 +75,7 @@ int main(int argc, char** argv) {
     code["capability.checks"] = kCapabilityChecks;
     code["capability.serialReset"] = kCapabilitySerialReset;
     code["capability.serialDial"] = kCapabilitySerialDial;
+    code["capability.serialKnock"] = kCapabilitySerialKnock;
     code["capability.settings"] = kCapabilitySettings;
     code["settings.maxValueBytes"] = num((long long)kSettingsMaxValueBytes);
 
@@ -94,10 +99,17 @@ int main(int argc, char** argv) {
     CHECK(kAuthNonceBytes >= 16);
     // A setting's value holds a select's value (64 characters) and fits a serial frame many times over.
     CHECK(kSettingsMaxValueBytes >= 64 && kSettingsMaxValueBytes * 4 <= kSerialMaxFrame);
+    // The knock: its bytes are as many as the link's and differ from them; a knock is more than one connect, since one
+    // may fail on the phone while another app's link is up, and the knock link is held past the decide step.
+    CHECK(std::string(kSerialKnockMagic).size() == 4 && std::string(kSerialKnockMagic) != "NBTL");
+    CHECK(kSerialKnockAttempts >= 2 && kSerialKnockGapMs > 0);
+    CHECK(kSerialKnockHoldMs > kSerialDecideMs);
     // The listener registers exactly this service, and decides on a link in exactly this time.
     SerialConfig config;
     CHECK(config.name == kSerialServiceName && config.uuid == kSerialServiceUuid);
     CHECK(config.decideMs == (unsigned)kSerialDecideMs && config.lingerMs == (unsigned)kSerialLingerMs);
+    // And knocks with the dial.
+    CHECK(config.dial.on && config.dial.knock);
     std::string asGiven;   // to the stack
     CHECK(btspp::normaliseUuid(kSerialServiceUuid, &asGiven) && asGiven == kSerialServiceUuid);
     CHECK(btspp::isServiceName(kSerialServiceName));
