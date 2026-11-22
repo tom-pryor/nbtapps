@@ -554,7 +554,9 @@ class AutostartSetupTest {
 
         val lost = ended() as AutostartStep.Failed
         assertTrue(lost.reason, lost.reason.startsWith("The app lost its link to the head unit."))
-        // With no link there is nothing to set up.
+        // With no link there is nothing to set up. The set-up ends as the job is marked lost, which is just before
+        // the connection says that the link is gone, so that is waited for.
+        await(jobs.connection, "the link's end") { it !is ConnectionState.Connected }
         setup.retry()
         val none = ended() as AutostartStep.Failed
         assertTrue(none.reason, none.reason.startsWith("The app has no link to the head unit."))
