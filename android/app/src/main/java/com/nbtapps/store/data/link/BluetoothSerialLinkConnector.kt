@@ -114,8 +114,8 @@ class SerialConnectTimes(
     /** How long a knock's connect that came up is kept for the car's link, as the protocol has it. */
     val knockHoldMillis: Long = ProtocolConstants.SERIAL_KNOCK_HOLD_MS,
     /**
-     * The most one of a knock's connects is given to come up or fail. Most fail or come up well within it; one the car
-     * neither answers nor refuses would otherwise take a burst's whole time.
+     * The most one of a knock's connects is given to come up or fail. Most fail or come up well within it; one that has
+     * no answer in it has not reached the car, and ends the knock ([BluetoothSerialLinkConnector.knock]).
      */
     val knockTryMillis: Long = 5_000,
     /** How many bursts a knock makes at most, where its caller does not say. */
@@ -162,8 +162,10 @@ class SerialConnectTimes(
  * service. One that comes up carries the knock's magic bytes and nothing else, and is closed once the car's link has
  * come or its hold is over; one the car refuses reaches no agent and is no knock, so where the car refuses the phone's
  * links (it has no media audio connection to the phone) the app cannot knock. A burst has several connects because
- * one may fail on the phone while another app's link to the car is up. The car's link that follows is the link, and no
- * link of the phone's own is made.
+ * one may fail on the phone while another app's link to the car is up. A connect that does not reach the car at all
+ * (no answer in its time, or a failure while the phone has no connection to the car) ends the knock at once: the car
+ * is off or out of range, and more connects would only keep the user waiting. The car's link that follows a knock is
+ * the link, and no link of the phone's own is made.
  *
  * The socket is the authenticated, encrypted kind, so the link is to the car the phone is paired with, and
  * nobody listens in. That does not say who opened it: any app on a paired phone can. The agent therefore asks
@@ -213,33 +215,41 @@ class BluetoothSerialLinkConnector(
         }
         // This connect's own tries, for why none came up.
         val tries = CopyOnWriteArrayList<LinkTry>()
-        return coroutineScope {
-            val listening = launch {
+        try {
+            return coroutineScope {
+                val listening = launch {
+                    try {
+                        offer(listener.accept(listOf(serial.address), first = true).link, "car's")
+                    } catch (e: IOException) {
+                        // The phone cannot listen now: the dial goes on alone.
+                    }
+                }
+                val dialling = launch {
+                    try {
+                        offer(SerialLink(connectWithRetry(window, times.pauseMillis, now, times.maxPauseMillis) { dial(serial.address, tries) }), "phone's")
+                    } catch (e: ConnectFailedException) {
+                        log.line("connect: gave up after ${e.tries}")
+                        won.completeExceptionally(IOException(gaveUp(serial, e, causeOf(tries), dials), e))
+                    }
+                }
                 try {
-                    offer(listener.accept(listOf(serial.address), first = true).link, "car's")
-                } catch (e: IOException) {
-                    // The phone cannot listen now: the dial goes on alone.
+                    won.await()
+                } finally {
+                    listening.cancel()
+                    dialling.cancel()
                 }
             }
-            val dialling = launch {
-                try {
-                    offer(SerialLink(connectWithRetry(window, times.pauseMillis, now, times.maxPauseMillis) { dial(serial.address, tries) }), "phone's")
-                } catch (e: ConnectFailedException) {
-                    log.line("connect: gave up after ${e.tries}")
-                    won.completeExceptionally(IOException(gaveUp(serial, e, causeOf(tries), dials), e))
-                }
-            }
-            try {
-                won.await()
-            } catch (e: CancellationException) {
-                // A link that came up just as the caller gave up is nobody's, and must not hold the car's link.
-                if (!won.completeExceptionally(e) && won.getCompletionExceptionOrNull() == null) won.getCompleted().close()
-                throw e
-            } finally {
-                listening.cancel()
-                dialling.cancel()
-            }
+        } catch (e: CancellationException) {
+            // The caller gave up: while the connect waited, or once a link had won, while the other way was still being
+            // ended. A link that won is nobody's then, and must not hold the car's link.
+            closeWon(won, e)
+            throw e
         }
+    }
+
+    /** A link [won] holds, which a caller cancelled with [cause] will never have, is closed; one still to come is too. */
+    private fun closeWon(won: CompletableDeferred<Link>, cause: CancellationException) {
+        if (!won.completeExceptionally(cause) && won.getCompletionExceptionOrNull() == null) won.getCompleted().close()
     }
 
     /**
@@ -280,17 +290,21 @@ class BluetoothSerialLinkConnector(
      * the end of the one before, whatever came of it ([knockOnce]); after its last, the car's link is waited for
      * [SerialConnectTimes.knockSettleMillis], and the next burst follows [SerialConnectTimes.knockPauseMillis] later.
      * The car's link ends the knocking the moment it is handed over, with the link's magic bytes written on it, and is
-     * returned. Each connect, each burst that had nothing and what the knocking came to are kept in the diagnostics;
-     * with [fallback], what it came to says that it was made because the agent dials and the connect had no link
-     * ([LinkTry.Path.FALLBACK_KNOCK_CONNECT]).
+     * returned. Each connect, each burst that had nothing and what the knocking came to are kept in the diagnostics.
      *
-     * A caller that is cancelled leaves nothing open: no connect of the knock's, no wait on the listener, no car's link.
+     * A connect that does not reach the car ([knockOnce]) ends the knocking at once, with no connect after it: the car
+     * is off or out of range then, and the rest would only take their time, with the user waiting. The first connect is
+     * always made, so a car in range whose connection to the phone that connect brings up is knocked at all the same.
      *
-     * @throws KnockUnansweredException if no link of the car's came after the last burst.
+     * A caller that is cancelled leaves nothing open: no connect of the knock's, no wait on the listener, no car's link,
+     * even one handed over as the caller gave up.
+     *
+     * @throws KnockUnansweredException if no link of the car's came after the last burst, or, [KnockUnansweredException.carAway],
+     *   after a connect that did not reach the car.
      * @throws NoCarLinkException if the phone cannot listen for it: then knocking would bring a link nobody takes.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: Boolean): Link {
+    override suspend fun knock(endpoint: Endpoint, bursts: Int?): Link {
         val serial = endpoint as? SerialEndpoint ?: throw IOException("Not a Bluetooth serial endpoint")
         radio.unavailable(serial.address)?.let { throw IOException(it) }
         val most = (bursts ?: times.knockBursts).coerceAtLeast(1)
@@ -299,53 +313,66 @@ class BluetoothSerialLinkConnector(
         val came = CompletableDeferred<Link>()
         // Where the knocking is, for what the diagnostics say brought the link.
         val at = AtomicReference<String?>(null)
-        val path = if (fallback) LinkTry.Path.FALLBACK_KNOCK_CONNECT else LinkTry.Path.KNOCK_CONNECT
         fun record(outcome: LinkTry.Outcome, failure: Throwable? = null, facts: TryFacts = TryFacts(), detail: String? = null) =
-            log.line(diagnostics.record(path, outcome, now() - began, failure, facts, detail).describe())
-        return coroutineScope {
-            val listening = launch {
-                try {
-                    val accepted = listener.accept(listOf(serial.address), first = true)
-                    if (!came.complete(accepted.link)) accepted.link.close()
-                } catch (e: IOException) {
-                    came.completeExceptionally(NoCarLinkException("This phone can't listen for the car's link: ${e.message}", e))
-                }
-            }
-            val knocking = launch {
-                for (burst in 1..most) {
-                    if (burst > 1 && carCame(came, times.knockPauseMillis)) return@launch
-                    val burstBegan = now()
-                    for (attempt in 1..times.knockAttempts) {
-                        if (attempt > 1 && carCame(came, times.knockGapMillis)) return@launch
-                        at.set("in burst $burst of $most, after connect $attempt")
-                        knockOnce(serial.address, came, "$burst.$attempt")
-                        if (came.isCompleted) return@launch
+            log.line(diagnostics.record(LinkTry.Path.KNOCK_CONNECT, outcome, now() - began, failure, facts, detail).describe())
+        val link = try {
+            coroutineScope {
+                val listening = launch {
+                    try {
+                        val accepted = listener.accept(listOf(serial.address), first = true)
+                        if (!came.complete(accepted.link)) accepted.link.close()
+                    } catch (e: IOException) {
+                        came.completeExceptionally(NoCarLinkException("This phone can't listen for the car's link: ${e.message}", e))
                     }
-                    if (carCame(came, times.knockSettleMillis)) return@launch
-                    log.line(
-                        diagnostics.record(LinkTry.Path.KNOCK_BURST, LinkTry.Outcome.NO_LINK, now() - burstBegan, detail = "$burst of $most").describe(),
-                    )
                 }
-                came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED))
+                val knocking = launch {
+                    for (burst in 1..most) {
+                        if (burst > 1 && carCame(came, times.knockPauseMillis)) return@launch
+                        val burstBegan = now()
+                        for (attempt in 1..times.knockAttempts) {
+                            if (attempt > 1 && carCame(came, times.knockGapMillis)) return@launch
+                            at.set("in burst $burst of $most, after connect $attempt")
+                            val reached = knockOnce(serial.address, came, "$burst.$attempt")
+                            if (came.isCompleted) return@launch
+                            if (!reached) {
+                                came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED, carAway = true))
+                                return@launch
+                            }
+                        }
+                        if (carCame(came, times.knockSettleMillis)) return@launch
+                        log.line(
+                            diagnostics.record(LinkTry.Path.KNOCK_BURST, LinkTry.Outcome.NO_LINK, now() - burstBegan, detail = "$burst of $most").describe(),
+                        )
+                    }
+                    came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED))
+                }
+                try {
+                    came.await()
+                } catch (e: KnockUnansweredException) {
+                    val detail = when {
+                        e.carAway -> "${at.get()}, which did not reach the car,"
+                        most == 1 -> "of 1 burst"
+                        else -> "of $most bursts"
+                    }
+                    record(LinkTry.Outcome.NO_LINK, facts = facts(serial.address, null, null), detail = detail)
+                    throw e
+                } catch (e: NoCarLinkException) {
+                    record(LinkTry.Outcome.FAILED, e.cause)
+                    throw e
+                } finally {
+                    listening.cancel()
+                    knocking.cancel()
+                }
             }
-            try {
-                came.await().also { record(LinkTry.Outcome.TAKEN, detail = at.get()) }
-            } catch (e: CancellationException) {
-                // A link that was handed over just as the caller gave up is nobody's, and must not hold the car's link.
-                if (!came.completeExceptionally(e) && came.getCompletionExceptionOrNull() == null) came.getCompleted().close()
-                record(LinkTry.Outcome.CANCELLED)
-                throw e
-            } catch (e: KnockUnansweredException) {
-                record(LinkTry.Outcome.NO_LINK, facts = facts(serial.address, null, null), detail = if (most == 1) "of 1 burst" else "of $most bursts")
-                throw e
-            } catch (e: NoCarLinkException) {
-                record(LinkTry.Outcome.FAILED, e.cause)
-                throw e
-            } finally {
-                listening.cancel()
-                knocking.cancel()
-            }
+        } catch (e: CancellationException) {
+            // The caller gave up: while the knock waited, or once the car's link had been handed over, while the knock's
+            // own connects were still being ended. A link handed over is nobody's then, and must not hold the car's link.
+            closeWon(came, e)
+            record(LinkTry.Outcome.CANCELLED)
+            throw e
         }
+        record(LinkTry.Outcome.TAKEN, detail = at.get())
+        return link
     }
 
     /** Waits up to [millis] for [came] to be settled, a link or a failure, and says whether it is. */
@@ -359,13 +386,22 @@ class BluetoothSerialLinkConnector(
      * One that comes up is sent the knock's magic bytes and nothing else, nothing is read from it, and it is closed once
      * [came] is settled or [SerialConnectTimes.knockHoldMillis] have passed. One that fails, is refused, or hears
      * nothing is closed at once. A cancel, as when the car's link has come, closes it wherever it is. What came of it is
-     * kept in the diagnostics; a failure is no failure of the knock, which goes on.
+     * kept in the diagnostics, in one line: a connect that is cancelled after its line, as one that came up is in its
+     * hold, has no second.
+     *
+     * Whether it reached the car: false where it had no answer in its time, or failed while the phone had no connection
+     * to the car ([TryFacts.carConnected] false); then the car is off or out of range, and the knock ends ([knock]). One
+     * that came up, was refused by the car, or failed while the phone was connected to the car, or could not tell, did.
+     * Any other failure is no failure of the knock, which goes on.
      */
-    private suspend fun knockOnce(address: String, came: CompletableDeferred<Link>, which: String) {
+    private suspend fun knockOnce(address: String, came: CompletableDeferred<Link>, which: String): Boolean {
         val began = now()
         var made: SerialSocket? = null
-        fun note(outcome: LinkTry.Outcome, failure: Throwable?, facts: TryFacts) =
+        var noted = false
+        fun note(outcome: LinkTry.Outcome, failure: Throwable?, facts: TryFacts) {
+            noted = true
             log.line(diagnostics.record(LinkTry.Path.KNOCK, outcome, now() - began, failure, facts, which).describe())
+        }
         try {
             val socket = withContext(io) { radio.socket(address, SERVICE_UUID).also { made = it } }
             withTimeoutOrNull(times.knockTryMillis) { withContext(io) { bringUp(socket, FrameCodec.KNOCK_MAGIC) } } ?: run {
@@ -378,6 +414,7 @@ class BluetoothSerialLinkConnector(
             } finally {
                 socket.closeQuietly()
             }
+            return true
         } catch (e: IOException) {
             val facts = facts(address, made, e)
             // The socket found the agent's channel, so the request reached the car, which turned it down.
@@ -387,9 +424,10 @@ class BluetoothSerialLinkConnector(
                 else -> LinkTry.Outcome.FAILED
             }
             note(outcome, e, facts)
+            return outcome == LinkTry.Outcome.REFUSED || (outcome == LinkTry.Outcome.FAILED && facts.carConnected != false)
         } catch (e: CancellationException) {
             made?.closeQuietly()
-            note(LinkTry.Outcome.CANCELLED, null, TryFacts())
+            if (!noted) note(LinkTry.Outcome.CANCELLED, null, TryFacts())
             throw e
         }
     }

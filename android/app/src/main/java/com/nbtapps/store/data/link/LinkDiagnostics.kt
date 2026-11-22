@@ -72,12 +72,6 @@ data class LinkTry(
 
         /** A connect that knocked, and what came of it: the car's link, or none. Its time is from its start. */
         KNOCK_CONNECT("knocking connect"),
-
-        /**
-         * As [KNOCK_CONNECT], for the one burst a connect to a head unit whose agent dials, and is not known to dial
-         * only when knocked, makes where it had no link at all: see [LinkConnector.knock]'s `fallback`.
-         */
-        FALLBACK_KNOCK_CONNECT("knocking connect made because the agent dials and the connect had no link,"),
     }
 
     enum class Outcome(val label: String) {
