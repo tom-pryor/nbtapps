@@ -783,7 +783,10 @@ audio at the car ("The re-point", below).
 
 The phone app listens while it is open, or busy with something that needs the link (a job, a pull of logs), with
 Bluetooth on and no link, and not after the user's own Disconnect until they connect again or come back to the
-app; a connect of its own listens too, beside the phone's dial, and takes whichever link comes up first. Where
+app; a connect of its own listens too, beside the phone's dial, and takes whichever link comes up first. To an
+agent that lists `serial-knock` a connect knocks in place of the phone's dial, and listens for the car's link; the
+phone's own link is made only where the user asks for it (**Connect from the phone**), which the app offers where
+a knock brought no link. Where
 `info.get` said that the phone's own links are left to another program (`phoneOpenedLeft`), a connect makes no dial
 and only listens, for 40 seconds, and the app offers the phone's own connect, once, when no link came; a link the
 phone did open gives way to one the car opens while it waits for its answer. It listens on the secure kind of RFCOMM socket, so only a device paired with the phone gets through, and it takes a
