@@ -88,10 +88,10 @@ class SetupViewModelTest {
             return inner.connect(endpoint, dials, listenOnly)
         }
 
-        // A knock, as the one a connect that had no link makes to an agent that dials: no link of the phone's own.
-        override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: Boolean): Link {
+        // A knock, as a connect to an agent that dials only when knocked makes: no link of the phone's own.
+        override suspend fun knock(endpoint: Endpoint, bursts: Int?): Link {
             gate?.await()
-            return inner.knock(endpoint, bursts, fallback)
+            return inner.knock(endpoint, bursts)
         }
 
         // A link the car opens is never held.
@@ -225,14 +225,11 @@ class SetupViewModelTest {
         val id = headUnits.saveCar(car)
         headUnits.update(id) { it.copy(serialDial = true, phoneOpenedLeft = true) }
         connector.listenOnlyMs = 300
-        // The one knock before the connect fails brings no link either.
-        connector.knockMs = 300
         val viewModel = viewModel()
         viewModel.pickTheCar()
 
         val failed = viewModel.awaitStep("failed") { it is SetupStep.Connect && it.failure != null }
         assertEquals(SetupStep.Connect("The car didn't connect to this app", fromPhone = true), failed.step)
-        assertEquals(listOf<Int?>(1), connector.knocks)
 
         viewModel.connectFromPhone()
 

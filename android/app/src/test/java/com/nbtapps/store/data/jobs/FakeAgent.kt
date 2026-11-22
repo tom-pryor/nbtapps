@@ -716,23 +716,24 @@ class FakeConnector(
     /** Each knock, with the bursts it was asked for (null: the connector's own number), in order. */
     val knocks = CopyOnWriteArrayList<Int?>()
 
-    /** Whether each knock of [knocks] was a connect's one burst before it fails (`fallback`), in the same order. */
-    val fallbacks = CopyOnWriteArrayList<Boolean>()
-
     /** How long a knock waits for the car's link ([dialIn]) before it fails, in milliseconds. */
     @Volatile
     var knockMs = 10_000L
 
+    /** Whether a knock that brings no link stops as the app's does after a connect that did not reach the car. */
+    @Volatile
+    var knockAway = false
+
     /**
      * As the app's serial connector: over [serial], no link of the phone's, only one the car opens ([dialIn]) while the
-     * knock listens for it, and [KnockUnansweredException] where none comes in [knockMs]. Over TCP, a connect.
+     * knock listens for it, and [KnockUnansweredException] where none comes in [knockMs], [knockAway] as it says. Over
+     * TCP, a connect.
      */
-    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: Boolean): Link {
+    override suspend fun knock(endpoint: Endpoint, bursts: Int?): Link {
         knocks += bursts
-        fallbacks += fallback
         if (!serial) return connect(endpoint, dials = true)
         return withTimeoutOrNull(knockMs) { accept(listOf(endpoint)).link }
-            ?: throw KnockUnansweredException("The car didn't connect to this app after it knocked")
+            ?: throw KnockUnansweredException("The car didn't connect to this app after it knocked", carAway = knockAway)
     }
 
     override fun supports(endpoint: Endpoint): Boolean = if (serial) endpoint is SerialEndpoint else endpoint is TcpEndpoint

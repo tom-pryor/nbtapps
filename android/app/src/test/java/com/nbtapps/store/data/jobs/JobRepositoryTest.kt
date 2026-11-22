@@ -2330,8 +2330,6 @@ class JobRepositoryTest {
         val jobs = leftCar(left = true)
         dialler.onConnect = { leaves(it, true) }
         dialler.listenOnlyMs = 300
-        // The one knock before the failure (see the tests of a head unit saved before its agent took knocks) brings none.
-        dialler.knockMs = 300
 
         val failed = jobs.connect("bt")
 
@@ -2340,12 +2338,10 @@ class JobRepositoryTest {
         assertTrue(failure.listenedOnly)
         assertEquals("The car didn't connect to this app", failure.reason)
         assertTrue("the phone dialled", dialler.agents.isEmpty())
-        assertEquals(listOf<Int?>(1), dialler.knocks)
         // Any other failure offers nothing of the kind.
         dialler.unreachable = "No route to the car"
         assertTrue(jobs.connectFromPhone("bt").isFailure)
         assertFalse((jobs.connection.value as ConnectionState.Failed).listenedOnly)
-        assertEquals("the phone's own connect knocked", 1, dialler.knocks.size)
         dialler.unreachable = null
         // Held at its dial, so that the link is put in use while the connect runs: see [inUseFromHere].
         val dial = CountDownLatch(1)
@@ -2373,7 +2369,6 @@ class JobRepositoryTest {
         val jobs = leftCar(left = true)
         dialler.onConnect = { leaves(it, true) }
         dialler.listenOnlyMs = 300
-        dialler.knockMs = 300
         shown.state.value = true
         dialIn()
         await(jobs.connection, "the link") { it is ConnectionState.Connected }
@@ -2388,7 +2383,6 @@ class JobRepositoryTest {
         assertTrue(dialler.listenOnly.last())
         until("listening again, at rest") { jobs.connection.value == ConnectionState.Disconnected && dialler.listening.value > 0 }
         assertTrue("$seen", seen.none { it is ConnectionState.Failed })
-        assertEquals("the quiet connect's one knock", listOf<Int?>(1), dialler.knocks)
         dialIn()
         await(jobs.connection, "the link") { it is ConnectionState.Connected }
     }
@@ -2398,7 +2392,6 @@ class JobRepositoryTest {
         val jobs = leftCar(left = true, holding = setOf(carAddress))
         dialler.onConnect = { leaves(it, true) }
         dialler.listenOnlyMs = 300
-        dialler.knockMs = 300
         shown.state.value = true
         dialIn()
         await(jobs.connection, "the link") { it is ConnectionState.Connected }
@@ -2424,7 +2417,6 @@ class JobRepositoryTest {
             agent.capabilities = """["${ProtocolConstants.CAPABILITY_SERIAL_DIAL}","${ProtocolConstants.CAPABILITY_SERIAL_RESET}"]"""
         }
         dialler.listenOnlyMs = 300
-        dialler.knockMs = 300
         // In sight, so that the link is kept once it is idle; the car's link goes to the connect, once it listens.
         shown.state.value = true
         val before = dialler.listenOnly.size
@@ -2468,7 +2460,6 @@ class JobRepositoryTest {
         dialIn()
         assertTrue(connecting.await().isSuccess)
         dialler.listenOnlyMs = 100
-        dialler.knockMs = 100
 
         dialler.agent.closing(LinkClosing.RESTARTING)
 
@@ -2476,8 +2467,6 @@ class JobRepositoryTest {
         assertTrue(failed.reason, failed.reason.startsWith("The head unit's agent hasn't answered since it restarted."))
         assertTrue(failed.listenedOnly)
         assertTrue("${dialler.listenOnly}", dialler.listenOnly.size > 1 && dialler.listenOnly.all { it })
-        // Each try that had no link knocked once before it failed.
-        assertTrue("${dialler.knocks}", dialler.knocks.isNotEmpty() && dialler.knocks.all { it == 1 } && dialler.fallbacks.all { it })
     }
 
     // ---- a head unit whose agent dials when knocked --------------------------------------------------------------
@@ -2608,6 +2597,47 @@ class JobRepositoryTest {
         assertEquals(listOf(false), dialler.listenOnly)
     }
 
+    private val notInReach = "The car isn't in reach of this phone. Check that the car is on and nearby, then connect again."
+
+    @Test
+    fun `where a knock did not reach the car and the car does not hold the phone, the failure says the car is not in reach`() = test {
+        val jobs = leftCar(left = false, knocks = true)
+        dialler.knockMs = 100
+        dialler.knockAway = true
+        // The phone says there is no media audio while the car is off too: that is not what the user is told.
+        mediaAudio.set(false)
+
+        assertTrue(jobs.connect("bt").exceptionOrNull() is NoCarLinkException)
+        val away = jobs.connection.value as ConnectionState.Failed
+        assertEquals(notInReach, away.reason)
+        // The phone's own connect is offered, as after any connect that only listened.
+        assertTrue(away.listenedOnly)
+        mediaAudio.set(null)
+        assertTrue(jobs.connect("bt").isFailure)
+        assertEquals(notInReach, (jobs.connection.value as ConnectionState.Failed).reason)
+        assertTrue("the phone dialled", dialler.agents.isEmpty())
+
+        // A knock whose connects reached the car: the car is there, and the media audio it lacks is what is said.
+        dialler.knockAway = false
+        mediaAudio.set(false)
+        assertTrue(jobs.connect("bt").isFailure)
+        assertEquals(noMediaAudio, (jobs.connection.value as ConnectionState.Failed).reason)
+    }
+
+    @Test
+    fun `where a knock did not reach the car while the car holds the phone, the failure goes by the car's media audio`() = test {
+        val jobs = leftCar(left = false, knocks = true, holding = setOf(carAddress))
+        dialler.knockMs = 100
+        dialler.knockAway = true
+
+        mediaAudio.set(false)
+        assertTrue(jobs.connect("bt").isFailure)
+        assertEquals(noMediaAudio, (jobs.connection.value as ConnectionState.Failed).reason)
+        mediaAudio.set(true)
+        assertTrue(jobs.connect("bt").isFailure)
+        assertEquals(noCarLink, (jobs.connection.value as ConnectionState.Failed).reason)
+    }
+
     @Test
     fun `the app's own connects to such a head unit knock too, on coming back and after a reset`() = test {
         val jobs = leftCar(left = false, knocks = true, holding = setOf(carAddress))
@@ -2693,182 +2723,69 @@ class JobRepositoryTest {
         assertTrue("given up on too soon", (System.nanoTime() - told) / 1_000_000 >= 400 - 50)
         assertTrue("${dialler.knocks}", dialler.knocks.size > 2 && dialler.knocks.drop(1).all { it == 1 })
         assertTrue("the phone dialled", dialler.listenOnly.isEmpty())
-        assertTrue("${dialler.fallbacks}", dialler.fallbacks.none { it })
+    }
+
+    @Test
+    fun `the wait after the agent restarts goes on for its whole time where its knocks do not reach the car`() = test {
+        val jobs = leftCar(left = false, knocks = true, rejoin = Rejoin(firstAfterMs = 20, knockEveryMs = 50, knockGiveUpAfterMs = 400))
+        dialler.onConnect = { knocks(it) }
+        shown.state.value = true
+        val first = scope.async { jobs.connect("bt") }
+        until("the connect knocks") { dialler.knocks.size == 1 }
+        dialIn()
+        assertTrue(first.await().isSuccess)
+        // Each knock fails at once, as one at a car that is off or out of range does.
+        dialler.knockMs = 0
+        dialler.knockAway = true
+        val told = System.nanoTime()
+
+        dialler.agent.closing(LinkClosing.RESTARTING)
+
+        val failed = await(jobs.connection, "the giving up") { it is ConnectionState.Failed } as ConnectionState.Failed
+        assertEquals("The head unit's agent hasn't answered since it restarted. $notInReach", failed.reason)
+        // A knock every knockEveryMs until its time is up, however short each is.
+        assertTrue("given up on too soon", (System.nanoTime() - told) / 1_000_000 >= 400 - 50)
+        assertTrue("${dialler.knocks}", dialler.knocks.size > 3 && dialler.knocks.drop(1).all { it == 1 })
     }
 
     // ---- a head unit saved before its agent dialled only when knocked -------------------------------------------------
 
-    /**
-     * A connect to `bt`, saved as one whose agent dials and is not known to take knocks, while its agent now dials only
-     * when knocked: where the agent leaves the phone's own links ([left]) it only listens, and otherwise the phone's
-     * own link does not come up. Neither brings a link: one knock burst does, and the connect succeeds over it.
-     */
-    private suspend fun knockedAfterNoLink(left: Boolean) = coroutineScope {
-        val jobs = leftCar(left = left)
-        dialler.listenOnlyMs = 100
-        dialler.unreachable = if (left) null else "No route to the car"
-        dialler.onConnect = { knocks(it, left = left) }
-
-        val connecting = async { jobs.connect("bt") }
-        until("the knock") { dialler.knocks.isNotEmpty() }
-        inUseFromHere(jobs)
-        val agent = dialIn()
-
-        assertTrue(connecting.await().isSuccess)
-        assertEquals(listOf<Int?>(1), dialler.knocks)
-        assertEquals(listOf(true), dialler.fallbacks)
-        assertEquals(if (left) listOf(true) else listOf(false), dialler.listenOnly)
-        assertEquals("a link of the phone's own came up", listOf(agent), dialler.agents)
-        assertEquals(listOf("hello", "info.get"), methods(agent).take(2))
-        assertEquals("bt", (jobs.connection.value as ConnectionState.Connected).headUnitId)
-        assertTrue(saved("bt").serialKnock && saved("bt").serialDial)
-    }
-
     @Test
-    fun `a connect that only listened and got no link knocks once at an agent that dials, and the car's link it brings connects`() = test {
-        knockedAfterNoLink(left = true)
-    }
-
-    @Test
-    fun `a connect whose own link did not come up knocks once at an agent that dials, and the car's link it brings connects`() = test {
-        knockedAfterNoLink(left = false)
-    }
-
-    @Test
-    fun `where that knock brings no link either, the connect fails as it did without it`() = test {
+    fun `where a connect that only listened had no link, the phone's own connect saves that the agent takes knocks, and the next connect knocks`() = test {
+        // Saved as one whose agent dials and leaves the phone's own links; its agent now dials only when knocked.
         val jobs = leftCar(left = true)
         dialler.listenOnlyMs = 100
-        dialler.knockMs = 100
-        mediaAudio.set(false)
 
-        val listening = jobs.connect("bt")
-
-        assertTrue(listening.exceptionOrNull() is NoCarLinkException)
-        val alone = jobs.connection.value as ConnectionState.Failed
-        assertEquals("The car didn't connect to this app", alone.reason)
-        assertTrue(alone.listenedOnly)
-        assertEquals(listOf<Int?>(1), dialler.knocks)
-        assertEquals(listOf(true), dialler.fallbacks)
-
-        // Where the phone's own link did not come up: its failure, and no offer of the phone's own connect.
-        headUnits.update("bt") { it.copy(phoneOpenedLeft = false) }
-        dialler.unreachable = "No route to the car"
-        val dialling = jobs.connect("bt")
-
-        assertFalse(dialling.exceptionOrNull() is NoCarLinkException)
-        assertEquals("No route to the car", dialling.exceptionOrNull()?.message)
-        val failed = jobs.connection.value as ConnectionState.Failed
-        assertEquals("No route to the car", failed.reason)
-        assertFalse(failed.listenedOnly)
-        assertEquals(listOf<Int?>(1, 1), dialler.knocks)
-        assertTrue(dialler.agents.isEmpty())
-        assertFalse(saved("bt").serialKnock)
-        until("nothing listens") { dialler.listening.value == 0 }
-    }
-
-    @Test
-    fun `no such knock where the agent does not dial, after a link that failed at hello, or for the phone's own connect`() = test {
-        val jobs = leftCar(left = false, dials = false, waitMs = 200)
-        dialler.knockMs = 100
-        dialler.unreachable = "No route to the car"
-        assertEquals("No route to the car", jobs.connect("bt").exceptionOrNull()?.message)
-        assertTrue(dialler.knocks.isEmpty())
-
-        // A link that came up and did not answer hello, or info.get, or did not take the phone: no knock.
-        headUnits.update("bt") { it.copy(serialDial = true) }
-        dialler.unreachable = null
-        dialler.onConnect = { it.silent += "hello" }
-        assertEquals("The head unit didn't answer (3 links were tried)", jobs.connect("bt").exceptionOrNull()?.message)
-        dialler.onConnect = { agent ->
-            leaves(agent, false)
-            agent.silent += "info.get"
-        }
-        assertTrue(jobs.connect("bt").isFailure)
-        dialler.onConnect = { agent ->
-            leaves(agent, false)
-            agent.handlers["hello"] = { throw Refusal("forbidden") }
-        }
-        assertTrue(jobs.connect("bt").isFailure)
-        assertTrue("${dialler.knocks}", dialler.knocks.isEmpty())
-
-        // The phone's own connect, which the user asks for where one only listened.
-        headUnits.update("bt") { it.copy(phoneOpenedLeft = true) }
-        dialler.unreachable = "No route to the car"
-        assertTrue(jobs.connectFromPhone("bt").isFailure)
-        assertTrue("${dialler.knocks}", dialler.knocks.isEmpty())
-    }
-
-    @Test
-    fun `a connect that is cancelled, or given up as the app leaves, makes no such knock and leaves nothing open`() = test {
-        val jobs = leftCar(left = true)
-        dialler.listenOnlyMs = 30_000
-        val cancelled = scope.async { jobs.connect("bt") }
-        until("the connect listens") { dialler.listening.value > 0 }
-        cancelled.cancel()
-        cancelled.join()
-        until("nothing listens") { dialler.listening.value == 0 }
-        assertTrue(dialler.knocks.isEmpty())
-
-        // Given up as the app leaves: in sight while it connects, then out of sight.
-        shown.state.value = true
-        val left = scope.async { jobs.connect("bt") }
-        until("the connect listens") { dialler.listenOnly.size == 2 && dialler.listening.value > 0 }
-        shown.state.value = false
-        assertEquals("The app was left before the link was up", left.await().exceptionOrNull()?.message)
-        until("nothing listens") { dialler.listening.value == 0 }
-        assertTrue(dialler.knocks.isEmpty())
-
-        // Cancelled in the knock itself: nothing open, and no link taken.
-        dialler.listenOnlyMs = 100
-        val knocking = scope.async { jobs.connect("bt") }
-        until("the knock") { dialler.knocks.size == 1 }
-        knocking.cancel()
-        knocking.join()
-        until("nothing listens") { dialler.listening.value == 0 }
-        assertNull(dialler.dialIn(carAddress))
-        assertEquals(ConnectionState.Disconnected, jobs.connection.value)
-        assertEquals(listOf<Int?>(1), dialler.knocks)
-    }
-
-    @Test
-    fun `a head unit known to take knocks knocks as before, with no knock of this kind`() = test {
-        val jobs = leftCar(left = false, knocks = true)
-        dialler.knockMs = 100
         assertTrue(jobs.connect("bt").exceptionOrNull() is NoCarLinkException)
-        assertEquals(listOf<Int?>(null), dialler.knocks)
-        assertEquals(listOf(false), dialler.fallbacks)
-        assertEquals(noCarLink, (jobs.connection.value as ConnectionState.Failed).reason)
-    }
+        val failed = jobs.connection.value as ConnectionState.Failed
+        assertTrue(failed.listenedOnly)
+        assertEquals("The car didn't connect to this app", failed.reason)
+        assertEquals(listOf(true), dialler.listenOnly)
+        assertTrue("it knocked", dialler.knocks.isEmpty())
+        assertTrue("the phone dialled", dialler.agents.isEmpty())
 
-    @Test
-    fun `the wait after the agent restarts knocks once after each try with no link, and the new agent's link ends it`() = test {
-        val jobs = leftCar(left = true, rejoin = Rejoin(firstAfterMs = 20, pauseMs = 20, giveUpAfterMs = 30_000))
-        dialler.onConnect = { leaves(it, true) }
-        // In sight, so that the link is kept once it is idle; the car's link goes to the connect, once it listens.
-        shown.state.value = true
-        val connecting = scope.async { jobs.connect("bt") }
-        until("the connect listens") { dialler.listenOnly.isNotEmpty() }
-        dialIn()
-        assertTrue(connecting.await().isSuccess)
-        dialler.listenOnlyMs = 50
-        dialler.knockMs = 50
-
-        dialler.agent.closing(LinkClosing.RESTARTING)
-
-        until("the wait knocks after its tries") { dialler.knocks.size >= 2 }
-        assertTrue("${dialler.knocks}", dialler.knocks.all { it == 1 } && dialler.fallbacks.all { it })
-        // The new version dials only when knocked.
-        dialler.knockMs = 10_000
+        // The offer: the phone's own link, whose hello says that the agent takes knocks. Held at its dial, so that the
+        // link is put in use while the connect runs: see [inUseFromHere].
+        val dial = CountDownLatch(1)
         dialler.onConnect = { agent ->
             knocks(agent, left = true)
-            newVersion(agent)
+            dial.await(30, TimeUnit.SECONDS)
         }
-        val knocked = dialler.knocks.size
-        until("the next knock") { dialler.knocks.size > knocked }
-        dialIn()
-        val back = await(jobs.connection, "the new agent") { it is ConnectionState.Connected } as ConnectionState.Connected
-        assertEquals("1.1.0", back.info.agentVersion)
-        assertTrue(saved("bt").serialKnock)
+        val fromPhone = async { jobs.connectFromPhone("bt") }
+        until("the phone's own connect dials") { dialler.listenOnly.size == 2 }
+        inUseFromHere(jobs)
+        dial.countDown()
+        assertTrue(fromPhone.await().isSuccess)
+        assertEquals(listOf(true, false), dialler.listenOnly)
+        assertTrue("it knocked", dialler.knocks.isEmpty())
+        assertTrue(saved("bt").serialKnock && saved("bt").serialDial)
+
+        // From now on every connect knocks, and takes the car's link.
+        jobs.disconnect()
+        dialler.onConnect = { knocks(it, left = true) }
+        knockedIn(jobs)
+        assertEquals(listOf<Int?>(null), dialler.knocks)
+        assertEquals(listOf(true, false), dialler.listenOnly)
     }
 
     @Test
@@ -2931,7 +2848,6 @@ class JobRepositoryTest {
         // One wait, from the first link's on, through the others and the pauses between them.
         assertEquals("listened without a break", listens + 1, dialler.listens.get())
         until("nothing listens") { dialler.listening.value == 0 }
-        assertTrue("links came: no knock", dialler.knocks.isEmpty())
     }
 
     @Test

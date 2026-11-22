@@ -698,52 +698,93 @@ class BluetoothSerialLinkConnectorTest {
     }
 
     @Test
-    fun `a knock made because the agent dials and the connect had no link says so in the diagnostics, with no address`() = runTest {
-        val radio = FakeRadio { FakeSocket("refused") }
+    fun `a knock at a car the phone has no connection to stops after the first connect that fails, and says the car was not reached`() = runTest {
+        val radio = FakeRadio { FakeSocket("read failed, socket might closed or timeout, read ret: -1") }
+        // As the phone has it of a car that is off or out of range: no channel found, and no connection to the car.
+        radio.facts = { _, _ -> TryFacts(channel = -1, carConnected = false, mediaAudio = false) }
         val diagnostics = SerialDiagnostics()
 
-        val failure = try {
-            knocking(radio, diagnostics).knock(car, 1, fallback = true)
-            throw AssertionError("the knock had a link")
-        } catch (e: IOException) {
-            e
-        }
+        val failure = knockFailure(knocking(radio, diagnostics))
 
-        assertTrue("$failure", failure is KnockUnansweredException)
-        assertEquals(5, radio.sockets.size)
+        assertTrue("$failure", failure is KnockUnansweredException && failure.carAway)
+        assertEquals(1, radio.sockets.size)
+        // At once on the test's clock, where the knock went on for its three bursts before: 11.5 s for connects that
+        // fail at once, and about 86 s for ones that each run out of their time.
+        assertEquals(0, currentTime)
+        assertTrue(radio.fakeSockets.all { it.closes.get() == 1 })
         val tries = diagnostics.tries()
-        assertEquals(5, tries.count { it.path == LinkTry.Path.KNOCK })
-        assertTrue(tries.none { it.path == LinkTry.Path.KNOCK_CONNECT })
-        val end = tries.single { it.path == LinkTry.Path.FALLBACK_KNOCK_CONNECT }
-        assertEquals(LinkTry.Outcome.NO_LINK, end.outcome)
-        assertTrue(
-            end.describe(),
-            end.describe().startsWith(
-                "knocking connect made because the agent dials and the connect had no link, of 1 burst had no link from the car after 2500 ms",
-            ),
+        assertEquals(LinkTry.Outcome.FAILED, tries.single { it.path == LinkTry.Path.KNOCK }.outcome)
+        assertTrue(tries.none { it.path == LinkTry.Path.KNOCK_BURST })
+        assertEquals(
+            "knocking connect in burst 1 of 3, after connect 1, which did not reach the car, had no link from the car after 0 ms " +
+                "(no channel, car not connected, no media audio)",
+            tries.single { it.path == LinkTry.Path.KNOCK_CONNECT }.describe(),
         )
-        val report = diagnostics.report("Car", null)
-        assertTrue(report, "made because the agent dials" in report && car.address !in report)
     }
 
     @Test
-    fun `a knock's connect that fails on the phone, or hears nothing, is kept as such, and the burst goes on`() = live {
+    fun `a knock goes on where its connects reach the car, or the phone cannot tell, whatever the phone says of its connection`() = runTest {
+        // Refused by the car: the car is there, though the phone has no hands-free or audio connection to it.
+        val refused = FakeRadio { FakeSocket("refused") }
+        refused.facts = { socket, _ -> TryFacts(channel = if (socket != null) 5 else null, carConnected = false) }
+        val failure = knockFailure(knocking(refused), bursts = 1)
+        assertTrue("$failure", failure is KnockUnansweredException && !failure.carAway)
+        assertEquals(5, refused.sockets.size)
+
+        // Failed on the phone while it has a connection to the car, or where it cannot tell.
+        for (connected in listOf(true, null)) {
+            val failing = FakeRadio { FakeSocket("Connection refused") }
+            failing.facts = { _, _ -> TryFacts(carConnected = connected) }
+            val failed = knockFailure(knocking(failing), bursts = 1)
+            assertTrue("$connected: $failed", failed is KnockUnansweredException && !failed.carAway)
+            assertEquals("$connected", 5, failing.sockets.size)
+        }
+
+        // Came up: the knock was sent, whatever the phone said of its connection before.
+        val up = FakeRadio()
+        up.facts = { _, _ -> TryFacts(carConnected = false) }
+        val unanswered = knockFailure(knocking(up), bursts = 1)
+        assertTrue("$unanswered", unanswered is KnockUnansweredException && !unanswered.carAway)
+        assertEquals(5, up.sockets.size)
+    }
+
+    @Test
+    fun `a car that the first connect reaches gets its knock through, though the phone had no connection to it before`() = live {
+        val radio = FakeRadio()
+        radio.facts = { _, _ -> TryFacts(carConnected = false) }
+        val listener = SerialListener(radio)
+        val connector = BluetoothSerialLinkConnector(radio, SerialConnectTimes(knockHoldMillis = 600_000), listener = listener)
+        val knocking = async { connector.knock(car) }
+        val server = radio.nextServer()
+        assertTrue(server.awaitAccepting())
+        until("the knock was sent") { radio.fakeSockets.firstOrNull()?.written?.size == 4 }
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address)
+        val link = knocking.await()
+
+        assertSame(incoming.output, link.output)
+        assertEquals(1, radio.sockets.size)
+        until("the listener closed") { listener.idle }
+    }
+
+    @Test
+    fun `a knock's connect that fails on the phone is kept as such and the burst goes on, and one that hears nothing ends the knock`() = live {
         // On real threads: the connect that hears nothing blocks one until its time is up.
-        val radio = FakeRadio { attempt -> if (attempt == 2) FakeSocket(blocks = true) else FakeSocket("Connection refused") }
+        val radio = FakeRadio { attempt -> if (attempt == 3) FakeSocket(blocks = true) else FakeSocket("Connection refused") }
         val diagnostics = SerialDiagnostics()
         val connector = BluetoothSerialLinkConnector(
             radio, SerialConnectTimes(knockTryMillis = 300, knockSettleMillis = 50), diagnostics = diagnostics, listener = SerialListener(radio),
         )
 
-        assertTrue(knockFailure(connector, bursts = 1) is KnockUnansweredException)
+        val failure = knockFailure(connector)
 
+        // No answer in its time: the car was not reached, and no connect follows, of this burst or another.
+        assertTrue("$failure", failure is KnockUnansweredException && failure.carAway)
         val knocks = diagnostics.tries().filter { it.path == LinkTry.Path.KNOCK }
-        assertEquals(
-            listOf(LinkTry.Outcome.FAILED, LinkTry.Outcome.NO_ANSWER, LinkTry.Outcome.FAILED, LinkTry.Outcome.FAILED, LinkTry.Outcome.FAILED),
-            knocks.map { it.outcome },
-        )
+        assertEquals(listOf(LinkTry.Outcome.FAILED, LinkTry.Outcome.FAILED, LinkTry.Outcome.NO_ANSWER), knocks.map { it.outcome })
         assertTrue(radio.fakeSockets.all { it.closes.get() >= 1 })
-        assertEquals(5, radio.sockets.size)
+        assertEquals(3, radio.sockets.size)
 
         // A socket the phone cannot even make is a connect that failed.
         val none = FakeRadio()
@@ -805,10 +846,11 @@ class BluetoothSerialLinkConnectorTest {
     }
 
     @Test
-    fun `a knock's connect that is up is closed when the car's link comes, not at the end of its hold`() = live {
+    fun `a knock's connect that is up is closed when the car's link comes, not at the end of its hold, and has one line`() = live {
         val radio = FakeRadio()
-        val listener = SerialListener(radio)
-        val connector = BluetoothSerialLinkConnector(radio, SerialConnectTimes(knockHoldMillis = 600_000), listener = listener)
+        val diagnostics = SerialDiagnostics()
+        val listener = SerialListener(radio, diagnostics = diagnostics)
+        val connector = BluetoothSerialLinkConnector(radio, SerialConnectTimes(knockHoldMillis = 600_000), diagnostics = diagnostics, listener = listener)
         val knocking = async { connector.knock(car) }
         val server = radio.nextServer()
         assertTrue(server.awaitAccepting())
@@ -825,6 +867,10 @@ class BluetoothSerialLinkConnectorTest {
         assertArrayEquals(FrameCodec.KNOCK_MAGIC, knock.written)
         assertEquals(3, knock.input.available())
         until("the listener closed") { listener.idle }
+        // Its hold was cancelled by the car's link: the line it had stays the only one, not followed by a cancel.
+        val tries = diagnostics.tries()
+        assertEquals(listOf(LinkTry.Outcome.KNOCKED), tries.filter { it.path == LinkTry.Path.KNOCK }.map { it.outcome })
+        assertEquals(listOf(LinkTry.Outcome.TAKEN), tries.filter { it.path == LinkTry.Path.KNOCK_CONNECT }.map { it.outcome })
     }
 
     @Test
@@ -863,6 +909,86 @@ class BluetoothSerialLinkConnectorTest {
         waiting.join()
         assertEquals(1, refused.sockets.size)
         until("the listener closed") { gapListener.idle }
+    }
+
+    /** A socket whose connect blocks until [gate] opens, and that a close does not end: one stuck in the phone's stack. */
+    private class StuckSocket(private val gate: CountDownLatch) : SerialSocket {
+        val connecting = CountDownLatch(1)
+        val closes = AtomicInteger()
+        override val input = ByteArrayInputStream(ByteArray(0))
+        override val output = ByteArrayOutputStream()
+
+        override fun connect() {
+            connecting.countDown()
+            gate.await(10, TimeUnit.SECONDS)
+        }
+
+        override fun close() {
+            closes.incrementAndGet()
+        }
+    }
+
+    @Test
+    fun `a car's link handed to a knock whose caller is cancelled while its own connect is being ended is closed`() = live {
+        val gate = CountDownLatch(1)
+        val stuck = StuckSocket(gate)
+        val radio = FakeRadio { stuck }
+        val diagnostics = SerialDiagnostics()
+        val listener = SerialListener(radio, diagnostics = diagnostics)
+        val connector = BluetoothSerialLinkConnector(radio, SerialConnectTimes(knockTryMillis = 600_000), diagnostics = diagnostics, listener = listener)
+        try {
+            val knocking = async { connector.knock(car) }
+            val server = radio.nextServer()
+            assertTrue(server.awaitAccepting())
+            assertTrue("the knock's connect never began", stuck.connecting.await(10, TimeUnit.SECONDS))
+
+            // The car's link is handed over, and the knock's connect is given up: the knock waits for it to end.
+            val incoming = FakeSocket()
+            server.dialIn(incoming, car.address)
+            until("the knock's connect was given up") { stuck.closes.get() >= 1 }
+            knocking.cancel()
+            gate.countDown()
+            knocking.join()
+
+            assertTrue(knocking.isCancelled)
+            assertTrue("the car's link was left open", incoming.closes.get() >= 1)
+            until("the listener closed") { listener.idle }
+            assertEquals(1, radio.sockets.size)
+            // One line for the connect, and one for the knock: both given up.
+            val tries = diagnostics.tries()
+            assertEquals(listOf(LinkTry.Outcome.CANCELLED), tries.filter { it.path == LinkTry.Path.KNOCK }.map { it.outcome })
+            assertEquals(listOf(LinkTry.Outcome.CANCELLED), tries.filter { it.path == LinkTry.Path.KNOCK_CONNECT }.map { it.outcome })
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
+    fun `a car's link that won a connect whose caller is cancelled while the phone's dial is being ended is closed`() = live {
+        val gate = CountDownLatch(1)
+        val stuck = StuckSocket(gate)
+        val radio = FakeRadio { stuck }
+        val live = Live(radio)
+        try {
+            val connecting = async { live.connector.connect(car, dials = true) }
+            val server = radio.nextServer()
+            assertTrue(server.awaitAccepting())
+            assertTrue("the phone's dial never began", stuck.connecting.await(10, TimeUnit.SECONDS))
+
+            val incoming = FakeSocket()
+            server.dialIn(incoming, car.address)
+            until("the phone's dial was given up") { stuck.closes.get() >= 1 }
+            connecting.cancel()
+            gate.countDown()
+            connecting.join()
+
+            assertTrue(connecting.isCancelled)
+            assertTrue("the car's link was left open", incoming.closes.get() >= 1)
+            until("the listener closed") { live.listener.idle }
+            assertEquals("no second try after the cancel", 1, radio.sockets.size)
+        } finally {
+            gate.countDown()
+        }
     }
 
     @Test
@@ -951,10 +1077,10 @@ class LinkConnectorsTest {
 
     @Test
     fun `a knock is handed on, and a connector that cannot knock connects as to an agent that dials`() = runBlocking {
-        val knocks = CopyOnWriteArrayList<Pair<Int?, Boolean>>()
+        val knocks = CopyOnWriteArrayList<Int?>()
         val knocking = object : LinkConnector by Named("serial", { it is SerialEndpoint }) {
-            override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: Boolean): Link {
-                knocks += bursts to fallback
+            override suspend fun knock(endpoint: Endpoint, bursts: Int?): Link {
+                knocks += bursts
                 return MemoryLink.pair(kind = "knocked").first
             }
         }
@@ -963,8 +1089,7 @@ class LinkConnectorsTest {
 
         assertEquals("knocked", both.knock(serial, 1).kind)
         assertEquals("knocked", both.knock(serial).kind)
-        assertEquals("knocked", both.knock(serial, 1, fallback = true).kind)
-        assertEquals(listOf<Pair<Int?, Boolean>>(1 to false, null to false, 1 to true), knocks)
+        assertEquals(listOf<Int?>(1, null), knocks)
         assertEquals("tcp", both.knock(tcp).kind)
         assertEquals(listOf(true), tcpOnly.dials)
     }

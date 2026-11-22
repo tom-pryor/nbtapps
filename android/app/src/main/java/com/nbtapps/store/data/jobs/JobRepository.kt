@@ -338,13 +338,9 @@ fun interface JobKeeper {
  * is offered where a knock brought no link, with what the phone can tell of why ([knockFailure]).
  *
  * What is saved of a head unit is learnt from its `hello`, so one whose agent another phone has since updated to one
- * that dials only when knocked still says that it dials and does not take knocks, and a connect the old way may never
- * reach it. So a connect to such a head unit, the same paths as above but [connectFromPhone], that comes to its end
- * with no link at all, neither the phone's own nor the car's, makes one burst of knocks before it fails
- * ([knockBeforeFailing]). A car's link that comes of it is greeted as any the car opens, and its `hello` saves that the
- * agent takes knocks; where none comes, the connect fails as it would have without the knock. A link that came up and
- * then failed, as one whose `hello` had no answer, brings no knock, and neither does a connect that was cancelled or
- * given up as the app left the foreground.
+ * that dials only when knocked is connected to the old way until a `hello` says otherwise. Where that connect only
+ * listened and had no link, the phone's own connect is offered as for any such failure, and the `hello` on the link it
+ * makes saves that the agent takes knocks: from then on every connect knocks.
  */
 class JobRepository(
     private val headUnits: HeadUnitRepository,
@@ -377,7 +373,7 @@ class JobRepository(
     /**
      * The addresses of the cars that hold the phone over hands-free or audio now, in upper case:
      * [com.nbtapps.store.data.PhoneBluetooth.connected]. What the app's own tries make of a car's link that did not
-     * come goes by it ([quietFailure]).
+     * come goes by it ([quietFailure]), and what the user is told of a knock that brought no link ([knockFailure]).
      */
     private val carsHolding: StateFlow<Set<String>> = MutableStateFlow(emptySet()),
     /**
@@ -605,26 +601,14 @@ class JobRepository(
             val endpoints = if (only != null) listOf(only) else unit.endpoints.filter(connector::supports).inConnectOrder()
             for (endpoint in endpoints) {
                 opened = null
-                // Whether this endpoint has had a link of any kind in this connect, the car's or the phone's.
-                var linked = false
                 val reason = try {
-                    val paired = try {
-                        dial(unit, endpoint, given(), knockBursts) { session ->
-                            opened = session
-                            if (session != null) linked = true
-                        }
-                    } catch (e: IOException) {
-                        // The one place where a connect that had no link at all is told from one whose link failed.
-                        val knocked = if (linked) null else knockBeforeFailing(unit, endpoint, fromPhone)
-                        // The car's link the knock brought, greeted as any link the car opened; or the failure as it was.
-                        dial(unit, endpoint, knocked ?: throw e, knockBursts) { opened = it }
-                    }
+                    val paired = dial(unit, endpoint, given(), knockBursts) { opened = it }
                     return if (paired) Result.success(Unit) else Result.failure(PairingNeeded())
                 } catch (e: RemoteException) {
                     AgentText.request(e.code)
                 } catch (e: IOException) {
                     if (e is NoCarLinkException) listenedOnly = true
-                    if (e is KnockUnansweredException) knockFailure(endpoint) else e.message ?: "The head unit couldn't be reached"
+                    if (e is KnockUnansweredException) knockFailure(endpoint, e) else e.message ?: "The head unit couldn't be reached"
                 }
                 opened?.let { abandon(it, reason) }
                 // A link that failed after it was shown as connected, as one whose `job.status` got no answer, is not.
@@ -648,39 +632,31 @@ class JobRepository(
     }
 
     /**
-     * The one burst of knocks ([LinkConnector.knock], with `fallback`) that a connect to [unit] over [endpoint] makes
-     * where it had no link at all, before it fails: for a head unit whose agent dials ([HeadUnit.serialDial]) and is
-     * not known to dial only when knocked ([HeadUnit.serialKnock]). Its agent may have been updated since, by another
-     * phone, to one that dials only when knocked; the phone would then never connect, and never learn that it knocks,
-     * unless its own link happened to get through. The car's link the knock brings, or null where none is made
-     * ([fromPhone], another kind of endpoint) or none came: the connect then fails as it would have without it.
+     * What the user is told where a connect knocked at [endpoint] and the car's link did not come ([failure]). The
+     * phone is connected to the car in some way where the car holds it over hands-free or audio ([carsHolding]), or
+     * where the knock's connects reached the car (it did not stop as [KnockUnansweredException.carAway]). Then, where the
+     * phone says that the car has no media audio connection to it, that is the likely cause: the car turns the phone's
+     * requests down, and no knock reaches the agent. Android also says there is none while the car is off or out of
+     * range, so that is not said where the phone has no connection to the car: a knock that did not reach it says that
+     * the car is not in reach. The phone's own connect is offered after the other two as the last thing to try; the
+     * failure offers it in every case, as any connect that only listened does ([ConnectionState.Failed.listenedOnly]).
      */
-    private suspend fun knockBeforeFailing(unit: HeadUnit, endpoint: Endpoint, fromPhone: Boolean): Link? {
-        if (fromPhone || !unit.serialDial || unit.serialKnock || !connector.accepts(endpoint)) return null
-        log.line("the connect had no link, and the agent dials: the app knocks once, as to an agent that dials only when knocked")
-        return try {
-            connector.knock(endpoint, bursts = 1, fallback = true).also { log.line("the knock brought the car's link") }
-        } catch (e: IOException) {
-            log.line("the knock brought no link either: the connect fails as it was")
-            null
-        }
-    }
-
-    /**
-     * What the user is told where a connect knocked at [endpoint] and the car's link did not come. Where the phone says
-     * that the car has no media audio connection to it, that is the likely cause: the car then turns the phone's
-     * requests down, and no knock reaches the agent. The phone's own connect is offered after either
-     * ([ConnectionState.Failed.listenedOnly]), as the last thing to try.
-     */
-    private fun knockFailure(endpoint: Endpoint): String {
-        val audio = (endpoint as? SerialEndpoint)?.let { serial ->
+    private fun knockFailure(endpoint: Endpoint, failure: KnockUnansweredException): String {
+        val serial = endpoint as? SerialEndpoint
+        val holding = serial != null && serial.address.uppercase() in carsHolding.value
+        val audio = serial?.let {
             try {
-                mediaAudio(serial.address)
+                mediaAudio(it.address)
             } catch (e: RuntimeException) {
                 null
             }
         }
-        return (if (audio == false) KNOCK_NO_MEDIA_AUDIO else KNOCK_NO_LINK) + " " + KNOCK_FROM_PHONE
+        val connected = holding || !failure.carAway
+        return when {
+            connected && audio == false -> KNOCK_NO_MEDIA_AUDIO + " " + KNOCK_FROM_PHONE
+            !connected -> KNOCK_NOT_IN_REACH
+            else -> KNOCK_NO_LINK + " " + KNOCK_FROM_PHONE
+        }
     }
 
     /**
@@ -2084,7 +2060,10 @@ class JobRepository(
         /** A knock that brought no link from the car otherwise. */
         const val KNOCK_NO_LINK = "The car didn't connect to this app. Check that the agent is running and the car is in range."
 
-        /** After either, the phone's own connect, the last thing to try. */
+        /** A knock that did not reach the car, which has no connection to the phone either: see [knockFailure]. */
+        const val KNOCK_NOT_IN_REACH = "The car isn't in reach of this phone. Check that the car is on and nearby, then connect again."
+
+        /** After the first two, the phone's own connect, the last thing to try. */
         const val KNOCK_FROM_PHONE = "If it still fails, try Connect from the phone, which can interrupt another app's link to the car."
 
         /** Why a link the phone opened is closed when a link the car opened takes its place: see [greet]. */
