@@ -19,9 +19,10 @@ commit (`tools/compare_apks.py`).
    git push origin android-v0.4.1
    ```
 
-3. The workflow **Android release** runs the tests with the real agent, builds the unsigned APK
-   (`tools/build_release.sh`), and makes a draft release of the tag holding `nbtapps-<version>-unsigned.apk` and
-   its SHA-256. It refuses a tag that is not `android-v` + `appVersion`.
+3. The workflow **Android release** runs the tests with the real agent and the check of the app's list of
+   licences (`checkLicences`), builds the unsigned APK (`tools/build_release.sh`), and makes a draft release of
+   the tag holding `nbtapps-<version>-unsigned.apk` and its SHA-256. It refuses a tag that is not `android-v` +
+   `appVersion`.
 4. Optionally, build the same commit here and keep it for the comparison:
 
    ```
@@ -31,7 +32,11 @@ commit (`tools/compare_apks.py`).
 
 5. Write the release's notes, what is new for the user, in a file outside the repo, one note on each line. They
    are what the release on GitHub, the app and the changelog say of it, so they keep to the catalogue's rule for
-   notes: no blank line, none over 200 characters, no control character.
+   notes: no blank line, none over 200 characters, no control character. The app shows them to everyone who
+   updates to the release: in a sheet the first time they open the app after the update, and under Settings,
+   What's new. So they are written for the user, not for a developer. `tools/sign.sh` publishes no release on
+   GitHub without them; a release that the catalogue records with no notes, as one signed with `--from` and no
+   `--notes` would be, shows no sheet.
 6. Sign and publish:
 
    ```
@@ -61,8 +66,8 @@ It is made in the catalogue repo from the notes recorded there, and never edited
 ## A dry run
 
 **Android release** can be run by hand (the Actions tab, or `gh workflow run android-release.yml --ref BRANCH`):
-it builds and checks, and keeps the APK with the run for two weeks, without a release. A pull request that changes
-the workflow or the build's scripts runs it the same way.
+it runs the tests and the licence check, builds and checks the APK, and keeps it with the run for two weeks,
+without a release. A pull request that changes the workflow or the build's scripts runs it the same way.
 
 ## The key
 
