@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 # Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-# Builds the app as it goes to users, unsigned: runs the unit tests, builds the minified release, checks it, and
-# leaves two files in release/:
+# Builds the app as it goes to users, unsigned: runs the unit tests and the check of the app's list of licences
+# against the release build's libraries (checkLicences), builds the minified release, checks it, and leaves two
+# files in release/:
 #
 #   nbtapps-<version>-unsigned.apk          the app, which no phone installs until tools/sign.sh has signed it
 #   nbtapps-<version>-unsigned.apk.sha256   its SHA-256, as sha256sum writes it
@@ -21,7 +22,9 @@ me=build_release.sh
 find_tools
 
 # There is no unit-test task for the release build: the tests run against the debug build of the same sources.
-(cd "$here" && ./gradlew :app:testDebugUnitTest :app:assembleRelease)
+# checkLicences reads the release build's runtime classpath, so a release cannot be built with a list of licences
+# that does not fit its libraries.
+(cd "$here" && ./gradlew :app:testDebugUnitTest :app:checkLicences :app:assembleRelease)
 
 apk="$here/app/build/outputs/apk/release/app-release-unsigned.apk"
 [ -f "$apk" ] || fail "the build left no unsigned APK at $apk"
