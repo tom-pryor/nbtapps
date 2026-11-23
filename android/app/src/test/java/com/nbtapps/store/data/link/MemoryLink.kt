@@ -21,7 +21,7 @@ class MemoryLink private constructor(private val incoming: Pipe, private val out
         outgoing.closeWriter()
     }
 
-    private class Pipe(capacity: Int) {
+    private class Pipe(capacity: Int, private val readLimitSeconds: Long?) {
         private val queue = LinkedBlockingQueue<ByteArray>(capacity)
         private var current = ByteArray(0)
         private var used = 0
@@ -43,8 +43,11 @@ class MemoryLink private constructor(private val incoming: Pipe, private val out
                 while (used == current.size) {
                     if (readerClosed) throw IOException("the link is closed")
                     // A test that waits for bytes that never come fails here instead of hanging the build.
-                    val next = queue.poll(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                        ?: throw IOException("nothing arrived on the test link in $READ_TIMEOUT_SECONDS seconds")
+                    val next = if (readLimitSeconds == null) {
+                        queue.take()
+                    } else {
+                        queue.poll(readLimitSeconds, TimeUnit.SECONDS) ?: throw IOException("nothing arrived on the test link in $readLimitSeconds seconds")
+                    }
                     if (next === END) {
                         queue.offer(END) // so every later read ends too
                         if (readerClosed) throw IOException("the link is closed")
@@ -93,11 +96,13 @@ class MemoryLink private constructor(private val incoming: Pipe, private val out
         /**
          * The two ends of one link. With [capacity], each direction holds that many writes and no more, so a
          * side that does not read makes the other side's writes wait, as a slow link does. [kind] is what both
-         * ends say they are: [Link.SERIAL] gets what a Bluetooth serial link gets.
+         * ends say they are: [Link.SERIAL] gets what a Bluetooth serial link gets. A read that has waited
+         * [readLimitSeconds] for bytes fails, unless that is null: then it waits until the link is closed, for a link
+         * that is meant to carry nothing and must not end by itself, however long the test takes.
          */
-        fun pair(capacity: Int = Int.MAX_VALUE, kind: String = "memory"): Pair<MemoryLink, MemoryLink> {
-            val there = Pipe(capacity)
-            val back = Pipe(capacity)
+        fun pair(capacity: Int = Int.MAX_VALUE, kind: String = "memory", readLimitSeconds: Long? = READ_TIMEOUT_SECONDS): Pair<MemoryLink, MemoryLink> {
+            val there = Pipe(capacity, readLimitSeconds)
+            val back = Pipe(capacity, readLimitSeconds)
             return MemoryLink(incoming = back, outgoing = there, kind) to MemoryLink(incoming = there, outgoing = back, kind)
         }
     }
