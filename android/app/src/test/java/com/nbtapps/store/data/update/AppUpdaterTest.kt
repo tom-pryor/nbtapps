@@ -2,8 +2,10 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.data.update
 
+import com.nbtapps.store.model.AppRelease
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,8 +50,20 @@ class AppUpdaterTest {
             scope = scope,
             terminalOpen = { terminal[minOf(terminalAsked++, terminal.size - 1)] },
             portOn = { portOn },
+            saveNotes = { release ->
+                // How many files Android had been handed when the notes were kept.
+                notesKept += release to installer.handed.size
+                notesFailure?.let { throw it }
+            },
         )
     }
+
+    /** The releases whose notes were kept, each with how many files Android had then been handed. */
+    private val notesKept = CopyOnWriteArrayList<Pair<AppRelease, Int>>()
+
+    /** What keeping the notes throws, if anything. */
+    @Volatile
+    private var notesFailure: Exception? = null
 
     /** Whether the SSH port for other apps is on. */
     @Volatile
@@ -90,6 +104,31 @@ class AppUpdaterTest {
         assertEquals(listOf(release.url), source.opened)
         assertArrayEquals(body, installer.handed.single())
         assertEquals(listOf("nbtapps-200.apk"), files())
+    }
+
+    @Test
+    fun `the release's notes are kept just before Android is handed the update`() {
+        updater.start(release)
+        handedOver()
+
+        assertEquals(listOf(release to 0), notesKept.toList())
+    }
+
+    @Test
+    fun `an update whose notes could not be kept goes on to Android`() {
+        notesFailure = IOException("No room for the notes")
+        updater.start(release)
+        handedOver()
+        assertArrayEquals(body, installer.handed.single())
+
+        // Nor does anything else the keeping throws stop it, or fail it.
+        notesFailure = IllegalStateException("The store is closed")
+        answer(InstallEvent.Failed("The update was cancelled."))
+        failure()
+        updater.start(release)
+        handedOver(2)
+        assertEquals(UpdateState.Installing, updater.state.value)
+        assertEquals(listOf(0, 1), notesKept.map { it.second })
     }
 
     @Test

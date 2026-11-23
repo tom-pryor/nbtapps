@@ -9,6 +9,7 @@ import com.nbtapps.store.model.AppRelease
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -111,6 +112,13 @@ class AppUpdater(
     private val terminalOpen: () -> Boolean = { false },
     /** Whether the SSH port for other apps is on, or being switched on, right now. */
     private val portOn: () -> Boolean = { false },
+    /**
+     * Keeps the notes of the release the app is updated to, for the new copy to show once it runs, beside those of
+     * the version that runs, for where the update does not happen: see
+     * [WhatsNewRepository][com.nbtapps.store.data.whatsnew.WhatsNewRepository]. Called just before Android is handed
+     * the update, which ends this copy once it is done.
+     */
+    private val saveNotes: suspend (AppRelease) -> Unit = {},
 ) {
     private val current = MutableStateFlow<UpdateState>(UpdateState.Idle)
 
@@ -185,6 +193,14 @@ class AppUpdater(
         // Asked again: the download took a while, and a job or a terminal may have begun since.
         checkIdle()
         current.value = UpdateState.Installing
+        // The update goes on without them: the new copy then takes its notes from the catalogue, if it still has them.
+        try {
+            saveNotes(release)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Nothing to tell the user.
+        }
         installer.install(apk)
     }
 
