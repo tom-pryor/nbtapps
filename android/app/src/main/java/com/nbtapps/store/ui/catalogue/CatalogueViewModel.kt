@@ -24,6 +24,8 @@ import com.nbtapps.store.data.update.AppUpdater
 import com.nbtapps.store.data.update.InstalledApp
 import com.nbtapps.store.data.update.UpdateState
 import com.nbtapps.store.data.update.appUpdate
+import com.nbtapps.store.data.whatsnew.VersionNotes
+import com.nbtapps.store.data.whatsnew.WhatsNewRepository
 import com.nbtapps.store.model.CataloguePackage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -239,6 +241,10 @@ class CatalogueViewModel internal constructor(
     prereleases: PrereleaseRepository,
     /** What else an update would end with the app: a terminal or the SSH port for other apps ([UpdateWait]). */
     private val inUse: Flow<UpdateWait?> = flowOf(null),
+    /** The notes of the version that runs, to show once: [WhatsNewRepository.toShow]. */
+    notesToShow: Flow<VersionNotes?> = flowOf(null),
+    /** They have been seen: [WhatsNewRepository.markSeen]. */
+    private val whatsNewSeen: () -> Unit = {},
 ) : ViewModel() {
 
     @Inject
@@ -251,10 +257,16 @@ class CatalogueViewModel internal constructor(
         prereleases: PrereleaseRepository,
         terminal: TerminalRepository,
         port: SshPort,
+        whatsNew: WhatsNewRepository,
     ) : this(
         repository, headUnits, jobs, updater, installed, prereleases,
         combine(terminal.state, port.state) { shell, ssh -> updateWait(false, shell.active, ssh.active) },
+        whatsNew.toShow,
+        whatsNew::markSeen,
     )
+
+    /** The sheet was dismissed here: it goes at once, before the store has it as seen. */
+    private val whatsNewDismissed = MutableStateFlow(false)
 
     private val query = MutableStateFlow("")
     private val filter = MutableStateFlow<CatalogueFilter>(CatalogueFilter.All)
@@ -281,6 +293,15 @@ class CatalogueViewModel internal constructor(
         }
             .combine(ownUpdate) { ui, (offer, state, busy) -> ui.withAppUpdate(offer, installed.versionName, state, busy) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CatalogueUiState())
+
+    /**
+     * What is new in the version that runs, for a sheet over the list, shown once after an update: null where there is
+     * nothing to show, and from the moment it is dismissed ([dismissWhatsNew]). The screen shows it only while it is on
+     * top.
+     */
+    val whatsNew: StateFlow<VersionNotes?> =
+        combine(notesToShow, whatsNewDismissed) { notes, dismissed -> notes.takeIf { !dismissed } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     init {
         // The head unit's list was read when the link was opened; only the catalogue is still to come.
@@ -312,6 +333,12 @@ class CatalogueViewModel internal constructor(
     fun updateApp() {
         val offer = uiState.value.appUpdate?.offer as? AppUpdateOffer.Available ?: return
         updater.start(offer.release)
+    }
+
+    /** The sheet of what is new was dismissed, however it was: by OK, a swipe, a tap beside it or Back. It is seen. */
+    fun dismissWhatsNew() {
+        whatsNewDismissed.value = true
+        whatsNewSeen()
     }
 
     fun setQuery(text: String) {

@@ -28,6 +28,10 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.nbtapps.store.R
 import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
+import com.nbtapps.store.ui.appsettings.AppSettingsScreen
+import com.nbtapps.store.ui.appsettings.LicenceScreen
+import com.nbtapps.store.ui.appsettings.LicencesScreen
+import com.nbtapps.store.ui.appsettings.WhatsNewScreen
 import com.nbtapps.store.ui.catalogue.CataloguePackageScreen
 import com.nbtapps.store.ui.catalogue.CatalogueScreen
 import com.nbtapps.store.ui.detail.HeadUnitDetailScreen
@@ -79,6 +83,25 @@ object SppTestRoute
  */
 @Serializable
 data class SetupRoute(val furtherCar: Boolean)
+
+/**
+ * The app's own settings, reached by the gear on both tabs: apart from [SettingsRoute], which is the settings of a
+ * package on a head unit.
+ */
+@Serializable
+object AppSettingsRoute
+
+/** What is new in the version of the app that runs, as a page opened from the app's settings. */
+@Serializable
+object WhatsNewRoute
+
+/** The projects whose code the app includes, and their licences. */
+@Serializable
+object LicencesRoute
+
+/** The text of the licence [licenceId], by the id the list of licences gives it. */
+@Serializable
+data class LicenceRoute(val licenceId: String)
 
 @Serializable
 object CatalogueRoute
@@ -141,6 +164,7 @@ fun NbtNavHost(
     val openHeadUnit = { id: String -> navController.navigate(HeadUnitDetailRoute(id)) }
     val setUp = { navController.navigate(SetupRoute(furtherCar = false)) }
     val addCar = { navController.navigate(SetupRoute(furtherCar = true)) }
+    val openAppSettings = { navController.navigate(AppSettingsRoute) }
     // Only the set-up itself is popped: a second tap while it goes must not pop the screen under it.
     val leaveSetup = {
         if (navController.currentBackStackEntry?.destination?.hasRoute(SetupRoute::class) == true) navController.popBackStack()
@@ -213,7 +237,29 @@ fun NbtNavHost(
                     onOpenSppTest = { navController.navigate(SppTestRoute) },
                     onSetUp = setUp,
                     onAddCar = addCar,
+                    onOpenSettings = openAppSettings,
                 )
+            }
+            composable<AppSettingsRoute> {
+                AppSettingsScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenWhatsNew = { navController.navigate(WhatsNewRoute) },
+                    onSetUp = setUp,
+                    onAddCar = addCar,
+                    onOpenLicences = { navController.navigate(LicencesRoute) },
+                )
+            }
+            composable<WhatsNewRoute> {
+                WhatsNewScreen(onBack = { navController.popBackStack() })
+            }
+            composable<LicencesRoute> {
+                LicencesScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenLicence = { id -> navController.navigate(LicenceRoute(id)) },
+                )
+            }
+            composable<LicenceRoute> { entry ->
+                LicenceScreen(entry.toRoute<LicenceRoute>().licenceId, onBack = { navController.popBackStack() })
             }
             composable<SetupRoute>(enterTransition = { if (setupAtLaunch.getAndSet(false)) EnterTransition.None else null }) {
                 SetupScreen(
@@ -287,6 +333,7 @@ fun NbtNavHost(
                     onOpenHeadUnit = openHeadUnit,
                     onSetUp = setUp,
                     onPairHeadUnit = pairHeadUnit,
+                    onOpenSettings = openAppSettings,
                 )
             }
             composable<CataloguePackageRoute> {

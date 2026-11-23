@@ -64,7 +64,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.currentStateAsState
 import com.nbtapps.store.R
 import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
 import com.nbtapps.store.data.jobs.AgentUpdate
@@ -73,6 +76,7 @@ import com.nbtapps.store.data.jobs.PackageStatus
 import com.nbtapps.store.data.update.AppUpdateOffer
 import com.nbtapps.store.data.update.UpdateState
 import com.nbtapps.store.model.AgentText
+import com.nbtapps.store.ui.appsettings.AppSettingsButton
 import com.nbtapps.store.ui.headunits.HeadUnitIndicator
 import com.nbtapps.store.ui.headunits.checksLine
 
@@ -80,7 +84,11 @@ import com.nbtapps.store.ui.headunits.checksLine
  * The catalogue's packages, against the head unit the app is working with: which of them it has, in which
  * version, and which have an update, with those first. The top bar names that head unit ([HeadUnitIndicator]):
  * [onOpenHeadUnit] opens its screen, and [onPairHeadUnit] goes to where the phone is paired with it. With no head
- * unit saved, a banner at the top of the list offers the set-up ([onSetUp]) in its place.
+ * unit saved, a banner at the top of the list offers the set-up ([onSetUp]) in its place. The gear after the head
+ * unit opens the app's settings ([onOpenSettings]).
+ *
+ * The first time the app is opened after an update, what is new in it comes up over the list ([WhatsNewSheet]),
+ * once this screen is on top: not under the set-up, nor while another tab is shown.
  */
 @Composable
 fun CatalogueScreen(
@@ -88,15 +96,22 @@ fun CatalogueScreen(
     onOpenHeadUnit: (String) -> Unit,
     onSetUp: () -> Unit,
     onPairHeadUnit: (String) -> Unit,
+    onOpenSettings: () -> Unit,
     viewModel: CatalogueViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val noHeadUnit by viewModel.noHeadUnit.collectAsStateWithLifecycle()
+    val whatsNew by viewModel.whatsNew.collectAsStateWithLifecycle()
+    // Resumed only while this screen is the one on top, and the app is in front.
+    val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
 
     CatalogueContent(
         uiState = uiState,
         // The banner says it: the bar has nothing to add with no head unit.
-        headUnit = { HeadUnitIndicator(onOpenHeadUnit, onSetUp = null, onPairHeadUnit) },
+        actions = {
+            HeadUnitIndicator(onOpenHeadUnit, onSetUp = null, onPairHeadUnit)
+            AppSettingsButton(onOpenSettings)
+        },
         onSetUp = onSetUp.takeIf { noHeadUnit },
         onQueryChange = viewModel::setQuery,
         onSelectFilter = viewModel::selectFilter,
@@ -105,13 +120,17 @@ fun CatalogueScreen(
         onOpenPackage = onOpenPackage,
         onOpenHeadUnit = onOpenHeadUnit,
     )
+    whatsNew?.takeIf { lifecycle.isAtLeast(Lifecycle.State.RESUMED) }?.let { notes ->
+        WhatsNewSheet(notes, onDismiss = viewModel::dismissWhatsNew)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CatalogueContent(
     uiState: CatalogueUiState,
-    headUnit: @Composable () -> Unit,
+    /** The top bar's: the head unit, then the gear. */
+    actions: @Composable () -> Unit,
     onSetUp: (() -> Unit)?,
     onQueryChange: (String) -> Unit,
     onSelectFilter: (CatalogueFilter) -> Unit,
@@ -128,7 +147,7 @@ private fun CatalogueContent(
     val atTop = !listState.canScrollBackward && !listState.isScrollInProgress
     SideEffect { if (atTop) listState.requestScrollToItem(0) }
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Catalogue") }, actions = { headUnit() }) },
+        topBar = { TopAppBar(title = { Text("Catalogue") }, actions = { actions() }) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (unit != null) {
