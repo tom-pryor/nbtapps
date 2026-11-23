@@ -80,8 +80,9 @@ jobs:
         run: python3 tools/bench.py image
 
       # The script a release is built with by hand, so that the two make the same file: the tests, the real agent's
-      # included, then the unsigned release build and its checks. It leaves the APK and its SHA-256 in release/.
-      - name: Tests and release build
+      # included, and the check of the app's list of licences (checkLicences), then the unsigned release build and
+      # its checks. It leaves the APK and its SHA-256 in release/.
+      - name: Tests, licence check and release build
         env:
           NBT_REQUIRE_BENCH: "1"
         run: tools/build_release.sh

@@ -7,6 +7,7 @@
 #   - the minified release build, unsigned: no key is ever on CI, and this proves that R8 and the release-only
 #     sources (src/release) still build
 #   - lint on both builds, without the checks for newer versions (app/build.gradle.kts leaves those out on CI)
+#   - the app's list of licences (checkLicences), against the release build's libraries
 # Nothing is kept from a run that passes; one that fails keeps its test and lint reports for two weeks.
 #
 # Each action is pinned to the commit of its release, named in the comment beside it.
@@ -60,11 +61,12 @@ jobs:
         working-directory: headunit
         run: python3 tools/bench.py image
 
-      # --continue: a failing test does not stop the release build and lint from being checked too.
-      - name: Tests, release build and lint
+      # --continue: a failing test does not stop the release build and lint from being checked too. checkLicences
+      # holds the app's list of licences (src/main/assets/licences/licences.txt) to the release build's libraries.
+      - name: Tests, release build, lint and licences
         env:
           NBT_REQUIRE_BENCH: "1"
-        run: ./gradlew --continue :app:testDebugUnitTest :app:assembleRelease :app:lintDebug :app:lintRelease
+        run: ./gradlew --continue :app:testDebugUnitTest :app:assembleRelease :app:lintDebug :app:lintRelease :app:checkLicences
 
       - name: Keep the reports
         if: failure()
