@@ -43,6 +43,8 @@ fun installedApp(context: Context): InstalledApp {
         versionName = info.versionName.orEmpty(),
         certSha256 = info.certSha256(),
         sdk = Build.VERSION.SDK_INT,
+        firstInstallTime = info.firstInstallTime,
+        lastUpdateTime = info.lastUpdateTime,
     )
 }
 

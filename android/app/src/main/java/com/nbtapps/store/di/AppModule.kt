@@ -61,6 +61,8 @@ import com.nbtapps.store.data.update.InstalledApp
 import com.nbtapps.store.data.update.PackageManagerApkInspector
 import com.nbtapps.store.data.update.SessionApkInstaller
 import com.nbtapps.store.data.update.installedApp
+import com.nbtapps.store.data.whatsnew.WhatsNewRepository
+import com.nbtapps.store.data.whatsnew.whatsNewStore
 import com.nbtapps.store.service.ServiceJobKeeper
 import com.nbtapps.store.ui.pairrequest.ElapsedClock
 import dagger.Binds
@@ -167,6 +169,21 @@ abstract class AppModule {
         @Singleton
         fun provideInstalledApp(@ApplicationContext context: Context): InstalledApp = installedApp(context)
 
+        /** What is new in the version that runs, shown once after an update, and what of it has been seen. */
+        @Provides
+        @Singleton
+        fun provideWhatsNewRepository(
+            @ApplicationContext context: Context,
+            catalogue: CatalogueRepository,
+            installed: InstalledApp,
+            @ApplicationScope scope: CoroutineScope,
+        ): WhatsNewRepository = WhatsNewRepository(
+            catalogue,
+            whatsNewStore(context.dataStoreFile("whats-new.json"), CoroutineScope(SupervisorJob() + Dispatchers.IO)),
+            installed,
+            scope,
+        )
+
         /** The app's update of itself. Its download is in the cache folder: it is of no use once it is installed. */
         @Provides
         @Singleton
@@ -178,6 +195,7 @@ abstract class AppModule {
             jobs: JobRepository,
             terminal: TerminalRepository,
             port: SshPort,
+            whatsNew: WhatsNewRepository,
             @ApplicationScope scope: CoroutineScope,
         ): AppUpdater = AppUpdater(
             source = source,
@@ -189,6 +207,7 @@ abstract class AppModule {
             scope = scope,
             terminalOpen = { terminal.state.value.active },
             portOn = { port.state.value.active },
+            saveNotes = whatsNew::saveNotes,
         )
 
         /** The SSH port for other apps: its connections go on when the screen, or the app, is left. */

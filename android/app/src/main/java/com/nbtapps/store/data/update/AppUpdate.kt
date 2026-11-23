@@ -13,7 +13,14 @@ data class InstalledApp(
     val certSha256: String?,
     /** The Android API level of the phone. */
     val sdk: Int,
-)
+    /** When the app was first installed on the phone, in ms since 1970, as Android has it. */
+    val firstInstallTime: Long,
+    /** When this copy was installed over another one, or [firstInstallTime] if it never was. */
+    val lastUpdateTime: Long,
+) {
+    /** Installed afresh, never as an update of an earlier copy: no earlier copy can have said what is new. */
+    val freshInstall: Boolean get() = firstInstallTime == lastUpdateTime
+}
 
 /** A release of the app that is newer than the copy that runs. */
 sealed interface AppUpdateOffer {

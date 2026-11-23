@@ -22,8 +22,14 @@ const val OTHER_CERT = "b2fd811e2dd7133fe6e0a7931c3aaff0a4a7df5bb8950c6ee51184a7
 
 const val APP_PACKAGE = "com.nbtapps.store"
 
-/** The copy of the app that runs in these tests: 0.1.0, signed with the release key, on Android 14. */
-val RUNNING = InstalledApp(APP_PACKAGE, versionCode = 100, versionName = "0.1.0", certSha256 = RELEASE_CERT, sdk = 34)
+/**
+ * The copy of the app that runs in these tests: 0.1.0, signed with the release key, on Android 14, installed over an
+ * earlier copy a day after the first.
+ */
+val RUNNING = InstalledApp(
+    APP_PACKAGE, versionCode = 100, versionName = "0.1.0", certSha256 = RELEASE_CERT, sdk = 34,
+    firstInstallTime = 1_763_000_000_000, lastUpdateTime = 1_763_086_400_000,
+)
 
 /** Stands for an APK's bytes. Nothing here opens one: what it says of itself is the inspector's to make up. */
 fun apkBytes(version: String): ByteArray = "the app $version, as an APK".encodeToByteArray()
