@@ -107,7 +107,10 @@ sealed interface SshPortState {
     ) : SshPortState
 }
 
-/** A tunnel as the port uses one: [SshTunnel]'s two streams, its state and host keys, and a close from any thread. */
+/**
+ * A tunnel as the port uses one: [SshTunnel]'s two streams, its state and host keys, and a close from any thread. Once
+ * [input] has ended, [state] says why.
+ */
 interface PortTunnel {
     val input: InputStream
     val output: OutputStream
@@ -598,6 +601,9 @@ class SshPort(
                 launch(Dispatchers.IO) { pipe(tunnel.input, connection.socket.getOutputStream(), connection) },
             ).joinAll()
             watch.cancel()
+            // The channel's end is in its state before its stream ends, so it is there now, though [follow] may have
+            // been cancelled before it was given it.
+            endBy(run, tunnel.state.value)
         } finally {
             withContext(NonCancellable + Dispatchers.IO) { connection.close() }
             synchronized(lock) {
@@ -630,12 +636,17 @@ class SshPort(
         tunnel.state.collect { now ->
             connection.paused = now == ChannelState.Paused
             publish(run)
-            val end = (now as? ChannelState.Closed)?.end
-            when {
-                end is ChannelEnd.ByAgent && end.reason == ChannelCloseReason.OFF -> run.end(PortOffReason.SWITCHED_OFF)
-                end is ChannelEnd.ByAgent && end.reason == ChannelCloseReason.PACKAGE_CHANGED -> run.end(PortOffReason.PACKAGE_CHANGED)
-                end is ChannelEnd.LinkLost -> run.end(PortOffReason.LINK_LOST)
-            }
+            endBy(run, now)
+        }
+    }
+
+    /** Turns the port off where [state] is an end of a connection's channel that says to: SSH access off, the package changed, the link lost. */
+    private fun endBy(run: Run, state: ChannelState) {
+        val end = (state as? ChannelState.Closed)?.end
+        when {
+            end is ChannelEnd.ByAgent && end.reason == ChannelCloseReason.OFF -> run.end(PortOffReason.SWITCHED_OFF)
+            end is ChannelEnd.ByAgent && end.reason == ChannelCloseReason.PACKAGE_CHANGED -> run.end(PortOffReason.PACKAGE_CHANGED)
+            end is ChannelEnd.LinkLost -> run.end(PortOffReason.LINK_LOST)
         }
     }
 

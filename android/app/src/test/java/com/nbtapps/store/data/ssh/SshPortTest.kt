@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
@@ -52,7 +53,9 @@ class SshPortTest {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val session = AgentSession(MemoryLink.pair().first, sessionScope)
+    // A link that carries nothing and stays open until the test is over, however long it takes: a lost link is only
+    // ever one a test brings about.
+    private val session = AgentSession(MemoryLink.pair(readLimitSeconds = null).first, sessionScope)
     private val sockets = CopyOnWriteArrayList<Socket>()
     private val held = CopyOnWriteArrayList<ServerSocket>()
 
@@ -94,7 +97,26 @@ class SshPortTest {
     /** A tunnel that sends back what it is sent, as an SSH server would answer, to the byte. */
     private class EchoTunnel(override val hostKeys: List<String>) : PortTunnel {
         private val queue = LinkedBlockingQueue<ByteArray>()
-        override val state = MutableStateFlow<ChannelState>(ChannelState.Open)
+        private val current = MutableStateFlow<ChannelState>(ChannelState.Open)
+
+        /** What a coroutine that collects [state] is given: [current], except what came while [unseen]. */
+        private val given = MutableStateFlow<ChannelState>(ChannelState.Open)
+
+        /** While set, a coroutine that collects [state] is given nothing new, as one not yet run would not be. */
+        @Volatile
+        var unseen = false
+
+        /** Its [value] is always the state as it is, as a [com.nbtapps.store.data.channels.ChannelLink]'s is. */
+        @OptIn(ExperimentalForInheritanceCoroutinesApi::class)
+        override val state: StateFlow<ChannelState> = object : StateFlow<ChannelState> by given {
+            override val value: ChannelState get() = current.value
+        }
+
+        /** The channel is now in [now]. */
+        fun set(now: ChannelState) {
+            current.value = now
+            if (!unseen) given.value = now
+        }
 
         @Volatile
         var closed = false
@@ -134,12 +156,17 @@ class SshPortTest {
             if (closed) return
             closed = true
             queue.put(ByteArray(0))
-            if (state.value !is ChannelState.Closed) state.value = ChannelState.Closed(ChannelEnd.ByApp)
+            if (state.value !is ChannelState.Closed) set(ChannelState.Closed(ChannelEnd.ByApp))
         }
 
-        /** The agent ends the channel, for [reason]. */
-        fun endByAgent(reason: String) {
-            state.value = ChannelState.Closed(ChannelEnd.ByAgent(reason))
+        /**
+         * The agent ends the channel, for [reason]: its state says so first, and then, where [streamEnds], what is read
+         * from it ends, as a [com.nbtapps.store.data.channels.ChannelLink]'s does. Without, the stream stays open until
+         * the port closes the tunnel.
+         */
+        fun endByAgent(reason: String, streamEnds: Boolean = true) {
+            set(ChannelState.Closed(ChannelEnd.ByAgent(reason)))
+            if (!streamEnds) return
             closed = true
             queue.put(ByteArray(0))
         }
@@ -461,19 +488,11 @@ class SshPortTest {
     }
 
     @Test
-    fun `SSH access switched off turns it off, seen by a look, by a connection's end, by a refused open, or told by the app`() = test {
+    fun `SSH access switched off turns it off, seen by a look, by a refused open, or told by the app`() = test {
         val rig = Rig(pollMs = 50)
         rig.on()
         rig.channel.reading = SwitchReading.OFF
         assertEquals(SshPortState.Off(CAR, reason = PortOffReason.SWITCHED_OFF), rig.off())
-
-        rig.channel.reading = SwitchReading.ON
-        val again = Rig()
-        val on = again.on()
-        val client = again.client(on)
-        assertEquals("x", echo(client, "x"))
-        again.channel.tunnels.last().endByAgent(ChannelCloseReason.OFF)
-        assertEquals(SshPortState.Off(CAR, reason = PortOffReason.SWITCHED_OFF), again.off())
 
         val third = Rig()
         val open = third.on()
@@ -481,14 +500,51 @@ class SshPortTest {
         third.client(open)
         assertEquals(SshPortState.Off(CAR, reason = PortOffReason.SWITCHED_OFF), third.off())
 
+        // Told of another head unit, or of SSH access switched on, it goes on: the reason it goes off with is the
+        // user's own switching off after them, which has none.
         val fourth = Rig()
         fourth.on()
         fourth.port.noteSwitch("other", false)
         fourth.port.noteSwitch(CAR, true)
-        delay(100)
-        assertTrue(fourth.port.state.value is SshPortState.On)
-        fourth.port.noteSwitch(CAR, false)
-        assertEquals(SshPortState.Off(CAR, reason = PortOffReason.SWITCHED_OFF), fourth.off())
+        fourth.port.switchOff()
+        assertEquals(SshPortState.Off(CAR), fourth.off())
+
+        val fifth = Rig()
+        fifth.on()
+        fifth.port.noteSwitch(CAR, false)
+        assertEquals(SshPortState.Off(CAR, reason = PortOffReason.SWITCHED_OFF), fifth.off())
+    }
+
+    /** The ends of a connection's channel by the agent that turn the port off, with the reason each turns it off for. */
+    private val agentEnds = listOf(ChannelCloseReason.OFF to PortOffReason.SWITCHED_OFF, ChannelCloseReason.PACKAGE_CHANGED to PortOffReason.PACKAGE_CHANGED)
+
+    @Test
+    fun `a connection's channel the agent ends turns it off for the agent's reason, where the port sees the end before the channel's stream ends`() = test {
+        for ((why, reason) in agentEnds) {
+            val rig = Rig()
+            val client = rig.client(rig.on())
+            assertEquals("x", echo(client, "x"))
+            // The stream stays open: only the port's look at the channel's state can turn it off.
+            rig.channel.tunnels.last().endByAgent(why, streamEnds = false)
+            assertEquals(why, SshPortState.Off(CAR, reason = reason), rig.off())
+            assertTrue(closedByFarSide(client))
+        }
+    }
+
+    @Test
+    fun `a connection's channel the agent ends turns it off for the agent's reason, where the channel's stream ends before the port sees the end`() = test {
+        for ((why, reason) in agentEnds) {
+            val rig = Rig()
+            val client = rig.client(rig.on())
+            assertEquals("x", echo(client, "x"))
+            // The port's look at the channel's state is given nothing more: only what the state says once the stream
+            // has ended can turn it off.
+            val tunnel = rig.channel.tunnels.last()
+            tunnel.unseen = true
+            tunnel.endByAgent(why)
+            assertEquals(why, SshPortState.Off(CAR, reason = reason), rig.off())
+            assertTrue(closedByFarSide(client))
+        }
     }
 
     @Test
@@ -501,12 +557,6 @@ class SshPortTest {
         rig.link.connection.value = connected(CAR)
         rig.on()
         rig.link.connection.value = connected(CAR, sshVersion = null)
-        assertEquals(SshPortState.Off(CAR, reason = PortOffReason.PACKAGE_CHANGED), rig.off())
-
-        rig.link.connection.value = connected(CAR)
-        val on = rig.on()
-        assertEquals("x", echo(rig.client(on), "x"))
-        rig.channel.tunnels.last().endByAgent(ChannelCloseReason.PACKAGE_CHANGED)
         assertEquals(SshPortState.Off(CAR, reason = PortOffReason.PACKAGE_CHANGED), rig.off())
 
         val polled = Rig(pollMs = 50)
@@ -527,9 +577,9 @@ class SshPortTest {
         rig.await<SshPortState.On>("paused") { it is SshPortState.On && it.paused }
         rig.link.jobOn.value = "other"
         rig.await<SshPortState.On>("not paused") { it is SshPortState.On && !it.paused }
-        rig.channel.tunnels.last().state.value = ChannelState.Paused
+        rig.channel.tunnels.last().set(ChannelState.Paused)
         rig.await<SshPortState.On>("held") { it is SshPortState.On && it.paused }
-        rig.channel.tunnels.last().state.value = ChannelState.Open
+        rig.channel.tunnels.last().set(ChannelState.Open)
         rig.await<SshPortState.On>("going on") { it is SshPortState.On && !it.paused }
 
         rig.channel.failure = SshTunnelException(TunnelFailure.Refused("busy", "busy"))
