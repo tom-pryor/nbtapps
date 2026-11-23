@@ -46,7 +46,15 @@ If you don't agree, please don't open a pull request.
 - **CI.** A pull request runs the checks in [.github/workflows/](.github/workflows/) on GitHub Actions: `reuse lint`
   and the header check on every one; on one that changes `android/` or `headunit/`, the Android unit tests with
   the real agent in its Docker bench (`NBT_REQUIRE_BENCH=1`, which fails the tests that would skip without the
-  bench), the unsigned release build and lint. The head unit's own tests and the QNX builds are not run there.
+  bench), the unsigned release build, lint and the app's licence check. The head unit's own tests and the QNX
+  builds are not run there.
+- **Libraries and their licences.** The app lists the projects whose code it includes, each with its licence, in
+  `android/app/src/main/assets/licences/licences.txt`, whose head says its format. A library that is added or
+  updated can bring a module that no project there covers: then `./gradlew :app:checkLicences` fails (`:app:check`
+  runs it, and so does CI, on a Dependabot pull request as on any other). Add a `covers` line under the right
+  project, or a new project under the licence the module's `.pom` names. `LicenceTextTest` holds the app's licence
+  pages to the texts in the libraries' jars, and fails when a library's licence text changes its layout: that is
+  meant, so look at that licence's page in the app again and update the test.
 - **No real car data.** No GPS positions, street names, VINs, Bluetooth addresses or bytes captured from a car in
   code, tests or comments. Make up values instead.
 - **Names.** The head unit's app framework is the "HU Framework" in prose (the code's namespace stays `bmw`).

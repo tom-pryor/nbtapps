@@ -61,7 +61,7 @@ plugins, logs) and how to run the check before opening a pull request.
 | Folder | What it is |
 |---|---|
 | [`headunit/`](headunit/) | The car’s side: the **NBTApps Agent** (`nbtagent`, `nbtctl`), which installs packages on the head unit; **NBTApp**, an iDrive plugin whose menu starts the Agent and pairs phones; the package tools; and the protocol and package definitions both sides share (`headunit/spec/`). C++ for QNX 6.5.0 plus Python tools. See [headunit/README.md](headunit/README.md). |
-| [`android/`](android/) | **NBTApps for Android** (`com.nbtapps.store`): browses the catalogue, pairs with a head unit and installs packages through the Agent; with the SSH package (`org.nbtapp.ssh`) on the head unit, its page's Debug card switches SSH access on and opens a terminal there, a root shell, and turns on a port on the phone through which an SSH app on the phone, or a laptop on its hotspot or Wi-Fi, logs in with a key saved in the app. A Gradle project of its own: open `android/` in Android Studio. |
+| [`android/`](android/) | **NBTApps for Android** (`com.nbtapps.store`): browses the catalogue, pairs with a head unit and installs packages through the Agent; with the SSH package (`org.nbtapp.ssh`) on the head unit, its page's Debug card switches SSH access on and opens a terminal there, a root shell, and turns on a port on the phone through which an SSH app on the phone, or a laptop on its hotspot or Wi-Fi, logs in with a key saved in the app. After an update it shows once what is new in it, and its Settings screen gives the version, what's new and the licences of the code it includes. A Gradle project of its own: open `android/` in Android Studio. |
 
 The two are built separately. Some Android tests run against the agent in `headunit/`, which they find next to
 `android/` (`NBT_AGENT_REPO` names another checkout), and `android/tools/sync_agent_vectors.sh` copies the
@@ -96,10 +96,12 @@ SPDX identifier `LicenseRef-PolyForm-Strict-1.0.0` (PolyForm Strict is not on th
 both. The license texts are in [LICENSES/](LICENSES/).
 
 Third-party code keeps its own terms: TweetNaCl in `headunit/agent/vendor/tweetnacl/` (public domain), the
-Gradle wrapper in `android/` (Apache-2.0), and Dropbear and OpenSSH, the submodules in `headunit/ssh/` (their own
-licence files; our patch to Dropbear and its build options are MIT, as Dropbear). The app's APK carries the
-libraries it is built with, each under its own licence, with the licence files they give in its `META-INF/`: among
-them JSch, its SSH client (BSD, in `META-INF/com.github.mwiede/jsch/`), with the notices of the JZlib (BSD) and
-jBCrypt (ISC) code it holds.
+Gradle wrapper in `android/` (Apache-2.0), the icons from Google's Material Icons among the app's drawables in
+`android/app/src/main/res/drawable/` (Apache-2.0, as the header of each says, naming Google LLC), and Dropbear and
+OpenSSH, the submodules in `headunit/ssh/` (their own licence files; our patch to Dropbear and its build options are
+MIT, as Dropbear). The app's APK carries the libraries it is built with, each under its own licence, with the
+licence files they give in its `META-INF/`: among them JSch, its SSH client (BSD, in
+`META-INF/com.github.mwiede/jsch/`), with the notices of the JZlib (BSD) and jBCrypt (ISC) code it holds. The app
+also lists them, each with its licence, under Settings, Open-source licences, where each licence's text can be read.
 
 Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
