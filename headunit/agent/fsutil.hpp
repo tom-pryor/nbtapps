@@ -10,6 +10,8 @@
 //     a time, and a leftover is recognised and removed.
 //   - Nothing here follows a link it is asked to remove, move or inspect: kindOf, removeFile and removeTree look at
 //     the link itself.
+//   - A removal that a signal interrupts is tried again: on the head unit unlink and rmdir come back with EINTR
+//     when a signal arrives meanwhile, as the end of a child process does, with the entry still there.
 //
 // Each function that can fail returns false and sets *error to a line for the log; `error` may be 0.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
@@ -82,6 +84,9 @@ void setTestHook(TestHook hook);
 // Test only: with true, moveFile always copies and removes, as it must between two file systems. On the head unit
 // the system partition and the agent's state are two file systems; in a test folder they are one.
 void setCopyOnMove(bool on);
+// Test only: the next `removals` tries to remove a file or a folder are interrupted, as a signal interrupts one on
+// the head unit, before anything is removed.
+void setInterrupts(int removals);
 // Test only: with false, nothing is synced. A test that ends a process to stand in for a crash loses nothing by
 // that, and thousands of syncs take minutes.
 void setSyncing(bool on);
