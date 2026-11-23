@@ -155,6 +155,20 @@ int main(int argc, char** argv) {
     CHECK(fs::removeTree(work + "/a", &why) && fs::kindOf(work + "/a") == fs::kNone && fs::removeTree(work + "/a", &why));
     uint64_t free = 0;
     CHECK(fs::freeBytes(work + "/not/there/yet", &free) && free > 0 && fs::sameDevice(work, work + "/not/there"));
+    // A removal that a signal interrupts is tried again: of a file, of an empty folder and of each entry of a tree.
+    CHECK(fs::makeDirs(work + "/i/d/e", &why) && fs::writeFile(work + "/i/f", "x", 0644, &why) &&
+          fs::writeFile(work + "/i/d/g", "y", 0644, &why));
+    fs::setInterrupts(3);
+    CHECK_IN(why, fs::removeFile(work + "/i/f", &why));
+    CHECK(fs::kindOf(work + "/i/f") == fs::kNone);
+    fs::setInterrupts(2);
+    CHECK(fs::removeEmptyDir(work + "/i/d/e") && fs::kindOf(work + "/i/d/e") == fs::kNone);
+    fs::setInterrupts(7);
+    CHECK_IN(why, fs::removeTree(work + "/i", &why));
+    CHECK(fs::kindOf(work + "/i") == fs::kNone);
+    fs::setInterrupts(1);
+    CHECK_IN(why, fs::removeFile(work + "/i/none", &why));                   // interrupted, then nothing there: fine
+    fs::setInterrupts(0);
 
     // 7. Processes: output from both streams, the exit code, the environment and the working folder. A second
     // thread waits for the whole of it, as the threads of the car's libraries do in the agent.

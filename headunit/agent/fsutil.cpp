@@ -27,6 +27,7 @@ namespace {
 bool gSyncing = true;
 bool gCopyOnMove = false;
 TestHook gTestHook = 0;
+int gInterrupts = 0;
 
 void point(const char* name) {
     if (gTestHook != 0) gTestHook(name);
@@ -35,6 +36,24 @@ void point(const char* name) {
 bool fail(std::string* error, const char* what, const std::string& path) {
     if (error != 0) *error = std::string(what) + " " + path + ": " + strerror(errno);
     return false;
+}
+
+// unlink, or rmdir for a folder, tried again for as long as a signal interrupts it. On the head unit either comes
+// back with EINTR when a signal arrives while the file system has the request, as the end of a child process
+// does, and the entry is then still there. If the interrupted call did remove it, the next finds nothing, which
+// every caller takes as removed.
+int removeEntry(const char* path, bool dir) {
+    for (;;) {
+        int result;
+        if (gInterrupts > 0) {
+            --gInterrupts;
+            errno = EINTR;
+            result = -1;
+        } else {
+            result = dir ? rmdir(path) : unlink(path);
+        }
+        if (result == 0 || errno != EINTR) return result;
+    }
 }
 
 bool writeAll(int fd, const void* data, size_t len) {
@@ -206,11 +225,11 @@ bool moveFile(const std::string& from, const std::string& to, std::string* error
 }
 
 bool removeFile(const std::string& path, std::string* error) {
-    if (unlink(path.c_str()) == 0 || errno == ENOENT || errno == ENOTDIR) return true;
+    if (removeEntry(path.c_str(), false) == 0 || errno == ENOENT || errno == ENOTDIR) return true;
     return fail(error, "cannot remove", path);
 }
 
-bool removeEmptyDir(const std::string& path) { return rmdir(path.c_str()) == 0 || errno == ENOENT; }
+bool removeEmptyDir(const std::string& path) { return removeEntry(path.c_str(), true) == 0 || errno == ENOENT; }
 
 bool removeTree(const std::string& path, std::string* error) {
     Kind kind = kindOf(path);
@@ -221,7 +240,7 @@ bool removeTree(const std::string& path, std::string* error) {
     for (size_t i = 0; i < names.size(); ++i) {
         if (!removeTree(path + "/" + names[i], error)) return false;
     }
-    if (rmdir(path.c_str()) != 0 && errno != ENOENT) return fail(error, "cannot remove the folder", path);
+    if (removeEntry(path.c_str(), true) != 0 && errno != ENOENT) return fail(error, "cannot remove the folder", path);
     return true;
 }
 
@@ -291,6 +310,7 @@ bool makeLink(const std::string& target, const std::string& path, std::string* e
 void setSyncing(bool on) { gSyncing = on; }
 void setTestHook(TestHook hook) { gTestHook = hook; }
 void setCopyOnMove(bool on) { gCopyOnMove = on; }
+void setInterrupts(int removals) { gInterrupts = removals; }
 
 bool syncFd(int fd) { return !gSyncing || fsync(fd) == 0; }
 
@@ -329,7 +349,7 @@ bool FileWriter::open(const std::string& path, std::string* error) {
     path_ = path;
     temp_ = tempIn(parentOf(path));
     // A leftover from an interrupted write is replaced. O_EXCL also refuses to write through a link left there.
-    if (unlink(temp_.c_str()) != 0 && errno != ENOENT) return fail(error, "cannot remove", temp_);
+    if (removeEntry(temp_.c_str(), false) != 0 && errno != ENOENT) return fail(error, "cannot remove", temp_);
     fd_ = ::open(temp_.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd_ < 0) return fail(error, "cannot create a file in", parentOf(path));
     return true;
@@ -349,7 +369,7 @@ bool FileWriter::commit(unsigned mode, bool durable, std::string* error) {
     if (ok) point("written");
     if (ok && rename(temp_.c_str(), path_.c_str()) != 0) ok = fail(error, "cannot put in place", path_);
     if (!ok) {
-        unlink(temp_.c_str());
+        removeEntry(temp_.c_str(), false);
         return false;
     }
     if (durable) syncDir(parentOf(path_));
@@ -361,7 +381,7 @@ void FileWriter::abandon() {
     if (fd_ < 0) return;
     ::close(fd_);
     fd_ = -1;
-    unlink(temp_.c_str());
+    removeEntry(temp_.c_str(), false);
 }
 
 }  // namespace fs
