@@ -7,7 +7,7 @@
 // is (sshrelay --version, and the first line of its log), with the build's git description beside it. It is the
 // package's own, not the agent's, and is raised whenever any of the package's programs changes: a version that has
 // been released is never built again with other content.
-#define NBT_SSH_VERSION "1.0.0-beta.1"
+#define NBT_SSH_VERSION "1.0.0"
 
 #ifndef NBT_APP_VERSION
 #define NBT_APP_VERSION "unknown"

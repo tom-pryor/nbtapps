@@ -140,7 +140,7 @@ gets is starts-program. It requires agent >=1.7.0-beta.1, the first with channel
 
 Its version is the relay's: NBT_SSH_VERSION in relay/version.hpp. sshrelay --version prints it with what
 git describe --always --dirty said when the relay was built, and the relay's log begins with the same line
-(sshrelay 1.0.0-beta.1 (build 03039b4)). make ssh-check finds it in the head unit's relay, and make ssh-release
+(sshrelay 1.0.0 (build 03039b4)). make ssh-check finds it in the head unit's relay, and make ssh-release
 refuses a relay of another version, or of another commit than the one checked out, or of a checkout with changes;
 and Dropbear and sftp-server built from other sources than that commit pins (build/ssh/qnx/sources, above). The
 version is raised whenever anything the package holds changes, also when only Dropbear or OpenSSH does: a version
