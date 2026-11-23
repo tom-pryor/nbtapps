@@ -13,9 +13,11 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -867,32 +869,109 @@ class BluetoothSerialLinkConnectorTest {
         assertEquals(1, radio.listens.size)
     }
 
-    @Test
-    fun `a knock's connect that is up is closed when the car's link comes, not at the end of its hold, and has one line`() = live {
+    /**
+     * A dispatcher that runs nothing by itself: what is dispatched to it waits until the test runs it, on the test's own
+     * thread. Two coroutines that one event resumes together wait side by side, and the test chooses which goes first.
+     */
+    private class HeldDispatcher : CoroutineDispatcher() {
+        private val waiting = LinkedBlockingDeque<Runnable>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            waiting.add(block)
+        }
+
+        /** How many wait to be run. */
+        val waitingCount: Int get() = waiting.size
+
+        /** Runs what waits, and what that dispatches in turn, until nothing does. */
+        fun runAll() {
+            while (true) (waiting.pollFirst() ?: return).run()
+        }
+
+        /** Runs the one that has waited longest, or with [latest] the one that came last. */
+        fun runOne(latest: Boolean = false) = checkNotNull(if (latest) waiting.pollLast() else waiting.pollFirst()) { "nothing waits" }.run()
+
+        /** Waits for something to be dispatched from another thread; false if nothing was within ten seconds. */
+        fun awaitDispatched(): Boolean {
+            val next = waiting.pollFirst(10, TimeUnit.SECONDS) ?: return false
+            waiting.putFirst(next)
+            return true
+        }
+    }
+
+    /**
+     * A knock on [held], whose connect is up and in its hold, and whose car's link has come: the coroutine that took it
+     * from the listener has settled the knock, and the knock's own wait and the connect's hold are both resumed and wait
+     * on [held], in that order, for the test to run one first. Neither the connect nor its hold has a time limit of its
+     * own: only the car's link, or a cancel, ends the hold.
+     */
+    private inner class KnockSettling {
+        val held = HeldDispatcher()
         val radio = FakeRadio()
         val diagnostics = SerialDiagnostics()
         val listener = SerialListener(radio, diagnostics = diagnostics)
-        val connector = BluetoothSerialLinkConnector(radio, SerialConnectTimes(knockHoldMillis = 600_000), diagnostics = diagnostics, listener = listener)
-        val knocking = async { connector.knock(car) }
-        val server = radio.nextServer()
-        assertTrue(server.awaitAccepting())
-        until("the knock was sent") { radio.fakeSockets.firstOrNull()?.written?.size == 4 }
-        assertEquals(0, radio.fakeSockets.single().closes.get())
-
+        val connector = BluetoothSerialLinkConnector(
+            radio, SerialConnectTimes(knockTryMillis = Long.MAX_VALUE, knockHoldMillis = Long.MAX_VALUE), io = held, diagnostics = diagnostics,
+            listener = listener,
+        )
+        val knocking = CoroutineScope(held).async { connector.knock(car) }
         val incoming = FakeSocket()
-        server.dialIn(incoming, car.address)
-        val link = knocking.await()
+        val knock: FakeSocket
+        val server: FakeServer
 
-        assertSame(incoming.output, link.output)
-        val knock = radio.fakeSockets.single()
-        assertEquals(1, knock.closes.get())
-        assertArrayEquals(FrameCodec.KNOCK_MAGIC, knock.written)
-        assertEquals(3, knock.input.available())
-        until("the listener closed") { listener.idle }
-        // Its hold was cancelled by the car's link: the line it had stays the only one, not followed by a cancel.
-        val tries = diagnostics.tries()
-        assertEquals(listOf(LinkTry.Outcome.KNOCKED), tries.filter { it.path == LinkTry.Path.KNOCK }.map { it.outcome })
-        assertEquals(listOf(LinkTry.Outcome.TAKEN), tries.filter { it.path == LinkTry.Path.KNOCK_CONNECT }.map { it.outcome })
+        init {
+            held.runAll()
+            knock = radio.fakeSockets.single()
+            assertEquals("the knock's connect is in its hold", listOf(LinkTry.Outcome.KNOCKED), knockLines())
+            server = radio.nextServer()
+            server.dialIn(incoming, car.address)
+            // The listener hands the link over on a thread of its own, which resumes the coroutine that waits for it.
+            assertTrue("the car's link was never handed over", held.awaitDispatched())
+            held.runOne()
+            assertEquals("the knock's wait and the connect's hold, both resumed", 2, held.waitingCount)
+            assertEquals(0, knock.closes.get())
+        }
+
+        fun knockLines() = diagnostics.tries().filter { it.path == LinkTry.Path.KNOCK }.map { it.outcome }
+
+        /** The knock is over: the car's link is the link, the connect closed once, and each has its one line. */
+        fun assertTaken() {
+            assertSame(incoming.output, knocking.getCompleted().output)
+            assertEquals(0, incoming.closes.get())
+            assertEquals(1, knock.closes.get())
+            assertArrayEquals(FrameCodec.KNOCK_MAGIC, knock.written)
+            assertEquals(3, knock.input.available())
+            assertTrue("the listener was left open", server.closes.get() >= 1)
+            // The line the connect had stays its only one, with no cancel after it.
+            assertEquals(listOf(LinkTry.Outcome.KNOCKED), knockLines())
+            assertEquals(listOf(LinkTry.Outcome.TAKEN), diagnostics.tries().filter { it.path == LinkTry.Path.KNOCK_CONNECT }.map { it.outcome })
+        }
+    }
+
+    @Test
+    fun `a knock's connect that is up is closed once when its hold sees the car's link before the knock ends it, and has one line`() {
+        val knock = KnockSettling()
+
+        // The connect's hold goes first: it ends because the car's link came, and closes the connect.
+        knock.held.runOne(latest = true)
+        assertEquals(1, knock.knock.closes.get())
+        assertFalse(knock.knocking.isCompleted)
+        knock.held.runAll()
+
+        knock.assertTaken()
+    }
+
+    @Test
+    fun `a knock's connect that is up is closed once when the knock ends it before its hold sees the car's link, and has one line`() {
+        val knock = KnockSettling()
+
+        // The knock's wait goes first: it has the car's link, and cancels the knocking while the hold waits to be run.
+        knock.held.runOne()
+        assertEquals(0, knock.knock.closes.get())
+        assertFalse(knock.knocking.isCompleted)
+        knock.held.runAll()
+
+        knock.assertTaken()
     }
 
     @Test

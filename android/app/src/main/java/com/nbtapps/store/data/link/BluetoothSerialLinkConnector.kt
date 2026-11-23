@@ -386,7 +386,8 @@ class BluetoothSerialLinkConnector(
      * One of a knock's connects, [which] by its burst and its place in it, given [SerialConnectTimes.knockTryMillis].
      * One that comes up is sent the knock's magic bytes and nothing else, nothing is read from it, and it is closed once
      * [came] is settled or [SerialConnectTimes.knockHoldMillis] have passed. One that fails, is refused, or hears
-     * nothing is closed at once. A cancel, as when the car's link has come, closes it wherever it is. What came of it is
+     * nothing is closed at once. A cancel, as when the car's link has come, closes it wherever it is; one that came up is
+     * closed by its hold, once, whether the hold sees [came] settled or is cancelled first. What came of it is
      * kept in the diagnostics, in one line: a connect that is cancelled after its line, as one that came up is in its
      * hold, has no second.
      *
@@ -415,6 +416,8 @@ class BluetoothSerialLinkConnector(
             try {
                 carCame(came, times.knockHoldMillis)
             } finally {
+                // Closed here whether the hold ends or is cancelled, and so not again below.
+                made = null
                 socket.closeQuietly()
             }
             return true
