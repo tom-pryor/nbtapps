@@ -3,6 +3,29 @@
 What changed in each release of the NBTApps app, the agent and the iDrive plugin.
 Generated from the catalogue's release notes.
 
+## 2026-11-23
+
+### App 0.9.0
+- With the SSH access package installed, the head unit's page has a Debug card with a terminal: a root shell on the head unit.
+- SSH from other apps: a port on the phone for another SSH client, and for other devices on the network if you allow them.
+- Connecting to another head unit asks first when that would close a terminal or switch the SSH port off.
+- The terminal and the SSH port need agent 1.7.0 or later.
+
+### Agent 1.7.0
+- Channels: a package can have a program on the head unit that the NBTApps app talks to through the agent, started when it is first needed.
+- A channel can have a switch, which is off until it is switched on and off again after the head unit has powered down.
+- A job that installs, updates or removes a package closes that package's channels first, and other channels wait until the job has ended.
+- nbtctl channel opens a channel from the head unit's command line.
+- Removing a file is tried again when the head unit interrupts it.
+- The SSH access package needs this agent.
+- Needs app 0.8.2 or later. An agent older than 1.6.0 updates to 1.6.0 first.
+
+### org.nbtapp.ssh 1.0.0
+- First release.
+- A root shell on the head unit over SSH: a terminal in the app, and a port on the phone for other SSH clients, with scp and sftp.
+- SSH access is switched on from the Debug card on the head unit's page, and is off again after the head unit has powered down.
+- Needs agent 1.7.0 or later and app 0.9.0 or later.
+
 ## 2026-11-22
 
 ### App 0.8.2
