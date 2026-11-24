@@ -1609,6 +1609,11 @@ class JobRepositoryTest {
             count.incrementAndGet()
             return inner.connect(endpoint, dials, listenOnly)
         }
+
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+            count.incrementAndGet()
+            return inner.connect(endpoint, dials, listenOnly, probe)
+        }
     }
 
     private suspend fun until(what: String, condition: () -> Boolean) {
@@ -2751,6 +2756,7 @@ class JobRepositoryTest {
             dialler.knockFallbacks,
         )
         assertTrue("a connect only listened", dialler.listenOnly.isEmpty())
+        assertTrue("a connect to an agent known to knock probed", dialler.probes.isEmpty())
     }
 
     @Test
@@ -2870,6 +2876,90 @@ class JobRepositoryTest {
             listOf(KnockFallback.ONCE_PER_KNOCK) + List(dialler.knockFallbacks.size - 1) { KnockFallback.NONE },
             dialler.knockFallbacks,
         )
+    }
+
+    // ---- a probing knock, to a head unit whose agent is not known to knock ------------------------------------------
+
+    @Test
+    fun `a head unit never greeted whose agent knows knocks is reached by the probing knock, and is saved as one that knocks`() = test {
+        val jobs = leftCar(left = false, dials = false)
+        dialler.probeMs = 10_000
+        dialler.onConnect = { knocks(it) }
+        val connecting = scope.async { jobs.connect("bt", byUser = true) }
+        until("the connect probes") { dialler.probes.size == 1 }
+        dialIn()
+
+        assertTrue(connecting.await().isSuccess)
+        // The user's: its Serial Port connects as a knock of the user's makes them.
+        assertEquals(listOf(KnockFallback.ONCE_PER_BURST), dialler.probes)
+        assertTrue("the phone dialled", dialler.dials.isEmpty())
+        assertEquals(1, dialler.agents.size)
+        assertEquals(true, headUnits.headUnit("bt").first()?.serialKnock)
+    }
+
+    @Test
+    fun `where the probing knock brings nothing the connect dials as before, with its tries counted as before`() = test {
+        val jobs = leftCar(left = false, dials = false, waitMs = 300)
+        // An agent that does not know knocks, and whose links stay silent.
+        dialler.onConnect = { it.silent += "hello" }
+
+        val result = jobs.connect("bt", byUser = true)
+
+        assertEquals("The head unit didn't answer (3 links were tried)", result.exceptionOrNull()?.message)
+        assertEquals(3, dialler.agents.size)
+        // The first link only was probed.
+        assertEquals(listOf(KnockFallback.ONCE_PER_BURST), dialler.probes)
+        assertEquals(listOf(false, false, false), dialler.dials)
+    }
+
+    @Test
+    fun `the probing knock's kind follows the connect's, and a connect from the phone makes none`() = test {
+        val jobs = leftCar(left = false, dials = false)
+        // In sight, so that the link is kept once it is idle.
+        shown.state.value = true
+        assertTrue(jobs.connect("bt", byUser = true).isSuccess)
+
+        // On coming back to the app, the app's own: the agent is still not known to knock.
+        shown.state.value = false
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        shown.state.value = true
+        await(jobs.connection, "the link") { it is ConnectionState.Connected }
+        assertEquals(listOf(KnockFallback.ONCE_PER_BURST, KnockFallback.ONCE_PER_KNOCK), dialler.probes)
+
+        // The phone's own link, as the user asked.
+        assertTrue(jobs.connectFromPhone("bt").isSuccess)
+        assertEquals(2, dialler.probes.size)
+    }
+
+    @Test
+    fun `the wait after an agent not known to knock restarts makes no probing knock`() = test {
+        val jobs = leftCar(left = false, dials = false, rejoin = Rejoin(firstAfterMs = 20, pauseMs = 50, giveUpAfterMs = 30_000))
+        shown.state.value = true
+        assertTrue(jobs.connect("bt").isSuccess)
+        assertEquals(listOf(KnockFallback.ONCE_PER_KNOCK), dialler.probes)
+
+        dialler.onConnect = ::newVersion
+        dialler.agent.closing(LinkClosing.RESTARTING)
+
+        val back = await(jobs.connection, "the new agent") { it is ConnectionState.Connected && it.info.agentVersion == "1.1.0" }
+        assertTrue("$back", back is ConnectionState.Connected)
+        assertEquals(2, dialler.agents.size)
+        assertEquals(listOf(KnockFallback.ONCE_PER_KNOCK), dialler.probes)
+    }
+
+    @Test
+    fun `a connect cancelled in its probing knock leaves nothing open or listening`() = test {
+        val jobs = leftCar(left = false, dials = false)
+        dialler.probeMs = 10_000
+        val connecting = async { jobs.connect("bt", byUser = true) }
+        until("the probe listens") { dialler.probes.size == 1 && dialler.listening.value > 0 }
+
+        connecting.cancelAndJoin()
+
+        until("nothing listens") { dialler.listening.value == 0 }
+        assertEquals(ConnectionState.Disconnected, jobs.connection.value)
+        assertTrue("a link was opened", dialler.agents.isEmpty())
+        assertNull("a car's link was still taken", dialler.dialIn(carAddress))
     }
 
     // ---- a head unit saved before its agent dialled only when knocked -------------------------------------------------

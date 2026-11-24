@@ -1429,6 +1429,209 @@ class BluetoothSerialLinkConnectorTest {
         )
     }
 
+    // ---- the probing knock of a connect, to an agent not known to knock -----------------------------------------------
+
+    private suspend fun probeFailure(connector: LinkConnector, probe: KnockFallback? = KnockFallback.ONCE_PER_KNOCK): IOException = try {
+        connector.connect(car, dials = false, listenOnly = false, probe = probe)
+        throw AssertionError("the connect had a link")
+    } catch (e: IOException) {
+        e
+    }
+
+    private fun probeLine(diagnostics: SerialDiagnostics) = diagnostics.tries().single { it.path == LinkTry.Path.KNOCK_PROBE }
+
+    @Test
+    fun `a probing knock whose connect to the agent's service comes up makes no connect after it, and the phone then dials`() = runTest {
+        val radio = KnockRadio()
+        val diagnostics = SerialDiagnostics()
+
+        val link = knocking(radio, diagnostics).connect(car, dials = false, listenOnly = false, probe = KnockFallback.ONCE_PER_KNOCK)
+
+        // The probe's one connect, held, the wait after it, and then the dial.
+        assertEquals(listOf(OWN, OWN), radio.asked)
+        val (probe, dial) = radio.ownSockets.map { it as FakeSocket }
+        assertArrayEquals(FrameCodec.KNOCK_MAGIC, probe.written)
+        assertEquals(1, probe.closes.get())
+        assertSame(dial.output, link.output)
+        assertArrayEquals(FrameCodec.MAGIC, dial.written)
+        assertFalse(link.openedByCar)
+        assertEquals(2_500, currentTime)
+        assertEquals(
+            "probing knock, to an agent not known to knock, in burst 1 of 1, after connect 1, which came up, had no link from the car after 2500 ms",
+            probeLine(diagnostics).describe(),
+        )
+        assertEquals(LinkTry.Outcome.UP, diagnostics.tries().single { it.path == LinkTry.Path.DIAL }.outcome)
+    }
+
+    @Test
+    fun `a probing knock whose connect to the Serial Port service comes up after one to the agent's service failed makes no connect after it`() = runTest {
+        val radio = KnockRadio(own = { attempt -> if (attempt == 1) FakeSocket("read failed") else FakeSocket() })
+        radio.ownFacts = { failure -> TryFacts(channel = if (failure != null) -1 else 1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+
+        val link = knocking(radio, diagnostics).connect(car, dials = false, listenOnly = false, probe = KnockFallback.ONCE_PER_BURST)
+
+        assertEquals(listOf(OWN, STANDARD, OWN), radio.asked)
+        assertSame(radio.ownSockets[1].output, link.output)
+        assertArrayEquals(FrameCodec.KNOCK_MAGIC, (radio.standardSockets.single() as FakeSocket).written)
+        // At 250 ms, held for 1 s, and the wait after it.
+        assertEquals(2_750, currentTime)
+        assertEquals("in burst 1 of 1, after connect 2 to the Serial Port service, which came up,", probeLine(diagnostics).detail)
+    }
+
+    @Test
+    fun `a probing knock none of whose connects comes up makes its whole burst, and the dial then fails as it would have`() = runTest {
+        fun refusing() = KnockRadio(own = { FakeSocket("read failed, socket might closed or timeout, read ret: -1") }, standard = { FakeSocket("refused") })
+            .also {
+                it.ownFacts = { TryFacts(channel = 5, carConnected = true) }
+                it.standardFacts = { TryFacts(channel = 1, carConnected = true) }
+            }
+        val without = probeFailure(knocking(refusing()), probe = null)
+        val began = currentTime
+        val radio = refusing()
+        val diagnostics = SerialDiagnostics()
+
+        val failure = probeFailure(knocking(radio, diagnostics))
+
+        // The user is told what they would have been told without it.
+        assertEquals(without.message, failure.message)
+        assertTrue(failure.message, failure.message.orEmpty().contains("(7 tries over 20 s)"))
+        // The burst, as a knock makes it, then the dial's 20 s.
+        assertEquals(listOf(OWN, STANDARD, STANDARD, OWN, OWN) + List(7) { OWN }, radio.asked)
+        assertEquals(2_500 + 19_900, currentTime - began)
+        assertEquals(1, diagnostics.tries().count { it.path == LinkTry.Path.KNOCK_BURST })
+        assertEquals(
+            "probing knock, to an agent not known to knock, of 1 burst had no link from the car after 2500 ms",
+            probeLine(diagnostics).describe(),
+        )
+        assertEquals(7, diagnostics.tries().count { it.path == LinkTry.Path.DIAL })
+    }
+
+    @Test
+    fun `a probing knock that does not reach the car leaves the dial to fail as it would have`() = runTest {
+        fun away() = KnockRadio(own = { FakeSocket("read failed") }).also { it.ownFacts = { TryFacts(channel = -1, carConnected = false) } }
+        val without = probeFailure(knocking(away()), probe = null)
+        val radio = away()
+        val diagnostics = SerialDiagnostics()
+
+        val failure = probeFailure(knocking(radio, diagnostics))
+
+        assertEquals(without.message, failure.message)
+        assertTrue(failure !is KnockUnansweredException)
+        assertEquals(List(8) { OWN }, radio.asked)
+        assertEquals("in burst 1 of 1, after connect 1, which did not reach the car,", probeLine(diagnostics).detail)
+    }
+
+    @Test
+    fun `a connect that only listens makes no probing knock`() = runTest {
+        val radio = FakeRadio()
+        val failure = try {
+            knocking(radio).connect(car, dials = true, listenOnly = true, probe = KnockFallback.ONCE_PER_BURST)
+            null
+        } catch (e: NoCarLinkException) {
+            e
+        }
+        assertNotNull(failure)
+        assertTrue(radio.sockets.isEmpty())
+    }
+
+    @Test
+    fun `the car's link that comes during the probing knock's hold is the connect's, and no dial is made`() = live {
+        val radio = KnockRadio()
+        val diagnostics = SerialDiagnostics()
+        val held = CountDownLatch(1)
+        val connector = BluetoothSerialLinkConnector(
+            radio, SerialConnectTimes(knockHoldMillis = 600_000), diagnostics = diagnostics,
+            log = opening(held, "knock 1.1 came up"), listener = SerialListener(radio),
+        )
+        val connecting = async { connector.connect(car, dials = false, listenOnly = false, probe = KnockFallback.ONCE_PER_KNOCK) }
+        val server = radio.base.nextServer()
+        assertTrue(server.awaitAccepting())
+        assertTrue("the probe's knock was never sent", held.await(10, TimeUnit.SECONDS))
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address)
+        val link = connecting.await()
+
+        assertSame(incoming.output, link.output)
+        assertTrue(link.openedByCar)
+        assertEquals("no dial after the car's link", listOf(OWN), radio.asked)
+        assertTrue("the probe's connect was left open", (radio.ownSockets.single() as FakeSocket).closes.get() >= 1)
+        val probe = probeLine(diagnostics)
+        assertEquals(LinkTry.Outcome.TAKEN, probe.outcome)
+        assertEquals("in burst 1 of 1, after connect 1", probe.detail)
+    }
+
+    @Test
+    fun `the car's link that comes after the probing knock and before the dial's first connect is the connect's`() = live {
+        // The probe's connect comes up; it is held and waited after for no time. The dial's first socket is made only
+        // when the test lets it, once the car's link has been taken.
+        val dialAsked = CountDownLatch(1)
+        val dialMay = CountDownLatch(1)
+        val dialled = FakeSocket()
+        val radio = KnockRadio(
+            own = { attempt ->
+                if (attempt == 1) {
+                    FakeSocket()
+                } else {
+                    dialAsked.countDown()
+                    dialMay.await(10, TimeUnit.SECONDS)
+                    dialled
+                }
+            },
+        )
+        val diagnostics = SerialDiagnostics()
+        val taken = CountDownLatch(1)
+        val connector = BluetoothSerialLinkConnector(
+            radio, SerialConnectTimes(knockHoldMillis = 0, knockSettleMillis = 0), diagnostics = diagnostics,
+            log = opening(taken, "connect: the car's link is up and taken"), listener = SerialListener(radio),
+        )
+        try {
+            val connecting = async { connector.connect(car, dials = false, listenOnly = false, probe = KnockFallback.ONCE_PER_KNOCK) }
+            val server = radio.base.nextServer()
+            assertTrue(server.awaitAccepting())
+            assertTrue("the dial never began", dialAsked.await(10, TimeUnit.SECONDS))
+            assertEquals(LinkTry.Outcome.NO_LINK, probeLine(diagnostics).outcome)
+
+            val incoming = FakeSocket()
+            server.dialIn(incoming, car.address)
+            assertTrue("the car's link was never taken", taken.await(10, TimeUnit.SECONDS))
+            dialMay.countDown()
+            val link = connecting.await()
+
+            assertSame(incoming.output, link.output)
+            assertTrue(link.openedByCar)
+            // The dial's socket, made as the connect was being ended, is closed with nothing written on it.
+            assertEquals(1, dialled.closes.get())
+            assertTrue(dialled.written.isEmpty())
+            assertTrue("the listener was left open", server.closes.get() >= 1)
+        } finally {
+            dialMay.countDown()
+        }
+    }
+
+    @Test
+    fun `a connect cancelled in its probing knock leaves its connect closed, and nothing listening`() = live {
+        val hanging = FakeSocket(blocks = true)
+        val radio = KnockRadio(own = { hanging })
+        val diagnostics = SerialDiagnostics()
+        val connector = BluetoothSerialLinkConnector(radio, diagnostics = diagnostics, listener = SerialListener(radio))
+        val connecting = async { connector.connect(car, dials = false, listenOnly = false, probe = KnockFallback.ONCE_PER_KNOCK) }
+        val server = radio.base.nextServer()
+        assertTrue(server.awaitAccepting())
+        assertTrue("the probe's connect never began", hanging.connecting.await(10, TimeUnit.SECONDS))
+
+        connecting.cancel()
+        connecting.join()
+
+        assertTrue(connecting.isCancelled)
+        assertTrue("the probe's connect was left open", hanging.closes.get() >= 1)
+        assertEquals(listOf(OWN), radio.asked)
+        assertTrue("the listener was left open", server.closes.get() >= 1)
+        assertEquals(LinkTry.Outcome.CANCELLED, probeLine(diagnostics).outcome)
+        assertEquals(listOf(LinkTry.Outcome.CANCELLED), knockLines(diagnostics).map { it.outcome })
+    }
+
     @Test
     fun `a knock that is cancelled in its connect to the Serial Port service leaves it closed, and nothing listening`() = live {
         val hanging = FakeSocket(blocks = true)

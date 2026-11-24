@@ -82,6 +82,13 @@ data class LinkTry(
          * names the connect the knocking was at, and its service where that was the car's Serial Port service.
          */
         KNOCK_CONNECT("knocking connect"),
+
+        /**
+         * A probing knock, made before the phone's dial to an agent not known to knock, and what came of it: the car's
+         * link, or none, after which the phone dialled. Its time is from its start, and is what it added to the connect;
+         * its detail is as [KNOCK_CONNECT]'s, or says that its connect that came up brought nothing.
+         */
+        KNOCK_PROBE("probing knock, to an agent not known to knock,"),
     }
 
     enum class Outcome(val label: String) {

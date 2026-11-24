@@ -867,6 +867,28 @@ class FakeConnector(
             ?: throw NoCarLinkException("The car didn't connect to this app")
     }
 
+    /** Each probing knock a connect made before its dial, with how often it might go through the Serial Port service. */
+    val probes = CopyOnWriteArrayList<KnockFallback>()
+
+    /**
+     * How long a probing knock waits for the car's link ([dialIn]) before the connect goes on as without it, in
+     * milliseconds: 0, for an agent that does not answer knocks, waits for nothing and does not listen.
+     */
+    @Volatile
+    var probeMs = 0L
+
+    /**
+     * As the app's serial connector: over [serial], where it does not only listen, a [probe] is kept and waits [probeMs]
+     * for the car's link, which is returned where it comes; otherwise the connect goes on as without it.
+     */
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+        if (probe != null && serial && !listenOnly) {
+            probes += probe
+            if (probeMs > 0) withTimeoutOrNull(probeMs) { accept(listOf(endpoint)).link }?.let { return it }
+        }
+        return connect(endpoint, dials, listenOnly)
+    }
+
     /** Each knock, with the bursts it was asked for (null: the connector's own number), in order. */
     val knocks = CopyOnWriteArrayList<Int?>()
 
