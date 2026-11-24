@@ -663,10 +663,18 @@ class BluetoothSerialLinkConnectorTest {
     fun `a knock's connect that fails where the phone found the agent's channel ends the app's own knock, and the user's burst, whose next waits 6 s`() = runTest {
         // The socket found the agent's channel on the car, and the connect failed: the car turned it down, or another
         // app's link to the car was in the way.
-        fun failing(starts: MutableList<Long>) = FakeRadio {
-            starts += currentTime
-            FakeSocket("read failed, socket might closed or timeout, read ret: -1")
-        }.also { it.facts = { socket, _ -> TryFacts(channel = if (socket != null) 5 else null, mediaAudio = false) } }
+        // The listener is opened on a thread of its own, and these connects fail at once on the test's clock: the first
+        // is not made until the phone listens, so that the count of listeners below does not hang on which came first.
+        fun failing(starts: MutableList<Long>): FakeRadio {
+            lateinit var radio: FakeRadio
+            radio = FakeRadio {
+                if (starts.isEmpty()) radio.nextServer()
+                starts += currentTime
+                FakeSocket("read failed, socket might closed or timeout, read ret: -1")
+            }
+            radio.facts = { socket, _ -> TryFacts(channel = if (socket != null) 5 else null, mediaAudio = false) }
+            return radio
+        }
 
         // The app's own: the knock ends there, after the wait for the car's link.
         val ownStarts = CopyOnWriteArrayList<Long>()
