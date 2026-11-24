@@ -2563,6 +2563,9 @@ class JobRepositoryTest {
     private val noMediaAudio = "The car didn't connect to this app. It has no media audio connection to this phone: " +
         "choose this phone in the car's media menu to reconnect it, then connect again. " +
         "If it still fails, try Connect from the phone, which can interrupt another app's link to the car."
+    private val inTheWay = "The car didn't connect to this app. Another app on this phone, such as Android Auto, may have been " +
+        "connecting to the car, and Android lets only one app at a time do so. Wait a few seconds, then connect again. " +
+        "If it still fails, try Connect from the phone, which can interrupt another app's link to the car."
     private val noCarLink = "The car didn't connect to this app. Check that the agent is running and the car is in range. " +
         "If it still fails, try Connect from the phone, which can interrupt another app's link to the car."
 
@@ -2697,6 +2700,23 @@ class JobRepositoryTest {
         dialler.knockAway = false
         mediaAudio.set(false)
         assertTrue(jobs.connect("bt").isFailure)
+        assertEquals(noMediaAudio, (jobs.connection.value as ConnectionState.Failed).reason)
+    }
+
+    @Test
+    fun `where a knock ended after a connect another app's link may have been in the way of, the failure says so, after the media audio`() = test {
+        val jobs = leftCar(left = false, knocks = true)
+        dialler.knockMs = 100
+        dialler.knockInTheWay = true
+
+        mediaAudio.set(true)
+        assertTrue(jobs.connect("bt", byUser = true).isFailure)
+        val failed = jobs.connection.value as ConnectionState.Failed
+        assertEquals(inTheWay, failed.reason)
+        assertTrue(failed.listenedOnly)
+        // Where the car has no media audio to the phone, it refuses the phone's links, and that is the likelier cause.
+        mediaAudio.set(false)
+        assertTrue(jobs.connect("bt", byUser = true).isFailure)
         assertEquals(noMediaAudio, (jobs.connection.value as ConnectionState.Failed).reason)
     }
 

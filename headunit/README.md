@@ -970,16 +970,21 @@ audio at the car ("The re-point", below).
   knocks at such an agent, and once at one it has not greeted yet (the probing knock, below) (`serial.knock*` in
   `spec/protocol/constants.txt`). The app makes up to 5 connects
   to the agent's service, 250 ms after each that fails (one may fail on the phone while another app's link to the
-  car is up); where one of them fails, the app makes its next connects to the car's standard Serial Port service
-  (0x1101) instead, with the same bytes and hold: the car advertises only some of the serial services registered
-  there, so the agent's may have no record a phone can find, and every serial record of the car names the same
-  RFCOMM channel, so such a link reaches the agent as one to its own service does, and the agent takes the knock by
-  its bytes whatever service the phone opened. It makes at most 2 such connects at a time, none after one of them
-  came up (where no agent runs, another program at the car may take that link), and then goes back to the agent's
-  service for the connects that remain, so a knock makes no more connects than it would without them. How often
-  depends on who started the knock: for a connect the user starts, once in each burst (each later burst then begins
-  at the Serial Port service); for the knocks the app makes by itself, once in the whole knock; for the app's wait
-  after an agent's update, never. One that comes up carries the knock's four magic bytes, `NBTK`, and nothing else: the agent reads
+  car is up). Every serial service of the car is on one RFCOMM channel, and Android takes no second link from a
+  phone to the same channel: a connect while another app on the phone has its link to the car fails on the phone,
+  and Android's clean-up of it closes that app's link, which the app then opens again at once. So a connect that
+  failed where the phone had found the service (or any failed connect to the car's standard Serial Port service,
+  0x1101, which the car always has) ends its burst: the app waits for the car's link as after any burst, and the
+  next burst follows 6 seconds later; the app's own knocks end there. Where a connect finds no record of the
+  agent's service (the car advertises only some of the serial services registered there, so the agent's may have
+  none a phone can find; such a connect goes no further than the look-up and disturbs nobody), the app's next
+  connect goes to the Serial Port service instead, with the same bytes and hold: such a link reaches the agent as
+  one to its own service does, as the agent takes the knock by its bytes whatever service the phone opened. Where
+  the phone cannot tell whether it found the service, that next connect waits 1.5 seconds first. One connect to the
+  Serial Port service at most is made: in each burst for a connect the user starts, later bursts beginning there;
+  once in the whole knock for the knocks the app makes by itself; never for the app's wait after an agent's update.
+  Where no agent runs, such a connect that comes up reaches another program at the car. The Serial Port connects
+  take the places of connects to the agent's service, so a knock makes no more connects than before. One that comes up carries the knock's four magic bytes, `NBTK`, and nothing else: the agent reads
   them within the decide step's 500 ms, writes nothing into the link, and lets it go, reading its node and dropping
   what comes until the app ends the link (it is never handed to another program), and takes it as the knock of the
   phone whose request brought that link. A phone's request for a serial link is no knock, whatever becomes of it. A

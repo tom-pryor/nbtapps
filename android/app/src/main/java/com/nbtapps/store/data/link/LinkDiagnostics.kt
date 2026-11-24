@@ -110,8 +110,12 @@ data class LinkTry(
         /** A knock's connect came up, and the knock's magic bytes were sent on it. */
         KNOCKED("came up, and the knock was sent"),
 
-        /** A knock's connect failed where the phone had found the agent's channel on the car: the car refused it. */
-        REFUSED("refused"),
+        /**
+         * A knock's connect failed where the phone had found the service's channel on the car. The phone cannot tell why:
+         * the car refused it, or another app on the phone has its link to the car's serial service, of which Android takes
+         * no second, and which the failed connect has closed. Named for the first, as it was before the second was known.
+         */
+        REFUSED("failed with the service found (refused by the car, or another app's link to the car in the way)"),
 
         /** Given up because the connect it was part of was cancelled, or had its link. */
         CANCELLED("cancelled"),
