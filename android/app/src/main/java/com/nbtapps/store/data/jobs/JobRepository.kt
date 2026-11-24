@@ -13,6 +13,7 @@ import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.Blob
 import com.nbtapps.store.data.link.IncomingLink
 import com.nbtapps.store.data.link.JobEvent
+import com.nbtapps.store.data.link.KnockFallback
 import com.nbtapps.store.data.link.KnockUnansweredException
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkClosedException
@@ -510,8 +511,13 @@ class JobRepository(
      * A caller that is cancelled meanwhile, as a screen's is when the user leaves it, takes the attempt with
      * it: no link stays open, and the state is [ConnectionState.Disconnected]. So does the app leaving the
      * foreground ([leave]), which fails the connect instead of cancelling its caller.
+     *
+     * [byUser] says that the user started it, as with a button: its knocks may then go through the car's Serial Port
+     * service once in each burst ([KnockFallback.ONCE_PER_BURST]), where one the app makes by itself, as any caller that
+     * does not say, may once in the whole knock ([KnockFallback.ONCE_PER_KNOCK]).
      */
-    suspend fun connect(headUnitId: String): Result<Unit> = connect(headUnitId, fromPhone = false)
+    suspend fun connect(headUnitId: String, byUser: Boolean = false): Result<Unit> =
+        connect(headUnitId, fromPhone = false, if (byUser) KnockFallback.ONCE_PER_BURST else KnockFallback.ONCE_PER_KNOCK)
 
     /**
      * [connect], once, the way a head unit whose agent leaves the phone's own links alone ([HeadUnit.phoneOpenedLeft]),
@@ -519,9 +525,9 @@ class JobRepository(
      * bytes and `hello`, as well as listening for it. For the user to ask for where a connect that only listened or
      * knocked had no link ([ConnectionState.Failed.listenedOnly]); nothing else does it.
      */
-    suspend fun connectFromPhone(headUnitId: String): Result<Unit> = connect(headUnitId, fromPhone = true)
+    suspend fun connectFromPhone(headUnitId: String): Result<Unit> = connect(headUnitId, fromPhone = true, KnockFallback.ONCE_PER_BURST)
 
-    private suspend fun connect(headUnitId: String, fromPhone: Boolean): Result<Unit> {
+    private suspend fun connect(headUnitId: String, fromPhone: Boolean, knockFallback: KnockFallback): Result<Unit> {
         heldBack.value = false
         // What the user asks for takes the place of what the app was waiting to do by itself.
         remembered = null
@@ -531,7 +537,7 @@ class JobRepository(
             connectLock.withLock {
                 // A wait that began while this one waited for the lock was not there to be ended above.
                 stopRejoining()
-                attempt(headUnitId, quiet = false, fromPhone = fromPhone)
+                attempt(headUnitId, quiet = false, fromPhone = fromPhone, knockFallback = knockFallback)
             }
         } ?: Result.failure(IOException(LEFT_WHILE_CONNECTING))
     }
@@ -560,7 +566,7 @@ class JobRepository(
      * What [connect] does, with [connectLock] held. When [quiet], it is one of the app's own tries, after the agent
      * restarted or on coming back to the foreground: a failure is the caller's to publish, and the state stays
      * [ConnectionState.Connecting]. With [fromPhone], the phone dials the car where it would otherwise only listen or
-     * knock ([connectFromPhone]). [knockBursts] is as for [attemptOver].
+     * knock ([connectFromPhone]). [knockBursts] and [knockFallback] are as for [attemptOver].
      */
     private suspend fun attempt(
         headUnitId: String,
@@ -568,12 +574,13 @@ class JobRepository(
         incoming: IncomingLink? = null,
         fromPhone: Boolean = false,
         knockBursts: Int? = null,
+        knockFallback: KnockFallback = KnockFallback.ONCE_PER_KNOCK,
     ): Result<Unit> {
         attempting.update { it + 1 }
         // A link the car opened, until it is the first link greeted. One that is never used is closed.
         var spare: Link? = incoming?.link
         try {
-            return attemptOver(headUnitId, quiet, incoming?.endpoint, fromPhone, knockBursts) { spare.also { spare = null } }
+            return attemptOver(headUnitId, quiet, incoming?.endpoint, fromPhone, knockBursts, knockFallback) { spare.also { spare = null } }
         } finally {
             spare?.close()
             attempting.update { it - 1 }
@@ -583,7 +590,9 @@ class JobRepository(
     /**
      * What [attempt] does. Where [only] is given, that endpoint alone is tried, and its first link is the one
      * [given] gives, if any: a link the car opened. [fromPhone] is as for [attempt]. [knockBursts]: how many bursts a
-     * knock makes, to a head unit whose agent dials when knocked ([HeadUnit.serialKnock]), where not the connector's own.
+     * knock makes, to a head unit whose agent dials when knocked ([HeadUnit.serialKnock]), where not the connector's own;
+     * [knockFallback]: how often its knocks may go through the car's Serial Port service ([LinkConnector.knock]), the
+     * same for the knocks of every link the connect opens.
      */
     private suspend fun attemptOver(
         headUnitId: String,
@@ -591,6 +600,7 @@ class JobRepository(
         only: Endpoint?,
         fromPhone: Boolean,
         knockBursts: Int?,
+        knockFallback: KnockFallback,
         given: () -> Link?,
     ): Result<Unit> {
         drop("The app connected again")
@@ -609,7 +619,7 @@ class JobRepository(
             for (endpoint in endpoints) {
                 opened = null
                 val reason = try {
-                    val paired = dial(unit, endpoint, given(), knockBursts) { opened = it }
+                    val paired = dial(unit, endpoint, given(), knockBursts, knockFallback) { opened = it }
                     return if (paired) Result.success(Unit) else Result.failure(PairingNeeded())
                 } catch (e: RemoteException) {
                     AgentText.request(e.code)
@@ -744,7 +754,7 @@ class JobRepository(
                 if (!wanted || session != null || unpaired != null) return@withLock
                 val before = connectionState.value
                 val link = spare.also { spare = null }
-                val result = attempt(unit.id, quiet = true, IncomingLink(incoming.endpoint, requireNotNull(link)))
+                val result = attempt(unit.id, quiet = true, IncomingLink(incoming.endpoint, requireNotNull(link)), knockFallback = KnockFallback.ONCE_PER_KNOCK)
                 log.line(
                     when {
                         result.isSuccess -> "the car's link is connected"
@@ -820,7 +830,7 @@ class JobRepository(
                 currentCoroutineContext().ensureActive()
                 if (remembered != headUnitId) return@withLock
                 remembered = null
-                quietFailure(headUnitId, attempt(headUnitId, quiet = true))
+                quietFailure(headUnitId, attempt(headUnitId, quiet = true, knockFallback = KnockFallback.ONCE_PER_KNOCK))
             }
         }
         returning = work
@@ -873,7 +883,10 @@ class JobRepository(
      * To a head unit whose agent dials only when knocked ([HeadUnit.serialKnock]), each connect is one burst of
      * knocks, one every [Rejoin.knockEveryMs], until [Rejoin.knockGiveUpAfterMs]; a link the car opens in between is
      * taken as at any other time ([take]), which ends the wait. The job is then shown as one whose wait is over
-     * ([JobView.waitedOut]), so that the screen says so and what to do.
+     * ([JobView.waitedOut]), so that the screen says so and what to do. None of these knocks goes through the car's
+     * Serial Port service ([KnockFallback.NONE]): while the agent restarts, a link that came up there
+     * would reach another program at the car, and the agent on trial dials the phone by itself, which the knock listens
+     * for all the while.
      */
     private suspend fun rejoin(headUnitId: String) {
         val began = clock()
@@ -888,7 +901,7 @@ class JobRepository(
             val result = connectLock.withLock {
                 // Taking a free lock asks nothing of the caller: one that was told to stop must not connect.
                 currentCoroutineContext().ensureActive()
-                attempt(headUnitId, quiet = true, knockBursts = if (knocks) 1 else null)
+                attempt(headUnitId, quiet = true, knockBursts = if (knocks) 1 else null, knockFallback = KnockFallback.NONE)
             }
             if (result.isSuccess) return
             if (result.exceptionOrNull() is PairingNeeded) return lost(headUnitId)
@@ -1471,7 +1484,8 @@ class JobRepository(
             if (connectionState.value != ConnectionState.Connecting(connected.headUnitId)) return@withLock false
             // For the car to take the last link down, as between the links a connect opens.
             delay(greeting.pauseMs)
-            val result = attempt(connected.headUnitId, quiet = true)
+            // The user's: the reset was theirs.
+            val result = attempt(connected.headUnitId, quiet = true, knockFallback = KnockFallback.ONCE_PER_BURST)
             quietFailure(connected.headUnitId, result)
             result.isSuccess
         }
@@ -1501,7 +1515,7 @@ class JobRepository(
      * Nothing is left listening, and no link of the car's open, however the greeting ends.
      *
      * To a head unit whose agent dials only when knocked ([HeadUnit.serialKnock]), each link is the car's that a knock
-     * brings ([LinkConnector.knock], with [knockBursts]), and is greeted as any link the car opened is; [HeadUnit.phoneOpenedLeft]
+     * brings ([LinkConnector.knock], with [knockBursts] and [knockFallback]), and is greeted as any link the car opened is; [HeadUnit.phoneOpenedLeft]
      * decides nothing, and no link of the phone's own is made.
      */
     private suspend fun greet(
@@ -1509,13 +1523,14 @@ class JobRepository(
         endpoint: Endpoint,
         first: Link?,
         knockBursts: Int?,
+        knockFallback: KnockFallback,
         holding: (AgentSession?) -> Unit,
         tries: Tries,
     ): Pair<AgentSession, Hello> =
         coroutineScope {
             val carLinks = CarLinks(endpoint, this)
             try {
-                rounds(unit, endpoint, first, knockBursts, holding, tries, carLinks)
+                rounds(unit, endpoint, first, knockBursts, knockFallback, holding, tries, carLinks)
             } finally {
                 // Nothing listens, and no link of the car's that came is left open, however the greeting ends. The
                 // scope waits for the listening to have stopped.
@@ -1529,6 +1544,7 @@ class JobRepository(
         endpoint: Endpoint,
         first: Link?,
         knockBursts: Int?,
+        knockFallback: KnockFallback,
         holding: (AgentSession?) -> Unit,
         tries: Tries,
         carLinks: CarLinks,
@@ -1545,7 +1561,7 @@ class JobRepository(
                     ?: came
                     ?: first.takeIf { tries.opened == 0 }
                     ?: if (unit.serialKnock) {
-                        connector.knock(endpoint, knockBursts)
+                        connector.knock(endpoint, knockBursts, knockFallback)
                     } else {
                         connector.connect(endpoint, unit.serialDial, listenOnly = unit.serialDial && unit.phoneOpenedLeft)
                     }
@@ -1733,12 +1749,12 @@ class JobRepository(
      * may be one the agent no longer serves, as a `hello` with no answer may be, so another is opened as [greet] does,
      * within the same [Greeting.serialTries]; on any other link the connect fails.
      */
-    private suspend fun dial(unit: HeadUnit, endpoint: Endpoint, first: Link?, knockBursts: Int?, holding: (AgentSession?) -> Unit): Boolean {
+    private suspend fun dial(unit: HeadUnit, endpoint: Endpoint, first: Link?, knockBursts: Int?, knockFallback: KnockFallback, holding: (AgentSession?) -> Unit): Boolean {
         var stale = false
         var given = first
         var tries = Tries()
         while (true) {
-            val (next, hello) = greet(unit, endpoint, given.also { given = null }, knockBursts, holding, tries)
+            val (next, hello) = greet(unit, endpoint, given.also { given = null }, knockBursts, knockFallback, holding, tries)
             try {
                 return open(unit, endpoint, next, hello, stale)
             } catch (e: StaleKey) {

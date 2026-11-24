@@ -472,7 +472,7 @@ class HeadUnitDetailViewModel internal constructor(
 
     /** Connect, after the question where a terminal or the SSH port of another head unit would end ([ConnectGuard]). */
     fun connect() {
-        viewModelScope.launch { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId) }
+        viewModelScope.launch { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId, byUser = true) }
     }
 
     /** One connect with the phone dialling the car as well, see [JobRepository.connectFromPhone]: after the same question. */

@@ -74,13 +74,16 @@ interface LinkConnector {
      * Knocks at the head unit at [endpoint], whose agent lists [ProtocolConstants.CAPABILITY_SERIAL_KNOCK]
      * ([com.nbtapps.store.model.HeadUnit.serialKnock]), and returns the link its car then opens to the phone: no link of
      * the phone's own is made. [bursts] is how many bursts of knocks are made at most, or null for the connector's own
-     * number. Only Bluetooth serial knocks: see [BluetoothSerialLinkConnector]. Any other connector connects as to an
-     * agent that dials.
+     * number. [fallback] is how often the knock may go through the car's standard Serial Port service after a connect
+     * to the agent's service failed ([BluetoothSerialLinkConnector.knock]): the cautious [KnockFallback.ONCE_PER_KNOCK]
+     * where the caller does not say. Only Bluetooth serial knocks: see [BluetoothSerialLinkConnector]. Any other
+     * connector connects as to an agent that dials.
      *
      * @throws KnockUnansweredException if no link of the car's came after the knocks.
      * @throws NoCarLinkException if the phone cannot listen for it.
      */
-    suspend fun knock(endpoint: Endpoint, bursts: Int? = null): Link = connect(endpoint, dials = true)
+    suspend fun knock(endpoint: Endpoint, bursts: Int? = null, fallback: KnockFallback = KnockFallback.ONCE_PER_KNOCK): Link =
+        connect(endpoint, dials = true)
 
     /** Whether [accept] can bring a link that the head unit at [endpoint] opens to the phone. Only Bluetooth serial can. */
     fun accepts(endpoint: Endpoint): Boolean = false
@@ -93,6 +96,26 @@ interface LinkConnector {
      * @throws IOException if the phone cannot listen now, or none of [endpoints] is one this connector [accepts].
      */
     suspend fun accept(endpoints: Collection<Endpoint>): IncomingLink = throw IOException("This version of the app can't take a link the head unit opens")
+}
+
+/**
+ * How often a knock ([LinkConnector.knock]) may go through the car's standard Serial Port service, after one of its
+ * connects to the agent's service failed: a connect there that comes up reaches another program at the car where no
+ * agent takes it. Each allows at most [SerialConnectTimes.knockStandardAttempts] such connects at a time, and none
+ * after one of them came up; see [BluetoothSerialLinkConnector.knock].
+ */
+enum class KnockFallback {
+    /** Never: for the wait after an agent's update, whose agent on trial dials the phone by itself. */
+    NONE,
+
+    /** Once in the whole knock: for the knocks the app makes by itself, as on coming back to the foreground. */
+    ONCE_PER_KNOCK,
+
+    /**
+     * Once in each burst of the knock: for a connect the user starts, who waits for it and would otherwise be told the
+     * car did not answer after a dial of the car's that brought nothing.
+     */
+    ONCE_PER_BURST,
 }
 
 /** A link a head unit opened to the phone: see [LinkConnector.accept]. */
@@ -116,7 +139,7 @@ class LinkConnectors(private val connectors: List<LinkConnector>) : LinkConnecto
     override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link =
         connectorFor(endpoint).connect(endpoint, dials, listenOnly)
 
-    override suspend fun knock(endpoint: Endpoint, bursts: Int?): Link = connectorFor(endpoint).knock(endpoint, bursts)
+    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link = connectorFor(endpoint).knock(endpoint, bursts, fallback)
 
     override fun accepts(endpoint: Endpoint): Boolean = connectors.any { it.accepts(endpoint) }
 

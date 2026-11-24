@@ -197,7 +197,7 @@ class SetupViewModel @Inject constructor(
         // A process that was stopped while the set-up connected: the connect goes on where it was.
         val restored = kept.value.answers
         if (restored.headUnitId != null && !restored.paired && jobs.connection.value.headUnitId != restored.headUnitId) {
-            connect(restored.headUnitId)
+            connect(restored.headUnitId, byUser = false)
         }
     }
 
@@ -324,7 +324,7 @@ class SetupViewModel @Inject constructor(
         }
         viewModelScope.launch {
             if (!guard.mayConnect(id) || kept.value.answers.headUnitId != null) return@launch
-            connect(id)
+            connect(id, byUser = true)
             take(id, added, name, address)
         }
     }
@@ -346,11 +346,12 @@ class SetupViewModel @Inject constructor(
 
     /**
      * Opens the link to the head unit [id], in place of the set-up's last try. The try belongs to this set-up: it
-     * is given up when the set-up is left, as [JobRepository.connect] says.
+     * is given up when the set-up is left, as [JobRepository.connect] says. [byUser]: the user asked for it, and it is
+     * not the set-up going on by itself after the process was stopped.
      */
-    private fun connect(id: String, fromPhone: Boolean = false) {
+    private fun connect(id: String, byUser: Boolean, fromPhone: Boolean = false) {
         attempt?.cancel()
-        val job = viewModelScope.launch(start = CoroutineStart.LAZY) { if (fromPhone) jobs.connectFromPhone(id) else jobs.connect(id) }
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) { if (fromPhone) jobs.connectFromPhone(id) else jobs.connect(id, byUser) }
         attempt = job
         attempting.value = true
         job.invokeOnCompletion { if (attempt === job) attempting.value = false }
@@ -366,7 +367,7 @@ class SetupViewModel @Inject constructor(
     /** Try again, after the connect failed. */
     fun retry() {
         val id = kept.value.answers.headUnitId ?: return
-        viewModelScope.launch { if (guard.mayConnect(id)) connect(id) }
+        viewModelScope.launch { if (guard.mayConnect(id)) connect(id, byUser = true) }
     }
 
     /**
@@ -376,7 +377,7 @@ class SetupViewModel @Inject constructor(
      */
     fun connectFromPhone() {
         val id = kept.value.answers.headUnitId ?: return
-        viewModelScope.launch { if (guard.mayConnect(id)) connect(id, fromPhone = true) }
+        viewModelScope.launch { if (guard.mayConnect(id)) connect(id, byUser = true, fromPhone = true) }
     }
 
     /** Cancel on the Connect page, and back from it: the connect is given up, and the car picked with it. */

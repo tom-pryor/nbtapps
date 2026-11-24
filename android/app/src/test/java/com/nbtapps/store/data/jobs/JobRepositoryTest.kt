@@ -11,6 +11,7 @@ import com.nbtapps.store.data.crypto.sha256Hex
 import com.nbtapps.store.data.link.AgentSession
 import com.nbtapps.store.data.link.BluetoothSerialLinkConnector
 import com.nbtapps.store.data.link.FakeRadio
+import com.nbtapps.store.data.link.KnockFallback
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.LinkConnectors
@@ -20,6 +21,7 @@ import com.nbtapps.store.data.link.ProtocolConstants
 import com.nbtapps.store.data.link.SerialListener
 import com.nbtapps.store.data.packages.PackageStore
 import com.nbtapps.store.data.packages.StoredPackage
+import com.nbtapps.store.data.terminal.JobTerminalLink
 import com.nbtapps.store.model.AgentText
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.AutostartReason
@@ -2713,7 +2715,7 @@ class JobRepositoryTest {
         dialler.onConnect = { knocks(it, also = listOf(ProtocolConstants.CAPABILITY_SERIAL_RESET)) }
         // In sight, so that the link is kept once it is idle.
         shown.state.value = true
-        val first = scope.async { jobs.connect("bt") }
+        val first = scope.async { jobs.connect("bt", byUser = true) }
         until("the connect knocks") { dialler.knocks.size == 1 }
         dialIn()
         assertTrue(first.await().isSuccess)
@@ -2742,7 +2744,49 @@ class JobRepositoryTest {
         assertTrue(failed.listenedOnly)
         assertEquals(noMediaAudio, failed.reason)
         assertEquals(listOf<Int?>(null, null, null, null), dialler.knocks)
+        // The user's connect and the one after the user's reset may go through the car's Serial Port service once in
+        // each burst; those the app makes by itself on coming back, once in the whole knock.
+        assertEquals(
+            listOf(KnockFallback.ONCE_PER_BURST, KnockFallback.ONCE_PER_BURST, KnockFallback.ONCE_PER_KNOCK, KnockFallback.ONCE_PER_KNOCK),
+            dialler.knockFallbacks,
+        )
         assertTrue("a connect only listened", dialler.listenOnly.isEmpty())
+    }
+
+    @Test
+    fun `a connect that says it is the user's, as a terminal's is, knocks as the user's, and one that does not as the app's own`() = test {
+        val jobs = leftCar(left = false, knocks = true)
+        dialler.onConnect = { knocks(it) }
+        shown.state.value = true
+        for ((connect, kind) in listOf<Pair<suspend () -> Result<Unit>, KnockFallback>>(
+            suspend { jobs.connect("bt") } to KnockFallback.ONCE_PER_KNOCK,
+            suspend { jobs.connect("bt", byUser = true) } to KnockFallback.ONCE_PER_BURST,
+            suspend { JobTerminalLink(jobs).connect("bt") } to KnockFallback.ONCE_PER_BURST,
+        )) {
+            val before = dialler.knocks.size
+            val connecting = scope.async { connect() }
+            until("the connect knocks") { dialler.knocks.size == before + 1 }
+            dialIn()
+            assertTrue(connecting.await().isSuccess)
+            assertEquals(kind, dialler.knockFallbacks.last())
+        }
+    }
+
+    @Test
+    fun `a car's link the app takes by itself that stays silent is followed by a knock of the app's own`() = test {
+        val jobs = leftCar(left = false, waitMs = 300, knocks = true)
+        // The car's link is not answered; the one the knock brings is.
+        dialler.onConnect = { agent ->
+            knocks(agent)
+            agent.silent += "hello"
+        }
+        shown.state.value = true
+        dialIn()
+        until("the next link knocks") { dialler.knocks.size == 1 }
+        dialler.onConnect = { knocks(it) }
+        dialIn()
+        await(jobs.connection, "the link") { it is ConnectionState.Connected }
+        assertEquals(listOf(KnockFallback.ONCE_PER_KNOCK), dialler.knockFallbacks)
     }
 
     @Test
@@ -2751,7 +2795,7 @@ class JobRepositoryTest {
         dialler.onConnect = { knocks(it) }
         // In sight, so that the link is kept once it is idle.
         shown.state.value = true
-        val first = scope.async { jobs.connect("bt") }
+        val first = scope.async { jobs.connect("bt", byUser = true) }
         until("the connect knocks") { dialler.knocks.size == 1 }
         dialIn()
         assertTrue(first.await().isSuccess)
@@ -2765,8 +2809,13 @@ class JobRepositoryTest {
         dialIn()
         val back = await(jobs.connection, "the new agent") { it is ConnectionState.Connected } as ConnectionState.Connected
         assertEquals("1.1.0", back.info.agentVersion)
-        // One burst each.
+        // One burst each, and none through the car's Serial Port service: the user's connect's knock may go there.
         assertTrue("${dialler.knocks}", dialler.knocks.drop(1).all { it == 1 })
+        assertEquals(
+            "${dialler.knockFallbacks}",
+            listOf(KnockFallback.ONCE_PER_BURST) + List(dialler.knocks.size - 1) { KnockFallback.NONE },
+            dialler.knockFallbacks,
+        )
         assertTrue("the phone dialled", dialler.listenOnly.isEmpty())
     }
 
@@ -2815,6 +2864,12 @@ class JobRepositoryTest {
         // A knock every knockEveryMs until its time is up, however short each is.
         assertTrue("given up on too soon", (System.nanoTime() - told) / 1_000_000 >= 400 - 50)
         assertTrue("${dialler.knocks}", dialler.knocks.size > 3 && dialler.knocks.drop(1).all { it == 1 })
+        // The first connect did not say it was the user's.
+        assertEquals(
+            "${dialler.knockFallbacks}",
+            listOf(KnockFallback.ONCE_PER_KNOCK) + List(dialler.knockFallbacks.size - 1) { KnockFallback.NONE },
+            dialler.knockFallbacks,
+        )
     }
 
     // ---- a head unit saved before its agent dialled only when knocked -------------------------------------------------

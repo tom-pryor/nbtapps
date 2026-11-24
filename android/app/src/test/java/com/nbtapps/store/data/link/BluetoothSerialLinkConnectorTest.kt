@@ -620,8 +620,12 @@ class BluetoothSerialLinkConnectorTest {
         }
     }
 
-    private suspend fun knockFailure(connector: LinkConnector, bursts: Int? = null): IOException = try {
-        connector.knock(car, bursts)
+    private suspend fun knockFailure(
+        connector: LinkConnector,
+        bursts: Int? = null,
+        fallback: KnockFallback = KnockFallback.ONCE_PER_KNOCK,
+    ): IOException = try {
+        connector.knock(car, bursts, fallback)
         throw AssertionError("the knock had a link")
     } catch (e: IOException) {
         e
@@ -1035,6 +1039,449 @@ class BluetoothSerialLinkConnectorTest {
         until("the listener closed") { listener.idle }
     }
 
+    // ---- the knock through the car's Serial Port service ----------------------------------------------------------
+
+    /**
+     * A stand-in for the phone's Bluetooth that tells a knock's connects apart by the service they are to: [own] makes
+     * the sockets to the agent's service and [standard] those to the car's Serial Port service, each by its count
+     * there, and what the phone tells of each is the test's ([ownFacts], [standardFacts]). Listening is [base]'s.
+     */
+    private class KnockRadio(
+        val base: FakeRadio = FakeRadio(),
+        private val own: (attempt: Int) -> SerialSocket = { FakeSocket() },
+        private val standard: (attempt: Int) -> SerialSocket = { FakeSocket() },
+    ) : SerialRadio by base {
+        /** The service of each socket asked for, in order. */
+        val asked = CopyOnWriteArrayList<UUID>()
+        val ownSockets = CopyOnWriteArrayList<SerialSocket>()
+        val standardSockets = CopyOnWriteArrayList<SerialSocket>()
+
+        @Volatile
+        var ownFacts: (failure: Throwable?) -> TryFacts = { TryFacts() }
+
+        @Volatile
+        var standardFacts: (failure: Throwable?) -> TryFacts = { TryFacts() }
+
+        override fun socket(address: String, uuid: UUID): SerialSocket {
+            asked += uuid
+            return when (uuid) {
+                OWN -> own(ownSockets.size + 1).also { ownSockets += it }
+                STANDARD -> standard(standardSockets.size + 1).also { standardSockets += it }
+                else -> throw AssertionError("a connect to $uuid")
+            }
+        }
+
+        override fun inspect(address: String, socket: SerialSocket?, failure: Throwable?): TryFacts = when {
+            // The knock's own last line, which is about no socket.
+            socket == null -> TryFacts()
+            socket in standardSockets -> standardFacts(failure)
+            else -> ownFacts(failure)
+        }
+    }
+
+    /** A log that opens [latch] at the first line that starts with [start]: for a test to wait until a knock's connect has its line. */
+    private fun opening(latch: CountDownLatch, start: String) = LinkLog { if (it.startsWith(start)) latch.countDown() }
+
+    private fun knockLines(diagnostics: SerialDiagnostics) = diagnostics.tries().filter { it.path == LinkTry.Path.KNOCK }
+
+    private fun knockEnd(diagnostics: SerialDiagnostics) = diagnostics.tries().single { it.path == LinkTry.Path.KNOCK_CONNECT }
+
+    @Test
+    fun `a knock whose connects to the agent's service come up makes none to the Serial Port service`() = runTest {
+        val radio = KnockRadio()
+
+        val failure = knockFailure(knocking(radio))
+
+        assertTrue("$failure", failure is KnockUnansweredException && !failure.carAway)
+        assertEquals(List(15) { OWN }, radio.asked)
+    }
+
+    @Test
+    fun `a connect to the agent's service that fails turns the next to the Serial Port service, whether the phone found its channel, found none, or cannot tell`() = runTest {
+        for ((channel, outcome) in listOf(-1 to LinkTry.Outcome.FAILED, 5 to LinkTry.Outcome.REFUSED, null to LinkTry.Outcome.FAILED)) {
+            val radio = KnockRadio(own = { FakeSocket("read failed") }, standard = { FakeSocket("read failed") })
+            radio.ownFacts = { TryFacts(channel = channel, carConnected = true) }
+            radio.standardFacts = { TryFacts(channel = 1, carConnected = true) }
+            val diagnostics = SerialDiagnostics()
+
+            val failure = knockFailure(knocking(radio, diagnostics), bursts = 1)
+
+            assertTrue("$channel: $failure", failure is KnockUnansweredException && !failure.carAway)
+            // The two there in the places of the next two, and the rest at the agent's service again.
+            assertEquals("$channel", listOf(OWN, STANDARD, STANDARD, OWN, OWN), radio.asked)
+            val knocks = knockLines(diagnostics)
+            assertEquals("$channel", outcome, knocks[0].outcome)
+            assertEquals(
+                listOf("1.1", "1.2 to the Serial Port service", "1.3 to the Serial Port service", "1.4", "1.5"),
+                knocks.map { it.detail },
+            )
+        }
+    }
+
+    @Test
+    fun `where both connects to the Serial Port service fail, the knock goes on at the agent's service to the end of its bursts, as it does today`() = runTest {
+        val starts = CopyOnWriteArrayList<Long>()
+        val radio = KnockRadio(
+            own = {
+                starts += currentTime
+                FakeSocket("read failed, socket might closed or timeout, read ret: -1")
+            },
+            standard = {
+                starts += currentTime
+                FakeSocket("read failed, socket might closed or timeout, read ret: -1")
+            },
+        )
+        // The car refuses them all: its one link for phone apps is held, say.
+        radio.ownFacts = { TryFacts(channel = 5, carConnected = true) }
+        radio.standardFacts = { TryFacts(channel = 1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+
+        val failure = knockFailure(knocking(radio, diagnostics))
+
+        assertTrue("$failure", failure is KnockUnansweredException && !failure.carAway)
+        // As many connects, at the same times, as a knock that makes none there.
+        assertEquals(listOf(OWN, STANDARD, STANDARD) + List(12) { OWN }, radio.asked)
+        assertEquals(
+            listOf<Long>(0, 250, 500, 750, 1_000, 4_500, 4_750, 5_000, 5_250, 5_500, 9_000, 9_250, 9_500, 9_750, 10_000),
+            starts,
+        )
+        assertEquals(11_500, currentTime)
+        assertTrue(radio.ownSockets.plus(radio.standardSockets).all { (it as FakeSocket).closes.get() == 1 })
+        val knocks = knockLines(diagnostics)
+        assertEquals(15, knocks.size)
+        assertTrue(knocks.all { it.outcome == LinkTry.Outcome.REFUSED })
+        assertEquals(
+            "knock 1.2 to the Serial Port service refused after 0 ms: IOException: read failed, socket might closed or timeout, " +
+                "read ret: -1 (channel 1, car connected)",
+            knocks[1].describe(),
+        )
+        assertEquals("3.5", knocks.last().detail)
+        assertEquals(3, diagnostics.tries().count { it.path == LinkTry.Path.KNOCK_BURST })
+        assertEquals("knocking connect of 3 bursts had no link from the car after 11500 ms", knockEnd(diagnostics).describe())
+    }
+
+    @Test
+    fun `a connect to the Serial Port service that comes up and brings no link is the only one there, and the knock goes on at the agent's service`() = runTest {
+        // As at a car where no agent runs: another program there may take the link to its Serial Port service.
+        val sockets = CopyOnWriteArrayList<TimedSocket>()
+        val radio = KnockRadio(
+            own = { FakeSocket("read failed, socket might closed or timeout, read ret: -1") },
+            standard = { TimedSocket({ currentTime }).also { sockets += it } },
+        )
+        radio.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+
+        val failure = knockFailure(knocking(radio, diagnostics))
+
+        assertTrue("$failure", failure is KnockUnansweredException && !failure.carAway)
+        // Though every connect to the agent's service fails, none goes there again.
+        assertEquals(listOf(OWN, STANDARD) + List(13) { OWN }, radio.asked)
+        val through = sockets.single()
+        assertArrayEquals(FrameCodec.KNOCK_MAGIC, through.written)
+        assertEquals(1, through.closes)
+        // Held for the hold's time; the bursts then go on as they would have.
+        assertEquals(250, through.began.get())
+        assertEquals(1_250, through.closedAt.get())
+        assertEquals(12_500, currentTime)
+        assertEquals(LinkTry.Outcome.KNOCKED, knockLines(diagnostics)[1].outcome)
+        assertEquals("of 3 bursts", knockEnd(diagnostics).detail)
+    }
+
+    @Test
+    fun `a connect to the Serial Port service brings the car's link, which is taken`() = live {
+        val failed = FakeSocket("read failed, socket might closed or timeout, read ret: -1")
+        val through = FakeSocket()
+        val radio = KnockRadio(own = { failed }, standard = { through })
+        // The phone cannot tell the channel: the turn to the Serial Port service does not ask.
+        radio.ownFacts = { TryFacts(carConnected = true) }
+        radio.standardFacts = { TryFacts(channel = 1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+        val held = CountDownLatch(1)
+        val connector = BluetoothSerialLinkConnector(
+            radio, SerialConnectTimes(knockHoldMillis = 600_000), diagnostics = diagnostics,
+            log = opening(held, "knock 1.2 to the Serial Port service came up"), listener = SerialListener(radio),
+        )
+        val knocking = async { connector.knock(car) }
+        val server = radio.base.nextServer()
+        assertTrue(server.awaitAccepting())
+        // The connect to the Serial Port service is up, with the knock sent, and holds for the car's link.
+        assertTrue("the knock through the Serial Port service was never sent", held.await(10, TimeUnit.SECONDS))
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address)
+        val link = knocking.await()
+
+        assertSame(incoming.output, link.output)
+        assertTrue(link.openedByCar)
+        assertEquals(listOf(OWN, STANDARD), radio.asked)
+        assertEquals(1, failed.closes.get())
+        assertTrue("nothing was written on the connect that failed", failed.written.isEmpty())
+        assertArrayEquals(FrameCodec.KNOCK_MAGIC, through.written)
+        assertEquals(3, through.input.available())
+        assertTrue("the knock's connect was left open", through.closes.get() >= 1)
+        assertTrue("the listener was left open", server.closes.get() >= 1)
+        val knocks = knockLines(diagnostics)
+        assertEquals(listOf("1.1", "1.2 to the Serial Port service"), knocks.map { it.detail })
+        assertEquals(listOf(LinkTry.Outcome.FAILED, LinkTry.Outcome.KNOCKED), knocks.map { it.outcome })
+        assertTrue(knocks[1].describe(), knocks[1].describe().endsWith("(channel 1, car connected)"))
+        val end = knockEnd(diagnostics)
+        assertEquals(LinkTry.Outcome.TAKEN, end.outcome)
+        assertEquals("in burst 1 of 3, after connect 2 to the Serial Port service", end.detail)
+    }
+
+    @Test
+    fun `a connect to the agent's service after those to the Serial Port service brings the car's link, which is taken`() = live {
+        // The first to the agent's service fails, as one does while another app's link to the car is up; the next one
+        // there comes up, and is held until the car's link comes.
+        val up = FakeSocket()
+        val radio = KnockRadio(own = { attempt -> if (attempt == 1) FakeSocket("read failed") else up }, standard = { FakeSocket("read failed") })
+        radio.ownFacts = { failure -> TryFacts(channel = if (failure != null) 5 else null, carConnected = true) }
+        radio.standardFacts = { TryFacts(channel = 1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+        val held = CountDownLatch(1)
+        val connector = BluetoothSerialLinkConnector(
+            radio, SerialConnectTimes(knockHoldMillis = 600_000), diagnostics = diagnostics,
+            log = opening(held, "knock 1.4 came up"), listener = SerialListener(radio),
+        )
+        val knocking = async { connector.knock(car) }
+        val server = radio.base.nextServer()
+        assertTrue(server.awaitAccepting())
+        assertTrue("the knock at the agent's service was never sent", held.await(10, TimeUnit.SECONDS))
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address)
+        val link = knocking.await()
+
+        assertSame(incoming.output, link.output)
+        assertEquals(listOf(OWN, STANDARD, STANDARD, OWN), radio.asked)
+        assertArrayEquals(FrameCodec.KNOCK_MAGIC, up.written)
+        assertTrue("the knock's connect was left open", up.closes.get() >= 1)
+        assertEquals("in burst 1 of 3, after connect 4", knockEnd(diagnostics).detail)
+    }
+
+    @Test
+    fun `a knock at a car that its first connect does not reach makes no connect to the Serial Port service, and one there that does not reach it ends the knock`() = runTest {
+        // No channel found and no connection to the car: the car is away.
+        val away = KnockRadio(own = { FakeSocket("read failed") })
+        away.ownFacts = { TryFacts(channel = -1, carConnected = false) }
+        val first = knockFailure(knocking(away))
+        assertTrue("$first", first is KnockUnansweredException && first.carAway)
+        assertEquals(listOf(OWN), away.asked)
+        assertEquals(0, currentTime)
+
+        // The car went out of reach between the connect to the agent's service and the one to the Serial Port service.
+        val gone = KnockRadio(own = { FakeSocket("read failed") }, standard = { FakeSocket("read failed") })
+        gone.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        gone.standardFacts = { TryFacts(channel = -1, carConnected = false) }
+        val diagnostics = SerialDiagnostics()
+        val second = knockFailure(knocking(gone, diagnostics))
+        assertTrue("$second", second is KnockUnansweredException && second.carAway)
+        assertEquals(listOf(OWN, STANDARD), gone.asked)
+        assertEquals(
+            "in burst 1 of 3, after connect 2 to the Serial Port service, which did not reach the car,",
+            knockEnd(diagnostics).detail,
+        )
+    }
+
+    @Test
+    fun `a knock told to make none there, or allowed none, makes no connect to the Serial Port service`() = runTest {
+        // Told so, as the wait after an agent's update is.
+        val told = KnockRadio(own = { FakeSocket("read failed") })
+        told.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        val failure = knockFailure(knocking(told), fallback = KnockFallback.NONE)
+        assertTrue("$failure", failure is KnockUnansweredException && !failure.carAway)
+        assertEquals(List(15) { OWN }, told.asked)
+
+        // Allowed none.
+        val none = KnockRadio(own = { FakeSocket("read failed") })
+        none.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        knockFailure(knocking(none, times = SerialConnectTimes(knockStandardAttempts = 0)))
+        assertEquals(List(15) { OWN }, none.asked)
+    }
+
+    // ---- once in each burst, as for a connect the user starts -----------------------------------------------------
+
+    @Test
+    fun `a knock that may go there once in each burst, where every connect is refused, begins each later burst there and ends as today`() = runTest {
+        val starts = CopyOnWriteArrayList<Long>()
+        val radio = KnockRadio(
+            own = {
+                starts += currentTime
+                FakeSocket("refused")
+            },
+            standard = {
+                starts += currentTime
+                FakeSocket("refused")
+            },
+        )
+        radio.ownFacts = { TryFacts(channel = 5, carConnected = true) }
+        radio.standardFacts = { TryFacts(channel = 1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+
+        val failure = knockFailure(knocking(radio, diagnostics), fallback = KnockFallback.ONCE_PER_BURST)
+
+        assertTrue("$failure", failure is KnockUnansweredException && !failure.carAway)
+        // The first burst looks at the agent's service first; the later ones begin at the Serial Port service at once.
+        assertEquals(
+            listOf(OWN, STANDARD, STANDARD, OWN, OWN) + listOf(STANDARD, STANDARD, OWN, OWN, OWN) + listOf(STANDARD, STANDARD, OWN, OWN, OWN),
+            radio.asked,
+        )
+        assertEquals(9, radio.ownSockets.size)
+        assertEquals(6, radio.standardSockets.size)
+        // As many connects, at the same times, as a knock that makes none there, and the same end.
+        assertEquals(
+            listOf<Long>(0, 250, 500, 750, 1_000, 4_500, 4_750, 5_000, 5_250, 5_500, 9_000, 9_250, 9_500, 9_750, 10_000),
+            starts,
+        )
+        assertEquals(11_500, currentTime)
+        assertEquals("2.1 to the Serial Port service", knockLines(diagnostics)[5].detail)
+        assertEquals("knocking connect of 3 bursts had no link from the car after 11500 ms", knockEnd(diagnostics).describe())
+    }
+
+    @Test
+    fun `a knock that may go there once in each burst makes one connect there that comes up in each burst, at most`() = runTest {
+        // As at a car where no agent runs: each connect to the Serial Port service comes up, and nothing answers.
+        val sockets = CopyOnWriteArrayList<TimedSocket>()
+        val radio = KnockRadio(
+            own = { FakeSocket("read failed") },
+            standard = { TimedSocket({ currentTime }).also { sockets += it } },
+        )
+        radio.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+
+        val failure = knockFailure(knocking(radio, diagnostics), fallback = KnockFallback.ONCE_PER_BURST)
+
+        assertTrue("$failure", failure is KnockUnansweredException && !failure.carAway)
+        assertEquals(
+            listOf(OWN, STANDARD, OWN, OWN, OWN) + listOf(STANDARD, OWN, OWN, OWN, OWN) + listOf(STANDARD, OWN, OWN, OWN, OWN),
+            radio.asked,
+        )
+        assertEquals(3, sockets.size)
+        assertTrue(sockets.all { it.closes == 1 && it.written.contentEquals(FrameCodec.KNOCK_MAGIC) })
+        // Each held for the hold's time; the later bursts' at their start.
+        assertEquals(listOf<Long>(250, 5_500, 11_000), sockets.map { it.began.get() })
+        assertEquals(14_500, currentTime)
+    }
+
+    @Test
+    fun `a knock that may go there once in each burst takes the car's link that its connect there in the second burst brings`() = live {
+        // The two there in the first burst are refused; the one that begins the second comes up, and holds for the link.
+        val up = FakeSocket()
+        val radio = KnockRadio(own = { FakeSocket("read failed") }, standard = { attempt -> if (attempt <= 2) FakeSocket("refused") else up })
+        radio.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        radio.standardFacts = { TryFacts(channel = 1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+        val held = CountDownLatch(1)
+        // No wait after a burst and between two that a test sits out, and a hold that only the car's link ends.
+        val connector = BluetoothSerialLinkConnector(
+            radio, SerialConnectTimes(knockHoldMillis = 600_000, knockSettleMillis = 0, knockPauseMillis = 0), diagnostics = diagnostics,
+            log = opening(held, "knock 2.1 to the Serial Port service came up"), listener = SerialListener(radio),
+        )
+        val knocking = async { connector.knock(car, fallback = KnockFallback.ONCE_PER_BURST) }
+        val server = radio.base.nextServer()
+        assertTrue(server.awaitAccepting())
+        assertTrue("the second burst's knock through the Serial Port service was never sent", held.await(10, TimeUnit.SECONDS))
+
+        val incoming = FakeSocket()
+        server.dialIn(incoming, car.address)
+        val link = knocking.await()
+
+        assertSame(incoming.output, link.output)
+        assertEquals(listOf(OWN, STANDARD, STANDARD, OWN, OWN, STANDARD), radio.asked)
+        assertArrayEquals(FrameCodec.KNOCK_MAGIC, up.written)
+        assertTrue("the knock's connect was left open", up.closes.get() >= 1)
+        assertEquals("in burst 2 of 3, after connect 1 to the Serial Port service", knockEnd(diagnostics).detail)
+    }
+
+    @Test
+    fun `a knock that may go there once in each burst makes none there where the agent's service answers, or where none is allowed`() = runTest {
+        val works = KnockRadio()
+        knockFailure(knocking(works), fallback = KnockFallback.ONCE_PER_BURST)
+        assertEquals(List(15) { OWN }, works.asked)
+
+        val none = KnockRadio(own = { FakeSocket("read failed") })
+        none.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        knockFailure(knocking(none, times = SerialConnectTimes(knockStandardAttempts = 0)), fallback = KnockFallback.ONCE_PER_BURST)
+        assertEquals(List(15) { OWN }, none.asked)
+    }
+
+    @Test
+    fun `a knock that may go there once in each burst ends where a connect of either service does not reach the car`() = runTest {
+        // The first, to the agent's service.
+        val away = KnockRadio(own = { FakeSocket("read failed") })
+        away.ownFacts = { TryFacts(channel = -1, carConnected = false) }
+        val first = knockFailure(knocking(away), fallback = KnockFallback.ONCE_PER_BURST)
+        assertTrue("$first", first is KnockUnansweredException && first.carAway)
+        assertEquals(listOf(OWN), away.asked)
+
+        // The one that begins the second burst, to the Serial Port service.
+        var standards = 0
+        val gone = KnockRadio(own = { FakeSocket("read failed") }, standard = { FakeSocket("read failed") })
+        gone.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        gone.standardFacts = { TryFacts(channel = -1, carConnected = ++standards <= 2) }
+        val diagnostics = SerialDiagnostics()
+        val second = knockFailure(knocking(gone, diagnostics), fallback = KnockFallback.ONCE_PER_BURST)
+        assertTrue("$second", second is KnockUnansweredException && second.carAway)
+        assertEquals(listOf(OWN, STANDARD, STANDARD, OWN, OWN, STANDARD), gone.asked)
+        assertEquals(
+            "in burst 2 of 3, after connect 1 to the Serial Port service, which did not reach the car,",
+            knockEnd(diagnostics).detail,
+        )
+    }
+
+    @Test
+    fun `a knock that is cancelled in its connect to the Serial Port service leaves it closed, and nothing listening`() = live {
+        val hanging = FakeSocket(blocks = true)
+        val radio = KnockRadio(own = { FakeSocket("read failed") }, standard = { hanging })
+        radio.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+        val connector = BluetoothSerialLinkConnector(radio, diagnostics = diagnostics, listener = SerialListener(radio))
+        val knocking = async { connector.knock(car) }
+        val server = radio.base.nextServer()
+        assertTrue(server.awaitAccepting())
+        assertTrue("the connect to the Serial Port service never began", hanging.connecting.await(10, TimeUnit.SECONDS))
+
+        knocking.cancel()
+        knocking.join()
+
+        assertTrue(knocking.isCancelled)
+        assertTrue("the connect was left open", hanging.closes.get() >= 1)
+        assertEquals(listOf(OWN, STANDARD), radio.asked)
+        assertTrue("the listener was left open", server.closes.get() >= 1)
+        val knocks = knockLines(diagnostics)
+        assertEquals(listOf(LinkTry.Outcome.FAILED, LinkTry.Outcome.CANCELLED), knocks.map { it.outcome })
+        assertEquals("1.2 to the Serial Port service", knocks[1].detail)
+        assertEquals(LinkTry.Outcome.CANCELLED, knockEnd(diagnostics).outcome)
+    }
+
+    @Test
+    fun `a knock that is cancelled in the hold of its connect to the Serial Port service leaves it closed, with the one line it had`() = live {
+        val through = FakeSocket()
+        val radio = KnockRadio(own = { FakeSocket("read failed") }, standard = { through })
+        radio.ownFacts = { TryFacts(channel = -1, carConnected = true) }
+        val diagnostics = SerialDiagnostics()
+        val held = CountDownLatch(1)
+        val connector = BluetoothSerialLinkConnector(
+            radio, SerialConnectTimes(knockHoldMillis = 600_000), diagnostics = diagnostics,
+            log = opening(held, "knock 1.2 to the Serial Port service came up"), listener = SerialListener(radio),
+        )
+        val knocking = async { connector.knock(car) }
+        val server = radio.base.nextServer()
+        assertTrue(server.awaitAccepting())
+        assertTrue("the knock through the Serial Port service was never sent", held.await(10, TimeUnit.SECONDS))
+
+        knocking.cancel()
+        knocking.join()
+
+        assertTrue(knocking.isCancelled)
+        assertTrue("the connect was left open", through.closes.get() >= 1)
+        assertArrayEquals(FrameCodec.KNOCK_MAGIC, through.written)
+        assertEquals(listOf(OWN, STANDARD), radio.asked)
+        assertTrue("the listener was left open", server.closes.get() >= 1)
+        assertEquals(listOf(LinkTry.Outcome.FAILED, LinkTry.Outcome.KNOCKED), knockLines(diagnostics).map { it.outcome })
+        assertEquals(LinkTry.Outcome.CANCELLED, knockEnd(diagnostics).outcome)
+    }
+
     @Test
     fun `a caller that is cancelled while a connect blocks gets out of it, and the socket is closed`() = runBlocking {
         // On real threads: the connect sits in a blocking call that only the socket's close ends.
@@ -1100,9 +1547,11 @@ class LinkConnectorsTest {
     @Test
     fun `a knock is handed on, and a connector that cannot knock connects as to an agent that dials`() = runBlocking {
         val knocks = CopyOnWriteArrayList<Int?>()
+        val fallbacks = CopyOnWriteArrayList<KnockFallback>()
         val knocking = object : LinkConnector by Named("serial", { it is SerialEndpoint }) {
-            override suspend fun knock(endpoint: Endpoint, bursts: Int?): Link {
+            override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link {
                 knocks += bursts
+                fallbacks += fallback
                 return MemoryLink.pair(kind = "knocked").first
             }
         }
@@ -1111,7 +1560,11 @@ class LinkConnectorsTest {
 
         assertEquals("knocked", both.knock(serial, 1).kind)
         assertEquals("knocked", both.knock(serial).kind)
-        assertEquals(listOf<Int?>(1, null), knocks)
+        assertEquals("knocked", both.knock(serial, 1, KnockFallback.NONE).kind)
+        assertEquals("knocked", both.knock(serial, fallback = KnockFallback.ONCE_PER_BURST).kind)
+        assertEquals(listOf<Int?>(1, null, 1, null), knocks)
+        // A caller that does not say has the cautious kind.
+        assertEquals(listOf(KnockFallback.ONCE_PER_KNOCK, KnockFallback.ONCE_PER_KNOCK, KnockFallback.NONE, KnockFallback.ONCE_PER_BURST), fallbacks)
         assertEquals("tcp", both.knock(tcp).kind)
         assertEquals(listOf(true), tcpOnly.dials)
     }
@@ -1128,3 +1581,7 @@ class LinkConnectorsTest {
         }
     }
 }
+
+/** The agent's own serial service, and the car's standard Serial Port service, as a knock's connects go to them. */
+private val OWN: UUID = BluetoothSerialLinkConnector.SERVICE_UUID
+private val STANDARD: UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb")
