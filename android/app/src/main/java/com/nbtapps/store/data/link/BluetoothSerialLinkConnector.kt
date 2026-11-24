@@ -137,6 +137,17 @@ class SerialConnectTimes(
      * again, not half made, when the knock's next connect goes out.
      */
     val knockUnsureWaitMillis: Long = 1_500,
+    /**
+     * A knock by dial-up ([BluetoothSerialLinkConnector.knock]): how long the car's link is waited for after the
+     * connect to the car's dial-up networking service, from its end, before the burst goes on, as the protocol has it.
+     */
+    val knockDialupWaitMillis: Long = ProtocolConstants.SERIAL_KNOCK_DIALUP_WAIT_MS,
+    /**
+     * The most a connect to the car's dial-up networking service is given to come up or fail: shorter than
+     * [knockTryMillis], as the agent refuses a request for it that the car has not refused within about 2 s. One that
+     * has no answer in it is closed, and no other is made in that knock.
+     */
+    val knockDialupTryMillis: Long = 3_000,
 )
 
 /**
@@ -201,6 +212,14 @@ class SerialConnectTimes(
  * Where no agent runs, such a connect that comes up reaches another program at the car, which may count it against
  * its own service. A knock whose connects to the agent's service come up makes none. Only the knock does this; the
  * phone's own link is always to the agent's service.
+ *
+ * There are two kinds of knock, and a burst makes them in this order. To an agent that lists
+ * [ProtocolConstants.CAPABILITY_SERIAL_KNOCK_DIALUP], and in a probing knock at one never greeted, each burst first
+ * makes one connect to the car's dial-up networking service ([DIALUP_UUID]), the knock by dial-up: that service is on an
+ * RFCOMM channel of its own, so the connect cannot run into another app's link to the car's serial channel. The car's
+ * side hears the request, which is the knock, and the car or the agent refuses it, so the connect fails with nothing
+ * written or read; the car's link is then waited for ([SerialConnectTimes.knockDialupWaitMillis]). Where none comes, the
+ * burst goes on with its connects to the serial channel, the knock by the magic bytes, as above.
  *
  * The socket is the authenticated, encrypted kind, so the link is to the car the phone is paired with, and
  * nobody listens in. That does not say who opened it: any app on a paired phone can. The agent therefore asks
@@ -389,9 +408,22 @@ class BluetoothSerialLinkConnector(
      * A caller that is cancelled leaves nothing open: no connect of the knock's, no wait on the listener, no car's link,
      * even one handed over as the caller gave up.
      *
-     * [dialup]: whether each burst may first make one connect to the car's dial-up networking service, the knock by
-     * dial-up ([ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID]), and wait [ProtocolConstants.SERIAL_KNOCK_DIALUP_WAIT_MS]
-     * for the car's link after it; handed on to [knockAt], which makes nothing of it yet.
+     * With [dialup], each burst first makes one connect to the car's dial-up networking service, the knock by dial-up
+     * ([DIALUP_UUID]), before its connects of above, which it does not count among [SerialConnectTimes.knockAttempts],
+     * in a knock of every kind ([dialupOnce]). Nothing is written on it. It fails where the car's side heard it:
+     * - where the phone had found the service's channel, the knock was made; the car's link is waited for
+     *   [SerialConnectTimes.knockDialupWaitMillis] from the connect's end, and where it comes no connect to the serial
+     *   channel is made at all; where it does not, the burst goes on with its connects of above;
+     * - where the phone found no record of the service, the car does not have it on now: the burst goes on at once;
+     * - where the phone cannot tell, the car's link is waited for as where the knock was made, and then the burst goes
+     *   on; so the channel the phone reads only makes the knock quicker, here as elsewhere.
+     * One that has no answer in [SerialConnectTimes.knockDialupTryMillis], or that comes up, which nobody should let it,
+     * is closed, the burst goes on at once, and no other is made in that knock. One that does not reach the car ends the
+     * knock, as any connect does. Its failure is never taken as one that ran into another app's link: it neither ends
+     * the burst nor lengthens the pause, nor turns the next connect to the Serial Port service. Later bursts make it
+     * again first: the agent may have been busy, or have switched the service on meanwhile, and it costs a few tenths of a
+     * second. Each such connect has its line in the diagnostics, numbered 0 in its burst ("1.0"), so that the other
+     * connects keep their numbers, and the knock's last line says where the car's link came after one.
      *
      * @throws KnockUnansweredException if no link of the car's came after the last burst, or, [KnockUnansweredException.carAway],
      *   after a connect that did not reach the car, or, [KnockUnansweredException.inTheWay], after a connect that may
@@ -489,8 +521,9 @@ class BluetoothSerialLinkConnector(
      * and is followed by another is kept in the diagnostics. With [probing], it ends after the first of its connects that
      * came up, to either service, its hold and [SerialConnectTimes.knockSettleMillis] after it: an agent that knows
      * knocks has had the car dial by then. Before each connect it ends where [deaf] says that the phone cannot listen. It
-     * settles nothing: what it stopped at is its caller's to make something of. [dialup]: whether each burst may first
-     * connect to the car's dial-up networking service ([knock]); nothing is made of it yet.
+     * settles nothing: what it stopped at is its caller's to make something of. With [dialup], each burst first makes
+     * its connect to the car's dial-up networking service ([dialupOnce]) and waits for the car's link after it, as
+     * [knock] says, until one has had no answer or come up; [at] then names that connect.
      */
     private suspend fun knockAt(
         address: String,
@@ -500,8 +533,10 @@ class BluetoothSerialLinkConnector(
         at: AtomicReference<String?>,
         probing: Boolean = false,
         deaf: () -> Boolean = { false },
-        @Suppress("UNUSED_PARAMETER") dialup: Boolean = false,
+        dialup: Boolean = false,
     ): KnockEnd {
+        // Whether the knock may still make its connect to the dial-up service at the start of a burst.
+        var dialupLeft = dialup
         // Whether the agent's service last failed where no record of it was found, or the phone could not tell: then
         // a burst begins at the Serial Port service, where it may make a connect there. See [knock].
         var missing = false
@@ -514,6 +549,20 @@ class BluetoothSerialLinkConnector(
             if (fallback == KnockFallback.ONCE_PER_BURST) standardLeft = true
             inTheWay = false
             val burstBegan = now()
+            if (dialupLeft) {
+                if (deaf()) return KnockEnd.DEAF
+                at.set("after the dial-up connect of burst $burst")
+                val dialed = dialupOnce(address, "$burst.0 $TO_DIALUP")
+                if (came.isCompleted) return KnockEnd.CAME
+                when (dialed) {
+                    // The knock was made, or may have been: the car's link is waited for.
+                    Dialed.KNOCKED, Dialed.UNSURE -> if (carCame(came, times.knockDialupWaitMillis)) return KnockEnd.CAME
+                    Dialed.AWAY -> return KnockEnd.AWAY
+                    // Pending at the car with nobody refusing it, or let up: none again in this knock.
+                    Dialed.UNANSWERED, Dialed.UP -> dialupLeft = false
+                    Dialed.NOT_FOUND -> Unit
+                }
+            }
             // Whether the next connect is to the Serial Port service, and how long it waits.
             var toStandard = missing
             var wait = times.knockGapMillis
@@ -719,6 +768,112 @@ class BluetoothSerialLinkConnector(
         AWAY,
     }
 
+    /**
+     * A knock's connect to the car's dial-up networking service, the knock by dial-up ([knock]), [which] by its burst,
+     * given [SerialConnectTimes.knockDialupTryMillis]. Nothing is written on it or read from it, and its socket is closed
+     * once, however it ends: at once where it came up, which nobody should let it, as where it failed or had no answer;
+     * and wherever it is where the knock is cancelled, as when the car's link has come. What came of it is kept in the
+     * diagnostics, in one line.
+     *
+     * What came of it ([Dialed]): it did not reach the car ([Dialed.AWAY]) by the rule of [knockOnce]. One that failed
+     * where the phone had found the service's channel was heard at the car, which or the agent refused it: the knock
+     * was made ([Dialed.KNOCKED]). One where it found none found no such service on the car ([Dialed.NOT_FOUND]), and
+     * one where it cannot tell may have made the knock ([Dialed.UNSURE]).
+     */
+    private suspend fun dialupOnce(address: String, which: String): Dialed {
+        val began = now()
+        var made: SerialSocket? = null
+        val closed = AtomicBoolean(false)
+        fun close() {
+            if (closed.compareAndSet(false, true)) made?.closeQuietly()
+        }
+        var noted = false
+        fun note(outcome: LinkTry.Outcome, failure: Throwable?, facts: TryFacts) {
+            noted = true
+            log.line(diagnostics.record(LinkTry.Path.KNOCK, outcome, now() - began, failure, facts, which).describe())
+        }
+        try {
+            val socket = withContext(io) { radio.socket(address, DIALUP_UUID).also { made = it } }
+            val up = withTimeoutOrNull(times.knockDialupTryMillis) {
+                withContext(io) {
+                    coroutineScope {
+                        // Set once the connect has come back: from then on the socket is not the watcher's to close.
+                        val settled = AtomicBoolean(false)
+                        // Started here and now, as [bringUp]'s, so that a cancel before it ran still closes the socket.
+                        val onCancel = launch(start = CoroutineStart.UNDISPATCHED) {
+                            try {
+                                awaitCancellation()
+                            } finally {
+                                if (!settled.get()) close()
+                            }
+                        }
+                        try {
+                            socket.connect()
+                        } catch (e: IOException) {
+                            // A connect that failed because it was cancelled, or ran out of its time, is no failure.
+                            currentCoroutineContext().ensureActive()
+                            throw e
+                        } finally {
+                            settled.set(true)
+                        }
+                        onCancel.cancel()
+                    }
+                }
+            }
+            val facts = facts(address, socket, if (up == null) NoAnswer(times.knockDialupTryMillis) else null)
+            close()
+            if (up == null) {
+                note(LinkTry.Outcome.NO_ANSWER, NoAnswer(times.knockDialupTryMillis), facts)
+                return if (facts.carConnected == true) Dialed.UNANSWERED else Dialed.AWAY
+            }
+            note(LinkTry.Outcome.DIALUP_UP, null, facts)
+            return Dialed.UP
+        } catch (e: IOException) {
+            close()
+            val facts = facts(address, made, e)
+            val found = facts.channel != null && facts.channel >= 0
+            val dialed = when {
+                found -> Dialed.KNOCKED
+                facts.carConnected == false -> Dialed.AWAY
+                facts.channel != null -> Dialed.NOT_FOUND
+                else -> Dialed.UNSURE
+            }
+            val outcome = when (dialed) {
+                Dialed.KNOCKED -> LinkTry.Outcome.DIALUP_KNOCKED
+                Dialed.NOT_FOUND -> LinkTry.Outcome.DIALUP_NONE
+                Dialed.UNSURE -> LinkTry.Outcome.DIALUP_UNSURE
+                else -> LinkTry.Outcome.FAILED
+            }
+            note(outcome, e, facts)
+            return dialed
+        } catch (e: CancellationException) {
+            close()
+            if (!noted) note(LinkTry.Outcome.CANCELLED, null, TryFacts())
+            throw e
+        }
+    }
+
+    /** What came of a knock's connect to the car's dial-up networking service ([dialupOnce]), for what the burst does next. */
+    private enum class Dialed {
+        /** It failed where the phone had found the service: the request was heard and refused, and the knock was made. */
+        KNOCKED,
+
+        /** It failed where the phone found no record of the service: the car does not have it on now. */
+        NOT_FOUND,
+
+        /** It failed, the car reached or may have been, where the phone cannot read whether it had found the service. */
+        UNSURE,
+
+        /** It had no answer in its time while the phone was connected to the car: the request is pending there. */
+        UNANSWERED,
+
+        /** It came up, which nobody should let it, and was closed at once. */
+        UP,
+
+        /** It did not reach the car: the car is off or out of range, and the knock ends. */
+        AWAY,
+    }
+
     /** What the phone can tell of a try, which may not fail it: nothing, where asking fails. */
     private fun facts(address: String, socket: SerialSocket?, failure: Throwable?): TryFacts = try {
         radio.inspect(address, socket, failure)
@@ -839,6 +994,15 @@ class BluetoothSerialLinkConnector(
 
         /** How a knock's connect to [STANDARD_SERVICE_UUID] is named in the diagnostics, after its place in the bursts. */
         private const val TO_STANDARD = "to the Serial Port service"
+
+        /**
+         * The car's dial-up networking service, the knock by dial-up's ([BluetoothSerialLinkConnector.knock]), on an
+         * RFCOMM channel of its own, apart from the car's serial channel.
+         */
+        val DIALUP_UUID: UUID = UUID.fromString(ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID)
+
+        /** How a knock's connect to [DIALUP_UUID] is named in the diagnostics, after its burst. */
+        private const val TO_DIALUP = "to the dial-up service"
 
         /** What the diagnostics say of a knock's connect that may have run into another app's link to the car. */
         private const val IN_THE_WAY_OF = "which another app's link to the car may have been in the way of"

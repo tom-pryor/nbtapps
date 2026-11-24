@@ -79,7 +79,7 @@ interface LinkConnector {
      *
      * [dialup]: whether the probing knock may first connect to the car's dial-up networking service, the knock by
      * dial-up ([ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID]), as [knock]'s `dialup`. The caller says so for a head unit
-     * it has never greeted. Nothing makes anything of it yet.
+     * it has never greeted: the probe's burst then begins with that connect.
      */
     suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean = false): Link =
         connect(endpoint, dials, listenOnly)
@@ -94,7 +94,8 @@ interface LinkConnector {
      * service in each burst, the knock by dial-up ([ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID]): for a head unit whose
      * agent lists [ProtocolConstants.CAPABILITY_SERIAL_KNOCK_DIALUP] ([com.nbtapps.store.model.HeadUnit.serialKnockDialup]),
      * in a knock of any kind, as such a connect cannot run into another app's link to the car; false where the caller
-     * does not say. Nothing makes anything of it yet. Only Bluetooth serial knocks: see [BluetoothSerialLinkConnector].
+     * does not say. Each burst then begins with one connect there, nothing written on it, and the car's link is waited
+     * for after it. Only Bluetooth serial knocks: see [BluetoothSerialLinkConnector].
      * Any other connector connects as to an agent that dials.
      *
      * @throws KnockUnansweredException if no link of the car's came after the knocks.
