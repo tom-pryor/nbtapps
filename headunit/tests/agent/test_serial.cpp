@@ -79,6 +79,21 @@ public:
         return found;
     }
     bool saw(const std::string& part) { return at(part) >= 0; }
+    // The items that are `item` and nothing more, by place, from the first; and every item.
+    std::vector<int> placesOf(const std::string& item) {
+        pthread_mutex_lock(&mu_);
+        std::vector<int> found;
+        for (size_t i = 0; i < items_.size(); ++i)
+            if (items_[i] == item) found.push_back((int)i);
+        pthread_mutex_unlock(&mu_);
+        return found;
+    }
+    std::vector<std::string> items() {
+        pthread_mutex_lock(&mu_);
+        std::vector<std::string> all = items_;
+        pthread_mutex_unlock(&mu_);
+        return all;
+    }
     // Whether a line of the log holds `part`: the trace's own items are not the log.
     bool logged(const std::string& part) { return loggedCount(part) > 0; }
     unsigned loggedCount(const std::string& part) {
@@ -144,7 +159,9 @@ class Node;
 class FakeGap : public GapClient {
 public:
     explicit FakeGap(Trace* trace)
-        : canOpen(true), openFinal_(false), silent(false), registerError(0), deregisterError(0), refusesWhileDialled(false),
+        : canOpen(true), openFinal_(false), silent(false), registerError(0), statusOnSubscribe(1), places(0),
+          deregisterError(0),
+          refusesWhileDialled(false),
           answersList(true), listed(false),
           connection(0), security(0), answersQuery(true), queryLists(true), queryError(0), queryInforms(false),
           queryRejected(false), queryUnread(false),
@@ -176,12 +193,28 @@ public:
     virtual bool request(uint32_t id, const std::vector<uint8_t>& payload) {
         if (!up_) return false;
         std::vector<uint8_t> reply;
+        // The agent's own registration is "register"; a stand-in's names its service.
+        std::string registered;
+        if (id == kReqSppUuidRegister) {
+            Reader r(&payload[0], (uint32_t)payload.size());
+            registered = r.str();
+        }
+        bool own = registered == kSerialServiceName;
         if (id == kReqSppUuidRegister && silent) {
-            trace_->add("register, not answered");
+            trace_->add(own ? "register, not answered" : "register " + registered + ", not answered");
         } else if (id == kReqSppUuidRegister) {
-            trace_->add("register");
-            putU32(reply, dialledUp() ? 5 : registerError);
+            trace_->add(own ? "register" : "register " + registered);
+            uint32_t error = own ? registerError : (registerErrorFor.count(registered) ? registerErrorFor[registered] : 5);
+            if (places > 0) error = modelRegister(registered);
+            putU32(reply, dialledUp() ? 5 : error);
             events_->gapMessage(kTypeResponse, kRspSppUuidRegister, &reply[0], (uint32_t)reply.size());
+        } else if (id == kReqSppUuidDeregister && places > 0) {
+            // As the stack's places would answer it.
+            Reader name(&payload[0], (uint32_t)payload.size());
+            std::string removed = name.str();
+            trace_->add("deregister " + removed);
+            putU32(reply, dialledUp() ? 5 : modelDeregister(removed));
+            events_->gapMessage(kTypeResponse, kRspSppUuidDeregister, &reply[0], (uint32_t)reply.size());
         } else if (id == kReqSppUuidDeregister) {
             Reader name(&payload[0], (uint32_t)payload.size());
             trace_->add("deregister " + name.str());
@@ -359,8 +392,78 @@ public:
         putU32(p, 0);
         events_->gapMessage(0x400, kInfDeviceListChanged, &p[0], (uint32_t)p.size());
     }
-    virtual bool subscribe(uint32_t) { return up_; }
+    virtual bool subscribe(uint32_t id) {
+        if (!up_) return false;
+        // As the server does: Status's current value comes as it is asked for.
+        if (id == kAttrStatus && statusOnSubscribe >= 0) status((uint32_t)statusOnSubscribe);
+        return true;
+    }
     virtual std::string describe() const { return "Test.Server 1.0"; }
+    // The attribute Status, 1 the car's Bluetooth on and 0 off, with the type its messages have. With the stack's
+    // places, 0 drops every registration, as switching Bluetooth off does.
+    void status(uint32_t value) {
+        if (value == 0) {
+            pthread_mutex_lock(&connectsMu_);
+            stack_.assign(stack_.size(), std::string());
+            pthread_mutex_unlock(&connectsMu_);
+        }
+        std::vector<uint8_t> p;
+        putU32(p, value);
+        events_->gapMessage(kTypeRejectedA, kAttrStatus, &p[0], (uint32_t)p.size());
+    }
+    // With `places`: the registrations the stack holds, by name, place by place, the free places left out (another
+    // program's made here by the test with hold()). A registration takes the first free place, as the stack's do.
+    std::vector<std::string> stack() {
+        pthread_mutex_lock(&connectsMu_);
+        std::vector<std::string> s;
+        for (size_t i = 0; i < stack_.size(); ++i)
+            if (!stack_[i].empty()) s.push_back(stack_[i]);
+        pthread_mutex_unlock(&connectsMu_);
+        return s;
+    }
+    std::string stackText() {
+        std::vector<std::string> s = stack();
+        std::string t;
+        for (size_t i = 0; i < s.size(); ++i) t += (i ? " " : "") + s[i];
+        return t;
+    }
+    void hold(const std::string& name) { modelRegister(name); }
+    // The place `name` holds, from 0; -1 for none.
+    int placeOf(const std::string& name) {
+        pthread_mutex_lock(&connectsMu_);
+        int at = -1;
+        for (size_t i = 0; i < stack_.size() && at < 0; ++i)
+            if (stack_[i] == name) at = (int)i;
+        pthread_mutex_unlock(&connectsMu_);
+        return at;
+    }
+    // A registration in the stack's places: 5 for a name that is there or no place left, as the stack answers both.
+    uint32_t modelRegister(const std::string& name) {
+        pthread_mutex_lock(&connectsMu_);
+        if (stack_.size() < places) stack_.resize(places);
+        bool there = false;
+        size_t free = stack_.size();
+        for (size_t i = 0; i < stack_.size(); ++i) {
+            there = there || stack_[i] == name;
+            if (stack_[i].empty() && free == stack_.size()) free = i;
+        }
+        bool room = free < stack_.size();
+        if (!there && room) stack_[free] = name;
+        pthread_mutex_unlock(&connectsMu_);
+        return there || !room ? 5 : 0;
+    }
+    uint32_t modelDeregister(const std::string& name) {
+        pthread_mutex_lock(&connectsMu_);
+        uint32_t error = 10;
+        for (size_t i = 0; i < stack_.size(); ++i) {
+            if (stack_[i] != name) continue;
+            stack_[i].clear();
+            error = 0;
+            break;
+        }
+        pthread_mutex_unlock(&connectsMu_);
+        return error;
+    }
 
     void attach() {
         up_ = true;
@@ -382,7 +485,13 @@ public:
     bool canOpen;
     bool openFinal_;   // with canOpen false: the failure is one no later try mends
     bool silent;                     // a registration is not answered
-    uint32_t registerError;          // what a registration is answered with
+    uint32_t registerError;          // what the agent's own registration is answered with
+    // And a stand-in's, by its name: 5 for a name not in it, as for a registration another program left behind.
+    std::map<std::string, uint32_t> registerErrorFor;
+    int statusOnSubscribe;           // the Status given as it is asked for; below 0: none
+    // Above 0: the registrations and removals are answered as the stack's places would (stack()), this many places,
+    // in place of registerError, registerErrorFor and deregisterError.
+    size_t places;
     uint32_t deregisterError;        // and a removal
     bool refusesWhileDialled;        // both are answered 5 while the dialled node is there, as for a link on the service
     bool answersList;                // DeviceListGet is answered, with the phone in it if `listed`
@@ -411,6 +520,7 @@ public:
     std::string unansweredFor;         // a ServiceDisconnect for this address is never answered
 
 private:
+    std::vector<std::string> stack_;   // connectsMu_
     Events* events_;
     bool up_;
     Trace* trace_;
@@ -1008,6 +1118,7 @@ static SerialConfig configFor(const std::string& dir) {
     c.decideMs = 300;
     c.lingerMs = 300;
     c.checkMs = 0;   // testRegistrationCheck() turns it on
+    c.holdMs = 0;    // the registration goes as the server attaches, Status on: the hold has tests of its own
     c.dial.on = false;   // the car dialling the phone has tests of its own, which turn it on
     // and dials as before the knock (--dial-knock off) in them: the knock's tests turn it on (knockConfig())
     c.dial.knock = false;
@@ -1060,7 +1171,7 @@ static void testListener() {
         // The gate is there before the stack is asked for anything, and nothing is registered before it answers.
         CHECK(trace.at("gate attach") >= 0 && trace.at("gate attach") < trace.at("gap open") && !trace.saw("register"));
         gap.attach();
-        CHECK(trace.saw("register"));
+        CHECK_IN(trace.text(), trace.saw("register"));
         CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
 
         // A phone asks, the node appears, the phone says the magic bytes, and the link is there: opened by the
@@ -3636,7 +3747,8 @@ static SerialServiceOwner declares(const char* name, const char* program) {
 }
 
 // The listener has the list of other programs' services swept each time its own has been registered, and is what
-// the removals go through.
+// the stand-ins and the removals go through. Here the stack answers 5 to every stand-in: the names hold what the
+// programs registered, and are never known to hold the agent's stand-in.
 static void testLeftBehind() {
     std::string dir = freshFolder("left-behind");
     Trace trace;
@@ -3655,22 +3767,360 @@ static void testLeftBehind() {
     services.setRemover(&listener);
     listener.setServices(&services);
     std::string why;
-    // Before the car's Bluetooth service is there, nothing can be removed.
-    CHECK(!listener.removeSerialService("TestRadio") && services.sweep("too early") == 0 && !trace.saw("deregister"));
+    // Before the car's Bluetooth service is there, nothing can be replaced.
+    CHECK(listener.replaceSerialService("TestRadio") == SerialServiceRemover::kNotNow);
+    CHECK(services.sweep("too early") == 0 && !trace.saw("deregister"));
     CHECK_IN(why, listener.start(&why));
     gap.attach();
     CHECK_IN(trace.text(), sawWithin(trace, "deregister TestRadio", 2000));
     CHECK_IN(trace.text(), sawWithin(trace, "SppUuidDeregister reply for 'TestRadio': 0 OK", 2000));
-    // After its own registration, and for the service whose program is gone only.
+    // The stand-ins went ahead of the agent's own registration, in the list's order.
+    std::vector<int> own = trace.placesOf("register");
+    CHECK_IN(trace.text(), own.size() == 1 && trace.placesOf("register TestRadio").size() == 2);
+    CHECK(trace.placesOf("register TestRadio")[0] < trace.placesOf("register Other")[0] &&
+          trace.placesOf("register Other")[0] < own[0]);
+    // The sweep came after its own registration, and replaced what the name of the service whose program is gone
+    // held: removed, and the stand-in registered at once. The other's program runs: its name is not touched.
     CHECK(trace.at("the serial service 'NBTApp' is registered") < trace.at("deregister TestRadio"));
+    CHECK(trace.placesOf("deregister TestRadio")[0] < trace.placesOf("register TestRadio")[1]);
     CHECK(trace.saw("serial service 'TestRadio': its program (radiod) is not running") && !trace.saw("deregister Other"));
     CHECK(!trace.saw("deregister NBTApp") && listener.active());
-    // The listener's own name is not one it removes this way, and its service stays.
-    CHECK(!listener.removeSerialService(kSerialServiceName) && listener.removeSerialService("Other"));
+    // The listener's own name is not one it replaces, and its service stays.
+    CHECK(listener.replaceSerialService(kSerialServiceName) == SerialServiceRemover::kNotNow);
+    CHECK(listener.replaceSerialService("Other") == SerialServiceRemover::kReplacing);
     CHECK_IN(trace.text(), sawWithin(trace, "deregister Other", 2000) && listener.active());
     listener.stop();
     services.setRemover(0);
-    CHECK(trace.saw("deregister NBTApp") && trace.saw("gate detach"));
+    // No stand-in held its name: none is removed as the listener stops.
+    CHECK(trace.saw("deregister NBTApp") && trace.saw("gate detach") && !trace.saw("stand-ins of the agent's removed"));
+    CHECK(trace.count("deregister TestRadio") == 1 && trace.count("deregister Other") == 1);
+}
+
+static double gHoldClock = 0;
+static pthread_mutex_t gHoldClockMu = PTHREAD_MUTEX_INITIALIZER;
+static double holdClock() {
+    pthread_mutex_lock(&gHoldClockMu);
+    double t = gHoldClock;
+    pthread_mutex_unlock(&gHoldClockMu);
+    return t;
+}
+static void setHoldClock(double t) {
+    pthread_mutex_lock(&gHoldClockMu);
+    gHoldClock = t;
+    pthread_mutex_unlock(&gHoldClockMu);
+}
+
+// Whether each of the agent's own registrations in the trace has the stand-ins `names` just before it, in that
+// order, with nothing else between them: every round's order. How many rounds there were goes into *rounds.
+static bool roundsInOrder(Trace& trace, const std::vector<std::string>& names, unsigned* rounds) {
+    std::vector<std::string> items = trace.items();
+    *rounds = 0;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i] != "register") continue;
+        ++*rounds;
+        size_t at = i;
+        for (size_t k = names.size(); k-- > 0;) {
+            // Log lines may come between them; another request may not.
+            while (at > 0 && items[at - 1].compare(0, 5, "log: ") == 0) --at;
+            if (at == 0 || items[at - 1] != "register " + names[k]) return false;
+            --at;
+        }
+    }
+    return true;
+}
+
+// The stand-ins as the listener has them made, on a stack that holds places as the car's does (FakeGap::places).
+static void testStandIns() {
+    std::string dir = freshFolder("stand-ins");
+    std::vector<std::string> radio(1, "TestRadio");
+    {   // the order in every path that registers: at the attach, after Bluetooth has come back, in each check; the
+        // sweep keeps a stand-in that holds its name; the stop removes it, its program not running
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        gap.places = 5;
+        gap.hold("CarOwn");                                   // the car's own, made first
+        FakeGate gate(&trace);
+        Machine machine(dir + "/root");
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        SerialConfig config = configFor(dir);
+        SerialListener listener(&gap, &gate, &trace, config);
+        services.setRemover(&listener);
+        listener.setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        CHECK_IN(gap.stackText(), gap.stackText() == "CarOwn TestRadio NBTApp");
+        CHECK_IN(trace.text(), sawWithin(trace, "and its name holds the agent's stand-in, which is left as it is (the "
+                                                "agent's serial service has just been registered)", 2000));
+        CHECK(!trace.saw("deregister TestRadio"));
+        // Switched off: everything goes, and the listener waits for it, set up as it is. On again: the whole round.
+        gap.status(0);
+        CHECK(trace.logged("the car's Bluetooth has been switched off (Status 0): every serial registration went with "
+                           "it, the agent's own, and 1 stand-in of the agent's"));
+        CHECK(!listener.serialStatus().registered && listener.active());
+        gap.hold("CarOwn");                                   // the car's own come first again
+        gap.status(1);
+        CHECK_IN(trace.text(), sawWithin(trace, "ahead of the agent's own", 2000));
+        double end = monoNow() + 3.0;
+        while (monoNow() < end && trace.count("the serial service 'NBTApp' is registered") < 2) pause(5);
+        CHECK_IN(trace.text(), trace.count("the serial service 'NBTApp' is registered") == 2);
+        CHECK_IN(gap.stackText(), gap.stackText() == "CarOwn TestRadio NBTApp");
+        unsigned rounds = 0;
+        CHECK_IN(trace.text(), roundsInOrder(trace, radio, &rounds) && rounds == 2);
+        CHECK(!trace.saw("gate detach"));
+        listener.stop();
+        services.setRemover(0);
+        // The stand-in goes after the agent's own; then the log says so.
+        CHECK_IN(trace.text(), trace.placesOf("deregister NBTApp").size() == 1 &&
+                               trace.placesOf("deregister TestRadio").size() == 1 &&
+                               trace.placesOf("deregister NBTApp")[0] < trace.placesOf("deregister TestRadio")[0]);
+        CHECK(trace.logged("1 stand-in of the agent's removed as Bluetooth serial stops, for services whose program is "
+                           "not running"));
+        CHECK(trace.logged("the stand-in 'TestRadio' (UUID " + standInUuid("TestRadio") + ") so far: 2 registrations "
+                           "sent; 2 held the name, 0 found it there, 0 had another answer"));
+        CHECK_IN(gap.stackText(), gap.stackText() == "CarOwn");
+    }
+    {   // the registration check: the stand-ins go ahead of every check
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        gap.places = 5;
+        FakeGate gate(&trace);
+        Machine machine(dir + "/root");
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        SerialConfig config = configFor(dir);
+        config.checkMs = 100;
+        config.checkQuietMs = 100;
+        SerialListener listener(&gap, &gate, &trace, config);
+        services.setRemover(&listener);
+        listener.setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        double end = monoNow() + 5.0;
+        while (monoNow() < end && trace.placesOf("register").size() < 4) pause(5);
+        listener.stop();
+        services.setRemover(0);
+        unsigned rounds = 0;
+        CHECK_IN(trace.text(), roundsInOrder(trace, radio, &rounds) && rounds >= 4);
+        // The check's rounds are quiet: the stand-in's answer is logged when it changes (from 0 at the start to 5, the
+        // name there), and not again while it stays the same.
+        CHECK_IN(trace.text(), trace.loggedCount("SppUuidRegister reply for the stand-in 'TestRadio', in a registration "
+                                                 "check's round") == 1);
+    }
+    {   // the program starts after the agent: its registration is refused (5), it removes it by name and registers
+        // again, as a declared program must, and so takes the stand-in's place, below the agent's. Without a stand-in
+        // the same program lands after the agent's.
+        for (int withStandIn = 1; withStandIn >= 0; --withStandIn) {
+            Trace trace;
+            LinksGone gone;
+            FakeGap gap(&trace);
+            gap.places = 5;
+            gap.hold("CarOwn");
+            FakeGate gate(&trace);
+            Machine machine(dir + "/root");
+            Store store(&machine);
+            SerialServices services(&machine, &store, &trace);
+            if (withStandIn) services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+            SerialListener listener(&gap, &gate, &trace, configFor(dir));
+            services.setRemover(&listener);
+            listener.setServices(&services);
+            std::string why;
+            CHECK_IN(why, listener.start(&why));
+            gap.attach();
+            CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+            // The program, as the stack sees it.
+            machine.running = "radiod";
+            uint32_t first = gap.modelRegister("TestRadio");
+            if (first == 5) CHECK(gap.modelDeregister("TestRadio") == 0 && gap.modelRegister("TestRadio") == 0);
+            CHECK(first == (withStandIn ? 5u : 0u));
+            CHECK_IN(gap.stackText(), gap.stackText() == (withStandIn ? "CarOwn TestRadio NBTApp" : "CarOwn NBTApp TestRadio"));
+            listener.stop();
+            services.setRemover(0);
+            // Its program runs: the name holds the program's registration, which the stop leaves alone.
+            CHECK_IN(trace.text(), !trace.saw("deregister TestRadio") && gap.stackText() == "CarOwn TestRadio");
+        }
+    }
+    {   // the program runs at the start, its registration there: the stand-in is refused, nothing is touched, and it
+        // stays as the listener stops
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        gap.places = 5;
+        gap.hold("TestRadio");
+        FakeGate gate(&trace);
+        Machine machine(dir + "/root");
+        machine.running = "radiod";
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        services.setRemover(&listener);
+        listener.setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        CHECK(trace.logged("SppUuidRegister reply for the stand-in 'TestRadio': 5 DEFAULT"));
+        listener.stop();
+        services.setRemover(0);
+        CHECK_IN(trace.text(), !trace.saw("deregister TestRadio") && gap.stackText() == "TestRadio");
+    }
+    {   // no place left for the agent's own, with five places and three of the car's: it takes the place of the last
+        // stand-in, Other's, and of no more; TestRadio's stand-in keeps the fourth place, the last the stack advertises.
+        // Nothing is registered after the agent's own then; the sweep's replacement of what Other's name holds finds
+        // no place. The program of TestRadio that starts then takes the fourth place, where phones find it.
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        gap.places = 5;
+        gap.hold("CarOne");
+        gap.hold("CarTwo");
+        gap.hold("CarThree");
+        FakeGate gate(&trace);
+        Machine machine(dir + "/root");
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        std::vector<SerialServiceOwner> two;
+        two.push_back(declares("TestRadio", "radiod"));
+        two.push_back(declares("Other", "otherd"));
+        services.setDeclared(two);
+        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        services.setRemover(&listener);
+        listener.setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        CHECK(trace.logged("So the last of them, 'Other', is given up") && !trace.logged("'TestRadio', is given up"));
+        CHECK(trace.logged("the one the stand-in given up ('Other') left; stand-ins that still hold their names: "
+                           "'TestRadio'"));
+        // In order: the round, the refusals, the one removal, the agent's own once more, and no stand-in after it in
+        // that round (the sweep's replacement of Other comes after the registered line).
+        std::vector<std::string> items = trace.items();
+        std::string requests;
+        for (size_t i = 0; i < items.size() && items[i].find("the serial service 'NBTApp' is registered") == std::string::npos;
+             ++i)
+            if (items[i].compare(0, 5, "log: ") != 0 && items[i].compare(0, 4, "gate") != 0 && items[i] != "gap open")
+                requests += (requests.empty() ? "" : ", ") + items[i];
+        CHECK_IN(requests, requests == "register TestRadio, register Other, register, deregister NBTApp, register, "
+                                       "deregister Other, register");
+        CHECK_IN(trace.text(), sawWithin(trace, "SppUuidRegister reply for the stand-in 'Other': 5 DEFAULT", 2000));
+        CHECK_IN(gap.stackText(), gap.stackText() == "CarOne CarTwo CarThree TestRadio NBTApp");
+        CHECK(gap.placeOf("TestRadio") == 3 && gap.placeOf("NBTApp") == 4);   // places 0 to 3 are advertised
+        CHECK(listener.serialStatus().registered && listener.active());
+        // TestRadio's program starts: refused, it removes the name and registers again, and lands in the fourth place.
+        machine.running = "radiod";
+        CHECK(gap.modelRegister("TestRadio") == 5 && gap.modelDeregister("TestRadio") == 0);
+        CHECK(gap.modelRegister("TestRadio") == 0 && gap.placeOf("TestRadio") == 3);
+        listener.stop();
+        services.setRemover(0);
+        CHECK_IN(gap.stackText(), gap.stackText() == "CarOne CarTwo CarThree TestRadio");
+    }
+    {   // a package's service no longer declared: its stand-in is removed at once
+        Trace trace;
+        LinksGone gone;
+        FakeGap gap(&trace);
+        gap.places = 5;
+        FakeGate gate(&trace);
+        Machine machine(dir + "/root");
+        Store store(&machine);
+        SerialServices services(&machine, &store, &trace);
+        services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+        SerialListener listener(&gap, &gate, &trace, configFor(dir));
+        services.setRemover(&listener);
+        listener.setServices(&services);
+        std::string why;
+        CHECK_IN(why, listener.start(&why));
+        gap.attach();
+        CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 2000));
+        CHECK_IN(gap.stackText(), gap.stackText() == "TestRadio NBTApp");
+        services.setDeclared(std::vector<SerialServiceOwner>());
+        CHECK_IN(trace.text(), sawWithin(trace, "SppUuidDeregister name 'TestRadio': the agent's stand-in for a service "
+                                                "that is no longer declared", 2000));
+        CHECK_IN(gap.stackText(), gap.stackText() == "NBTApp");
+        listener.stop();
+        services.setRemover(0);
+        CHECK(!trace.saw("stand-ins of the agent's removed") && !trace.saw("stand-in of the agent's removed"));
+    }
+}
+
+// The hold, by the test's own clock: nothing goes until the car's Bluetooth has been on for the hold time, and the
+// listener waits for it as long as it takes, set up as it is, taking the links phones open meanwhile.
+static void testRegistrationHold() {
+    std::string dir = freshFolder("hold");
+    Trace trace;
+    LinksGone gone;
+    FakeGap gap(&trace);
+    gap.places = 5;
+    FakeGate gate(&trace);
+    Machine machine(dir + "/root");
+    Store store(&machine);
+    SerialServices services(&machine, &store, &trace);
+    services.setDeclared(std::vector<SerialServiceOwner>(1, declares("TestRadio", "radiod")));
+    SerialConfig config = configFor(dir);
+    config.holdMs = 10000;
+    config.holdClock = &holdClock;
+    config.registerMs = 100;                                  // were the hold counted, the listener would give up at once
+    setHoldClock(500);
+    SerialListener listener(&gap, &gate, &trace, config);
+    services.setRemover(&listener);
+    listener.setServices(&services);
+    std::string why;
+    CHECK_IN(why, listener.start(&why));
+    gap.attach();
+    CHECK(trace.logged("the car's Bluetooth is on as the agent attaches (Status 1): no serial registration goes out for "
+                       "10 s, counted from the attach"));
+    CHECK(!listener.registrationSent() && !listener.serialStatus().registered && gap.stack().empty());
+    // The listener's passes go on meanwhile, past its time for the registration: links phones open are taken
+    // and decided on, and it does not give up. Each node is taken at a pass of its own.
+    Node first(dir + "/btspp", 1), second(dir + "/btspp", 2);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    first.appear();
+    CHECK_IN(trace.text(), sawWithin(trace, "btspp1 let go", 3000));
+    first.vanish();
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    second.appear();
+    CHECK_IN(trace.text(), sawWithin(trace, "btspp2 let go", 3000));
+    second.vanish();
+    CHECK_IN(trace.text(), trace.placesOf("register").empty() && trace.placesOf("register TestRadio").empty());
+    CHECK_IN(trace.text(), !trace.saw("gate detach") && listener.active());
+    // Past the hold, by the test's clock: the round goes, the stand-in first.
+    trace.add("test: the hold has passed");
+    setHoldClock(510);
+    CHECK_IN(trace.text(), sawWithin(trace, "the serial service 'NBTApp' is registered", 3000));
+    CHECK(trace.at("test: the hold has passed") < trace.placesOf("register TestRadio")[0]);
+    CHECK(trace.placesOf("register TestRadio")[0] < trace.placesOf("register")[0]);
+    CHECK(trace.logged("the serial registrations go out now, 10.0 s after the car's Bluetooth was seen on: the stand-in "
+                       "for the 1 declared serial service of other programs first, then the agent's own"));
+    CHECK_IN(gap.stackText(), gap.stackText() == "TestRadio NBTApp");
+    // Off, and on again: nothing until the hold has passed from the switch-on.
+    gap.status(0);
+    CHECK(gap.stack().empty() && !listener.serialStatus().registered);
+    setHoldClock(600);
+    gap.status(1);
+    CHECK(trace.logged("the car's Bluetooth has been switched on (Status 1): no serial registration goes out for 10 s"));
+    Node third(dir + "/btspp", 3);
+    gap.phone(kInfServiceRequest, kCarSerialService);
+    third.appear();
+    CHECK_IN(trace.text(), sawWithin(trace, "btspp3 let go", 3000));
+    third.vanish();
+    CHECK_IN(gap.stackText(), gap.stack().empty() && listener.active() && !trace.saw("gate detach"));
+    trace.add("test: the second hold has passed");
+    setHoldClock(610);
+    double end = monoNow() + 3.0;
+    while (monoNow() < end && trace.count("the serial service 'NBTApp' is registered") < 2) pause(5);
+    CHECK_IN(trace.text(), trace.count("the serial service 'NBTApp' is registered") == 2);
+    CHECK(trace.at("test: the second hold has passed") < trace.placesOf("register TestRadio")[1]);
+    CHECK_IN(gap.stackText(), gap.stackText() == "TestRadio NBTApp");
+    listener.stop();
+    services.setRemover(0);
 }
 
 // ---- the decide step ------------------------------------------------------------------------------------------------
@@ -5490,16 +5940,30 @@ static void testOptions() {
     CHECK(!parseSerialCheckS("3601", &s) && !parseSerialCheckS("", &s) && !parseSerialCheckS(0, &s));
     CHECK(!parseSerialCheckS("-1", &s) && !parseSerialCheckS("30s", &s) && !parseSerialCheckS("99999999999", &s));
     CHECK(s == 7);
+    s = 7;
+    CHECK(parseSerialHoldS("0", &s) && s == 0);
+    CHECK(parseSerialHoldS("10", &s) && s == 10);
+    CHECK(parseSerialHoldS("600", &s) && s == kSerialHoldMostS);
+    s = 7;
+    CHECK(!parseSerialHoldS("601", &s) && !parseSerialHoldS("", &s) && !parseSerialHoldS(0, &s));
+    CHECK(!parseSerialHoldS("-1", &s) && !parseSerialHoldS("10s", &s) && !parseSerialHoldS("99999999999", &s));
+    CHECK(s == 7);
     config = SerialConfig();
-    CHECK(config.checkMs == 30000 && config.checkQuietMs == 30000);
-    CHECK(describeSerialCheck(config) ==
-          "while the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, "
-          "the registration is checked every 30 s by registering it again: switching Bluetooth off and on drops it, "
-          "and the car says nothing");
+    CHECK(config.checkMs == 30000 && config.checkQuietMs == 30000 && config.holdMs == 10000);
+    CHECK_IN(describeSerialCheck(config), describeSerialCheck(config) ==
+          "no serial registration goes until the car's Bluetooth has said for 10 s that it is on, counted from the "
+          "attach when it is on then, with the stand-ins for the declared serial services of other programs ahead of "
+          "the agent's own; switching Bluetooth off drops them all, and the car says so. While the service is "
+          "registered, no link of the agent's is up and no phone has asked for a link for 30 s, the registration is "
+          "checked every 30 s by registering it again, after the stand-ins: a car whose Bluetooth says nothing of "
+          "being switched off drops it all the same");
     config.checkMs = 0;
-    CHECK(describeSerialCheck(config) ==
-          "the registration is not checked (--register-check 0): a registration that switching Bluetooth off and on "
-          "drops stays lost until the agent is started again");
+    config.holdMs = 0;
+    CHECK_IN(describeSerialCheck(config), describeSerialCheck(config) ==
+          "the serial registrations go as soon as the car's Bluetooth says it is on (--register-hold 0), with the "
+          "stand-ins for the declared serial services of other programs ahead of the agent's own; switching Bluetooth "
+          "off drops them all, and the car says so. The registration is not checked (--register-check 0): a "
+          "registration that the car drops with no word stays lost until the agent is started again");
 
     std::vector<std::string> programs;
     CHECK(describeSerialHold(programs) ==
@@ -6136,6 +6600,8 @@ int main(int argc, char** argv) {
     testAgent();
     testAgentDials();
     testLeftBehind();
+    testStandIns();
+    testRegistrationHold();
     testDecide();
     testPutBack();
     testLeftOvers();

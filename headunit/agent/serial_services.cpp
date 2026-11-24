@@ -107,8 +107,23 @@ SerialServices::SerialServices(const Platform* platform, const Store* store, Ser
 SerialServices::~SerialServices() { pthread_mutex_destroy(&mu_); }
 
 void SerialServices::setRemover(SerialServiceRemover* remover) {
-    Lock lock(&mu_);
-    remover_ = remover;
+    std::vector<std::string> names;
+    {
+        Lock lock(&mu_);
+        remover_ = remover;
+        names = namesLocked();
+    }
+    if (remover != 0) remover->serialServicesDeclared(names);
+}
+
+std::vector<std::string> SerialServices::namesLocked() const {
+    std::vector<std::string> names;
+    for (size_t i = 0; i < declared_.size(); ++i) {
+        bool twice = false;
+        for (size_t k = 0; k < names.size(); ++k) twice = twice || names[k] == declared_[i].name;
+        if (!twice) names.push_back(declared_[i].name);
+    }
+    return names;
 }
 
 void SerialServices::reload() {
@@ -137,8 +152,15 @@ void SerialServices::reload() {
 }
 
 void SerialServices::setDeclared(const std::vector<SerialServiceOwner>& declared) {
-    Lock lock(&mu_);
-    declared_ = declared;
+    SerialServiceRemover* remover;
+    std::vector<std::string> names;
+    {
+        Lock lock(&mu_);
+        declared_ = declared;
+        remover = remover_;
+        names = namesLocked();
+    }
+    if (remover != 0) remover->serialServicesDeclared(names);
 }
 
 std::vector<SerialServiceOwner> SerialServices::declared() {
@@ -184,6 +206,25 @@ ProgramState SerialServices::handInstalledRunning(std::string* names) {
 }
 
 unsigned SerialServices::sweep(const char* why) { return sweepOf(declared(), why); }
+
+std::vector<std::string> SerialServices::namesRunning() {
+    std::vector<SerialServiceOwner> owners = declared();
+    std::map<std::string, ProgramState> programs;   // each program is looked for once
+    std::vector<std::string> names;
+    for (size_t i = 0; i < owners.size(); ++i) {
+        std::map<std::string, ProgramState>::const_iterator it = programs.find(owners[i].program);
+        ProgramState state = it != programs.end() ? it->second : platform_->programState(owners[i].program);
+        programs[owners[i].program] = state;
+        if (state != kProgramRunning) continue;
+        bool twice = false;
+        for (size_t k = 0; k < names.size(); ++k) twice = twice || names[k] == owners[i].name;
+        if (twice) continue;
+        names.push_back(owners[i].name);
+        Lock lock(&mu_);
+        keptSaid_.erase(owners[i].name);
+    }
+    return names;
+}
 
 unsigned SerialServices::sweepIfDue(const char* why) {
     {
@@ -239,6 +280,12 @@ unsigned SerialServices::sweepOf(const std::vector<SerialServiceOwner>& owners, 
     }
 
     unsigned asked = 0;
+    // What a name holds while its program runs is that program's, and not the stand-in, whatever it was before.
+    for (std::set<std::string>::const_iterator it = answered.begin(); it != answered.end(); ++it) {
+        remover->serialServiceRuns(*it);
+        Lock lock(&mu_);
+        keptSaid_.erase(*it);
+    }
     for (ByService::const_iterator it = unknown.begin(); it != unknown.end(); ++it) {
         if (answered.count(it->first) != 0) continue;
         log_->line("serial service '" + it->first + "': whether its program (" + list(it->second) +
@@ -246,11 +293,25 @@ unsigned SerialServices::sweepOf(const std::vector<SerialServiceOwner>& owners, 
     }
     for (ByService::const_iterator it = gone.begin(); it != gone.end(); ++it) {
         if (answered.count(it->first) != 0 || unknown.count(it->first) != 0) continue;
-        bool sent = remover->removeSerialService(it->first);
-        log_->line("serial service '" + it->first + "': its program (" + list(it->second) + ") is not running, so a " +
-                   "registration it left behind " + (sent ? "is being removed" : "would be removed, but the car's "
-                   "Bluetooth service cannot be asked now") + " (" + why + ")");
-        if (sent) ++asked;
+        SerialServiceRemover::Replace r = remover->replaceSerialService(it->first);
+        bool say = true;
+        {
+            Lock lock(&mu_);
+            if (r == SerialServiceRemover::kKeptOurs) say = keptSaid_.insert(it->first).second;
+            else keptSaid_.erase(it->first);
+        }
+        if (r == SerialServiceRemover::kReplacing) ++asked;
+        if (!say) continue;
+        std::string head = "serial service '" + it->first + "': its program (" + list(it->second) + ") is not running, ";
+        if (r == SerialServiceRemover::kReplacing)
+            log_->line(head + "so what is registered under its name, which may be a registration it left behind, is "
+                              "being removed, and the agent's stand-in registered in its place (" + why + ")");
+        else if (r == SerialServiceRemover::kKeptOurs)
+            log_->line(head + "and its name holds the agent's stand-in, which is left as it is (" + why + "); this is "
+                              "said once until that changes");
+        else
+            log_->line(head + "so what is registered under its name would be replaced by the agent's stand-in, but the "
+                              "car's Bluetooth service cannot be asked now (" + why + ")");
     }
     return asked;
 }

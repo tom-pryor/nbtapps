@@ -721,6 +721,8 @@ SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, c
     }
     // A ServiceDisconnect with no answer in the time the dial waits for one is given up, so that the next may go.
     spp_.setDisconnectReplyTime(config.dial.disconnectWaitMs / 1000.0);
+    spp_.setHold(config.holdMs / 1000.0);
+    if (config.holdClock != 0) spp_.setClock(config.holdClock);
     pthread_mutex_init(&mu_, NULL);
     pthread_cond_init(&wake_, NULL);
 }
@@ -929,6 +931,48 @@ void SerialListener::shutDown() {
     if (held) gate_->release();
     gate_->detach();
     closeKept(kAllButUp);
+    removeStandIns();
+}
+
+namespace {
+// How long the stop waits for the answers to the removals of the stand-ins, in all.
+const double kStandInsGoneWaitS = 3.0;
+}  // namespace
+
+void SerialListener::removeStandIns() {
+    std::vector<SppService::StandInState> all = spp_.standIns();
+    for (size_t i = 0; i < all.size(); ++i) {
+        const SppService::StandInState& s = all[i];
+        if (s.sent == 0) continue;
+        say("the stand-in '%s' (UUID %s) so far: %u registration%s sent; %u held the name, %u found it there, %u had "
+            "another answer", s.name.c_str(), s.uuid.c_str(), s.sent, s.sent == 1 ? "" : "s", s.placed, s.there, s.other);
+    }
+    // A name whose program runs holds that program's registration: it is left alone.
+    noteRunning();
+    unsigned n = spp_.removeStandIns();
+    if (n == 0) return;
+    double end = monoNow() + kStandInsGoneWaitS;
+    bool pending = spp_.othersPending();
+    while (pending && monoNow() < end) {
+        usleep(20000);
+        pending = spp_.othersPending();
+    }
+    say("%u stand-in%s of the agent's removed as Bluetooth serial stops, for services whose program is not running%s",
+        n, n == 1 ? "" : "s", pending ? ": not every removal was answered in 3 s" : "");
+}
+
+void SerialListener::noteRunning() {
+    if (services_ == 0) return;
+    std::vector<std::string> running = services_->namesRunning();
+    for (size_t i = 0; i < running.size(); ++i) spp_.standInRuns(running[i]);
+}
+
+SerialServiceRemover::Replace SerialListener::replaceSerialService(const std::string& name) {
+    switch (spp_.replaceWithStandIn(name)) {
+    case SppService::kReplacing: return SerialServiceRemover::kReplacing;
+    case SppService::kKeptOurs: return SerialServiceRemover::kKeptOurs;
+    default: return SerialServiceRemover::kNotNow;
+    }
 }
 
 Link* SerialListener::accept() {
@@ -1315,6 +1359,9 @@ void SerialListener::checkRegistrationIfDue() {
     pthread_mutex_lock(&mu_);
     checkedAtShared_ = now;
     pthread_mutex_unlock(&mu_);
+    // The stand-ins go ahead of the check: a name whose program has run since its stand-in was answered is no longer
+    // known to hold it.
+    noteRunning();
     spp_.checkRegistration(config_.checkMs / 1000.0);
 }
 
@@ -3682,11 +3729,17 @@ void SerialListener::run() {
     // start() could not set the listener up: from here it tries again.
     if (!active() && !comeBack()) return;
     bool registered = false;
+    unsigned timesRegistered = 0;
     double deadline = monoNow() + config_.registerMs / 1000.0;
     while (!stopping()) {
+        // The registrations go once the hold has passed (SerialConfig::holdMs), and a stale answer is passed over.
+        spp_.tend();
+        // The count before the state, so that a registration made anew between two passes is never missed, however
+        // quickly the car's Bluetooth was switched off and on in between.
+        unsigned times = spp_.timesRegistered();
         SppService::State s = spp_.state();
         if (s == SppService::kRegistered) {
-            if (!registered) {
+            if (!registered || times != timesRegistered) {
                 say("the serial service '%s' is registered: a phone app connects to UUID %s", config_.name.c_str(),
                     config_.uuid.c_str());
                 // What another program left registered would have a phone open links that nothing answers, and
@@ -3701,11 +3754,15 @@ void SerialListener::run() {
                 if (config_.dial.on && !spp_.askDeviceList()) say("the car's device list could not be asked for");
             }
             registered = true;
+            timesRegistered = times;
             leftTried_ = false;
             checkRegistrationIfDue();
         } else {
             if (registered) deadline = monoNow() + config_.registerMs / 1000.0;
             registered = false;
+            // While no registration may go (the hold, or the car's Bluetooth off) the listener waits for it: that is
+            // no failure of the registration, and its time does not count.
+            if (s == SppService::kHeld) deadline = monoNow() + config_.registerMs / 1000.0;
             // What the car's Bluetooth service said of the phones went with it, and so did an ask or a dial that was
             // out, and the record a failed dial may have left wrong.
             if (!spp_.attached()) {

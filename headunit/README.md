@@ -32,7 +32,7 @@ Nothing in HmiMain3D is patched.
 | `tools/plugin_pkg.py` | Builds that package of `release/NbtApp/` (`make plugin-pkg`) and signs it for a release (`make plugin-release`) |
 | `tools/check.py` | `make check` |
 | `tools/make_icons.py`, `tools/update_stubs.sh` | Redraw the images; regenerate `stubs/*.syms` from a firmware dump |
-| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `node_reader` (the one reader of an open serial node, which keeps a read out on it), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running), `serial_services` (the serial services other programs register, and the removal of one whose program is gone), `serial_report` (the start-up report: what the head unit says of its Bluetooth when the agent starts), `presence` (which of the car's phones are there, from its device list), `dial_rules` and `dial_config` (when the car dials a phone of the agent's, and what each answer comes to), `serial_dial` (what the agent and the listener tell each other of the dial and of `serial.status`) and `problem_log` (the problem file). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). `settings` and `settings_file` are a package's settings: the rules a value is held to, where the file is, and its text edited a key at a time. `channels` is the channels that are open: a controller's messages to a package's program and back, and the programs the agent starts for them. Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
+| `agent/` | The install agent: the package reader (zip profile, signature, manifest, hashes), the install engine (install, upgrade, remove, rollback, recovery), and the protocol a phone speaks to it (frames, messages, plans, jobs), on SHA-256, a strict JSON parser, inflate, and Ed25519 verification from `agent/vendor/tweetnacl`. Two programs: `nbtagent`, which runs on a folder that stands in for the head unit and, in the build for the head unit, also on the head unit itself, and `nbtctl`, a command-line controller. Also here is the Bluetooth serial link, which only the head unit's build of `nbtagent` offers: `dsi_client` (the head unit's service-to-service IPC), `spp_service` (the registration of a serial service of our own with the Bluetooth stack, when it may go, and the stand-ins ahead of it), `spp_gate` (the gate in front of `/dev/btspp0`), `spp_nodes` (which serial node holds a link of ours), `node_reader` (the one reader of an open serial node, which keeps a read out on it), `serial_link` (the listener, and a link on a serial node), `programs` (which programs are running), `serial_services` (the serial services other programs register, the agent's stand-in for each, and the replacement of what one whose program is gone left), `serial_report` (the start-up report: what the head unit says of its Bluetooth when the agent starts), `presence` (which of the car's phones are there, from its device list), `dial_rules` and `dial_config` (when the car dials a phone of the agent's, and what each answer comes to), `serial_dial` (what the agent and the listener tell each other of the dial and of `serial.status`) and `problem_log` (the problem file). `agent_home` is the agent's own folder on the head unit, a folder to each version of it, which the agent updates itself through. `checks` holds the compatibility checks: what was put onto a head unit by hand, outside this system, and its fix: a plugin moved aside whole, the rest removed a path at a time (see [Checks](#checks)). `settings` and `settings_file` are a package's settings: the rules a value is held to, where the file is, and its text edited a key at a time. `channels` is the channels that are open: a controller's messages to a package's program and back, and the programs the agent starts for them. Four scripts for the head unit's shell: `hu_probe.sh` reads off a head unit what the agent has to know about it, `hu_install.sh` puts the agent onto one, `nbtstart.sh` is the starter that decides there which version of the agent is started, and `nbtlaunch.sh` is a version's own launcher, which starts that version's `nbtagent` and starts it again when it fails |
 | `spec/` | Definitions shared with the Android app: `manifest.schema.json`; `json-profile.vectors`, the cases every JSON parser of the project must agree on; and `protocol/`, the frames every codec must build and refuse alike, one whole conversation with the agent, frame by frame, and `constants.txt`, the names and numbers both sides must hold alike |
 | `tools/nbtpkg.py` | Builds, signs and verifies `.nbtpkg` packages |
 | `tools/check_agent.py` | `make agent-check`: `release/agent/` is the head unit's kind of program, holds nothing of the test bench, and its `nbtagent` holds the official package key; and the agent's own package in `release/pkg/` is byte for byte what `tools/agent_pkg.py` makes of that folder |
@@ -782,16 +782,48 @@ attached and no answer to the registration, or refused), takes the gate away aga
 seconds later, and so on until the service is registered. A dial of the car's that is out then is given up first
 ("The car dials the phone", below), so that the dials go on as before once the service is registered again. A
 client of the car's Bluetooth service that fails once it has been made (no memory for it, or its connection thread not started) cannot be opened again: the agent
-says so once and Bluetooth serial stays off until the agent is started again. Switching Bluetooth off and on in iDrive drops the registration, and the car says nothing
-of it, so while the service is registered, no link of the agent's is up and no phone has asked for a link for 30
-seconds, the agent checks it every 30 seconds by registering it again (`--register-check <s>`, below): the car
-answers that it has it already, which changes nothing and is only counted, or takes it anew, which the log says
-(`the car's Bluetooth had dropped the registration of 'NBTApp' ... and has registered it again`). If the next
-check finds it gone again, one more line says that it keeps being dropped, and after that it is only counted until
-a check finds it there or the stack busy. Any other answer is logged when it differs from the last such answer
-and only counted while it repeats. A check never removes the registration first, as the agent's start does with
-one that is refused. When it stops, the agent logs how many checks it made and what they found, with the last
-other answer and how many times in a row it came. Its lines in the log start with `bluetooth:`. Besides the phones'
+says so once and Bluetooth serial stays off until the agent is started again.
+
+**When the agent registers.** The car's Bluetooth stack advertises the first four serial registrations of this kind
+that it holds, in the order they were made; a fifth is taken and answered as any other, but is in no service record,
+so no phone finds it. The car's own software holds one to three of them, made within about a second of the stack's
+opening, and one of those has an empty advertised UUID: a registration of that kind is mishandled by the stack at
+its removal, which then leaves one entry of a table taken until the stack's process restarts, and that happens at
+every switch-off that follows a switch-on at which another program registered before the car's own. So the agent
+makes no registration of that kind, and none of its own before the car's are there. The agent asks the car's
+Bluetooth service for its Status (on or off) and its Bluetooth name as it attaches, and sends no registration of any
+kind until Status says the car's Bluetooth is on and has said so for 10 seconds (`--register-hold <s>`, below); when
+it is on as the agent attaches, the 10 seconds count from the attach. A Status that is neither on nor off counts as
+none, and a service that says nothing of Status in 10 seconds from the attach has the registrations go then, as
+with no hold. Meanwhile the service is not registered: the agent takes and decides on the links phones open as
+ever, the pairing window's dials and the dials of a version on trial wait, a knock waits for its dial as it does
+while the service is not registered (4 seconds at most, and is then ignored with a line in the log), and the 20
+seconds the agent gives the registration do not count. Switching Bluetooth off drops every registration, and the
+car's Status says so: the agent marks its own and its stand-ins (below) gone, makes no registration and no check
+until Bluetooth is on again and has been for the hold time, and then registers as at its start; each time it is
+registered again, the services of other programs are swept again. An answer to a registration that went out before
+the switch-off is passed over when it comes (15 seconds at the most), and the next registration waits for it. The
+agent's own registration answered 1 (TIMEOUT), which the stack may have carried out all the same, is removed by name
+and made once more, as a first refusal of any kind is. A car whose Bluetooth says nothing of a switch-off is met by
+the registration check: while the service is registered, no link of the agent's is up and no phone has asked for a
+link for 30 seconds, the agent checks it every 30 seconds by registering it again (`--register-check <s>`, below),
+after its stand-ins: the car answers that it has it already, which changes nothing and is only counted, or takes it
+anew, which the log says (`the car's Bluetooth had dropped the registration of 'NBTApp' ... and has registered it
+again`). If the next check finds it gone again, one more line says that it keeps being dropped, and after that it
+is only counted until a check finds it there or the stack busy (1 or 2: the next check, a registration of the same
+name, finds it there or makes it). Any other answer is logged when it differs from the last such answer and only
+counted while it repeats. A check never removes the registration first, as the agent's start does with one that is
+refused. When it stops, the agent logs how many checks it made and what they found, with the last other answer and
+how many times in a row it came, and for each stand-in how many of its registrations went and what they found.
+
+The log has, with the time of each line, every change of Status (`the car's Bluetooth has been switched off (Status
+0) ...`, `... has been switched on (Status 1): no serial registration goes out for 10 s ...`), every name the car
+gives its Bluetooth (`LocalName`, with the number of its characters and never the name itself; '' at a switch-off),
+the line that the registrations go out now and how long after Bluetooth was seen on, and each registration and its
+answer: the 60 first lines about Status and the name in a run, and the rest only counted. The car's own software
+sets the name at every switch-on just before it makes its own registrations, so the gap between the Status line,
+the name lines and the agent's registrations is how long the car took. Its lines in the log start with
+`bluetooth:`. Besides the phones'
 requests for a link, the
 agent asks the car's Bluetooth service for what it says of the car's device list, of links that end and of a
 phone's services; it keeps that, and logs the first eight links that end, never with a phone's name or address.
@@ -1130,13 +1162,68 @@ whose:
   (`/var/opt/nbtapp`, or `state/` under `--root`): the name, a space, the program's file name. A line that starts
   with `#` is a comment.
 
-With Bluetooth serial on, the agent removes the registration of every such service whose program is not running:
-when its own service has been registered; during an install step once the hook that stops the package's
-programs has had its turn (`preInstall` of an install or an upgrade, `preRemove` of a removal); and when it has
-let a phone's link go, at most once in 30 seconds. It looks for the program among the head unit's processes by
-the file name of the executable, so a program that a shell runs from a script is not found. A service whose
-program runs is left alone, and so is every service when the processes cannot be read. Each removal, and what the
-car's Bluetooth service answered, is in the log.
+The stack also advertises only its first four registrations ("When the agent registers", above), so a program
+that registers after the agent, with the car's own ahead of both, may be in no service record, and phones never
+find its service. So, with Bluetooth serial on, the agent keeps a place for each such service below its own: each
+time it registers its own service (as it starts, after the car's Bluetooth service comes back, and after the car's
+Bluetooth has been switched on again), it first registers a **stand-in** under each declared service's name, one at
+a time in the order they are declared: a registration of that name, with a UUID made up for it (the first 16 bytes
+of the SHA-256 of `NBTApps stand-in serial service:` and the name, marked as a UUID of version 8: the same for the
+same name every time, and another for every other name) as both its advertised and its dialled UUID. A stand-in the
+car takes holds the name and the place; one answered 5 finds the name there already (the program's own
+registration, a stand-in from before, or no place left) and is left so; any other answer is logged, and the agent's
+own registration follows all the same. The stand-ins go ahead of every registration check too, and there their
+answers are logged only when one differs from that stand-in's last. While the program is not running a phone sees
+a record under the service's name with the made-up UUID, which no phone looks for.
+
+**What a declared program has to do.** Its registration is answered 5 while the agent's stand-in holds its name.
+A program declared for a serial service must, when the car's Bluetooth service answers its registration 5 ("the
+name is there"), remove the registration of that name (SppUuidDeregister) and register again, and so take the
+stand-in's place; a program that registers once and gives up on a 5 stays without its service while the agent
+runs. It must also register with an advertised UUID of its own, never an empty one.
+
+The car's Bluetooth service cannot be asked what is registered under a name, so the agent keeps it: a name holds
+its stand-in from the moment the car took the stand-in until its program is seen running, the car's Bluetooth is
+switched off, the car's Bluetooth service goes, or the name is removed; at any other time what it holds is not
+known. With Bluetooth serial on, the agent **sweeps** every declared service whose program is not running: when
+its own service has been registered; during an install step once the hook that stops the package's programs has
+had its turn (`preInstall` of an install or an upgrade, `preRemove` of a removal); and when it has let a phone's
+link go, at most once in 30 seconds. A name that holds the agent's stand-in is left as it is, and the log says so
+once until that changes. Any other name is replaced: what it holds, which may be a registration the program left
+behind, which phones would open links to with nobody reading them, is removed by name, and the stand-in registered
+in its place at once. A program that starts in between and registers keeps its registration: the stand-in is then
+answered 5. It looks for the program among the head unit's processes by the file name of the executable, so a
+program that a shell runs from a script is not found; it looks before every registration check too, and a name
+whose program runs is not known to hold the stand-in from then on. A service whose program runs is never touched
+but for the stand-in's registration in a round, which the car refuses while the program's own is there, and every
+service is left alone when the processes cannot be read. While no registration may go (the hold, or Bluetooth off)
+nothing is replaced, and the log says that the car's Bluetooth service cannot be asked now. Each removal and
+registration, and what the car's Bluetooth service answered, is in the log.
+
+**No place left.** The stack's answer 5 to the agent's own registration means "the name is there" or "no place".
+The agent removes its own name then, and its answer 10 says that nothing was there; if the registration made once
+more is refused too, while stand-ins of the agent's hold their names, the agent gives up stand-ins rather than stay
+without its own service, and no more of them than it needs: it removes the last of them, in the order they are
+declared, and registers its own once more, in the place that one left; refused again, it gives up the next-to-last
+the same way, and so on, until its own is taken or no stand-in of its own is left (and then the registration has
+failed, as before). The agent's own service needs no advertised place (the app reaches it by its knock through the
+car's own serial service, and the car dials from any place), while a declared program does, so the first stand-ins
+keep the advertised places for their programs. The log says, for each stand-in given up, which it was and that its
+service has no stand-in for now, so that its program may be refused a place or get one that no phone finds; and,
+once the agent's own is registered, which stand-ins still hold their names. A stand-in whose removal is answered
+other than 0 or 10 is no longer counted as the agent's, and the agent's own is registered once more all the same.
+A stand-in given up is not registered again then: it goes first again in the next round, the registration check's
+or that of the next switch-on, where it is refused as long as no place is free; a place that has come free by then
+it takes, after the agent's own, which may be the place the stack does not advertise. Switching Bluetooth off, or the
+car's Bluetooth service going, in the middle of this ends it, and the next round starts afresh.
+
+**When the agent stops, and when the list changes.** As Bluetooth serial stops (the agent stopping, or giving up
+on its registration), after its own registration, the agent removes every stand-in that holds its name and whose
+program is not running, waits up to 3 seconds for the answers, and says how many; a name whose program runs is left
+alone. A service that is no longer declared (its package removed, or the file changed) loses its stand-in at once
+when that holds its name, and its name is left alone otherwise. The agent keeps nothing of its stand-ins on disk: an
+agent that starts knows only the services declared then, and a stand-in that an agent killed earlier left under a
+name no longer declared stays until the car's Bluetooth is switched off or its stack restarts.
 
 **Other programs' links.** The car gives every link a phone opens the same node and names the same service for
 it, so a program that takes serial links of its own meets the agent's links, and the agent meets its links. Only
@@ -1206,27 +1293,28 @@ The log has, for every link, how long after the open its first message came, how
 left on it, whether it was the agent's or was let go, and why, how many bytes were put back for another program or
 why they could not be, whether the node was still there after the close and when it went, how much was dropped
 from a node that was read to its end, and each time the gate starts and stops refusing those programs. One option
-of `nbtagent` changes the decide step without a new build, one the registration check, and three the car's dialling;
-all five go with Bluetooth serial only:
+of `nbtagent` changes the decide step without a new build, two the registration (its hold and its check), and three
+the car's dialling; all six go with Bluetooth serial only:
 
 | Option | What it changes |
 |---|---|
 | `--decide <ms>` | How long the magic bytes are waited for, 1 to 10000, in place of the protocol's 500 ms. A phone app goes by the protocol's time, so this is for measuring, not for a car that is in use |
 | `--register-check <s>` | Every how many seconds the registration is checked while all is quiet, 0 to 3600, in place of 30; 0 never checks it |
+| `--register-hold <s>` | How many seconds the car's Bluetooth has to have said it is on before a serial registration goes, 0 to 600, in place of 10; with 0 they go as soon as it says so ("When the agent registers", above) |
 | `--dial on\|off` | Whether the car dials a phone of the agent's (above); on by default. With off, the agent takes only the links phones open, as before |
 | `--dial-knock on\|off` | With the dial: on (the default), the car dials a phone when its app knocks, and otherwise only in the pairing window, at `nbtctl serial dial` and for the first 2 minutes of a trial of the agent, with no ask and no poll, and lists `serial-knock`; off, it asks and polls as before the knock, with the rule that leaves some phones' own links to another program, for comparisons. Not with `--dial off` |
 | `--dial-poll <f>,<l>,<t>` | With `--dial-knock off` only: the dial's polls, every f seconds (1 to 3600) for l seconds (0 to 86400) after a phone connects or a link ends, then every t seconds (1 to 3600), in place of 10,120,30 |
 
 When Bluetooth serial has started, six lines in the log say what the agent goes by: the time and what becomes
 of a link that is let go, what becomes of a link the agent ends, what it does about a registration that is not
-taken or is lost, how it checks the registration, the programs the gate holds off as they are declared at that
+taken or is lost, when it registers and how it checks the registration, the programs the gate holds off as they are declared at that
 moment (the list is taken anew each time the hold goes on), and how the car dials a phone:
 
 ```
 bluetooth: a link is the agent's if it opens with the magic bytes within 500 ms of the open of its node, after any whole frames left over from an earlier link. Any other is let go. If a program declared for a serial service is running, the gate has seen another program open the node, or a program of software put on by hand is running, what was read from it is put back into its node, which stays open, unread, until the link ends, for the program it belongs to; where that cannot be done, its node is closed for that program. Otherwise it is read until the link ends or one of those signs comes. A link that opens with the knock's magic bytes there instead is the phone's knock: nothing is written into it, the car is to dial the phone that opened it, and its node is read, with what comes dropped, until the link ends. Every link a phone opens is read so, whoever the phone is
 bluetooth: a link the agent ends keeps its node, read and with what comes dropped, until the phone ends the link; the log says so if it is still up 5000 ms after the agent's end closed
 bluetooth: a serial service that the car's Bluetooth service does not take, or that is not registered for 20 s, is given up: the gate is taken away, and both are set up again 30 s later, for as long as it takes
-bluetooth: while the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, the registration is checked every 30 s by registering it again: switching Bluetooth off and on drops it, and the car says nothing
+bluetooth: no serial registration goes until the car's Bluetooth has said for 10 s that it is on, counted from the attach when it is on then, with the stand-ins for the declared serial services of other programs ahead of the agent's own; switching Bluetooth off drops them all, and the car says so. While the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, the registration is checked every 30 s by registering it again, after the stand-ins: a car whose Bluetooth says nothing of being switched off drops it all the same
 bluetooth: while a link is being decided on or is the agent's, the gate also refuses opens by radiod
 bluetooth: the car dials a phone on its instance 'nbtapp' (/dev/nbtapp) when the phone's app knocks, and otherwise only while the pairing window is open, at serial.dial and while this version of the agent is on trial (--dial-knock on): a link the phone opens that starts with the knock's magic bytes within the decide time is that phone's knock, and a phone's request for a serial link is no knock, whatever becomes of it. A knock of any phone that is connected to the car and paired with it, one of the agent's or not, has the car dial it at once, with no ask before it, when no link of the agent's is up and no dial is out; one that comes while a phone's request is pending, a link is being decided on or another phone's dial is out waits 4000 ms at most. After a dial a knock brought that gave the agent no link, that phone's knocks are ignored for 3000 ms. No poll, and no ask of a phone's services. While the pairing window is open every phone there is dialled every 5 s, and while this version of the agent is on trial and no link of the agent's is up, every phone of the agent's there every 5 s, for 120 s from when the trial is known, the serial service registered and the car's device list come; after that, until the version is confirmed, a phone is dialled when its app knocks, as when it is not on trial. The app's magic bytes are waited for 3000 ms; a dial with no answer is given up after 95 s; a link left behind on the instance that a dial finds is ended, and the phone dialled again at once. A dialled link that the agent ends has 5000 ms to be ended by the phone before the car is asked to, and the car's answer is waited for 3000 ms. A phone's request that the car ends while the agent's dial is out, or up to 1000 ms after it was answered, is not counted as a refusal. A registration refused while /dev/nbtapp is there: the car's device list is waited for 3000 ms and the link ended for each phone there, 15 s at most in all, and the service registered again at once if it has gone. As soon as the car answers a dial with a failure other than 10 or BUSY, one re-point request goes on the same instance, so that a link end the car may book against that instance names no phone: its answer is waited for 3000 ms, with no dial meanwhile, and an answer other than 5 within 500 ms stops these requests for the rest of the run
 ```

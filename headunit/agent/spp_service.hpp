@@ -8,8 +8,25 @@
 //
 // The stack's server "BSS_GAP.SGBluetoothGap" takes a request SppUuidRegister(name, UUID, UUID, type) and adds an
 // SDP record for the UUID, which a phone app then connects to. Nothing is written to disk: a reboot clears the
-// registration, and so does a restart of the stack's process. A program that ends without SppUuidDeregister leaves
-// the registration behind until then, with nothing answering it.
+// registration, and so does a restart of the stack's process, and so does switching the car's Bluetooth off. A
+// program that ends without SppUuidDeregister leaves the registration behind until then, with nothing answering it.
+//
+// What the stack does with the registrations of all its clients, which the agent goes by:
+//   * it advertises the first four registrations of this kind that it holds, in the order they were made, each in a
+//     place of its own. A fifth is taken, answered 0 and can be dialled from (the car's dial takes the UUID from the
+//     request), but is in no service record, so a phone never finds it; a sixth is answered 5, as a name that is
+//     registered already is. A registration that is removed frees its place, and the next one made takes the first
+//     free place. The car's own software holds one to three of them (one at least on every car), made within about a
+//     second of the stack's opening, in answer to that opening
+//   * a registration whose advertised UUID is empty ("dial-only") is mishandled at its removal: the stack frees the
+//     wrong entry of a table it keeps of them, one entry stays taken until the stack's process restarts, and the
+//     registration that held the entry freed can no longer be removed, by anyone. The car's own software makes one
+//     such registration. Registrations with an advertised UUID can be made and removed any number of times. So the
+//     agent never makes a dial-only registration, and makes none of its own before the car's are there
+//   * a registration sent before the stack says it is open (attribute Status, below) is carried out, and still
+//     answered 1 (TIMEOUT) some 10 s later; one sent while it is closed is answered 5 at once. Switching the car's
+//     Bluetooth off closes the stack and drops every registration; switching it on opens it again
+//   * nothing tells a client which names are registered, nor when another client registers or removes one
 //
 // Three layers, each usable without the one below:
 //   * pure helpers (no devices, plain C++98): the UUID and name checks, the payloads of the requests, readers for
@@ -97,6 +114,18 @@ inline bool isResponseId(uint32_t id) { return id >= 0x80000016u && id <= 0x8000
 const uint32_t kTypeResponse = 0x200;
 const uint32_t kTypeRejectedA = 0x202, kTypeRejectedB = 0x204;   // the stub or server refused the request
 
+// Two attributes of the server's, asked for as the informs are. The current value comes a few milliseconds after it
+// is asked for, and again at every change. Each of their messages has the type 0x202, which for a reply would be
+// kTypeRejectedA, so they are told apart by their id before anything else.
+//   Status     u32: 1 the stack is open (the car's Bluetooth is on), 0 it is closed. 1 comes shortly before the answer
+//              to the Open that switches Bluetooth on, 0 just before the answer to the Close that switches it off
+//   LocalName  string: the car's Bluetooth name. Sent at the Open, as '' at a Close, and just before the answer to any
+//              client's LocalNameSet, whether or not the name changed: the car's own software sets it at every Open,
+//              and makes its own registrations right after that answer
+const uint32_t kAttrStatus = 0xc0000000u;
+const uint32_t kAttrLocalName = 0xc0000001u;
+inline bool isAttributeId(uint32_t id) { return id == kAttrStatus || id == kAttrLocalName; }
+
 // ---- UUID and name -------------------------------------------------------------------------------------------
 
 inline bool isHex(char c) {
@@ -137,6 +166,14 @@ inline bool isServiceName(const std::string& s) {
     }
     return true;
 }
+
+// The UUID of the agent's stand-in for the serial service `name` of another program (SppService::setStandIns()):
+// made up from the name, the same for the same name in every run and on every car, and another for every other name.
+// It is the first 16 bytes of the SHA-256 of kStandInSeed followed by the name, with the version bits set to 8 and
+// the variant bits to 10 (RFC 9562, a UUID of the maker's own), in the form normaliseUuid() gives. So it is never the
+// agent's own UUID, which is a version 4 one, never a Bluetooth SIG profile UUID (isSigBaseUuid()), and never empty.
+const char* const kStandInSeed = "NBTApps stand-in serial service:";
+std::string standInUuid(const std::string& name);
 
 // ---- request payloads ----------------------------------------------------------------------------------------
 
@@ -268,7 +305,8 @@ inline const char* registerErrorMeaning(uint32_t e) {
     switch (e) {
     case 1: return "the stack was busy for too long and dropped the request";
     case 2: return "the stack was busy with another request";
-    case 5: return "the name or the UUID is registered already, or the car's Bluetooth is switched off";
+    case 5: return "the name or the UUID is registered already, the stack has no place left for it, or the car's "
+                   "Bluetooth is switched off";
     default: return "";
     }
 }
@@ -666,15 +704,70 @@ private:
 };
 
 // ---- the registration ------------------------------------------------------------------------------------------
-// start() registers the service as soon as the server is attached, and again each time the server comes back,
-// because its restart drops the registration. A first refusal is taken for a registration that an earlier run
-// left behind under the same name: that one is removed and the registration tried once more. remove() takes the
-// service away again; after it a server that comes back is not given the service a second time.
+// start() registers the service once the server is attached and its registrations may go (below), and again each
+// time the server comes back, because its restart drops the registration, and each time the car's Bluetooth has
+// been switched on again, because switching it off drops it too. A first refusal is taken for a registration that an
+// earlier run left behind under the same name: that one is removed and the registration tried once more. remove()
+// takes the service away again; after it a server that comes back is not given the service a second time.
+//
+// When registrations may go. With the server attached, Status (kAttrStatus) and LocalName are asked for with the
+// informs. No SppUuidRegister of this object's goes out, of any kind, unless Status says the stack is open and has
+// said so for the hold time (setHold()): the car's own registrations are made within about a second of the stack's
+// opening, and one of them is dial-only, so a registration made before it costs the stack a table entry at the next
+// switch-off (the top of this file). The hold counts from when Status said open; at an attach that finds the stack
+// open already, from the attach, since how long it has been open cannot be told. Status closed: every registration
+// is gone, this object's and its stand-ins', and none goes out, nor a check, until it is open again and the hold has
+// passed; then the whole round goes as at the start. A server that says nothing of Status within setStatusWait() of
+// the attach (a stack that has no such attribute, or a subscription that could not be sent) has the registrations
+// go then, as with no hold, and the log says so. Until they may go the state is kHeld. The hold's end, and the
+// stale answers below, are seen by tend(), which the caller makes often; a server whose Status comes open with a
+// hold of 0 has the round go at once.
+//
+// The stand-ins (setStandIns()). The places the stack advertises are given in the order registrations come, so a
+// program that registers after the agent may land in the fifth place, where no phone finds it. So for each serial
+// service of another program that the agent is told of, a registration is made under that service's name, with the
+// UUID standInUuid() makes for it as both its advertised and its dialled UUID and the agent's own type, ahead of the
+// agent's own: it holds the name, and with it a place below the agent's, until the program registers. The program's
+// own registration is then answered 5 (the name is there): the program removes it by name, and registers again, and
+// so takes that place. A round is the stand-ins, one at a time in the order they were given, each waiting for its
+// answer (the answers name nothing, and are told apart only by their order), then this object's own registration or
+// its check. A stand-in answered 0 holds the name; 5 means the name is there already (the program's own
+// registration, a stand-in from before, or no place left), and is left so; any other answer is logged, and the round
+// goes on. Only one SppUuidRegister of this object's is out at a time, of any kind.
+//
+// What a name holds. The stack cannot be asked what is registered under a name, so each stand-in is kept as "the
+// name holds the agent's stand-in" (ours) from an answer 0 to its registration until its program is seen running
+// (standInRuns()), the server goes, Status goes to closed, or its name is removed; at any other time what it holds
+// is not known. replaceWithStandIn() is for a service whose program is not running: a stand-in that is ours is left
+// alone, and what the name holds otherwise (a registration the program left behind, which phones would open links
+// to with nobody reading them) is removed by name and the stand-in registered in its place at once.
+//
+// No place left. A 5 to this object's own registration means "the name is there" or "no place": the removal by name
+// that follows tells the two apart, as its answer 10 says that nothing was there. When the second registration is
+// refused too and stand-ins that are ours stand ahead of it, the agent's own takes the place of the last of them, in
+// the order of the round, and of no more than it needs: that stand-in is removed (an ordinary removal, which the stack
+// makes safely) and the registration made once more; refused again, the next-to-last that is ours is given up the
+// same way, and so on, one removal and one registration at a time, until the registration is taken or no stand-in that
+// is ours is left (kFailed then). The agent's own needs no advertised place (the app reaches it through the car's own
+// serial service, and the car dials from any place), while a declared program needs one, so the places the first
+// stand-ins hold, the advertised ones, stay theirs. A removal answered anything but 0 or 10 leaves that stand-in not
+// known to be ours, and the registration goes once more all the same: refused, the next stand-in is given up, so the
+// loop ends by itself. A stand-in given up is not registered again in that round; it stays given (setStandIns()) and
+// goes first in the next round as always. In a registration check's round it is then answered 5 every time while no
+// place is free, which is only counted; once a place has come free in between (a registration of the car's or of a
+// program went) it takes that one, which is after the agent's own and may be the one the stack does not advertise.
+// Nothing better can be known, and nothing is done about it. Status closed or the server going in the middle ends it:
+// everything is forgotten, and the next round starts afresh.
 //
 // The server's requests for a link do not say which serial node the link gets, and name the service the phone
 // asked for. Which link is whose is for the caller to work out.
 const double kOtherRemovalReplyS = 5.0;   // see SppService::setOtherReplyTime()
 const double kDisconnectReplyS = 3.0;     // see SppService::setDisconnectReplyTime()
+const double kStatusWaitS = 10.0;         // see SppService::setStatusWait()
+// A registration sent before the server went or Status went to closed is answered all the same, within some 10 s
+// (TIMEOUT at the latest), and the next one waits for that answer, which is then passed over. With none in this long
+// it is passed over all the same, and the next goes.
+const double kStaleReplyS = 15.0;
 
 class SppService : private GapClient::Events {
 public:
@@ -688,8 +781,28 @@ public:
         kFailed,         // the server did not take the registration
         kRemoveSent,     // SppUuidDeregister by remove() or startRemoval()
         kRemoved,        // the server removed it, or had nothing under the name (removeError() says which)
-        kRemoveFailed
+        kRemoveFailed,
+        kHeld            // started and attached, and no registration may go yet: the car's Bluetooth is off, or has
+                         // not been on for the hold time (setHold()), or the server has not said which yet
     };
+
+    // What the server's Status says of the car's Bluetooth.
+    enum Bluetooth { kBtUnknown, kBtOff, kBtOn };
+    // What replaceWithStandIn() came to.
+    enum Replace {
+        kReplacing,      // the name's registration is being removed, and the stand-in follows it; or was already
+        kKeptOurs,       // the name holds the agent's stand-in: nothing was done
+        kNotNow          // nothing could be done now: the server is not attached, no registration may go, or the
+                         // name is not one to take
+    };
+    // One stand-in, as standIns() tells it: for the log and the tests.
+    struct StandInState {
+        std::string name, uuid;
+        bool ours;                    // the name holds it, as far as is known
+        unsigned sent, placed, there, other;   // its registrations sent, and answered 0, 5 and anything else
+    };
+    // The time this object goes by, in seconds; monotonic. A test's own, in place of the system's (setClock()).
+    typedef double (*Clock)();
 
     // What a phone's request for a serial link came to.
     enum Phone {
@@ -746,6 +859,44 @@ public:
 
     // Before start(). The caller checks the name (isServiceName) and the UUID (normaliseUuid) first.
     void configure(const std::string& name, const std::string& uuid, uint32_t type);
+    // Before start(): how long Status must have said open before a registration goes (the top of this section); 0,
+    // which is how it starts, for none.
+    void setHold(double seconds) { holdS_ = seconds; }
+    // Before start(): how long after an attach a server that says nothing of Status is waited for before the
+    // registrations go all the same. kStatusWaitS unless a test sets it.
+    void setStatusWait(double seconds) { statusWaitS_ = seconds; }
+    // Test only, before start(): the clock for the hold, the waits for answers and the stale answers.
+    void setClock(Clock clock) { clock_ = clock; }
+    // The names of the serial services of other programs that the agent has a stand-in for: from here on, each round
+    // registers these, in this order, ahead of this object's own registration or check. The agent's own name, and a
+    // name the stack would not take, are passed over; so is a name given twice. A name that is no longer given is
+    // dropped: a stand-in that is ours under it is removed by name, one whose registration is out is removed once it is
+    // answered 0, and one that is not known to be ours is left as it is. From any thread.
+    void setStandIns(const std::vector<std::string>& names);
+    // The program of stand-in `name` is running: from here the name is not known to hold the stand-in, so that nothing
+    // takes what it holds for the agent's. From any thread.
+    void standInRuns(const std::string& name);
+    // For a serial service of another program's whose program is not running (serial_services.hpp): kKeptOurs if the
+    // name holds the agent's stand-in; otherwise what is registered under it is removed by name (removeOther()'s
+    // queue), and on an answer 0 or 10 the stand-in is registered at once, ahead of anything but a round under way;
+    // kReplacing then, and also while that is under way already. kNotNow, with nothing done, if the server is not
+    // attached, the service is not started or no registration may go now (kHeld), or the name is this object's own or
+    // not a service name. A name not given to setStandIns() is taken as one, and dropped again at its next call. From
+    // any thread.
+    Replace replaceWithStandIn(const std::string& name);
+    // Removes by name every stand-in that is ours, through removeOther()'s queue, as the agent stops; how many. Its
+    // program is the caller's to look at first (standInRuns()): a name whose program runs holds that program's
+    // registration, and is left alone. From any thread.
+    unsigned removeStandIns();
+    // Whether a removal of another program's registration or of a stand-in waits to go out or for its answer.
+    bool othersPending();
+    std::vector<StandInState> standIns();
+    Bluetooth bluetooth();
+    // At every pass of the caller's: the registrations go when they may (the hold has passed, or the server has said
+    // nothing of Status for setStatusWait()), and an answer that a registration sent before the server went or
+    // Status went to closed was waiting for is passed over after kStaleReplyS. From any thread; never while the caller
+    // holds a lock the events take.
+    void tend();
 
     // False if the client cannot start connecting. Otherwise kWaiting, and the rest follows as events.
     bool start();
@@ -759,7 +910,8 @@ public:
     // Either way the service is not registered again by this object, until again().
     bool remove(const char* why);
     // After remove(), or once the registration has failed: registers once more, on the client that start()
-    // opened. kWaiting until the server is attached, and from there as after start().
+    // opened. kWaiting until the server is attached, and from there as after start(): the round at once if
+    // registrations may go, kHeld until they may otherwise.
     void again();
 
     // Asks the server to drop the registration filed under `name`, which is not this object's own: one that a
@@ -875,14 +1027,19 @@ public:
         std::vector<std::string> version;  // the stack's version strings, from VersionGet, as the log shows them
         unsigned othersConnectReplies;     // ServiceConnect replies for another client that came while ours waited
         unsigned othersDisconnectReplies;  // the same for ServiceDisconnect
+        unsigned statusChanges;            // Status values that differed from the one before, the first among them
+        unsigned names;                    // LocalName values
         Heard() : devicesKnown(false), deviceListChanges(0), linksEnded(0), serviceListChanges(0),
-                  othersConnectReplies(0), othersDisconnectReplies(0) {}
+                  othersConnectReplies(0), othersDisconnectReplies(0), statusChanges(0), names(0) {}
     };
     Heard heard();
 
-    // The registration check. Switching Bluetooth off and on in iDrive drops every registration, and the stack
-    // says nothing of it: no inform comes, and the registration stays kRegistered here. So, while registered, the
-    // caller sends SppUuidRegister for this object's own name now and then, and the answer says:
+    // The registration check. Switching Bluetooth off and on in iDrive drops every registration. Status says so
+    // (above), and then the registration is no longer kRegistered here; but a stack with no Status, or a drop of
+    // another kind, says nothing, and the registration stays kRegistered. So, while registered, the caller has
+    // SppUuidRegister for this object's own name sent now and then, as the end of a round: the stand-ins go first,
+    // each counted, with a line only for an answer other than the stand-in's last, and then the check, whose answer
+    // says:
     //   0       the stack had lost the registration, and has it again now: logged the first time; if the next
     //           check that is not answered 5, 1 or 2 finds it gone again, one line says it keeps being dropped,
     //           and after that it is counted only, until a check finds it there (5) or the stack busy (1, 2)
@@ -891,9 +1048,10 @@ public:
     //   other   (or a rejection of the request): logged when it differs from the last such answer, or when a
     //           check answered 5, 1 or 2 came between them; else counted only
     // A check changes no state. It is never the start-up path, which clears a refused registration by removing
-    // it: a check answered 5 has found what it hoped to find. False, with nothing sent, unless the registration is
-    // kRegistered, the server attached and no check waits for its reply; one that has waited `replyS` counts as
-    // unanswered, and the next may go. From any thread.
+    // it: a check answered 5 has found what it hoped to find. A check answered 1 (TIMEOUT) may have been carried out:
+    // it counts as busy, and the next check, a registration of the same name, finds it there (5) or makes it (0).
+    // False, with nothing sent, unless the registration is kRegistered, the server attached and no check waits for
+    // its reply; one whose round has waited `replyS` counts as unanswered, and the next may go. From any thread.
     bool checkRegistration(double replyS);
     struct CheckCounts {
         unsigned sent, present, restored, busy, other, unanswered;
@@ -908,6 +1066,9 @@ public:
     CheckCounts checkCounts();
 
     State state();
+    // How many times this object's own registration has become kRegistered: a caller that looks now and then sees by
+    // it that the registration was made anew, however quickly it was lost and made again in between.
+    unsigned timesRegistered();
     // The server's answer to the last removal of this object's own registration: 0, a GapErrorCode, or kNoError
     // for none yet. 10 (no such name is registered) counts as removed: the stack had dropped the registration.
     uint32_t removeError();
@@ -933,24 +1094,110 @@ private:
     void subscribeTo(uint32_t informId);
     bool handleKnown(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len);
     void checkAnswered(uint32_t err, uint32_t rejectedType);
-    void sendRegister();
     bool sendDeregister(const char* why);
     void sendNextOther();
     void noteUnknown(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len);
     bool takeDisconnect(const std::string& address, const std::string& service, bool told, bool quiet = false);
 
+    // What a removal through removeOther()'s queue is for.
+    enum OtherWhy {
+        kOtherLeftBehind,   // removeOther(): another program's registration, left behind
+        kOtherReplace,      // replaceWithStandIn(): what a name holds, for the stand-in to follow
+        kOtherYield,        // a stand-in given up for the agent's own registration (No place left, above)
+        kOtherStop,         // removeStandIns()
+        kOtherDropped       // a stand-in whose name setStandIns() no longer gives
+    };
+    struct Other {
+        std::string name;
+        OtherWhy why;
+        Other(const std::string& n, OtherWhy w) : name(n), why(w) {}
+    };
+    // What the one SppUuidRegister that is out is for.
+    enum RegFor { kForNone, kForStandIn, kForOwn, kForCheck };
+    struct StandIn {
+        std::string name, uuid;
+        bool wanted;      // setStandIns() gives it now
+        bool ours;        // the name holds it (What a name holds, above)
+        bool replacing;   // replaceWithStandIn(): the removal of what the name holds is under way, or its stand-in
+                          // waits to go or for its answer
+        bool queued;      // in pending_
+        uint32_t last;    // its last answer, kNoError with lastRejected for a rejection; lastKnown: one came
+        uint32_t lastRejected;
+        bool lastKnown;
+        unsigned sent, placed, there, other;
+        StandIn() : wanted(false), ours(false), replacing(false), queued(false), last(kNoError), lastRejected(0),
+                    lastKnown(false), sent(0), placed(0), there(0), other(0) {}
+    };
+
+    double now() const { return clock_(); }
+    // Whether registrations may go now (When registrations may go, above). mu_ held.
+    bool mayRegisterLocked(double at) const;
+    // From kHeld: the round of this object's own registration begins, if registrations may go now. True if it began.
+    bool advance();
+    // The same with mu_ held, and *line the log's line for it: kRegSent, and the round set out; begun() then says the
+    // line, tells kRegSent and sends, with mu_ let go. In one step with what sets kHeld, so that no other thread
+    // begins the round in between.
+    bool beginLocked(std::string* line);
+    void begun(const std::string& line);
+    // Sends the next SppUuidRegister that is due, if none is out and they may go: this object's second registration,
+    // the next of a round, then a stand-in that waits. Never with mu_ held.
+    void pump();
+    // The answer to the SppUuidRegister that was out.
+    void registerAnswered(uint32_t err, uint32_t rejectedType);
+    // `waited`: this object's own registration was the one out; otherwise the answer is only said.
+    void ownAnswered(uint32_t err, uint32_t rejectedType, bool waited);
+    void standInAnswered(const std::string& name, uint32_t err, uint32_t rejectedType, bool quiet);
+    // The answer to a removal through removeOther()'s queue that was for a stand-in.
+    void otherAnswered(const Other& other, uint32_t err);
+    void statusTold(const uint8_t* payload, uint32_t len);
+    void nameTold(const uint8_t* payload, uint32_t len);
+    // Every registration is gone (Status closed, or the server went): mu_ held.
+    void forgetRegistrationsLocked();
+    StandIn* standInLocked(const std::string& name);
+    // "'A', 'B'", for the log.
+    static std::string namesText(const std::vector<std::string>& names);
+    // Whether a line about Status or LocalName is said: the first kAttributeLines are, and *last is true for the
+    // last of them. mu_ held.
+    bool attributeLineLocked(bool* last);
+    void queueOtherLocked(const std::string& name, OtherWhy why);
+
     GapClient* gap_;
     Events* events_;
     std::string name_, uuid_;
     uint32_t type_;
+    Clock clock_;
+    double holdS_, statusWaitS_;
     pthread_mutex_t mu_;   // state_, mode_, subscribed_, and everything below
     State state_;
     Mode mode_;
     bool subscribed_;      // the phones' requests are asked for of the server that is attached now
-    std::vector<std::string> otherWaiting_;   // removeOther(): not yet sent
+    std::vector<Other> otherWaiting_;         // removeOther()'s queue: not yet sent
     std::string otherSent_;                   // sent, and waiting for its reply; empty for none
+    OtherWhy otherSentWhy_;
     double otherSentAt_;
     double otherReplyS_;
+    // Status, since the attach (When registrations may go, above).
+    Bluetooth bt_;
+    bool statusHeard_;                        // a Status has come since the attach: the first is its current value
+    double attachedAt_, openSince_;
+    unsigned attributeLines_;                 // lines said about Status and LocalName
+    // The stand-ins, in the order setStandIns() gave them, and what goes out of SppUuidRegister.
+    std::vector<StandIn> standIns_;
+    RegFor regFor_;                           // the one SppUuidRegister out; kForNone: none
+    std::string regName_;                     // kForStandIn: whose
+    double regAt_;
+    bool regStale_;                           // sent before the server went or Status went to closed
+    bool regQuiet_;                           // a stand-in of a check's round: a line only for news
+    bool roundOn_, roundCheck_;               // a round goes, for the check (or for this object's own)
+    std::vector<std::string> roundLeft_;      // its stand-ins still to go
+    bool retryDue_;                           // this object's second (or a later) registration is to go next
+    std::vector<std::string> pending_;        // stand-ins to register when nothing else is due: replaceWithStandIn()'s
+    bool yieldTried_;                         // this round has given a stand-in up (No place left, above)
+    bool yielding_;                           // one is being given up: yieldLeft_ (1) removal still to answer
+    unsigned yieldLeft_;
+    std::vector<std::string> yielded_;        // the stand-ins this round has given up, in that order, for the log
+    unsigned checkFails_;                     // checks whose registration could not be sent
+    unsigned timesRegistered_;
     // The last phone's request for a link: its address and the service it asked for. In memory only; neither
     // reaches the log or leaves this class.
     std::string phoneAddress_, phoneService_;
