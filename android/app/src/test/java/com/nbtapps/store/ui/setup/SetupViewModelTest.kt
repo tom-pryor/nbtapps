@@ -89,6 +89,12 @@ class SetupViewModelTest {
             return inner.connect(endpoint, dials, listenOnly)
         }
 
+        // The same, with a probing knock first, for a car whose agent is not known to knock.
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+            gate?.await()
+            return inner.connect(endpoint, dials, listenOnly, probe)
+        }
+
         // A knock, as a connect to an agent that dials only when knocked makes: no link of the phone's own.
         override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link {
             gate?.await()
@@ -217,6 +223,24 @@ class SetupViewModelTest {
 
         viewModel.awaitStep("pair") { it is SetupStep.Pair }
         assertEquals(1, saved().size)
+        // Both the user's: their probing knocks may go through the car's Serial Port service once in each burst.
+        assertEquals(listOf(KnockFallback.ONCE_PER_BURST, KnockFallback.ONCE_PER_BURST), connector.probes)
+    }
+
+    @Test
+    fun `a set-up that goes on after its process was stopped connects as the app's own`() = test {
+        connector.unreachable = "No route to the car"
+        val state = SavedStateHandle()
+        val viewModel = viewModel(state)
+        viewModel.pickTheCar()
+        viewModel.awaitStep("failed") { it is SetupStep.Connect && it.failure != null }
+        jobs.disconnect()
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+
+        viewModel(SavedStateHandle(state.keys().associateWith { state.get<Any?>(it) }))
+
+        await(jobs.connection, "the resumed connect's failure") { it is ConnectionState.Failed }
+        assertEquals(listOf(KnockFallback.ONCE_PER_BURST, KnockFallback.ONCE_PER_KNOCK), connector.probes)
     }
 
     @Test

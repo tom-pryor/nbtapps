@@ -21,6 +21,7 @@ import com.nbtapps.store.data.jobs.FakeChecks
 import com.nbtapps.store.data.jobs.FakeConnector
 import com.nbtapps.store.data.jobs.FakePhones
 import com.nbtapps.store.data.jobs.JobRepository
+import com.nbtapps.store.data.link.KnockFallback
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.link.LinkConnectors
@@ -78,6 +79,12 @@ class PairRequestViewModelTest {
         override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
             gate?.await()
             return inner.connect(endpoint, dials, listenOnly)
+        }
+
+        // The same, with a probing knock first, for a car whose agent is not known to knock.
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+            gate?.await()
+            return inner.connect(endpoint, dials, listenOnly, probe)
         }
     }
 

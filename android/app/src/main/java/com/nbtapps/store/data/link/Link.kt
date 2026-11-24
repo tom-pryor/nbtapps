@@ -71,6 +71,16 @@ interface LinkConnector {
     suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link = connect(endpoint, dials)
 
     /**
+     * [connect], where with [probe] the connector first makes a probing knock, for a head unit whose agent is not known
+     * to knock ([com.nbtapps.store.model.HeadUnit.serialKnock]): one burst, its Serial Port connects as [probe] allows
+     * ([knock]), that ends after the first of its connects that came up, while it listens for the car's link, which is
+     * returned where it comes. One that brings none leaves the connect to go on as without it. Only Bluetooth serial
+     * probes, and not where it only listens: see [BluetoothSerialLinkConnector].
+     */
+    suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link =
+        connect(endpoint, dials, listenOnly)
+
+    /**
      * Knocks at the head unit at [endpoint], whose agent lists [ProtocolConstants.CAPABILITY_SERIAL_KNOCK]
      * ([com.nbtapps.store.model.HeadUnit.serialKnock]), and returns the link its car then opens to the phone: no link of
      * the phone's own is made. [bursts] is how many bursts of knocks are made at most, or null for the connector's own
@@ -138,6 +148,9 @@ class LinkConnectors(private val connectors: List<LinkConnector>) : LinkConnecto
 
     override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link =
         connectorFor(endpoint).connect(endpoint, dials, listenOnly)
+
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link =
+        connectorFor(endpoint).connect(endpoint, dials, listenOnly, probe)
 
     override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link = connectorFor(endpoint).knock(endpoint, bursts, fallback)
 

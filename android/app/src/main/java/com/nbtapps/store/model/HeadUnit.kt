@@ -37,7 +37,9 @@ data class HeadUnit(
      * The agent listed the capability `serial-knock` in its last `hello`: it has the car dial the phone only when the
      * app knocks, so every connect to it knocks ([com.nbtapps.store.data.link.LinkConnector.knock]) and [phoneOpenedLeft]
      * no longer decides anything. Kept beside [serialDial], from the same `hello`. False until a `hello` says so, and for
-     * a head unit saved before there was this, which is connected to as before until then.
+     * a head unit saved before there was this. While it is false, a connect dials the agent as before, but tries its first
+     * link by a probing knock before that dial (`JobRepository.greet`), which brings the car's link where the agent knows
+     * knocks, and with its `hello` sets this.
      */
     val serialKnock: Boolean = false,
     /**

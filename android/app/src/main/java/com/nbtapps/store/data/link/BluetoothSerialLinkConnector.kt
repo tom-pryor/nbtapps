@@ -177,6 +177,13 @@ class SerialConnectTimes(
  * is off or out of range, and more connects would only keep the user waiting. The car's link that follows a knock is
  * the link, and no link of the phone's own is made.
  *
+ * Such an agent has the car dial any phone that knocks and is connected to the car and paired with it, one of its own
+ * or not. So a connect to an agent not known to knock, as one never greeted yet, may knock first: a probing knock, one
+ * burst that ends after the first of its connects that came up, while the connect already listens for the car's link
+ * ([connect] with `probe`). Where it brings none, the phone dials as it would have. It costs an agent that does not
+ * know knocks the knock's hold and the wait after it, some 3 seconds, and where no agent runs, one knock's link that
+ * another program at the car may take.
+ *
  * The car advertises only some of the serial services registered there: one registered after those it has room for
  * is in no service record, though the car still dials from it, so the phone finds no channel for it, and a connect to
  * it fails before it reaches the car. Every serial service of the car's is on the same RFCOMM channel, and the agent
@@ -219,11 +226,24 @@ class BluetoothSerialLinkConnector(
      * dial to go on alone. With [listenOnly], for an agent that [dials], only listens, for
      * [SerialConnectTimes.dialWindowMillis] ([waitForCar]). A caller that is cancelled leaves nothing open.
      */
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link = connect(endpoint, dials, listenOnly, probe = null)
+
+    /**
+     * As [connect] without [probe], but that with [probe] the dial follows a probing knock ([probeKnock]), for an agent that
+     * is not known to knock: the phone listens for the car's link from the start, so a link the car opens at any time,
+     * while the probe knocks, between its end and the dial's start, or during the dial, is taken. The probe takes nothing
+     * from the dial: its window begins after the probe, and the probe's connects are not among the tries whose failures
+     * the user is told of. A connect that only listens makes none, as its agent leaves the phone's own links to another
+     * program at the car, which a knock's link would reach.
+     */
     @OptIn(ExperimentalCoroutinesApi::class)
-    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
         val serial = endpoint as? SerialEndpoint ?: throw IOException("Not a Bluetooth serial endpoint")
         radio.unavailable(serial.address)?.let { throw IOException(it) }
         if (listenOnly && dials) waitForCar(serial)?.let { return it }
+        val probing = probe.takeIf { !listenOnly }
+        // Set where the phone cannot listen: a probe then knocks no more, as the car's link would come to nobody.
+        val deaf = AtomicBoolean(false)
         val window = if (dials) times.dialWindowMillis else times.windowMillis
         // The first link that is up. A second one finds it taken, and is closed with nothing more written on it.
         val won = CompletableDeferred<Link>()
@@ -244,9 +264,11 @@ class BluetoothSerialLinkConnector(
                         offer(listener.accept(listOf(serial.address), first = true).link, "car's")
                     } catch (e: IOException) {
                         // The phone cannot listen now: the dial goes on alone.
+                        deaf.set(true)
                     }
                 }
                 val dialling = launch {
+                    if (probing != null && probeKnock(serial, won, probing, deaf)) return@launch
                     try {
                         offer(SerialLink(connectWithRetry(window, times.pauseMillis, now, times.maxPauseMillis) { dial(serial.address, tries) }), "phone's")
                     } catch (e: ConnectFailedException) {
@@ -371,38 +393,12 @@ class BluetoothSerialLinkConnector(
                     }
                 }
                 val knocking = launch {
-                    // Whether a connect to the agent's service has failed, and how many connects the knock may still make
-                    // to the car's Serial Port service: see above.
-                    var failedOwn = false
-                    val allowed = if (fallback == KnockFallback.NONE) 0 else times.knockStandardAttempts.coerceAtLeast(0)
-                    var standardLeft = allowed
-                    for (burst in 1..most) {
-                        if (burst > 1 && carCame(came, times.knockPauseMillis)) return@launch
-                        if (fallback == KnockFallback.ONCE_PER_BURST) standardLeft = allowed
-                        val burstBegan = now()
-                        for (attempt in 1..times.knockAttempts) {
-                            if (attempt > 1 && carCame(came, times.knockGapMillis)) return@launch
-                            val standard = failedOwn && standardLeft > 0
-                            val to = if (standard) " $TO_STANDARD" else ""
-                            at.set("in burst $burst of $most, after connect $attempt$to")
-                            val knocked = knockOnce(serial.address, came, "$burst.$attempt$to", if (standard) STANDARD_SERVICE_UUID else SERVICE_UUID)
-                            if (came.isCompleted) return@launch
-                            if (knocked == Knocked.AWAY) {
-                                came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED, carAway = true))
-                                return@launch
-                            }
-                            when {
-                                // One that came up was the knock: none follows it there.
-                                standard -> standardLeft = if (knocked == Knocked.UP) 0 else standardLeft - 1
-                                knocked == Knocked.FAILED -> failedOwn = true
-                            }
-                        }
-                        if (carCame(came, times.knockSettleMillis)) return@launch
-                        log.line(
-                            diagnostics.record(LinkTry.Path.KNOCK_BURST, LinkTry.Outcome.NO_LINK, now() - burstBegan, detail = "$burst of $most").describe(),
-                        )
+                    when (knockAt(serial.address, came, most, fallback, at)) {
+                        KnockEnd.AWAY -> came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED, carAway = true))
+                        KnockEnd.UNANSWERED -> came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED))
+                        // Settled already, by the car's link or by the listener's failure.
+                        KnockEnd.CAME, KnockEnd.CAME_UP, KnockEnd.DEAF -> Unit
                     }
-                    came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED))
                 }
                 try {
                     came.await()
@@ -431,6 +427,105 @@ class BluetoothSerialLinkConnector(
         }
         record(LinkTry.Outcome.TAKEN, detail = at.get())
         return link
+    }
+
+    /** Where [knockAt] stopped. */
+    private enum class KnockEnd {
+        /** [knockAt]'s `came` was settled: by the car's link, or by why there is none. */
+        CAME,
+
+        /** A connect did not reach the car. */
+        AWAY,
+
+        /** After the last burst, with no link of the car's. */
+        UNANSWERED,
+
+        /** After its first connect that came up, its hold and the wait after it, with no link of the car's: a probe's end. */
+        CAME_UP,
+
+        /** Before a connect, as the phone cannot listen for the car's link. */
+        DEAF,
+    }
+
+    /**
+     * The knocking of [knock], [most] bursts at the car at [address], until [came] is settled, with its connects to the
+     * car's Serial Port service as [fallback] allows, and [at] kept at the connect it is at; each burst that had nothing
+     * is kept in the diagnostics. With [probing], it ends after the first of its connects that came up, to either
+     * service, its hold and [SerialConnectTimes.knockSettleMillis] after it: an agent that knows knocks has had the car
+     * dial by then. Before each connect it ends where [deaf] says that the phone cannot listen. It settles nothing: what
+     * it stopped at is its caller's to make something of.
+     */
+    private suspend fun knockAt(
+        address: String,
+        came: CompletableDeferred<Link>,
+        most: Int,
+        fallback: KnockFallback,
+        at: AtomicReference<String?>,
+        probing: Boolean = false,
+        deaf: () -> Boolean = { false },
+    ): KnockEnd {
+        // Whether a connect to the agent's service has failed, and how many connects the knock may still make to the
+        // car's Serial Port service: see [knock].
+        var failedOwn = false
+        val allowed = if (fallback == KnockFallback.NONE) 0 else times.knockStandardAttempts.coerceAtLeast(0)
+        var standardLeft = allowed
+        for (burst in 1..most) {
+            if (burst > 1 && carCame(came, times.knockPauseMillis)) return KnockEnd.CAME
+            if (fallback == KnockFallback.ONCE_PER_BURST) standardLeft = allowed
+            val burstBegan = now()
+            for (attempt in 1..times.knockAttempts) {
+                if (attempt > 1 && carCame(came, times.knockGapMillis)) return KnockEnd.CAME
+                if (deaf()) return KnockEnd.DEAF
+                val standard = failedOwn && standardLeft > 0
+                val to = if (standard) " $TO_STANDARD" else ""
+                at.set("in burst $burst of $most, after connect $attempt$to")
+                val knocked = knockOnce(address, came, "$burst.$attempt$to", if (standard) STANDARD_SERVICE_UUID else SERVICE_UUID)
+                if (came.isCompleted) return KnockEnd.CAME
+                if (knocked == Knocked.AWAY) return KnockEnd.AWAY
+                if (probing && knocked == Knocked.UP) return if (carCame(came, times.knockSettleMillis)) KnockEnd.CAME else KnockEnd.CAME_UP
+                when {
+                    // One that came up was the knock: none follows it there.
+                    standard -> standardLeft = if (knocked == Knocked.UP) 0 else standardLeft - 1
+                    knocked == Knocked.FAILED -> failedOwn = true
+                }
+            }
+            if (carCame(came, times.knockSettleMillis)) return KnockEnd.CAME
+            log.line(diagnostics.record(LinkTry.Path.KNOCK_BURST, LinkTry.Outcome.NO_LINK, now() - burstBegan, detail = "$burst of $most").describe())
+        }
+        return KnockEnd.UNANSWERED
+    }
+
+    /**
+     * The probing knock of a [connect] to [serial], whose agent is not known to knock: one burst ([knockAt]), with its
+     * Serial Port connects as [fallback] allows, that ends after the first of its connects that came up, while the
+     * connect listens for the car's link, which settles [won]. What it came to is kept in the diagnostics, in one line.
+     * Whether the car's link came: where it did not, for whatever reason, the connect dials as it would have without it.
+     * The phone cannot listen where [deaf] says so, and then it knocks no more.
+     */
+    private suspend fun probeKnock(serial: SerialEndpoint, won: CompletableDeferred<Link>, fallback: KnockFallback, deaf: AtomicBoolean): Boolean {
+        val began = now()
+        val at = AtomicReference<String?>(null)
+        fun line(outcome: LinkTry.Outcome, detail: String?) =
+            log.line(diagnostics.record(LinkTry.Path.KNOCK_PROBE, outcome, now() - began, detail = detail).describe())
+        val end = try {
+            knockAt(serial.address, won, 1, fallback, at, probing = true, deaf = deaf::get)
+        } catch (e: CancellationException) {
+            // The car's link ends the connect, and with it the probe, as it does a knock; or the caller gave up.
+            if (won.isCompleted && won.getCompletionExceptionOrNull() == null) line(LinkTry.Outcome.TAKEN, at.get()) else line(LinkTry.Outcome.CANCELLED, at.get())
+            throw e
+        }
+        when (end) {
+            KnockEnd.CAME -> {
+                line(LinkTry.Outcome.TAKEN, at.get())
+                return true
+            }
+            KnockEnd.AWAY -> line(LinkTry.Outcome.NO_LINK, "${at.get()}, which did not reach the car,")
+            KnockEnd.CAME_UP -> line(LinkTry.Outcome.NO_LINK, "${at.get()}, which came up,")
+            KnockEnd.UNANSWERED -> line(LinkTry.Outcome.NO_LINK, "of 1 burst")
+            KnockEnd.DEAF -> line(LinkTry.Outcome.NO_LINK, "where the phone cannot listen for the car's link,")
+        }
+        log.line("connect: the probing knock brought no link of the car's: the phone dials the agent as it would have")
+        return false
     }
 
     /** Waits up to [millis] for [came] to be settled, a link or a failure, and says whether it is. */

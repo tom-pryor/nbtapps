@@ -967,9 +967,19 @@ dial without an ask is no way out either, since a dial that the app does not tak
 audio at the car ("The re-point", below).
 
 - **The knock.** An agent that dials this way lists the capability `serial-knock` in `hello`, and a phone app
-  knocks only at such an agent (`serial.knock*` in `spec/protocol/constants.txt`). The app makes up to 5 connects
+  knocks at such an agent, and once at one it has not greeted yet (the probing knock, below) (`serial.knock*` in
+  `spec/protocol/constants.txt`). The app makes up to 5 connects
   to the agent's service, 250 ms after each that fails (one may fail on the phone while another app's link to the
-  car is up); one that comes up carries the knock's four magic bytes, `NBTK`, and nothing else: the agent reads
+  car is up); where one of them fails, the app makes its next connects to the car's standard Serial Port service
+  (0x1101) instead, with the same bytes and hold: the car advertises only some of the serial services registered
+  there, so the agent's may have no record a phone can find, and every serial record of the car names the same
+  RFCOMM channel, so such a link reaches the agent as one to its own service does, and the agent takes the knock by
+  its bytes whatever service the phone opened. It makes at most 2 such connects at a time, none after one of them
+  came up (where no agent runs, another program at the car may take that link), and then goes back to the agent's
+  service for the connects that remain, so a knock makes no more connects than it would without them. How often
+  depends on who started the knock: for a connect the user starts, once in each burst (each later burst then begins
+  at the Serial Port service); for the knocks the app makes by itself, once in the whole knock; for the app's wait
+  after an agent's update, never. One that comes up carries the knock's four magic bytes, `NBTK`, and nothing else: the agent reads
   them within the decide step's 500 ms, writes nothing into the link, and lets it go, reading its node and dropping
   what comes until the app ends the link (it is never handed to another program), and takes it as the knock of the
   phone whose request brought that link. A phone's request for a serial link is no knock, whatever becomes of it. A
@@ -1001,7 +1011,13 @@ Bluetooth on and no link, and not after the user's own Disconnect until they con
 app; a connect of its own listens too, beside the phone's dial, and takes whichever link comes up first. To an
 agent that lists `serial-knock` a connect knocks in place of the phone's dial, and listens for the car's link; the
 phone's own link is made only where the user asks for it (**Connect from the phone**), which the app offers where
-a knock brought no link. Where
+a knock brought no link. To an agent the app does not know to knock yet, as one it has never greeted (a first
+connect, pairing, the set-up), a connect knocks once first, a probing knock: one burst, ending after the first of
+its connects that came up, while the app already listens for the car's link. An agent that knows knocks has the
+car dial any phone that knocks and is connected to the car and paired with it, one of its own or not, so this
+reaches it even where the phone cannot find the agent's service; its `hello` then tells the app to knock from then
+on. Where no link comes, the app dials the agent's service as before. A connect from the phone and the app's wait
+after an agent's update make no probing knock. Where
 `info.get` said that the phone's own links are left to another program (`phoneOpenedLeft`), a connect makes no dial
 and only listens, for 40 seconds, and the app offers the phone's own connect, once, when no link came; a link the
 phone did open gives way to one the car opens while it waits for its answer. It listens on the secure kind of RFCOMM socket, so only a device paired with the phone gets through, and it takes a
