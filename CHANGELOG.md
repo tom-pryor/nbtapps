@@ -46,7 +46,7 @@ Generated from the catalogue's release notes.
 - An app installed by hand is stopped before its files are removed.
 - Needs app 0.8.2 or later. An agent older than 1.6.0 updates to 1.6.0 first.
 
-### Plugin 1.3.0 (pre-release)
+### Plugin 1.3.0
 - A new row, Stop the agent, stops the agent until the head unit has powered down
 - After such a stop the agent is not started again by an iDrive restart; Start the agent starts it
 - The new row needs agent 1.6.2 or later
