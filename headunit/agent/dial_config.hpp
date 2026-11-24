@@ -7,7 +7,8 @@
 // serial link to a phone of the agent's (dial_rules.hpp), in one place. `nbtagent --dial off` turns all of it off,
 // and the agent then takes the links phones open, and no other, as it did before. `nbtagent --dial-knock off` keeps
 // the dial and turns the knock off: the car then asks a phone for its services and dials it when they name the
-// agent's, at polls and at the phone's requests, as before the knock.
+// agent's, at polls and at the phone's requests, as before the knock. `nbtagent --knock-dialup off` keeps the knock
+// by magic bytes alone (DialConfig::knockDialup).
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <stdio.h>
@@ -28,6 +29,9 @@ struct DialConfig {
     bool knock;                  // and only when a phone's app knocks, and in the pairing window, at serial.dial and
                                  // for a while when the agent is on trial, with no ask before the dial and no poll
                                  // (dial_rules.hpp, "The knock"). Off: the asks and polls below, as before the knock
+    bool knockDialup;            // with the knock: the knock by dial-up, a phone's request for the car's dial-up
+                                 // networking service (constants.txt, serial.knockDialupUuid), and the agent lists
+                                 // serial-knock-dialup (nbtagent --knock-dialup)
     unsigned knockQuietMs;       // a dial a knock brought gave the agent no link: further knocks of that phone are
                                  // ignored for this long
     unsigned knockWaitMs;        // a knock that came while a phone's request was pending, a link was being decided on
@@ -77,7 +81,7 @@ struct DialConfig {
     std::string node;            // the dialled link's node, /dev/<instance>
 
     DialConfig()
-        : on(true), knock(true), knockQuietMs(3000), knockWaitMs(4000), trialDialMs(5000),
+        : on(true), knock(true), knockDialup(true), knockQuietMs(3000), knockWaitMs(4000), trialDialMs(5000),
           trialDialForMs(120000), pollFirstMs(10000),pollFirstForMs(120000), pollLaterMs(30000), signalWaitMs(1000),
           askLimitMs(6000), settleMs(8000), signalAskMs(10000), pairingRoundMs(5000), replyLimitMs(95000),
           retryMs(15000), backOffMs(30000), backOffMostMs(300000), magicWaitMs(3000),
@@ -121,6 +125,9 @@ inline bool parseDialKnock(const char* text, bool* out) {
     return true;
 }
 
+// The value of `nbtagent --knock-dialup`: on or off, as --dial-knock's.
+inline bool parseKnockDialup(const char* text, bool* out) { return parseDialKnock(text, out); }
+
 // What the car dialling the phone goes by, for the agent's first lines in the log.
 inline std::string describeDial(const DialConfig& c) {
     if (!c.on)
@@ -133,10 +140,10 @@ inline std::string describeDial(const DialConfig& c) {
                  "while the pairing window is open, at serial.dial and while this version of the agent is on trial "
                  "(--dial-knock on): a link the phone opens that starts with the knock's magic bytes within the decide "
                  "time is that phone's knock, and a phone's request for a serial link is no knock, whatever becomes of "
-                 "it. A knock of any phone that is connected to the car and paired with it, one of the agent's or not, "
-                 "has the car dial it at once, with no "
-                 "ask before it, when no link of the agent's is up and no dial is out; one that comes while a phone's "
-                 "request is pending, a link is being decided on or another phone's dial is out waits %u ms at most. "
+                 "it. %s. A knock of any phone that is connected to the car and paired with it, one of the agent's or "
+                 "not, has the car dial it at once, with no ask before it, when no link of the agent's is up and no "
+                 "dial is out; one that comes while a phone's request is pending, a link is being decided on or "
+                 "another phone's dial is out waits %u ms at most. "
                  "After a dial a knock brought that gave the agent no link, that phone's knocks are "
                  "ignored for %u ms. No poll, and no ask of a phone's services. While the pairing window is open every "
                  "phone there is dialled every %u s, and while this version of the agent is on trial and no link of the "
@@ -154,7 +161,10 @@ inline std::string describeDial(const DialConfig& c) {
                  "re-point request goes on the same instance, so that a link end the car may book against that "
                  "instance names no phone: its answer is waited for %u ms, with no dial meanwhile, and an answer other "
                  "than 5 within %u ms stops these requests for the rest of the run",
-                 c.node.c_str(), c.knockWaitMs, c.knockQuietMs,
+                 c.node.c_str(),
+                 c.knockDialup ? "The agent lists serial-knock-dialup, the knock by dial-up (--knock-dialup on)"
+                               : "The agent does not list serial-knock-dialup (--knock-dialup off)",
+                 c.knockWaitMs, c.knockQuietMs,
                  c.pairingRoundMs / 1000, c.trialDialMs / 1000, c.trialDialForMs / 1000, c.magicWaitMs,
                  c.replyLimitMs / 1000, c.closeWaitMs,
                  c.disconnectWaitMs, c.overtakeMs, c.node.c_str(), c.listWaitMs, c.registerCleanupMs / 1000,

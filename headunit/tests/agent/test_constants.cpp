@@ -64,6 +64,8 @@ int main(int argc, char** argv) {
     code["serial.knockAttempts"] = num(kSerialKnockAttempts);
     code["serial.knockGapMs"] = num(kSerialKnockGapMs);
     code["serial.knockHoldMs"] = num(kSerialKnockHoldMs);
+    code["serial.knockDialupUuid"] = kSerialKnockDialupUuid;
+    code["serial.knockDialupWaitMs"] = num(kSerialKnockDialupWaitMs);
     code["pairing.codeDigits"] = num(kPairingCodeDigits);
     code["pairing.windowSeconds"] = num(kPairingWindowSeconds);
     code["pairing.tries"] = num(kPairingTries);
@@ -76,6 +78,7 @@ int main(int argc, char** argv) {
     code["capability.serialReset"] = kCapabilitySerialReset;
     code["capability.serialDial"] = kCapabilitySerialDial;
     code["capability.serialKnock"] = kCapabilitySerialKnock;
+    code["capability.serialKnockDialup"] = kCapabilitySerialKnockDialup;
     code["capability.settings"] = kCapabilitySettings;
     code["settings.maxValueBytes"] = num((long long)kSettingsMaxValueBytes);
     code["capability.channels"] = kCapabilityChannels;
@@ -108,10 +111,16 @@ int main(int argc, char** argv) {
     // A setting's value holds a select's value (64 characters) and fits a serial frame many times over.
     CHECK(kSettingsMaxValueBytes >= 64 && kSettingsMaxValueBytes * 4 <= kSerialMaxFrame);
     // The knock: its bytes are as many as the link's and differ from them; a knock is more than one connect, since one
-    // may fail on the phone while another app's link is up, and the knock link is held past the decide step.
+    // may find no record of the service or bring no link, and the knock link is held past the decide step.
     CHECK(std::string(kSerialKnockMagic).size() == 4 && std::string(kSerialKnockMagic) != "NBTL");
     CHECK(kSerialKnockAttempts >= 2 && kSerialKnockGapMs > 0);
     CHECK(kSerialKnockHoldMs > kSerialDecideMs);
+    // The knock by dial-up: the car's dial-up networking service, the standard one (0x1103 on the Bluetooth base UUID),
+    // never the agent's own; the app waits for the car's link after it, and not for ever.
+    CHECK(std::string(kSerialKnockDialupUuid) == "00001103-0000-1000-8000-00805F9B34FB");
+    CHECK(std::string(kSerialKnockDialupUuid) != kSerialServiceUuid);
+    CHECK(kSerialKnockDialupWaitMs > 0 && kSerialKnockDialupWaitMs < kSerialSilenceMs);
+    CHECK(std::string(kCapabilitySerialKnockDialup) != kCapabilitySerialKnock);
     // The two kinds of stream number meet and do not overlap; a channel message fits a serial link's frame; a
     // credit is granted back in halves (agent.hpp, "Channels"); the agent tries more than once in its wait.
     CHECK(kStreamLast + 1 == kChannelFirstStream);
@@ -122,8 +131,8 @@ int main(int argc, char** argv) {
     SerialConfig config;
     CHECK(config.name == kSerialServiceName && config.uuid == kSerialServiceUuid);
     CHECK(config.decideMs == (unsigned)kSerialDecideMs && config.lingerMs == (unsigned)kSerialLingerMs);
-    // And knocks with the dial.
-    CHECK(config.dial.on && config.dial.knock);
+    // And knocks with the dial, by dial-up too.
+    CHECK(config.dial.on && config.dial.knock && config.dial.knockDialup);
     std::string asGiven;   // to the stack
     CHECK(btspp::normaliseUuid(kSerialServiceUuid, &asGiven) && asGiven == kSerialServiceUuid);
     CHECK(btspp::isServiceName(kSerialServiceName));

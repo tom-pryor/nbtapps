@@ -870,6 +870,9 @@ class FakeConnector(
     /** Each probing knock a connect made before its dial, with how often it might go through the Serial Port service. */
     val probes = CopyOnWriteArrayList<KnockFallback>()
 
+    /** Whether each probing knock might go by dial-up first ([LinkConnector.connect]'s `dialup`), in order. */
+    val probeDialups = CopyOnWriteArrayList<Boolean>()
+
     /**
      * How long a probing knock waits for the car's link ([dialIn]) before the connect goes on as without it, in
      * milliseconds: 0, for an agent that does not answer knocks, waits for nothing and does not listen.
@@ -881,9 +884,10 @@ class FakeConnector(
      * As the app's serial connector: over [serial], where it does not only listen, a [probe] is kept and waits [probeMs]
      * for the car's link, which is returned where it comes; otherwise the connect goes on as without it.
      */
-    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean): Link {
         if (probe != null && serial && !listenOnly) {
             probes += probe
+            probeDialups += dialup
             if (probeMs > 0) withTimeoutOrNull(probeMs) { accept(listOf(endpoint)).link }?.let { return it }
         }
         return connect(endpoint, dials, listenOnly)
@@ -894,6 +898,9 @@ class FakeConnector(
 
     /** How often each knock may go through the car's Serial Port service ([LinkConnector.knock]), in order. */
     val knockFallbacks = CopyOnWriteArrayList<KnockFallback>()
+
+    /** Whether each knock might go by dial-up first ([LinkConnector.knock]'s `dialup`), in order. */
+    val knockDialups = CopyOnWriteArrayList<Boolean>()
 
     /** How long a knock waits for the car's link ([dialIn]) before it fails, in milliseconds. */
     @Volatile
@@ -912,9 +919,10 @@ class FakeConnector(
      * knock listens for it, and [KnockUnansweredException] where none comes in [knockMs], [knockAway] as it says. Over
      * TCP, a connect.
      */
-    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link {
+    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback, dialup: Boolean): Link {
         knocks += bursts
         knockFallbacks += fallback
+        knockDialups += dialup
         if (!serial) return connect(endpoint, dials = true)
         return withTimeoutOrNull(knockMs) { accept(listOf(endpoint)).link }
             ?: throw KnockUnansweredException("The car didn't connect to this app after it knocked", carAway = knockAway, inTheWay = knockInTheWay)

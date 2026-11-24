@@ -1083,7 +1083,12 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
         pthread_mutex_unlock(&mu_);
         if (!spp_.askAboutRefused()) sayRefusal(RefusalFacts::kListNotAsked, PhoneInList());
     }
+    // A request for the car's dial-up networking service is never a serial link's: with the knock by dial-up, it is
+    // that phone's knock.
+    if (what == SppService::kPhoneAsked && service == kCarDialupService && knockDialupOn()) dialupKnock(address);
 }
+
+void SerialListener::dialupKnock(const std::string& /*address*/) {}
 
 // The car's device list has come for the refusal that waits for it: on the Bluetooth service's thread.
 void SerialListener::sppRefusedPhone(const PhoneInList& phone) { sayRefusal(RefusalFacts::kListRead, phone); }

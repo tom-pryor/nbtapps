@@ -1721,6 +1721,7 @@ class LinkConnectorsTest {
     private class Named(val name: String, val reaches: (Endpoint) -> Boolean) : LinkConnector {
         val dials = CopyOnWriteArrayList<Boolean>()
         val listenOnly = CopyOnWriteArrayList<Boolean>()
+        val probes = CopyOnWriteArrayList<Pair<KnockFallback?, Boolean>>()
         override fun supports(endpoint: Endpoint) = reaches(endpoint)
         override suspend fun connect(endpoint: Endpoint): Link = MemoryLink.pair(kind = name).first
         override suspend fun connect(endpoint: Endpoint, dials: Boolean): Link {
@@ -1731,6 +1732,11 @@ class LinkConnectorsTest {
         override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link {
             this.listenOnly += listenOnly
             return connect(endpoint, dials)
+        }
+
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean): Link {
+            probes += probe to dialup
+            return connect(endpoint, dials, listenOnly)
         }
     }
 
@@ -1753,16 +1759,22 @@ class LinkConnectorsTest {
         LinkConnectors(listOf(serialOnly)).connect(serial, dials = true, listenOnly = true)
         assertEquals(listOf(true, true), serialOnly.dials)
         assertEquals(listOf(true), serialOnly.listenOnly)
+        // A probing knock, with whether it may go by dial-up first; a caller that does not say has none.
+        LinkConnectors(listOf(serialOnly)).connect(serial, dials = false, listenOnly = false, probe = KnockFallback.ONCE_PER_BURST, dialup = true)
+        LinkConnectors(listOf(serialOnly)).connect(serial, dials = false, listenOnly = false, probe = KnockFallback.ONCE_PER_KNOCK)
+        assertEquals(listOf(KnockFallback.ONCE_PER_BURST to true, KnockFallback.ONCE_PER_KNOCK to false), serialOnly.probes)
     }
 
     @Test
     fun `a knock is handed on, and a connector that cannot knock connects as to an agent that dials`() = runBlocking {
         val knocks = CopyOnWriteArrayList<Int?>()
         val fallbacks = CopyOnWriteArrayList<KnockFallback>()
+        val dialups = CopyOnWriteArrayList<Boolean>()
         val knocking = object : LinkConnector by Named("serial", { it is SerialEndpoint }) {
-            override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link {
+            override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback, dialup: Boolean): Link {
                 knocks += bursts
                 fallbacks += fallback
+                dialups += dialup
                 return MemoryLink.pair(kind = "knocked").first
             }
         }
@@ -1773,9 +1785,14 @@ class LinkConnectorsTest {
         assertEquals("knocked", both.knock(serial).kind)
         assertEquals("knocked", both.knock(serial, 1, KnockFallback.NONE).kind)
         assertEquals("knocked", both.knock(serial, fallback = KnockFallback.ONCE_PER_BURST).kind)
-        assertEquals(listOf<Int?>(1, null, 1, null), knocks)
-        // A caller that does not say has the cautious kind.
-        assertEquals(listOf(KnockFallback.ONCE_PER_KNOCK, KnockFallback.ONCE_PER_KNOCK, KnockFallback.NONE, KnockFallback.ONCE_PER_BURST), fallbacks)
+        assertEquals("knocked", both.knock(serial, dialup = true).kind)
+        assertEquals(listOf<Int?>(1, null, 1, null, null), knocks)
+        // A caller that does not say has the cautious kind, and no knock by dial-up.
+        assertEquals(
+            listOf(KnockFallback.ONCE_PER_KNOCK, KnockFallback.ONCE_PER_KNOCK, KnockFallback.NONE, KnockFallback.ONCE_PER_BURST, KnockFallback.ONCE_PER_KNOCK),
+            fallbacks,
+        )
+        assertEquals(listOf(false, false, false, false, true), dialups)
         assertEquals("tcp", both.knock(tcp).kind)
         assertEquals(listOf(true), tcpOnly.dials)
     }

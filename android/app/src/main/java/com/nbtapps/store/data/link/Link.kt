@@ -76,8 +76,12 @@ interface LinkConnector {
      * ([knock]), that ends after the first of its connects that came up, while it listens for the car's link, which is
      * returned where it comes. One that brings none leaves the connect to go on as without it. Only Bluetooth serial
      * probes, and not where it only listens: see [BluetoothSerialLinkConnector].
+     *
+     * [dialup]: whether the probing knock may first connect to the car's dial-up networking service, the knock by
+     * dial-up ([ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID]), as [knock]'s `dialup`. The caller says so for a head unit
+     * it has never greeted. Nothing makes anything of it yet.
      */
-    suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link =
+    suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean = false): Link =
         connect(endpoint, dials, listenOnly)
 
     /**
@@ -86,14 +90,22 @@ interface LinkConnector {
      * the phone's own is made. [bursts] is how many bursts of knocks are made at most, or null for the connector's own
      * number. [fallback] is how often the knock may go through the car's standard Serial Port service after a connect
      * to the agent's service failed ([BluetoothSerialLinkConnector.knock]): the cautious [KnockFallback.ONCE_PER_KNOCK]
-     * where the caller does not say. Only Bluetooth serial knocks: see [BluetoothSerialLinkConnector]. Any other
-     * connector connects as to an agent that dials.
+     * where the caller does not say. [dialup] is whether the knock may first connect to the car's dial-up networking
+     * service in each burst, the knock by dial-up ([ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID]): for a head unit whose
+     * agent lists [ProtocolConstants.CAPABILITY_SERIAL_KNOCK_DIALUP] ([com.nbtapps.store.model.HeadUnit.serialKnockDialup]),
+     * in a knock of any kind, as such a connect cannot run into another app's link to the car; false where the caller
+     * does not say. Nothing makes anything of it yet. Only Bluetooth serial knocks: see [BluetoothSerialLinkConnector].
+     * Any other connector connects as to an agent that dials.
      *
      * @throws KnockUnansweredException if no link of the car's came after the knocks.
      * @throws NoCarLinkException if the phone cannot listen for it.
      */
-    suspend fun knock(endpoint: Endpoint, bursts: Int? = null, fallback: KnockFallback = KnockFallback.ONCE_PER_KNOCK): Link =
-        connect(endpoint, dials = true)
+    suspend fun knock(
+        endpoint: Endpoint,
+        bursts: Int? = null,
+        fallback: KnockFallback = KnockFallback.ONCE_PER_KNOCK,
+        dialup: Boolean = false,
+    ): Link = connect(endpoint, dials = true)
 
     /** Whether [accept] can bring a link that the head unit at [endpoint] opens to the phone. Only Bluetooth serial can. */
     fun accepts(endpoint: Endpoint): Boolean = false
@@ -154,10 +166,11 @@ class LinkConnectors(private val connectors: List<LinkConnector>) : LinkConnecto
     override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean): Link =
         connectorFor(endpoint).connect(endpoint, dials, listenOnly)
 
-    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link =
-        connectorFor(endpoint).connect(endpoint, dials, listenOnly, probe)
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean): Link =
+        connectorFor(endpoint).connect(endpoint, dials, listenOnly, probe, dialup)
 
-    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link = connectorFor(endpoint).knock(endpoint, bursts, fallback)
+    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback, dialup: Boolean): Link =
+        connectorFor(endpoint).knock(endpoint, bursts, fallback, dialup)
 
     override fun accepts(endpoint: Endpoint): Boolean = connectors.any { it.accepts(endpoint) }
 

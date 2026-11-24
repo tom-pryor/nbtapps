@@ -43,6 +43,8 @@ class ProtocolConstantsTest {
         "serial.knockAttempts" to ProtocolConstants.SERIAL_KNOCK_ATTEMPTS.toString(),
         "serial.knockGapMs" to ProtocolConstants.SERIAL_KNOCK_GAP_MS.toString(),
         "serial.knockHoldMs" to ProtocolConstants.SERIAL_KNOCK_HOLD_MS.toString(),
+        "serial.knockDialupUuid" to ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID,
+        "serial.knockDialupWaitMs" to ProtocolConstants.SERIAL_KNOCK_DIALUP_WAIT_MS.toString(),
         "pairing.codeDigits" to ProtocolConstants.PAIRING_CODE_DIGITS.toString(),
         "pairing.windowSeconds" to ProtocolConstants.PAIRING_WINDOW_SECONDS.toString(),
         "pairing.tries" to ProtocolConstants.PAIRING_TRIES.toString(),
@@ -55,6 +57,7 @@ class ProtocolConstantsTest {
         "capability.serialReset" to ProtocolConstants.CAPABILITY_SERIAL_RESET,
         "capability.serialDial" to ProtocolConstants.CAPABILITY_SERIAL_DIAL,
         "capability.serialKnock" to ProtocolConstants.CAPABILITY_SERIAL_KNOCK,
+        "capability.serialKnockDialup" to ProtocolConstants.CAPABILITY_SERIAL_KNOCK_DIALUP,
         "capability.settings" to ProtocolConstants.CAPABILITY_SETTINGS,
         "settings.maxValueBytes" to ProtocolConstants.SETTINGS_MAX_VALUE_BYTES.toString(),
         "capability.channels" to ProtocolConstants.CAPABILITY_CHANNELS,
@@ -88,13 +91,22 @@ class ProtocolConstantsTest {
         // The agent's log says a link is still up, after its own end closed, well before the app's keep-alive would
         // end it. So the app has to end the link when `link.closing` comes, which SerialSessionTest holds it to.
         assertTrue(ProtocolConstants.SERIAL_LINGER_MS in 1 until ProtocolConstants.SERIAL_SILENCE_MS)
-        // A knock is more than one connect, since one may fail on the phone while another app's link is up, and the
-        // one that comes up is held past the agent's decide step; the knock's magic bytes are four, as the link's are,
-        // and not the same.
+        // A knock is more than one connect, since one may find no record of the service or bring no link, and the one
+        // that comes up is held past the agent's decide step; the knock's magic bytes are four, as the link's are, and
+        // not the same.
         assertTrue(ProtocolConstants.SERIAL_KNOCK_ATTEMPTS >= 2 && ProtocolConstants.SERIAL_KNOCK_GAP_MS > 0)
         assertTrue(ProtocolConstants.SERIAL_KNOCK_HOLD_MS > ProtocolConstants.SERIAL_DECIDE_MS)
         assertEquals(ProtocolConstants.SERIAL_KNOCK_MAGIC, String(FrameCodec.KNOCK_MAGIC, Charsets.US_ASCII))
         assertFalse(FrameCodec.KNOCK_MAGIC.contentEquals(FrameCodec.MAGIC))
+        // The knock by dial-up goes to the standard dial-up networking service (0x1103 on the Bluetooth base UUID), in
+        // the form the file writes it, never the agent's own or the Serial Port service; its wait is well short of a
+        // silent link's.
+        val dialup = UUID.fromString(ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID)
+        assertEquals(ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID, dialup.toString().uppercase())
+        assertEquals(0x1103L, (dialup.mostSignificantBits ushr 32) and 0xFFFF)
+        assertEquals(BluetoothSerialLinkConnector.STANDARD_SERVICE_UUID.leastSignificantBits, dialup.leastSignificantBits)
+        assertFalse(dialup == BluetoothSerialLinkConnector.SERVICE_UUID || dialup == BluetoothSerialLinkConnector.STANDARD_SERVICE_UUID)
+        assertTrue(ProtocolConstants.SERIAL_KNOCK_DIALUP_WAIT_MS in 1 until ProtocolConstants.SERIAL_SILENCE_MS)
         // A package's serial service may have neither the agent's name nor the car's.
         assertFalse(ManifestParser.isSerialServiceName(ProtocolConstants.SERIAL_SERVICE_NAME))
         assertFalse(ManifestParser.isSerialServiceName("SPP"))

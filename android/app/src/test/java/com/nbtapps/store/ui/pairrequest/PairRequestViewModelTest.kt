@@ -82,9 +82,9 @@ class PairRequestViewModelTest {
         }
 
         // The same, with a probing knock first, for a car whose agent is not known to knock.
-        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean): Link {
             gate?.await()
-            return inner.connect(endpoint, dials, listenOnly, probe)
+            return inner.connect(endpoint, dials, listenOnly, probe, dialup)
         }
     }
 

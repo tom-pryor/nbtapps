@@ -7,8 +7,8 @@
 //   nbtagent                                 on the head unit itself: in the build for the head unit only
 //   (host build also: [--test-key FILE]... [--debug-tcp [ADDRESS:]PORT])
 //   (head unit's build also: [--bluetooth] [--no-bluetooth] [--decide MS] [--register-check S]
-//    [--register-hold S] [--dial on|off] [--dial-knock on|off] [--dial-poll F,L,T], and `nbtagent --look PATH` for
-//    its own use)
+//    [--register-hold S] [--dial on|off] [--dial-knock on|off] [--knock-dialup on|off] [--dial-poll F,L,T], and
+//    `nbtagent --look PATH` for its own use)
 //
 // With --root, everything it touches is inside DIR, laid out as host_platform.hpp says: installed records,
 // staging, ${app}, ${data}, ${plugins}, ${var_plugins}, and absolute destinations under DIR/system. It remounts
@@ -90,7 +90,8 @@
 // off, and the agent then takes only the links phones open, as before. --dial-knock off keeps the dial and has the car
 // dial as it did before the knock, once the phone's service list, which the car is asked for first, names the agent's
 // service; --dial-poll F,L,T then sets how often it polls, every F seconds for L seconds after a phone connects or a
-// link ends, then every T seconds.
+// link ends, then every T seconds. --knock-dialup off keeps the knock by magic bytes alone: the agent does not list
+// serial-knock-dialup (dial_config.hpp).
 // `nbtagent --look PATH` is how the gate is checked, by this program run again: one stat() of PATH, answered by
 // the exit code.
 //
@@ -154,11 +155,11 @@ static int usage() {
 #ifdef NBT_HEAD_UNIT
             "usage: nbtagent [--no-bluetooth] [--decide MS] [--register-check S]\n"
             "                [--register-hold S] [--dial on|off] [--dial-knock on|off]\n"
-            "                [--dial-poll F,L,T]\n"
+            "                [--knock-dialup on|off] [--dial-poll F,L,T]\n"
             "                                             work on this head unit\n"
             "       nbtagent --root DIR [--socket PATH] [--bluetooth [--decide MS]\n"
             "                [--register-check S] [--register-hold S] [--dial on|off]\n"
-            "                [--dial-knock on|off] [--dial-poll F,L,T]]\n"
+            "                [--dial-knock on|off] [--knock-dialup on|off] [--dial-poll F,L,T]]\n"
             "                                             work on a folder that stands in for one\n"
             "  (no --root)     state in /var/opt/nbtapp, the socket at %s; the system\n"
             "                  partition is remounted for a write and put back, the HMI restarted\n"
@@ -184,6 +185,9 @@ static int usage() {
             "                  (for its first 2 minutes);\n"
             "                  off, it asks the phone for its services and dials it at polls and at\n"
             "                  its requests, as before the knock (default on)\n"
+            "  --knock-dialup on|off\n"
+            "                  with the knock: on, the agent lists serial-knock-dialup, the knock by\n"
+            "                  dial-up; off, the knock by magic bytes alone (default on)\n"
             "  --dial-poll F,L,T\n"
             "                  with the dial and --dial-knock off: poll every F seconds for L seconds\n"
             "                  after a phone connects or a link ends, then every T seconds (default\n"
@@ -250,13 +254,14 @@ struct Options {
     int holdS;                     // --register-hold, the same way
     int dial;                      // --dial: 1 on, 0 off, below 0: not given. Only the head unit's build
     int knock;                     // --dial-knock, the same way
+    int knockDialup;               // --knock-dialup, the same way
     bool dialPoll;                 // --dial-poll was given, with these values
     DialConfig poll;
     std::string self;              // how this program was started, to start it again for the gate's check
 
     Options()
         : debugTcpPort(-1), debugTcpAddress("127.0.0.1"), bluetooth(-1), decideMs(0), checkS(-1), holdS(-1),
-          dial(-1), knock(-1), dialPoll(false) {}
+          dial(-1), knock(-1), knockDialup(-1), dialPoll(false) {}
 };
 
 #ifdef NBT_HEAD_UNIT
@@ -324,6 +329,7 @@ static SerialConfig serialConfigOf(const Options& options) {
     if (options.holdS >= 0) config.holdMs = (unsigned)options.holdS * 1000;
     if (options.dial >= 0) config.dial.on = options.dial == 1;
     if (options.knock >= 0) config.dial.knock = options.knock == 1;
+    if (options.knockDialup >= 0) config.dial.knockDialup = options.knockDialup == 1;
     if (options.dialPoll) {
         config.dial.pollFirstMs = options.poll.pollFirstMs;
         config.dial.pollFirstForMs = options.poll.pollFirstForMs;
@@ -665,6 +671,14 @@ int main(int argc, char** argv) {
             }
             options.knock = on ? 1 : 0;
             ++i;
+        } else if (arg == "--knock-dialup" && value != 0) {
+            bool on = true;
+            if (!parseKnockDialup(value, &on)) {
+                fprintf(stderr, "nbtagent: --knock-dialup takes on or off\n");
+                return kExitUsage;
+            }
+            options.knockDialup = on ? 1 : 0;
+            ++i;
         } else if (arg == "--dial-poll" && value != 0) {
             if (!parseDialPoll(value, &options.poll)) {
                 fprintf(stderr, "nbtagent: --dial-poll takes F,L,T: seconds from 1 to 3600, 0 to 86400 and 1 to 3600\n");
@@ -709,13 +723,21 @@ int main(int argc, char** argv) {
     if (options.root.empty() && !options.socketPath.empty()) return usage();
     if (options.bluetooth < 0) options.bluetooth = options.root.empty() ? 1 : 0;
     if (options.bluetooth == 0 &&
-        (options.decideMs != 0 || options.checkS >= 0 || options.dial >= 0 || options.knock >= 0 || options.dialPoll)) {
-        fprintf(stderr, "nbtagent: --decide, --register-check, --dial, --dial-knock and --dial-poll are about Bluetooth "
-                        "serial, which is off%s\n", options.root.empty() ? "" : ": with --root it takes --bluetooth");
+        (options.decideMs != 0 || options.checkS >= 0 || options.dial >= 0 || options.knock >= 0 ||
+         options.knockDialup >= 0 || options.dialPoll)) {
+        fprintf(stderr, "nbtagent: --decide, --register-check, --dial, --dial-knock, --knock-dialup and --dial-poll "
+                        "are about Bluetooth serial, which is off%s\n",
+                options.root.empty() ? "" : ": with --root it takes --bluetooth");
         return kExitUsage;
     }
-    if (options.dial == 0 && (options.dialPoll || options.knock >= 0)) {
-        fprintf(stderr, "nbtagent: --dial-knock and --dial-poll are about the dial, which --dial off turns off\n");
+    if (options.dial == 0 && (options.dialPoll || options.knock >= 0 || options.knockDialup >= 0)) {
+        fprintf(stderr, "nbtagent: --dial-knock, --knock-dialup and --dial-poll are about the dial, which --dial off "
+                        "turns off\n");
+        return kExitUsage;
+    }
+    // The knock by dial-up is a kind of knock.
+    if (options.knockDialup >= 0 && options.knock == 0) {
+        fprintf(stderr, "nbtagent: --knock-dialup is about the knock, which --dial-knock off turns off\n");
         return kExitUsage;
     }
     // The polls are the way of the dial without the knock.

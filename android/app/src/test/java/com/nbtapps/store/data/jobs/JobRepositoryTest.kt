@@ -1610,9 +1610,9 @@ class JobRepositoryTest {
             return inner.connect(endpoint, dials, listenOnly)
         }
 
-        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean): Link {
             count.incrementAndGet()
-            return inner.connect(endpoint, dials, listenOnly, probe)
+            return inner.connect(endpoint, dials, listenOnly, probe, dialup)
         }
     }
 
@@ -2617,6 +2617,44 @@ class JobRepositoryTest {
     }
 
     @Test
+    fun `whether the agent knocks by dial-up is kept with the head unit from every hello, and each knock is told it`() = test {
+        val jobs = leftCar(left = false, knocks = true)
+        assertFalse(saved("bt").serialKnockDialup)
+
+        // An agent that knocks by magic bytes alone.
+        dialler.onConnect = { knocks(it) }
+        knockedIn(jobs)
+        assertFalse(saved("bt").serialKnockDialup)
+        jobs.disconnect()
+
+        // One that lists the knock by dial-up: kept, and the next knock may go by it.
+        dialler.onConnect = { knocks(it, also = listOf(ProtocolConstants.CAPABILITY_SERIAL_KNOCK_DIALUP)) }
+        knockedIn(jobs)
+        assertTrue(saved("bt").serialKnock && saved("bt").serialKnockDialup)
+        jobs.disconnect()
+        knockedIn(jobs)
+        assertEquals(listOf(false, false, true), dialler.knockDialups)
+        jobs.disconnect()
+
+        // One that no longer lists it: from the next knock on, none by dial-up.
+        dialler.onConnect = { knocks(it) }
+        knockedIn(jobs)
+        assertFalse(saved("bt").serialKnockDialup)
+        jobs.disconnect()
+        knockedIn(jobs)
+        assertEquals(listOf(false, false, true, true, false), dialler.knockDialups)
+        jobs.disconnect()
+
+        // The knock by dial-up is a kind of knock: an agent that lists it without the knock is not kept as knocking so.
+        dialler.onConnect = { agent ->
+            leaves(agent, false)
+            agent.capabilities = """["${ProtocolConstants.CAPABILITY_SERIAL_DIAL}","${ProtocolConstants.CAPABILITY_SERIAL_KNOCK_DIALUP}"]"""
+        }
+        knockedIn(jobs)
+        assertFalse(saved("bt").serialKnock || saved("bt").serialKnockDialup)
+    }
+
+    @Test
     fun `a connect to a head unit whose agent dials when knocked knocks, whatever the agent says of the phone's own links`() = test {
         val jobs = leftCar(left = true, knocks = true)
         dialler.onConnect = { knocks(it, left = true) }
@@ -2910,8 +2948,9 @@ class JobRepositoryTest {
         dialIn()
 
         assertTrue(connecting.await().isSuccess)
-        // The user's: its Serial Port connects as a knock of the user's makes them.
+        // The user's: its Serial Port connects as a knock of the user's makes them; and, never greeted, by dial-up first.
         assertEquals(listOf(KnockFallback.ONCE_PER_BURST), dialler.probes)
+        assertEquals(listOf(true), dialler.probeDialups)
         assertTrue("the phone dialled", dialler.dials.isEmpty())
         assertEquals(1, dialler.agents.size)
         assertEquals(true, headUnits.headUnit("bt").first()?.serialKnock)
@@ -2945,6 +2984,9 @@ class JobRepositoryTest {
         shown.state.value = true
         await(jobs.connection, "the link") { it is ConnectionState.Connected }
         assertEquals(listOf(KnockFallback.ONCE_PER_BURST, KnockFallback.ONCE_PER_KNOCK), dialler.probes)
+        // The first, to a head unit never greeted, may go by dial-up; the second, to one greeted since whose agent did
+        // not list it, does not.
+        assertEquals(listOf(true, false), dialler.probeDialups)
 
         // The phone's own link, as the user asked.
         assertTrue(jobs.connectFromPhone("bt").isSuccess)

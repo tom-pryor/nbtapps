@@ -43,6 +43,14 @@ data class HeadUnit(
      */
     val serialKnock: Boolean = false,
     /**
+     * The agent listed the capability `serial-knock-dialup` in its last `hello`: it also takes this phone's request for
+     * the car's dial-up networking service as its knock, so each burst of a knock at it may first connect there
+     * ([com.nbtapps.store.data.link.LinkConnector.knock] with `dialup`). Kept beside [serialKnock], from the same
+     * `hello`, and never true without it from there. False until a `hello` says so, and for a head unit saved before
+     * there was this.
+     */
+    val serialKnockDialup: Boolean = false,
+    /**
      * The agent said in its last `info.get` (`phoneOpenedLeft` in its `serial` object) that a Bluetooth serial link
      * this phone opens itself is left to another program on the car: a connect then only waits for the car's link
      * ([com.nbtapps.store.data.link.BluetoothSerialLinkConnector]). False until an `info.get` says so, where one leaves

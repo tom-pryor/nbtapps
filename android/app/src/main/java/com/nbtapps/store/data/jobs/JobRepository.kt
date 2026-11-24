@@ -1530,7 +1530,9 @@ class JobRepository(
      *
      * To a head unit whose agent dials only when knocked ([HeadUnit.serialKnock]), each link is the car's that a knock
      * brings ([LinkConnector.knock], as [knocking] says), and is greeted as any link the car opened is; [HeadUnit.phoneOpenedLeft]
-     * decides nothing, and no link of the phone's own is made.
+     * decides nothing, and no link of the phone's own is made. The knock may go by dial-up where the agent lists that
+     * ([HeadUnit.serialKnockDialup]), in a knock of any kind; so may the probing knock below, to a head unit never
+     * greeted (no [HeadUnit.headUnitId] yet).
      *
      * To one whose agent is not known to knock, as one never greeted yet, the first link may be tried by a probing knock
      * first ([Knocking.probes]): the connector makes one burst of knocks, ending after the first of its connects that came
@@ -1586,11 +1588,18 @@ class JobRepository(
                     ?: came
                     ?: first.takeIf { tries.opened == 0 }
                     ?: if (unit.serialKnock) {
-                        connector.knock(endpoint, knocking.bursts, knocking.fallback)
+                        connector.knock(endpoint, knocking.bursts, knocking.fallback, dialup = unit.serialKnockDialup)
                     } else {
-                        // The first link only is probed: see [greet].
+                        // The first link only is probed: see [greet]. Its knock by dial-up, to a head unit never greeted,
+                        // whose agent's capabilities nothing has said yet.
                         val probe = knocking.fallback.takeIf { knocking.probes && tries.opened == 0 }
-                        connector.connect(endpoint, unit.serialDial, listenOnly = unit.serialDial && unit.phoneOpenedLeft, probe = probe)
+                        connector.connect(
+                            endpoint,
+                            unit.serialDial,
+                            listenOnly = unit.serialDial && unit.phoneOpenedLeft,
+                            probe = probe,
+                            dialup = unit.headUnitId == null,
+                        )
                     }
                 if (replacing == null) tries.opened++
                 val next = AgentSession(link, scope, now = clock).also(holding)
@@ -1812,11 +1821,19 @@ class JobRepository(
         if (unit.headUnitId != null && unit.headUnitId != hello.headUnitId) {
             throw ProtocolException("This isn't the head unit saved as ${unit.name}. Add it as a new one.")
         }
-        // Kept from every `hello`, for how the next connect is made: see [HeadUnit.serialDial] and [HeadUnit.serialKnock].
-        // From what is saved, not from [unit], which a connect from the phone changed for itself.
+        // Kept from every `hello`, for how the next connect is made: see [HeadUnit.serialDial], [HeadUnit.serialKnock] and
+        // [HeadUnit.serialKnockDialup]. From what is saved, not from [unit], which a connect from the phone changed for
+        // itself. The knock by dial-up is a kind of knock: never kept without it.
         val dials = ProtocolConstants.CAPABILITY_SERIAL_DIAL in hello.capabilities
         val knocks = ProtocolConstants.CAPABILITY_SERIAL_KNOCK in hello.capabilities
-        headUnits.update(unit.id) { if (it.serialDial == dials && it.serialKnock == knocks) it else it.copy(serialDial = dials, serialKnock = knocks) }
+        val dialup = knocks && ProtocolConstants.CAPABILITY_SERIAL_KNOCK_DIALUP in hello.capabilities
+        headUnits.update(unit.id) {
+            if (it.serialDial == dials && it.serialKnock == knocks && it.serialKnockDialup == dialup) {
+                it
+            } else {
+                it.copy(serialDial = dials, serialKnock = knocks, serialKnockDialup = dialup)
+            }
+        }
         val agentId = requireNotNull(hello.headUnitId)
         if (keys.has(agentId)) answered("auth") { prove(next, agentId) }
         // The first thing asked also tells whether the agent takes this phone as it is.

@@ -45,16 +45,35 @@ serial.lingerMs 5000
 # The knock. An agent that lists the capability serial-knock has the car dial a phone when that phone's app knocks
 # (and while a pairing code shows, or for a time after a new version of the agent starts on trial), and not
 # otherwise. To knock, a phone app that listens for the car's link makes up to knockAttempts connects to the agent's
-# service, knockGapMs after each that fails, in milliseconds; there are several because one may fail on the phone
-# while another app's link to the car is up. A connect that comes up is sent the knock's magic bytes and nothing
-# else, and is kept until the car's link has come or knockHoldMs have passed; the agent writes nothing into it. The
-# agent takes the knock's magic bytes at the start of a link a phone opened, within decideMs, as that phone's knock,
-# and lets the link go. A connect that the car refuses reaches no agent, so where the car refuses a phone's links (it
-# does so while it has no media audio connection to that phone) a knock cannot be made.
+# service, knockGapMs after each that fails, in milliseconds; there are several because one may find no record of
+# the service or bring no link, while one that may have run into another app's link to the car ends its burst
+# (README.md, "The knock"). A connect that comes up is sent the knock's magic bytes and nothing else, and is kept
+# until the car's link has come or knockHoldMs have passed; the agent writes nothing into it. The agent takes the
+# knock's magic bytes at the start of a link a phone opened, within decideMs, as that phone's knock, and lets the
+# link go. A connect that the car refuses reaches no agent, so where the car refuses a phone's links (it does so
+# while it has no media audio connection to that phone) a knock cannot be made.
 serial.knockMagic NBTK
 serial.knockAttempts 5
 serial.knockGapMs 250
 serial.knockHoldMs 1000
+
+# The knock by dial-up, beside the knock by magic bytes and not in its place. The car's Bluetooth stack has a dial-up
+# networking service (the car as a dial-up gateway) whose service record, of class knockDialupUuid, names an RFCOMM
+# channel of its own, apart from the one every serial service of the car is on. An agent that lists the capability
+# serial-knock-dialup has that service on while it runs, switching it on where it is off, and takes a phone's
+# request for it as that phone's knock, by the same rules as a knock by magic bytes, and so has the car dial that
+# phone. Nothing is ever written into such a connect or read from it: the request itself is the knock. The car
+# refuses it, or the agent does where the car has not within about 2 seconds, so the phone's connect fails; one that
+# comes up all the same is closed at once. A phone app knocks this way by one connect to knockDialupUuid, the first of
+# each burst of its knock, and then waits up to knockDialupWaitMs, in milliseconds from that connect's end, for the
+# car's link; where none has come, the burst goes on as a knock by magic bytes. Android takes no second link from a
+# phone to the same RFCOMM channel of a device, so a connect to the car's serial channel fails while another app's
+# link is up there, and closes that link; one to the dial-up service is on another channel and cannot, so it may be
+# made in a knock of any kind. Where the car has no record of the service the connect fails at the look-up and
+# disturbs nobody. A phone app knocks this way at an agent that lists serial-knock-dialup, and in a probing knock at
+# one it has never greeted; an agent that does not list it takes no such request as a knock.
+serial.knockDialupUuid 00001103-0000-1000-8000-00805F9B34FB
+serial.knockDialupWaitMs 1500
 
 # Pairing a phone (the plan document, "Enrolment on the car's screen"). The car's screen shows a code of this many
 # digits, which the user types into the phone app; `pairing.issue` carries it.
@@ -101,6 +120,10 @@ capability.serialDial serial-dial
 # An agent that lists this one dials a phone when its app knocks: see serial.knockMagic above. A phone app knocks
 # only at an agent that lists it, and such an agent also lists serial-dial.
 capability.serialKnock serial-knock
+# An agent that lists this one also takes a phone's request for the car's dial-up networking service as that
+# phone's knock: see serial.knockDialupUuid above. A phone app knocks that way only at an agent that lists it, or in
+# a probing knock at one it has never greeted, and such an agent also lists serial-knock.
+capability.serialKnockDialup serial-knock-dialup
 # An agent that lists this one has settings.get and settings.set, which give and change the settings an installed
 # package's manifest names in `settings` (spec/manifest.schema.json). One that does not list it answers them with
 # `unsupported`.

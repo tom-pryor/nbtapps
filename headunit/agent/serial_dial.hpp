@@ -76,6 +76,9 @@ public:
     // Whether the car dials phones in this run at all, and whether only when they knock (dial_rules.hpp).
     virtual bool dialOn() = 0;
     virtual bool knockOn() = 0;
+    // And whether a phone's request for the car's dial-up networking service is a knock too (DialConfig::knockDialup):
+    // the agent then lists serial-knock-dialup. Never without knockOn().
+    virtual bool knockDialupOn() = 0;
     // Whether this version of the agent is on trial, not yet confirmed (agent.hpp): with the knock, the car dials the
     // agent's phones while it is, whether they knock or not, for a limited time (DialConfig::trialDialForMs) and
     // then only when they knock. The agent says so when it is given the listener, and

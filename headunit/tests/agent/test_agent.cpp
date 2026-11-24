@@ -3909,7 +3909,7 @@ static bool listsCapability(const Parsed& hello, const char* name) {
 // What the agent tells the car's dialling of, and asks of it.
 class FakeDial : public SerialDial {
 public:
-    FakeDial() : on(true), knock(true), phones(1), code("not-found"), dials(0) {
+    FakeDial() : on(true), knock(true), knockDialup(true), phones(1), code("not-found"), dials(0) {
         status.registered = true;
         status.checkedMsAgo = 12000;
         status.stack.push_back("Stack 1.0");
@@ -3942,6 +3942,7 @@ public:
     virtual void pairingWindow(bool open) { said += open ? "open " : "closed "; }
     virtual bool dialOn() { return on; }
     virtual bool knockOn() { return knock; }
+    virtual bool knockDialupOn() { return knockDialup; }
     virtual void agentOnTrial(bool onTrial) { trial += onTrial ? "on trial " : "not on trial "; }
     virtual unsigned dialNow(std::string* why, const char** c) {
         ++dials;
@@ -3963,7 +3964,7 @@ public:
     }
     std::string said;
     std::string trial;                    // what agentOnTrial() was told, in order
-    bool on, knock;
+    bool on, knock, knockDialup;
     unsigned phones;
     const char* code;
     unsigned dials;
@@ -3994,16 +3995,25 @@ static void testSerialDial() {
     CHECK(Parsed(b.call(p, "pairing.issue", codeParams(code))).result.isObject());
     CHECK(dial.said == "open closed open closed open closed ");
 
-    // The capability, while the dial is on; the knock's, while the dial is on with knocks.
+    // The capability, while the dial is on; the knock's, while the dial is on with knocks; the knock by dial-up's,
+    // while it is on too, and never without the knock's.
     Parsed both(b.hello(b.connect(), kGoodHello));
-    CHECK(listsCapability(both, kCapabilitySerialDial) && listsCapability(both, kCapabilitySerialKnock));
+    CHECK(listsCapability(both, kCapabilitySerialDial) && listsCapability(both, kCapabilitySerialKnock) &&
+          listsCapability(both, kCapabilitySerialKnockDialup));
+    dial.knockDialup = false;
+    Parsed byMagic(b.hello(b.connect(), kGoodHello));
+    CHECK(listsCapability(byMagic, kCapabilitySerialDial) && listsCapability(byMagic, kCapabilitySerialKnock) &&
+          !listsCapability(byMagic, kCapabilitySerialKnockDialup));
+    dial.knockDialup = true;
     dial.knock = false;
     Parsed dialOnly(b.hello(b.connect(), kGoodHello));
-    CHECK(listsCapability(dialOnly, kCapabilitySerialDial) && !listsCapability(dialOnly, kCapabilitySerialKnock));
+    CHECK(listsCapability(dialOnly, kCapabilitySerialDial) && !listsCapability(dialOnly, kCapabilitySerialKnock) &&
+          !listsCapability(dialOnly, kCapabilitySerialKnockDialup));
     dial.knock = true;
     dial.on = false;
     Parsed none(b.hello(b.connect(), kGoodHello));
-    CHECK(!listsCapability(none, kCapabilitySerialDial) && !listsCapability(none, kCapabilitySerialKnock));
+    CHECK(!listsCapability(none, kCapabilitySerialDial) && !listsCapability(none, kCapabilitySerialKnock) &&
+          !listsCapability(none, kCapabilitySerialKnockDialup));
     dial.on = true;
 
     // serial.status, and the same in info.get: counts and names.

@@ -90,15 +90,15 @@ class SetupViewModelTest {
         }
 
         // The same, with a probing knock first, for a car whose agent is not known to knock.
-        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+        override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean): Link {
             gate?.await()
-            return inner.connect(endpoint, dials, listenOnly, probe)
+            return inner.connect(endpoint, dials, listenOnly, probe, dialup)
         }
 
         // A knock, as a connect to an agent that dials only when knocked makes: no link of the phone's own.
-        override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link {
+        override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback, dialup: Boolean): Link {
             gate?.await()
-            return inner.knock(endpoint, bursts, fallback)
+            return inner.knock(endpoint, bursts, fallback, dialup)
         }
 
         // A link the car opens is never held.

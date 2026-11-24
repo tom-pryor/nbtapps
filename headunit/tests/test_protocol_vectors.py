@@ -328,6 +328,7 @@ CONSTANTS = {
     "serial.lingerMs": "number",
     "serial.knockMagic": "name", "serial.knockAttempts": "number", "serial.knockGapMs": "number",
     "serial.knockHoldMs": "number",
+    "serial.knockDialupUuid": "uuid", "serial.knockDialupWaitMs": "number",
     "pairing.codeDigits": "number", "pairing.windowSeconds": "number", "pairing.tries": "number",
     "pairing.pauseSeconds": "number", "auth.nonceBytes": "number",
     "capability.autostart": "name",
@@ -337,6 +338,7 @@ CONSTANTS = {
     "capability.serialReset": "name",
     "capability.serialDial": "name",
     "capability.serialKnock": "name",
+    "capability.serialKnockDialup": "name",
     "capability.settings": "name",
     "settings.maxValueBytes": "number",
     "capability.channels": "name",
@@ -384,9 +386,15 @@ def check_constants():
     if len(values["serial.knockMagic"]) != 4 or values["serial.knockMagic"] == "NBTL":
         fail("constants.txt: serial.knockMagic is not four bytes other than the link's magic bytes")
     if values["serial.knockAttempts"] < 2:
-        fail("constants.txt: a knock is one connect, which may fail on the phone while another app's link is up")
+        fail("constants.txt: a knock is one connect, which may find no record of the service or bring no link")
     if values["serial.knockHoldMs"] <= values["serial.decideMs"]:
         fail("constants.txt: serial.knockHoldMs ends a knock link before the agent has decided on it")
+    if values["serial.knockDialupUuid"] != "00001103-0000-1000-8000-00805F9B34FB":
+        fail("constants.txt: serial.knockDialupUuid is not the standard dial-up networking service's")
+    if values["serial.knockDialupWaitMs"] >= values["serial.silenceMs"]:
+        fail("constants.txt: serial.knockDialupWaitMs keeps a knock waiting longer than a link may be silent")
+    if values["capability.serialKnockDialup"] == values["capability.serialKnock"]:
+        fail("constants.txt: the knock by dial-up has the knock's own capability")
     if values["stream.last"] + 1 != values["channel.firstStream"] or values["channel.firstStream"] > 65535:
         fail("constants.txt: the channels' stream numbers do not follow on from the other streams'")
     if not values["frame.minPayload"] <= values["channel.maxMessage"] <= values["serial.maxFrame"]:

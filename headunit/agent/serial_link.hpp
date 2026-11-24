@@ -196,6 +196,9 @@ struct DialledLink;
 // The name of the car's own serial service, which the stack gives in a phone's request whatever UUID the phone
 // connected to.
 const char* const kCarSerialService = "SPP";
+// The name the stack gives in a phone's request for the car's dial-up networking service (constants.txt,
+// serial.knockDialupUuid), which is a phone's knock by dial-up where SerialDial::knockDialupOn().
+const char* const kCarDialupService = "DUN";
 
 // SerialLog, where the serial code's account of what it does goes, is in serial_log.hpp.
 
@@ -670,6 +673,7 @@ public:
     virtual void pairingWindow(bool open);
     virtual bool dialOn() { return config_.dial.on; }
     virtual bool knockOn() { return config_.dial.on && config_.dial.knock; }
+    virtual bool knockDialupOn() { return knockOn() && config_.dial.knockDialup; }
     virtual void agentOnTrial(bool onTrial);
     virtual unsigned dialNow(std::string* why, const char** code);
     virtual SerialStatus serialStatus();
@@ -724,6 +728,10 @@ private:
     virtual void sppPhone(btspp::SppService::Phone what, const std::string& service, bool parsed,
                           const std::string& address);
     virtual void sppRefusedPhone(const btspp::PhoneInList& phone);
+    // The phone at `address` asked the car for its dial-up networking service (kCarDialupService) while
+    // knockDialupOn(): that phone's knock by dial-up. On the Bluetooth service's thread, from sppPhone(). It does
+    // nothing yet: the knock by dial-up is to take it as a knock (DialRules::knocked()) and see the request refused.
+    void dialupKnock(const std::string& address);
     virtual void sppDevices(const std::vector<btspp::BtDevice>& devices);
     virtual void sppConnectReply(const btspp::ServiceConnectReply& reply);
     virtual void sppLateConnectReply(const btspp::ServiceConnectReply& reply);
