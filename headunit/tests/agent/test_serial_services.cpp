@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <map>
+#include <set>
 
 #include "../../agent/fsutil.hpp"
 #include "../../agent/host_platform.hpp"
@@ -44,22 +45,41 @@ public:
     mutable unsigned asked;
 };
 
-// The car's Bluetooth service, as far as a removal goes.
+// The car's Bluetooth service, as far as the stand-ins go: a name in `ours` holds the agent's stand-in.
 class FakeRemover : public SerialServiceRemover {
 public:
-    FakeRemover() : takes(true) {}
-    virtual bool removeSerialService(const std::string& name) {
-        if (takes) removed += (removed.empty() ? "" : " ") + name;
-        return takes;
+    FakeRemover() : takes(true), told(0) {}
+    virtual Replace replaceSerialService(const std::string& name) {
+        if (!takes) return kNotNow;
+        if (ours.count(name) != 0) return kKeptOurs;
+        removed += (removed.empty() ? "" : " ") + name;
+        return kReplacing;
     }
-    // The removals asked for since the last look, in order.
+    virtual void serialServiceRuns(const std::string& name) {
+        runs += (runs.empty() ? "" : " ") + name;
+        ours.erase(name);
+    }
+    virtual void serialServicesDeclared(const std::vector<std::string>& names) {
+        ++told;
+        declaredNames.clear();
+        for (size_t i = 0; i < names.size(); ++i) declaredNames += (i ? " " : "") + names[i];
+    }
+    // The replacements asked for since the last look, in order.
     std::string took() {
         std::string s = removed;
         removed.clear();
         return s;
     }
+    // The services told as running since the last look, in order.
+    std::string ran() {
+        std::string s = runs;
+        runs.clear();
+        return s;
+    }
     bool takes;
-    std::string removed;
+    std::string removed, runs, declaredNames;
+    std::set<std::string> ours;
+    unsigned told;
 };
 
 class Lines : public SerialLog {
@@ -170,19 +190,49 @@ static void testSweep() {
     // With nobody to remove a registration, nothing is done and nothing looked at.
     CHECK(b.services.sweep("a test") == 0 && b.machine.asked == 0 && b.lines.took().empty());
 
-    // No program runs: every service is removed, each program looked for once.
+    // The remover is told the names at once, each once, in the list's order; and again when the list is set.
+    CHECK(b.remover.told == 0);
     b.services.setRemover(&b.remover);
+    CHECK_IN(b.remover.declaredNames, b.remover.told == 1 && b.remover.declaredNames == "TestRadio TestRadio-2 Other");
+    b.services.setDeclared(declared);
+    CHECK(b.remover.told == 2);
+
+    // No program runs: what every service's name holds is replaced by the stand-in, each program looked for once.
     CHECK(b.services.sweep("a test") == 3);
     CHECK_IN(b.remover.removed, b.remover.took() == "Other TestRadio TestRadio-2");
-    CHECK(b.machine.asked == 2);
+    CHECK(b.machine.asked == 2 && b.remover.ran().empty());
     std::string said = b.lines.took();
-    CHECK_IN(said, has(said, "serial service 'TestRadio': its program (radiod) is not running, so a registration it left "
-                             "behind is being removed (a test)"));
+    CHECK_IN(said, has(said, "serial service 'TestRadio': its program (radiod) is not running, so what is registered "
+                             "under its name, which may be a registration it left behind, is being removed, and the "
+                             "agent's stand-in registered in its place (a test)"));
 
-    // A program that runs keeps its services; the others go.
+    // A name that holds the agent's stand-in is left as it is, and that is said once until it changes.
+    b.remover.ours.insert("Other");
+    CHECK(b.services.sweep("a test") == 2 && b.remover.took() == "TestRadio TestRadio-2");
+    said = b.lines.took();
+    CHECK_IN(said, has(said, "serial service 'Other': its program (otherd) is not running, and its name holds the "
+                             "agent's stand-in, which is left as it is (a test); this is said once until that changes"));
+    CHECK(b.services.sweep("again") == 2 && !has(b.lines.took(), "'Other'") && b.remover.took() == "TestRadio TestRadio-2");
+
+    // A program that runs keeps its services, which the remover is told of; the others are replaced. A name told as
+    // running is no longer known to hold the stand-in.
     b.machine.programs["radiod"] = kProgramRunning;
+    b.machine.programs["otherd"] = kProgramRunning;
+    CHECK(b.services.sweep("a test") == 0 && b.remover.took().empty());
+    CHECK_IN(b.remover.runs, b.remover.ran() == "Other TestRadio TestRadio-2" && b.remover.ours.empty());
+    b.machine.programs.erase("otherd");
+    b.remover.ours.insert("Other");
+    CHECK(b.services.sweep("a test") == 0 && b.remover.ran() == "TestRadio TestRadio-2");
+    CHECK(has(b.lines.took(), "its name holds the agent's stand-in"));   // said again: it had changed
+    b.remover.ours.clear();
     CHECK(b.services.sweep("a test") == 1 && b.remover.took() == "Other");
     CHECK(!has(b.lines.took(), "TestRadio"));
+    b.remover.ran();
+
+    // namesRunning(): the services whose program runs, each once, and nothing asked of the remover.
+    std::vector<std::string> running = b.services.namesRunning();
+    CHECK(running.size() == 2 && running[0] == "TestRadio" && running[1] == "TestRadio-2");
+    CHECK(b.remover.ran().empty() && b.remover.took().empty());
 
     // A program the machine cannot speak for keeps its services too, and that is said.
     b.machine.programs["radiod"] = kProgramUnknown;
@@ -208,11 +258,12 @@ static void testSweep() {
     b.machine.programs["firstd"] = kProgramRunning;          // one runs and one cannot be told: answered for
     CHECK(b.services.sweep("a test") == 0 && b.lines.took().empty());
 
-    // A removal the car's Bluetooth service cannot be asked for is not counted, and is said.
+    // A replacement the car's Bluetooth service cannot be asked for is not counted, and is said.
     b.machine.programs.clear();
     b.remover.takes = false;
     CHECK(b.services.sweep("a test") == 0);
-    CHECK(has(b.lines.took(), "would be removed, but the car's Bluetooth service cannot be asked now"));
+    CHECK(has(b.lines.took(), "so what is registered under its name would be replaced by the agent's stand-in, but the "
+                              "car's Bluetooth service cannot be asked now (a test)"));
     b.remover.takes = true;
 
     // A sign that can come many times makes a sweep only so often.

@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <time.h>
 
+#include "sha256.hpp"
+
 namespace nbt {
 namespace btspp {
 
@@ -17,7 +19,26 @@ double monoNow() {
     return (double)ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+// The lines said about Status and LocalName in the life of an SppService; after them, they are only counted.
+const unsigned kAttributeLines = 60;
+
 }  // namespace
+
+std::string standInUuid(const std::string& name) {
+    std::string seed = std::string(kStandInSeed) + name;
+    uint8_t d[kSha256Bytes];
+    sha256(seed.data(), seed.size(), d);
+    d[6] = (uint8_t)((d[6] & 0x0f) | 0x80);   // version 8
+    d[8] = (uint8_t)((d[8] & 0x3f) | 0x80);   // variant 10
+    static const char kHex[] = "0123456789ABCDEF";
+    std::string u;
+    for (int i = 0; i < 16; ++i) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) u += '-';
+        u += kHex[d[i] >> 4];
+        u += kHex[d[i] & 15];
+    }
+    return u;
+}
 
 // ---- DsiGapClient ------------------------------------------------------------------------------------------------
 
@@ -73,8 +94,12 @@ void DsiGapClient::onData(DsiClient*, uint32_t type, uint32_t id, uint32_t, cons
 // ---- SppService --------------------------------------------------------------------------------------------------
 
 SppService::SppService(GapClient* gap, Events* events)
-    : gap_(gap), events_(events), type_(0), state_(kIdle), mode_(kModeOff), subscribed_(false), otherSentAt_(0),
-      otherReplyS_(kOtherRemovalReplyS), unknownLeft_(0), removeError_(kNoError), clearError_(kNoError),
+    : gap_(gap), events_(events), type_(0), clock_(&monoNow), holdS_(0), statusWaitS_(kStatusWaitS), state_(kIdle),
+      mode_(kModeOff), subscribed_(false), otherSentWhy_(kOtherLeftBehind), otherSentAt_(0),
+      otherReplyS_(kOtherRemovalReplyS), bt_(kBtUnknown), statusHeard_(false), attachedAt_(0), openSince_(0),
+      attributeLines_(0), regFor_(kForNone), regAt_(0), regStale_(false), regQuiet_(false), roundOn_(false),
+      roundCheck_(false), retryDue_(false), yieldTried_(false), yielding_(false), yieldLeft_(0), checkFails_(0),
+      timesRegistered_(0), unknownLeft_(0), removeError_(kNoError), clearError_(kNoError),
       disconnectOut_(false), disconnectTold_(false), disconnectQuiet_(false), disconnectSentAt_(0), disconnectReplyS_(kDisconnectReplyS),
       connectOut_(false), lateKept_(false), pairingInforms_(false), refusalAsked_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0), checkOut_(false), checkSentAt_(0),
       unansweredSaid_(false), restoredRun_(0), oddRun_(false) {
@@ -90,7 +115,7 @@ void SppService::configure(const std::string& name, const std::string& uuid, uin
 }
 
 void SppService::say(const char* fmt, ...) {
-    char line[512];
+    char line[1024];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(line, sizeof(line), fmt, ap);
@@ -103,6 +128,13 @@ SppService::State SppService::state() {
     State s = state_;
     pthread_mutex_unlock(&mu_);
     return s;
+}
+
+unsigned SppService::timesRegistered() {
+    pthread_mutex_lock(&mu_);
+    unsigned n = timesRegistered_;
+    pthread_mutex_unlock(&mu_);
+    return n;
 }
 
 uint32_t SppService::removeError() {
@@ -149,6 +181,17 @@ bool SppService::remove(const char* why) {
     setMode(kModeOff);
     pthread_mutex_lock(&mu_);
     removeError_ = kNoError;
+    // No registration of this object's goes from here: a round under way ends, and what waited for one with it.
+    roundOn_ = false;
+    roundLeft_.clear();
+    retryDue_ = false;
+    yielding_ = false;
+    yielded_.clear();
+    for (size_t i = 0; i < standIns_.size(); ++i) {
+        if (standIns_[i].queued) standIns_[i].replacing = false;
+        standIns_[i].queued = false;
+    }
+    pending_.clear();
     pthread_mutex_unlock(&mu_);
     if (!gap_->attached()) return false;
     set(kRemoveSent);   // before the request goes out: its reply comes on another thread
@@ -162,17 +205,21 @@ void SppService::again() {
     setMode(kModeKeep);
     if (!gap_->attached()) return;   // gapAttached() goes on from here, when the server is there
     // The server is there. If it has attached since the two lines above, gapAttached() has registered already.
+    subscribe();   // once for each time the server attaches: nothing again if it was asked for already
+    std::string line;
     pthread_mutex_lock(&mu_);
     bool waiting = state_ == kWaiting;
+    bool begin = false;
     if (waiting) {
-        state_ = kRegSent;
+        state_ = kHeld;
         clearError_ = kNoError;
+        begin = beginLocked(&line);
     }
     pthread_mutex_unlock(&mu_);
     if (!waiting) return;
-    events_->sppState(kRegSent);
-    subscribe();
-    sendRegister();
+    // kHeld is told only where the round cannot begin at once.
+    if (begin) begun(line);
+    else events_->sppState(kHeld);
 }
 
 // The informs: asked for once for each time the server attaches. The phones' requests for a link, and what is
@@ -194,6 +241,10 @@ void SppService::subscribe() {
         subscribeTo(kInfPairingError);
         subscribeTo(kInfSimplePairingConfirmationRequired);
     }
+    // Whether the car's Bluetooth is on, which the registrations wait for, and its name, which the car's own
+    // software sets just before it makes its registrations: for the log.
+    subscribeTo(kAttrStatus);
+    subscribeTo(kAttrLocalName);
 }
 
 void SppService::subscribeTo(uint32_t informId) {
@@ -240,32 +291,44 @@ bool SppService::checkRegistration(double replyS) {
     if (!gap_->attached()) return false;
     bool lost = false, sayLost = false;
     pthread_mutex_lock(&mu_);
-    double now = monoNow();
-    if (checkOut_ && now - checkSentAt_ >= replyS) {
+    double at = now();
+    if (checkOut_ && at - checkSentAt_ >= replyS) {
         checkOut_ = false;
         lost = true;
         ++checks_.unanswered;
         sayLost = !unansweredSaid_;
         unansweredSaid_ = true;
+        // Its round is given up, and so is a registration of that round's that is out: an answer that comes after
+        // all is taken as the next one's, as the check's always was.
+        if (roundOn_ && roundCheck_) {
+            roundOn_ = false;
+            roundLeft_.clear();
+        }
+        if (regFor_ == kForCheck || (regFor_ == kForStandIn && regQuiet_)) regFor_ = kForNone;
     }
-    bool go = state_ == kRegistered && !checkOut_;
+    bool go = state_ == kRegistered && !checkOut_ && !roundOn_;
+    unsigned fails = checkFails_;
     if (go) {
         checkOut_ = true;
-        checkSentAt_ = now;
+        checkSentAt_ = at;
         ++checks_.sent;
+        // The stand-ins go first, as in every round.
+        roundOn_ = true;
+        roundCheck_ = true;
+        roundLeft_.clear();
+        for (size_t i = 0; i < standIns_.size(); ++i)
+            if (standIns_[i].wanted) roundLeft_.push_back(standIns_[i].name);
     }
     pthread_mutex_unlock(&mu_);
     if (lost && sayLost)
         say("the registration check of '%s' had no reply in %.0f s; until one is answered, later ones without a reply "
             "are only counted", name_.c_str(), replyS);
     if (!go) return false;
-    // Quietly: the check is not a registration of its own, and goes out every half minute.
-    if (gap_->request(kReqSppUuidRegister, buildRegister(name_, uuid_, uuid_, type_))) return true;
+    pump();
     pthread_mutex_lock(&mu_);
-    checkOut_ = false;
-    --checks_.sent;
+    bool failed = checkFails_ != fails;
     pthread_mutex_unlock(&mu_);
-    return false;
+    return !failed;
 }
 
 SppService::CheckCounts SppService::checkCounts() {
@@ -333,43 +396,693 @@ SppService::Heard SppService::heard() {
 bool SppService::removeOther(const std::string& name) {
     if (name == name_ || !isServiceName(name) || !gap_->attached()) return false;
     pthread_mutex_lock(&mu_);
-    bool have = otherSent_ == name;
-    for (size_t i = 0; i < otherWaiting_.size(); ++i) have = have || otherWaiting_[i] == name;
-    if (!have) otherWaiting_.push_back(name);
+    queueOtherLocked(name, kOtherLeftBehind);
     pthread_mutex_unlock(&mu_);
     sendNextOther();
     return true;
 }
 
+// A name that is waiting or out already is not taken twice. mu_ held.
+void SppService::queueOtherLocked(const std::string& name, OtherWhy why) {
+    bool have = otherSent_ == name;
+    for (size_t i = 0; i < otherWaiting_.size(); ++i) have = have || otherWaiting_[i].name == name;
+    if (!have) otherWaiting_.push_back(Other(name, why));
+}
+
+namespace {
+const char* otherWhyText(int why) {
+    switch (why) {
+    case 1: return "what is registered under it, whose program is not running: the agent's stand-in takes its place";
+    case 2: return "the agent's stand-in, given up so that the agent's own serial service has a place";
+    case 3: return "the agent's stand-in, as Bluetooth serial stops, and its program is not running";
+    case 4: return "the agent's stand-in for a service that is no longer declared";
+    default: return "another program's registration, left behind";
+    }
+}
+}  // namespace
+
 // Sends the next removal that waits, unless one is out already or a removal of our own waits for its reply: the
 // replies carry no name, and are told apart only by the order they come in.
 void SppService::sendNextOther() {
     std::string lost, next;
+    OtherWhy lostWhy = kOtherLeftBehind, nextWhy = kOtherLeftBehind;
     pthread_mutex_lock(&mu_);
-    double now = monoNow();
-    if (!otherSent_.empty() && now - otherSentAt_ > otherReplyS_) {
+    double at = now();
+    if (!otherSent_.empty() && at - otherSentAt_ > otherReplyS_) {
         lost = otherSent_;
+        lostWhy = otherSentWhy_;
         otherSent_.clear();
     }
     bool ownOut = state_ == kClearSent || state_ == kRemoveSent;
     if (otherSent_.empty() && !ownOut && !otherWaiting_.empty()) {
-        next = otherWaiting_.front();
+        next = otherWaiting_.front().name;
+        nextWhy = otherWaiting_.front().why;
         otherWaiting_.erase(otherWaiting_.begin());
         otherSent_ = next;
-        otherSentAt_ = now;
+        otherSentWhy_ = nextWhy;
+        otherSentAt_ = at;
     }
     pthread_mutex_unlock(&mu_);
     if (!lost.empty()) {
         say("no reply to the removal of '%s' in %.0f s", lost.c_str(), otherReplyS_);
         events_->sppOtherRemoved(lost, kNoError);
+        otherAnswered(Other(lost, lostWhy), kNoError);
     }
     if (next.empty()) return;
-    say("SppUuidDeregister name '%s': another program's registration, left behind", next.c_str());
+    say("SppUuidDeregister name '%s': %s", next.c_str(), otherWhyText(nextWhy));
     if (send(kReqSppUuidDeregister, buildDeregister(next))) return;
     pthread_mutex_lock(&mu_);
     if (otherSent_ == next) otherSent_.clear();
     pthread_mutex_unlock(&mu_);
     events_->sppOtherRemoved(next, kNoError);
+    otherAnswered(Other(next, nextWhy), kNoError);
+}
+
+// ---- the stand-ins, and when registrations may go ----------------------------------------------------------------
+
+SppService::StandIn* SppService::standInLocked(const std::string& name) {
+    for (size_t i = 0; i < standIns_.size(); ++i)
+        if (standIns_[i].name == name) return &standIns_[i];
+    return 0;
+}
+
+bool SppService::mayRegisterLocked(double at) const {
+    if (bt_ == kBtOn) return at - openSince_ >= holdS_;
+    if (bt_ == kBtOff) return false;
+    return at - attachedAt_ >= statusWaitS_;
+}
+
+bool SppService::attributeLineLocked(bool* last) {
+    *last = false;
+    if (attributeLines_ >= kAttributeLines) return false;
+    *last = ++attributeLines_ == kAttributeLines;
+    return true;
+}
+
+void SppService::setStandIns(const std::vector<std::string>& names) {
+    bool drops = false;
+    pthread_mutex_lock(&mu_);
+    std::vector<StandIn> kept;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const std::string& n = names[i];
+        if (!isServiceName(n) || n == name_) continue;
+        bool twice = false;
+        for (size_t k = 0; k < kept.size(); ++k) twice = twice || kept[k].name == n;
+        if (twice) continue;
+        StandIn* had = standInLocked(n);
+        StandIn s;
+        if (had != 0) {
+            s = *had;
+        } else {
+            s.name = n;
+            s.uuid = standInUuid(n);
+        }
+        s.wanted = true;
+        kept.push_back(s);
+    }
+    for (size_t i = 0; i < standIns_.size(); ++i) {
+        StandIn s = standIns_[i];
+        bool given = false;
+        for (size_t k = 0; k < kept.size(); ++k) given = given || kept[k].name == s.name;
+        if (given) continue;
+        if (s.ours) {
+            s.ours = false;
+            queueOtherLocked(s.name, kOtherDropped);
+            drops = true;
+        }
+        for (size_t k = 0; k < pending_.size(); ++k) {
+            if (pending_[k] != s.name) continue;
+            pending_.erase(pending_.begin() + k);
+            break;
+        }
+        // Kept until its registration that is out is answered: an answer 0 then has it removed (standInAnswered()).
+        if (regFor_ == kForStandIn && regName_ == s.name) {
+            s.wanted = false;
+            s.queued = false;
+            kept.push_back(s);
+        }
+    }
+    standIns_ = kept;
+    pthread_mutex_unlock(&mu_);
+    if (drops) sendNextOther();
+}
+
+void SppService::standInRuns(const std::string& name) {
+    pthread_mutex_lock(&mu_);
+    StandIn* s = standInLocked(name);
+    if (s != 0) s->ours = false;
+    pthread_mutex_unlock(&mu_);
+}
+
+SppService::Replace SppService::replaceWithStandIn(const std::string& name) {
+    if (name == name_ || !isServiceName(name) || !gap_->attached()) return kNotNow;
+    pthread_mutex_lock(&mu_);
+    if (mode_ != kModeKeep || state_ == kHeld || state_ == kWaiting || !mayRegisterLocked(now())) {
+        pthread_mutex_unlock(&mu_);
+        return kNotNow;
+    }
+    StandIn* s = standInLocked(name);
+    if (s == 0) {
+        StandIn fresh;
+        fresh.name = name;
+        fresh.uuid = standInUuid(name);
+        fresh.wanted = true;
+        standIns_.push_back(fresh);
+        s = &standIns_.back();
+    }
+    Replace r = kKeptOurs;
+    if (!s->ours) {
+        r = kReplacing;
+        if (!s->replacing) {
+            s->replacing = true;
+            queueOtherLocked(name, kOtherReplace);
+        }
+    }
+    pthread_mutex_unlock(&mu_);
+    if (r == kReplacing) sendNextOther();
+    return r;
+}
+
+unsigned SppService::removeStandIns() {
+    if (!gap_->attached()) return 0;   // they went with the server
+    unsigned n = 0;
+    pthread_mutex_lock(&mu_);
+    for (size_t i = 0; i < standIns_.size(); ++i) {
+        if (!standIns_[i].ours) continue;
+        standIns_[i].ours = false;
+        queueOtherLocked(standIns_[i].name, kOtherStop);
+        ++n;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (n > 0) sendNextOther();
+    return n;
+}
+
+bool SppService::othersPending() {
+    sendNextOther();   // one with no reply in its time is given up here, and the next sent
+    pthread_mutex_lock(&mu_);
+    bool pending = !otherWaiting_.empty() || !otherSent_.empty();
+    pthread_mutex_unlock(&mu_);
+    return pending && gap_->attached();
+}
+
+std::string SppService::namesText(const std::vector<std::string>& names) {
+    std::string t;
+    for (size_t i = 0; i < names.size(); ++i) t += (i ? ", '" : "'") + names[i] + "'";
+    return t;
+}
+
+std::vector<SppService::StandInState> SppService::standIns() {
+    std::vector<StandInState> out;
+    pthread_mutex_lock(&mu_);
+    for (size_t i = 0; i < standIns_.size(); ++i) {
+        const StandIn& s = standIns_[i];
+        if (!s.wanted) continue;
+        StandInState t;
+        t.name = s.name;
+        t.uuid = s.uuid;
+        t.ours = s.ours;
+        t.sent = s.sent;
+        t.placed = s.placed;
+        t.there = s.there;
+        t.other = s.other;
+        out.push_back(t);
+    }
+    pthread_mutex_unlock(&mu_);
+    return out;
+}
+
+SppService::Bluetooth SppService::bluetooth() {
+    pthread_mutex_lock(&mu_);
+    Bluetooth b = bt_;
+    pthread_mutex_unlock(&mu_);
+    return b;
+}
+
+void SppService::tend() {
+    bool stale = false;
+    pthread_mutex_lock(&mu_);
+    if (regFor_ != kForNone && regStale_ && now() - regAt_ >= kStaleReplyS) {
+        regFor_ = kForNone;
+        regStale_ = false;
+        stale = true;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (stale) {
+        say("no answer came in %.0f s to a serial registration that went out before the car's Bluetooth was switched "
+            "off or the server went: it is passed over, and the next goes", kStaleReplyS);
+        pump();
+    }
+    // Only a round that begins here is sent from here: what else is due goes on from the answers, on the thread they
+    // come on.
+    advance();
+}
+
+bool SppService::beginLocked(std::string* line) {
+    double at = now();
+    if (state_ != kHeld || mode_ != kModeKeep || !mayRegisterLocked(at)) return false;
+    state_ = kRegSent;
+    clearError_ = kNoError;
+    yieldTried_ = false;
+    roundOn_ = true;
+    roundCheck_ = false;
+    roundLeft_.clear();
+    for (size_t i = 0; i < standIns_.size(); ++i)
+        if (standIns_[i].wanted) roundLeft_.push_back(standIns_[i].name);
+    unsigned n = (unsigned)roundLeft_.size();
+    double since = at - (bt_ == kBtOn ? openSince_ : attachedAt_);
+    char what[160];
+    if (n == 0)
+        snprintf(what, sizeof what, "the agent's own; no serial service of another program is declared");
+    else
+        snprintf(what, sizeof what, "the stand-in%s for the %u declared serial service%s of other programs first, then "
+                 "the agent's own", n == 1 ? "" : "s", n, n == 1 ? "" : "s");
+    char text[400];
+    if (bt_ == kBtOn)
+        snprintf(text, sizeof text, "the serial registrations go out now, %.1f s after the car's Bluetooth was seen on: "
+                 "%s", since, what);
+    else
+        snprintf(text, sizeof text, "the car's Bluetooth stack has said nothing of whether it is on (Status) in %.1f s "
+                 "since the attach: the serial registrations go out now all the same, as with no hold: %s", since, what);
+    *line = text;
+    return true;
+}
+
+void SppService::begun(const std::string& line) {
+    say("%s", line.c_str());
+    events_->sppState(kRegSent);
+    pump();
+}
+
+bool SppService::advance() {
+    if (!gap_->attached()) return false;
+    std::string line;
+    pthread_mutex_lock(&mu_);
+    bool begin = beginLocked(&line);
+    pthread_mutex_unlock(&mu_);
+    if (!begin) return false;
+    begun(line);
+    return true;
+}
+
+void SppService::pump() {
+    for (;;) {
+        if (!gap_->attached()) return;
+        RegFor what = kForNone;
+        std::string name, uuid;
+        bool quiet = false;
+        pthread_mutex_lock(&mu_);
+        double at = now();
+        if (regFor_ != kForNone || mode_ != kModeKeep || !mayRegisterLocked(at)) {
+            pthread_mutex_unlock(&mu_);
+            return;
+        }
+        if (retryDue_) {
+            retryDue_ = false;
+            if (state_ == kRetrySent) what = kForOwn;
+        } else if (roundOn_) {
+            while (what == kForNone && !roundLeft_.empty()) {
+                StandIn* s = standInLocked(roundLeft_.front());
+                roundLeft_.erase(roundLeft_.begin());
+                if (s == 0 || !s->wanted) continue;
+                what = kForStandIn;
+                name = s->name;
+                uuid = s->uuid;
+                ++s->sent;
+            }
+            quiet = roundCheck_;
+            if (what == kForNone) {
+                roundOn_ = false;
+                if (roundCheck_ && checkOut_ && state_ == kRegistered) what = kForCheck;
+                else if (!roundCheck_ && state_ == kRegSent) what = kForOwn;
+                else if (roundCheck_ && checkOut_) {
+                    // the registration is not there any more to be checked: the check is not made
+                    checkOut_ = false;
+                    --checks_.sent;
+                }
+            }
+        } else if (!pending_.empty()) {
+            StandIn* s = standInLocked(pending_.front());
+            pending_.erase(pending_.begin());
+            if (s != 0) s->queued = false;
+            if (s != 0 && s->wanted) {
+                what = kForStandIn;
+                name = s->name;
+                uuid = s->uuid;
+                ++s->sent;
+            } else if (s != 0) {
+                s->replacing = false;
+            }
+        }
+        if (what == kForNone) {
+            bool more = retryDue_ || roundOn_ || !pending_.empty();
+            pthread_mutex_unlock(&mu_);
+            if (more) continue;
+            return;
+        }
+        regFor_ = what;
+        regName_ = name;
+        regAt_ = at;
+        regStale_ = false;
+        regQuiet_ = quiet;
+        pthread_mutex_unlock(&mu_);
+
+        bool sent;
+        if (what == kForCheck) {
+            // Quietly: the check is not a registration of its own, and goes out every half minute.
+            sent = gap_->request(kReqSppUuidRegister, buildRegister(name_, uuid_, uuid_, type_));
+        } else if (what == kForOwn) {
+            say("SppUuidRegister name '%s', UUID %s, type %u", name_.c_str(), uuid_.c_str(), type_);
+            sent = send(kReqSppUuidRegister, buildRegister(name_, uuid_, uuid_, type_));
+        } else if (quiet) {
+            sent = gap_->request(kReqSppUuidRegister, buildRegister(name, uuid, uuid, type_));
+        } else {
+            say("SppUuidRegister name '%s', UUID %s, type %u: the stand-in for another program's serial service, ahead "
+                "of the agent's own", name.c_str(), uuid.c_str(), type_);
+            sent = send(kReqSppUuidRegister, buildRegister(name, uuid, uuid, type_));
+        }
+        if (sent) return;   // what follows goes on from its answer
+        pthread_mutex_lock(&mu_);
+        if (regFor_ == what && regName_ == name) regFor_ = kForNone;
+        if (what == kForCheck) {
+            checkOut_ = false;
+            --checks_.sent;
+            ++checkFails_;
+        } else if (what == kForStandIn) {
+            StandIn* s = standInLocked(name);
+            if (s != 0) s->replacing = false;
+        }
+        pthread_mutex_unlock(&mu_);
+        // This object's own that could not be sent waits, as it always has, for the caller's time limit.
+        if (what != kForStandIn) return;
+    }
+}
+
+void SppService::registerAnswered(uint32_t err, uint32_t rejectedType) {
+    pthread_mutex_lock(&mu_);
+    RegFor what = regFor_;
+    std::string name = regName_;
+    bool stale = regStale_, quiet = regQuiet_;
+    regFor_ = kForNone;
+    regStale_ = false;
+    if (what == kForCheck && !stale) checkOut_ = false;
+    pthread_mutex_unlock(&mu_);
+    if (stale) {
+        char rejection[48];
+        snprintf(rejection, sizeof rejection, "a rejection (type 0x%x)", rejectedType);
+        say("the answer to a serial registration that went out before the car's Bluetooth was switched off or the "
+            "server went (%s): %s, passed over",
+            what == kForStandIn ? ("the stand-in '" + name + "'").c_str() : (what == kForCheck ? "a check" : "the agent's own"),
+            rejectedType != 0 ? rejection : registerErrorText(err).c_str());
+    } else if (what == kForCheck) {
+        checkAnswered(err, rejectedType);
+    } else if (what == kForStandIn) {
+        standInAnswered(name, err, rejectedType, quiet);
+    } else {
+        ownAnswered(err, rejectedType, what == kForOwn);
+    }
+    pump();
+}
+
+void SppService::ownAnswered(uint32_t err, uint32_t rejectedType, bool waited) {
+    State s = state();
+    bool ownTry = waited && (s == kRegSent || s == kRetrySent);
+    if (rejectedType != 0) {
+        say("the Bluetooth server rejected the request (type 0x%x, id 0x%x)", rejectedType, kReqSppUuidRegister);
+        if (ownTry) {
+            pthread_mutex_lock(&mu_);
+            yielding_ = false;
+            yielded_.clear();
+            pthread_mutex_unlock(&mu_);
+            set(kFailed);
+        }
+        sendNextOther();
+        return;
+    }
+    say("SppUuidRegister reply: %s", registerErrorText(err).c_str());
+    // A reply that comes when no registration of ours waits for one (after remove(), say) changes nothing.
+    if (!ownTry) return;
+    if (err == 0) {
+        pthread_mutex_lock(&mu_);
+        std::string given = namesText(yielded_);
+        std::vector<std::string> kept;
+        // The stand-ins given up are not registered again in this round: they stay given up, and go first in the next.
+        for (size_t i = 0; i < standIns_.size(); ++i)
+            if (standIns_[i].ours && standIns_[i].wanted) kept.push_back(standIns_[i].name);
+        size_t yielded = yielded_.size();
+        yielding_ = false;
+        yielded_.clear();
+        ++timesRegistered_;
+        pthread_mutex_unlock(&mu_);
+        if (yielded > 0)
+            say("the agent's own serial service '%s' has a place now, the one the stand-in%s given up (%s) left; "
+                "stand-ins that still hold their names: %s", name_.c_str(), yielded == 1 ? "" : "s", given.c_str(),
+                kept.empty() ? "none" : namesText(kept).c_str());
+        set(kRegistered);
+        return;
+    }
+    if (s == kRegSent) {
+        set(kClearSent);
+        sendDeregister("clearing a registration an earlier run left behind, then trying again");
+        return;
+    }
+    // The second registration, or one after a stand-in was given up, is refused too. No place left, in the header:
+    // the last stand-in that is ours, in the order of the round, is given up, and the agent's own goes once more.
+    std::string last;
+    pthread_mutex_lock(&mu_);
+    uint32_t cleared = clearError_;
+    bool gaveUp = yieldTried_;
+    yielding_ = false;
+    if (err == 5) {
+        for (size_t i = standIns_.size(); i-- > 0 && last.empty();)
+            if (standIns_[i].ours && standIns_[i].wanted) last = standIns_[i].name;
+    }
+    if (!last.empty()) {
+        standInLocked(last)->ours = false;
+        yieldTried_ = true;
+        yielding_ = true;
+        yieldLeft_ = 1;
+        yielded_.push_back(last);
+        queueOtherLocked(last, kOtherYield);
+    } else {
+        yielded_.clear();
+    }
+    pthread_mutex_unlock(&mu_);
+    if (!last.empty()) {
+        say("the car's Bluetooth service did not take the agent's own serial service '%s' (%s) with stand-ins of the "
+            "agent's registered ahead of it: the stack may have no place left, and the agent's own service must have "
+            "one. So the last of them, '%s', is given up: it is removed, and the agent's own registered once more in its "
+            "place. The declared service '%s' has no stand-in for now: its program may be refused a place, or get one "
+            "that no phone finds", name_.c_str(), registerErrorText(err).c_str(), last.c_str(), last.c_str());
+        sendNextOther();
+        return;
+    }
+    // Nothing was filed under our name, and the stack still says DEFAULT.
+    if (cleared == 10 && err == 5)
+        say("nothing was registered under the name '%s', so its UUID %s is registered under another name, the stack "
+            "has no place left for it, or the car's Bluetooth is switched off", name_.c_str(), uuid_.c_str());
+    if (gaveUp)
+        say("the agent's own serial service '%s' was refused after the stand-ins were given up too (%s)", name_.c_str(),
+            registerErrorText(err).c_str());
+    set(kFailed);
+}
+
+void SppService::standInAnswered(const std::string& name, uint32_t err, uint32_t rejectedType, bool quiet) {
+    bool news = true, drop = false;
+    pthread_mutex_lock(&mu_);
+    StandIn* s = standInLocked(name);
+    if (s != 0) {
+        news = !quiet || !s->lastKnown || s->last != err || s->lastRejected != rejectedType;
+        s->last = err;
+        s->lastRejected = rejectedType;
+        s->lastKnown = true;
+        s->replacing = false;
+        if (rejectedType == 0 && err == 0) {
+            s->ours = true;
+            ++s->placed;
+        } else if (rejectedType == 0 && err == 5) {
+            ++s->there;
+        } else {
+            ++s->other;
+        }
+        if (!s->wanted) {
+            if (s->ours) {
+                queueOtherLocked(name, kOtherDropped);
+                drop = true;
+            }
+            for (size_t i = 0; i < standIns_.size(); ++i) {
+                if (standIns_[i].name != name) continue;
+                standIns_.erase(standIns_.begin() + i);
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&mu_);
+    if (news) {
+        const char* in = quiet ? ", in a registration check's round" : "";
+        if (rejectedType != 0)
+            say("the Bluetooth server rejected the stand-in '%s' (type 0x%x)%s: it is not known to be there",
+                name.c_str(), rejectedType, in);
+        else if (err == 0)
+            say("SppUuidRegister reply for the stand-in '%s'%s: 0 OK: it holds the name, and its place, for the service's "
+                "program", name.c_str(), in);
+        else if (err == 5)
+            say("SppUuidRegister reply for the stand-in '%s'%s: %s: it is left as it is", name.c_str(), in,
+                registerErrorText(err).c_str());
+        else
+            say("SppUuidRegister reply for the stand-in '%s'%s: %s: it is not known to be there", name.c_str(), in,
+                registerErrorText(err).c_str());
+    }
+    if (drop) sendNextOther();
+}
+
+void SppService::otherAnswered(const Other& other, uint32_t err) {
+    bool go = false, left = false, odd = false;
+    pthread_mutex_lock(&mu_);
+    if (other.why == kOtherReplace) {
+        StandIn* s = standInLocked(other.name);
+        if (s != 0 && s->replacing && !s->queued) {
+            // 10: nothing was there; 0: it is gone. Either way the stand-in goes in its place at once.
+            if ((err == 0 || err == 10) && s->wanted && mode_ == kModeKeep) {
+                s->queued = true;
+                pending_.push_back(other.name);
+                go = true;
+            } else {
+                s->replacing = false;
+                left = err != kNoError;
+            }
+        }
+    } else if (other.why == kOtherYield) {
+        // Whatever the answer, the agent's own goes once more. A stand-in whose removal was refused may hold its place
+        // still: then the agent's own is refused again and the next stand-in given up, so this ends.
+        if (yielding_ && yieldLeft_ > 0 && --yieldLeft_ == 0) {
+            retryDue_ = true;
+            go = true;
+            odd = err != 0 && err != 10;
+        }
+    }
+    pthread_mutex_unlock(&mu_);
+    if (odd)
+        say("the removal of the stand-in '%s' was answered %s: it may hold its place still; the agent's own serial "
+            "service is registered once more all the same", other.name.c_str(),
+            err == kNoError ? "with nothing (no reply in time, or a rejection)" : deregisterErrorText(err).c_str());
+    if (left)
+        say("what is registered under '%s' was not removed (%s): no stand-in is put in its place", other.name.c_str(),
+            deregisterErrorText(err).c_str());
+    if (go) pump();
+}
+
+// ---- what the server says of the car's Bluetooth ------------------------------------------------------------------
+
+void SppService::forgetRegistrationsLocked() {
+    for (size_t i = 0; i < standIns_.size(); ++i) {
+        standIns_[i].ours = false;
+        standIns_[i].replacing = false;
+        standIns_[i].queued = false;
+    }
+    for (size_t i = standIns_.size(); i-- > 0;)
+        if (!standIns_[i].wanted) standIns_.erase(standIns_.begin() + i);
+    pending_.clear();
+    roundOn_ = false;
+    roundLeft_.clear();
+    retryDue_ = false;
+    yielding_ = false;
+    yieldLeft_ = 0;
+    yielded_.clear();
+    checkOut_ = false;
+    // The registrations that removeOther() was asked to remove went too.
+    otherWaiting_.clear();
+    if (regFor_ != kForNone) regStale_ = true;
+}
+
+void SppService::statusTold(const uint8_t* payload, uint32_t len) {
+    Reader r(payload, len);
+    uint32_t value = r.u32();
+    if (!r.ok()) {
+        pthread_mutex_lock(&mu_);
+        bool first = (unreadSaid_ & 128) == 0;
+        unreadSaid_ |= 128;
+        pthread_mutex_unlock(&mu_);
+        if (first)
+            say("Status from the Bluetooth server could not be read (%u bytes); later ones that cannot be read are not "
+                "logged", len);
+        return;
+    }
+    Bluetooth is = value == 1 ? kBtOn : (value == 0 ? kBtOff : kBtUnknown);
+    bool closedNow = false, held = false, sayIt = false, last = false;
+    unsigned ours = 0;
+    pthread_mutex_lock(&mu_);
+    double at = now();
+    bool first = !statusHeard_;
+    statusHeard_ = true;
+    Bluetooth was = bt_;
+    bool changed = first || is != was;
+    if (changed) {
+        ++heard_.statusChanges;
+        sayIt = attributeLineLocked(&last);
+    }
+    if (is == kBtOn && (was != kBtOn || first)) openSince_ = first ? attachedAt_ : at;
+    if (is == kBtOff && was != kBtOff) {
+        closedNow = !first;
+        for (size_t i = 0; i < standIns_.size(); ++i) ours += standIns_[i].ours ? 1 : 0;
+        bool had = state_ == kRegSent || state_ == kClearSent || state_ == kRetrySent || state_ == kRegistered;
+        if (mode_ == kModeKeep && had) {
+            state_ = kHeld;
+            held = true;
+        }
+        forgetRegistrationsLocked();
+    }
+    bt_ = is;
+    double hold = holdS_;
+    pthread_mutex_unlock(&mu_);
+    if (sayIt) {
+        const char* more = last ? ". Further changes of the car's Bluetooth state and name are counted and not logged" : "";
+        char ahead[96] = "";
+        if (ours > 0) snprintf(ahead, sizeof ahead, ", and %u stand-in%s of the agent's", ours, ours == 1 ? "" : "s");
+        if (is == kBtUnknown)
+            say("the Bluetooth server gave Status %u, which is neither on (1) nor off (0): taken as not known, so the "
+                "serial registrations go %.0f s after the attach at the latest%s", value, statusWaitS_, more);
+        else if (is == kBtOn && hold > 0)
+            say("the car's Bluetooth %s (Status 1): no serial registration goes out for %.0f s%s, so that the car's own "
+                "are made first%s", first ? "is on as the agent attaches" : "has been switched on", hold,
+                first ? ", counted from the attach" : "", more);
+        else if (is == kBtOn)
+            say("the car's Bluetooth %s (Status 1): the serial registrations may go out at once (no hold)%s",
+                first ? "is on as the agent attaches" : "has been switched on", more);
+        else if (!closedNow)
+            say("the car's Bluetooth is off (Status 0) as the agent attaches: no serial registration goes out until it is "
+                "on and has been for %.0f s%s", hold, more);
+        else
+            say("the car's Bluetooth has been switched off (Status 0): every serial registration went with it, the "
+                "agent's own%s; no registration and no registration check goes out until it is on again and has been "
+                "for %.0f s%s", ahead, hold, more);
+    }
+    if (held) events_->sppState(kHeld);
+    if (is != kBtOff) advance();
+}
+
+void SppService::nameTold(const uint8_t* payload, uint32_t len) {
+    Reader r(payload, len);
+    std::string name = r.str();
+    bool sayIt = false, last = false;
+    pthread_mutex_lock(&mu_);
+    if (r.ok()) {
+        ++heard_.names;
+        sayIt = attributeLineLocked(&last);
+    }
+    bool first = !r.ok() && (unreadSaid_ & 256) == 0;
+    if (!r.ok()) unreadSaid_ |= 256;
+    pthread_mutex_unlock(&mu_);
+    if (first)
+        say("LocalName from the Bluetooth server could not be read (%u bytes); later ones that cannot be read are not "
+            "logged", len);
+    if (!sayIt) return;
+    // The name may be a person's: only whether it is there, and its length.
+    const char* more = last ? ". Further changes of the car's Bluetooth state and name are counted and not logged" : "";
+    if (name.empty())
+        say("the car's Bluetooth name is cleared (LocalName ''), as at a switch-off%s", more);
+    else
+        say("the car's Bluetooth name is given (LocalName, %u characters)%s", (unsigned)name.size(), more);
 }
 
 namespace {
@@ -746,11 +1459,6 @@ bool SppService::send(uint32_t id, const std::vector<uint8_t>& payload) {
     return false;
 }
 
-void SppService::sendRegister() {
-    say("SppUuidRegister name '%s', UUID %s, type %u", name_.c_str(), uuid_.c_str(), type_);
-    send(kReqSppUuidRegister, buildRegister(name_, uuid_, uuid_, type_));
-}
-
 bool SppService::sendDeregister(const char* why) {
     say("SppUuidDeregister name '%s': %s", name_.c_str(), why);
     return send(kReqSppUuidDeregister, buildDeregister(name_));
@@ -765,23 +1473,42 @@ void SppService::gapAttached() {
         return;
     }
     if (m != kModeKeep) return;
-    subscribe();
+    // A server that has just attached, a new one too: Status is not known yet, and the hold counts from here if it
+    // says the stack is open (When registrations may go, in the header).
     pthread_mutex_lock(&mu_);
+    attachedAt_ = now();
+    bt_ = kBtUnknown;
+    statusHeard_ = false;
+    openSince_ = 0;
     clearError_ = kNoError;
     pthread_mutex_unlock(&mu_);
-    set(kRegSent);
-    sendRegister();
+    subscribe();   // Status may come during this, and is kept
+    // Held, and the round begun at once if it may be, in one step: no other thread begins it in between.
+    std::string line;
+    pthread_mutex_lock(&mu_);
+    State before = state_;
+    state_ = kHeld;
+    bool begin = beginLocked(&line);
+    pthread_mutex_unlock(&mu_);
+    // kHeld is told only where the round cannot begin at once.
+    if (begin) begun(line);
+    else if (before != kHeld) events_->sppState(kHeld);
 }
 
 void SppService::gapDetached() {
     say("the Bluetooth server detached (its process stopped or restarted): the registration is gone with it");
     pthread_mutex_lock(&mu_);
-    bool had = state_ == kRegSent || state_ == kClearSent || state_ == kRetrySent || state_ == kRegistered;
+    bool had = state_ == kRegSent || state_ == kClearSent || state_ == kRetrySent || state_ == kRegistered ||
+               state_ == kHeld;
     if (had) state_ = kWaiting;
     subscribed_ = false;
-    checkOut_ = false;
-    // Every registration went with the server, the ones that removeOther() was asked to remove among them.
-    otherWaiting_.clear();
+    // Every registration went with the server, the stand-ins' and the ones that removeOther() was asked to remove
+    // among them, and no answer comes from it to one that is out.
+    forgetRegistrationsLocked();
+    regFor_ = kForNone;
+    regStale_ = false;
+    bt_ = kBtUnknown;
+    statusHeard_ = false;
     otherSent_.clear();
     // No reply comes from a server that has gone, and what it said of the phones is old.
     disconnectOut_ = false;
@@ -798,6 +1525,12 @@ void SppService::gapDetached() {
 }
 
 void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, uint32_t len) {
+    // An attribute's messages have the type of a rejection: by their id first.
+    if (isAttributeId(id)) {
+        if (id == kAttrStatus) statusTold(payload, len);
+        else nameTold(payload, len);
+        return;
+    }
     if (isServiceRequestInform(id)) {
         // The phone's name and address are personal data: they stay here, and only the service goes on. The address
         // is kept, for a ServiceDisconnect, and never said.
@@ -861,6 +1594,7 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
     if ((id == kRspSppUuidDeregister && !rejected) || (id == kReqSppUuidDeregister && rejected)) {
         pthread_mutex_lock(&mu_);
         std::string other = otherSent_;
+        OtherWhy why = otherSentWhy_;
         otherSent_.clear();
         pthread_mutex_unlock(&mu_);
         if (!other.empty()) {
@@ -868,48 +1602,28 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
             if (rejected) say("the Bluetooth server rejected the removal of '%s' (type 0x%x)", other.c_str(), type);
             else say("SppUuidDeregister reply for '%s': %s", other.c_str(), deregisterErrorText(err).c_str());
             events_->sppOtherRemoved(other, err);
+            otherAnswered(Other(other, why), err);
             sendNextOther();
             return;
         }
     }
 
+    // Whichever SppUuidRegister of ours was out: the stand-in's, the check's or our own.
     if ((id == kRspSppUuidRegister && !rejected) || (id == kReqSppUuidRegister && rejected)) {
-        pthread_mutex_lock(&mu_);
-        bool check = checkOut_;
-        checkOut_ = false;
-        pthread_mutex_unlock(&mu_);
-        if (check) {
-            checkAnswered(rejected ? kNoError : readError(payload, len), rejected ? type : 0);
-            return;
-        }
+        registerAnswered(rejected ? kNoError : readError(payload, len), rejected ? type : 0);
+        return;
     }
 
     State s = state();
-    if (id == kRspSppUuidRegister && !rejected) {
-        uint32_t err = readError(payload, len);
-        say("SppUuidRegister reply: %s", registerErrorText(err).c_str());
-        // A reply that comes when no registration is waiting for one (after remove(), say) changes nothing.
-        if (s != kRegSent && s != kRetrySent) return;
-        if (err == 0) {
-            set(kRegistered);
-        } else if (s == kRegSent) {
-            set(kClearSent);
-            sendDeregister("clearing a registration an earlier run left behind, then trying again");
-        } else {
-            pthread_mutex_lock(&mu_);
-            uint32_t cleared = clearError_;
-            pthread_mutex_unlock(&mu_);
-            // Nothing was filed under our name, and the stack still says DEFAULT.
-            if (cleared == 10 && err == 5)
-                say("nothing was registered under the name '%s', so its UUID %s is registered under another name, or "
-                    "the car's Bluetooth is switched off", name_.c_str(), uuid_.c_str());
-            set(kFailed);
-        }
-        return;
-    }
     if (rejected) {
         say("the Bluetooth server rejected the request (type 0x%x, id 0x%x)", type, id);
-        if (s == kClearSent) { set(kRetrySent); sendRegister(); }
+        if (s == kClearSent) {
+            set(kRetrySent);
+            pthread_mutex_lock(&mu_);
+            retryDue_ = true;
+            pthread_mutex_unlock(&mu_);
+            pump();
+        }
         else if (s == kRegSent || s == kRetrySent) set(kFailed);
         else if (s == kRemoveSent) set(kRemoveFailed);
         sendNextOther();
@@ -923,7 +1637,13 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
         if (s == kClearSent) clearError_ = err;
         else removeError_ = err;
         pthread_mutex_unlock(&mu_);
-        if (s == kClearSent) { set(kRetrySent); sendRegister(); }
+        if (s == kClearSent) {
+            set(kRetrySent);
+            pthread_mutex_lock(&mu_);
+            retryDue_ = true;
+            pthread_mutex_unlock(&mu_);
+            pump();
+        }
         else set(err == 0 || err == 10 ? kRemoved : kRemoveFailed);
         sendNextOther();   // a removal of another program's registration may have waited for this answer
         return;

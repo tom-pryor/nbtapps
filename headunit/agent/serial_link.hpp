@@ -298,6 +298,12 @@ private:
     std::string lastFailure_;             // why the last attach failed; empty after one that worked
 };
 
+// The hold: no serial registration of the agent's goes to the car's Bluetooth stack until the stack has said for this
+// long that it is open (spp_service.hpp). The car's own software makes its registrations within about a second of
+// the stack's opening, in answer to that opening; the time is many times that, and short enough that an agent that
+// starts with the head unit is registered within its first seconds.
+const unsigned kSerialHoldMs = 10000;
+
 struct SerialConfig {
     std::string name, uuid;      // the service
     std::string carService;      // a request that names this service, or `name`, may be for a link of ours
@@ -319,6 +325,9 @@ struct SerialConfig {
                                  // service is registered and quiet; 0: never
     unsigned checkQuietMs;       // quiet: no link of the agent's up or being decided on, and no phone's request
                                  // for a link for this long
+    unsigned holdMs;             // no serial registration goes until the car's Bluetooth has been on for this long
+                                 // (SppService::setHold()); counted from the attach when it is on then
+    btspp::SppService::Clock holdClock;   // the clock that hold is counted by; 0: the system's. A test's own
     unsigned attachWaitMs;       // the car's Bluetooth service not attached for this long: the log says so, once
     DialConfig dial;             // the car dials the agent's phones (dial_config.hpp)
 
@@ -326,7 +335,8 @@ struct SerialConfig {
         : name(kSerialServiceName), uuid(kSerialServiceUuid), carService(kCarSerialService),
           nodePrefix("/dev/btspp"), registerMs(20000), retryMs(30000), requestWindowS(15), decideMs((unsigned)kSerialDecideMs),
           linkWaitMs(3000), lingerMs((unsigned)kSerialLingerMs), readNode(0), writeNode(0),
-          resetArmedMs(60000), checkMs(30000), checkQuietMs(30000), attachWaitMs(10000) {}
+          resetArmedMs(60000), checkMs(30000), checkQuietMs(30000), holdMs(kSerialHoldMs), holdClock(0),
+          attachWaitMs(10000) {}
 };
 
 // What the system's log says of the car's Bluetooth service, for a client of it that has not attached: on the head
@@ -446,17 +456,44 @@ inline bool parseSerialCheckS(const char* text, unsigned* out) {
     return true;
 }
 
-// What the listener does to find out that the car's Bluetooth has dropped the registration.
+// The most `--register-hold` takes, in seconds.
+const unsigned kSerialHoldMostS = 600;
+
+// The value of `--register-hold`: a whole number of seconds from 0 (no hold) to kSerialHoldMostS, in digits and
+// nothing else.
+inline bool parseSerialHoldS(const char* text, unsigned* out) {
+    if (text == 0 || *text == 0) return false;
+    unsigned s = 0;
+    for (const char* c = text; *c != 0; ++c) {
+        if (*c < '0' || *c > '9') return false;
+        s = s * 10 + (unsigned)(*c - '0');
+        if (s > kSerialHoldMostS) return false;
+    }
+    *out = s;
+    return true;
+}
+
+// When the listener registers, and what it does to find out that the car's Bluetooth has dropped the registration.
 inline std::string describeSerialCheck(const SerialConfig& config) {
+    char hold[200];
+    if (config.holdMs == 0)
+        snprintf(hold, sizeof hold, "the serial registrations go as soon as the car's Bluetooth says it is on "
+                 "(--register-hold 0)");
+    else
+        snprintf(hold, sizeof hold, "no serial registration goes until the car's Bluetooth has said for %u s that it "
+                 "is on, counted from the attach when it is on then", config.holdMs / 1000);
+    std::string head = std::string(hold) + ", with the stand-ins for the declared serial services of other programs "
+                       "ahead of the agent's own; switching Bluetooth off drops them all, and the car says so. ";
     if (config.checkMs == 0)
-        return "the registration is not checked (--register-check 0): a registration that switching Bluetooth off and "
-               "on drops stays lost until the agent is started again";
+        return head + "The registration is not checked (--register-check 0): a registration that the car drops with no "
+                      "word stays lost until the agent is started again";
     char every[32], quiet[32];
     snprintf(every, sizeof every, "%u s", config.checkMs / 1000);
     snprintf(quiet, sizeof quiet, "%u s", config.checkQuietMs / 1000);
-    return std::string("while the service is registered, no link of the agent's is up and no phone has asked for a "
-                       "link for ") + quiet + ", the registration is checked every " + every +
-           " by registering it again: switching Bluetooth off and on drops it, and the car says nothing";
+    return head + "While the service is registered, no link of the agent's is up and no phone has asked for a link "
+                  "for " + quiet + ", the registration is checked every " + every +
+           " by registering it again, after the stand-ins: a car whose Bluetooth says nothing of being switched off "
+           "drops it all the same";
 }
 
 // What the listener does with a link once it has opened its node, and, while the car dials, which links a phone
@@ -596,11 +633,14 @@ inline std::string describeRefusal(unsigned count, const RefusalFacts& f) {
 // unit may be there before the car's Bluetooth service is). stop() removes the registration and the gate. Links already handed out are not touched by either: each lasts until one of its sides ends it. A link
 // that stop() finds opened and not yet handed out has nobody to serve it, and is ended as the agent ends a link.
 //
-// The listener holds the agent's one client of the car's Bluetooth service, so it is also what removes another
-// program's registration that was left behind (SerialServiceRemover). Given the list of such services, it has the
-// list swept each time its own service has been registered (when the agent starts, and when the car's Bluetooth
-// service comes back) and when it has let a link go, and the programs on the list are the ones the gate's hold
-// keeps off the node.
+// The listener holds the agent's one client of the car's Bluetooth service, so it is also what registers the
+// stand-ins of other programs' serial services and replaces a registration such a program left behind
+// (SerialServiceRemover). Given the list of such services, it has the list swept each time its own service has been
+// registered (when the agent starts, when the car's Bluetooth service comes back, and when the car's Bluetooth has
+// been switched on again) and when it has let a link go, has the declared programs looked at before each registration
+// check, and the programs on the list are the ones the gate's hold keeps off the node. While no registration may go
+// (the hold, SerialConfig::holdMs, or the car's Bluetooth off) the listener waits for it, and the time it gives the
+// registration (SerialConfig::registerMs) does not count.
 //
 // The hold goes by the links of the serial kind that are up in this process (serialLinksOpen()), so a process has
 // one listener at a time.
@@ -635,7 +675,10 @@ public:
     virtual SerialStatus serialStatus();
     virtual bool phoneOpenedLeft(const std::string& address);
     virtual std::vector<std::string> takeUndialled();
-    virtual bool removeSerialService(const std::string& name) { return spp_.removeOther(name); }
+    // SerialServiceRemover (serial_services.hpp), through the stand-ins of SppService. From any thread.
+    virtual Replace replaceSerialService(const std::string& name);
+    virtual void serialServiceRuns(const std::string& name) { spp_.standInRuns(name); }
+    virtual void serialServicesDeclared(const std::vector<std::string>& names) { spp_.setStandIns(names); }
 
     // Puts the gate in front and opens the client of the car's Bluetooth service. If either does not work, the
     // listener says why in the log and tries again SerialConfig::retryMs later, and so on, each reason said once;
@@ -668,7 +711,7 @@ public:
     // service, and VersionGet. From any thread.
     virtual bool registrationSent() {
         btspp::SppService::State s = spp_.state();
-        return s != btspp::SppService::kIdle && s != btspp::SppService::kWaiting;
+        return s != btspp::SppService::kIdle && s != btspp::SppService::kWaiting && s != btspp::SppService::kHeld;
     }
     virtual bool askStackVersion() { return spp_.askVersion(); }
 
@@ -725,6 +768,11 @@ private:
     void updateHold();
     void waitForPass();
     void checkRegistrationIfDue();
+    // As Bluetooth serial stops: the stand-ins whose program is not running are removed (SppService::removeStandIns()),
+    // and their answers waited for a while; with what they came to, for the log.
+    void removeStandIns();
+    // The declared programs that run are looked for, and their names are not known to hold a stand-in from here.
+    void noteRunning();
     bool linkExpected();
     bool stopping();
     void shutDown();

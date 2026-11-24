@@ -22,7 +22,7 @@ static const char* const kName = "Test_Service";
 static const char* const kUuid = "0123ABCD-89EF-4A5B-8C7D-0123456789AB";
 static const char* const kPhoneName = "Test Phone";
 static const char* const kPhoneAddress = "AABBCCDDEEFF";
-static const size_t kInforms = 6;   // the informs a registration asks for
+static const size_t kInforms = 8;   // the informs a registration asks for, and the two attributes
 
 static std::vector<uint8_t> bytes(const char* s, size_t n) {
     return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(s), reinterpret_cast<const uint8_t*>(s) + n);
@@ -37,7 +37,7 @@ public:
         std::vector<uint8_t> payload;
     };
 
-    FakeGap() : events(0), up(false), canOpen(true), takes(true), refuseSubscribe(false), opens(0) {}
+    FakeGap() : events(0), up(false), canOpen(true), takes(true), refuseSubscribe(false), statusOnSubscribe(1), opens(0) {}
 
     virtual bool open(Events* e) {
         ++opens;
@@ -56,7 +56,20 @@ public:
     virtual bool subscribe(uint32_t informId) {
         if (!up || refuseSubscribe) return false;
         informs.push_back(informId);
+        // As the server does: an attribute's current value comes as it is asked for.
+        if (informId == kAttrStatus && statusOnSubscribe >= 0) status((uint32_t)statusOnSubscribe);
         return true;
+    }
+    // The attribute Status (1 the car's Bluetooth on, 0 off) and LocalName, with the type their messages have.
+    void status(uint32_t value) {
+        std::vector<uint8_t> p;
+        putU32(p, value);
+        events->gapMessage(kTypeRejectedA, kAttrStatus, &p[0], (uint32_t)p.size());
+    }
+    void localName(const std::string& name) {
+        std::vector<uint8_t> p;
+        putString(p, name);
+        events->gapMessage(kTypeRejectedA, kAttrLocalName, &p[0], (uint32_t)p.size());
     }
     virtual std::string describe() const { return "Test.Server 1.0"; }
 
@@ -93,6 +106,7 @@ public:
 
     Events* events;
     bool up, canOpen, takes, refuseSubscribe;
+    int statusOnSubscribe;   // the Status given as it is asked for; below 0: none
     int opens;
     std::vector<Sent> sent;
     std::vector<uint32_t> informs;
@@ -223,6 +237,671 @@ struct Registered {
     }
 };
 
+// ---- the hold, Status, and the stand-ins: on the test's own clock --------------------------------------------------
+
+static double gClock = 1000.0;
+static double testClock() { return gClock; }
+
+// The name a registration carries; its two UUIDs are the same, and its type 0. *uuid: that UUID.
+static std::string registers(const std::vector<uint8_t>& p, std::string* uuid = 0) {
+    Reader r(&p[0], (uint32_t)p.size());
+    std::string name = r.str(), advertised = r.str(), dialled = r.str();
+    uint32_t type = r.u32();
+    CHECK(r.ok() && r.left() == 0 && advertised == dialled && !advertised.empty() && type == 0);
+    if (uuid != 0) *uuid = advertised;
+    return name;
+}
+
+// What went out since the last look, in order, as "R:Name D:Name"; it is not kept.
+static std::string out(FakeGap& gap) {
+    std::string s;
+    for (size_t i = 0; i < gap.sent.size(); ++i) {
+        const FakeGap::Sent& x = gap.sent[i];
+        std::string item = x.id == kReqSppUuidRegister
+                               ? "R:" + registers(x.payload)
+                               : (x.id == kReqSppUuidDeregister ? "D:" + deregisters(x.payload) : std::string("?"));
+        s += (s.empty() ? "" : " ") + item;
+    }
+    gap.sent.clear();
+    return s;
+}
+
+static size_t count(const Seen& seen, const char* part) {
+    size_t n = 0;
+    for (size_t i = 0; i < seen.lines.size(); ++i) n += seen.lines[i].find(part) != std::string::npos;
+    return n;
+}
+
+// A service with the stand-ins Radio_A and Radio_B, on the test's clock with a hold of `hold` seconds, started and
+// not yet attached. The clock starts at 1000.
+struct Held {
+    FakeGap gap;
+    Seen seen;
+    SppService spp;
+    explicit Held(double hold = 10) : spp(&gap, &seen) {
+        gClock = 1000.0;
+        spp.setClock(&testClock);
+        spp.setHold(hold);
+        spp.configure(kName, kUuid, 0);
+        std::vector<std::string> names;
+        names.push_back("Radio_A");
+        names.push_back("Radio_B");
+        spp.setStandIns(names);
+        CHECK(spp.start());
+    }
+    // The one request out is the registration of `name`: it is answered `error`.
+    void answer(const std::string& name, uint32_t error) {
+        std::string sent = out(gap);
+        CHECK_IN(sent, sent == "R:" + name);
+        gap.reply(kRspSppUuidRegister, error);
+    }
+    // The one request out is the removal of `name`: it is answered `error`.
+    void removed(const std::string& name, uint32_t error) {
+        std::string sent = out(gap);
+        CHECK_IN(sent, sent == "D:" + name);
+        gap.reply(kRspSppUuidDeregister, error);
+    }
+    bool ours(const std::string& name) {
+        std::vector<SppService::StandInState> all = spp.standIns();
+        for (size_t i = 0; i < all.size(); ++i)
+            if (all[i].name == name) return all[i].ours;
+        return false;
+    }
+    // Attached with no hold left, the stand-ins answered `a` and `b`, the agent's own 0.
+    void registered(uint32_t a, uint32_t b) {
+        gap.attach();
+        if (!gap.sent.empty() || spp.state() == SppService::kHeld) {
+            gClock += 3600;
+            spp.tend();
+        }
+        answer("Radio_A", a);
+        answer("Radio_B", b);
+        answer(kName, 0);
+        CHECK(spp.state() == SppService::kRegistered && gap.sent.empty());
+        seen.passed();
+    }
+};
+
+static void testStandInUuid() {
+    // Made up from the name: the same for the same name, another for another; version 8, variant 10; upper case.
+    std::string a = standInUuid("TestRadio"), again = standInUuid("TestRadio"), b = standInUuid("Radio_A");
+    CHECK_IN(a, a == "7CA5066F-D228-8358-A771-37BE7BDFFA5E");   // from SHA-256, by another implementation
+    CHECK_IN(b, b == "8CCB6CD8-B3F5-8C9D-B348-4D4EC259B15F");
+    CHECK(a == again && a != b && standInUuid("testradio") != a && standInUuid("TestRadio2") != a);
+    std::string n;
+    CHECK(normaliseUuid(a, &n) && n == a && a[14] == '8' && std::string("89AB").find(a[19]) != std::string::npos);
+    CHECK(!isSigBaseUuid(a) && a != kUuid && a != std::string(36, '0'));
+}
+
+// When registrations may go: Status, the hold, and a server that says nothing.
+static void testHold() {
+    {   // Status open as the server attaches: nothing until the hold has passed, counted from the attach
+        Held h;
+        h.gap.attach();
+        CHECK(h.spp.state() == SppService::kHeld && h.gap.sent.empty() && h.spp.bluetooth() == SppService::kBtOn);
+        CHECK(h.gap.informs.size() == kInforms && h.gap.informs[6] == kAttrStatus && h.gap.informs[7] == kAttrLocalName);
+        CHECK_IN(h.seen.passed(), h.seen.passed() == path(SppService::kWaiting, SppService::kHeld));
+        CHECK(h.seen.said("the car's Bluetooth is on as the agent attaches (Status 1): no serial registration goes out "
+                          "for 10 s, counted from the attach, so that the car's own are made first"));
+        gClock = 1009.999;
+        h.spp.tend();
+        CHECK(h.gap.sent.empty() && h.spp.state() == SppService::kHeld && !h.spp.checkRegistration(30));
+        CHECK(h.spp.replaceWithStandIn("Radio_A") == SppService::kNotNow && h.gap.sent.empty());
+        gClock = 1010.0;
+        h.spp.tend();
+        CHECK(h.spp.state() == SppService::kRegSent);
+        CHECK(h.seen.said("the serial registrations go out now, 10.0 s after the car's Bluetooth was seen on: the "
+                          "stand-ins for the 2 declared serial services of other programs first, then the agent's own"));
+        // The stand-ins first, one at a time, then the agent's own.
+        std::string uuid;
+        CHECK(h.gap.sent.size() == 1 && registers(h.gap.sent[0].payload, &uuid) == "Radio_A" &&
+              uuid == standInUuid("Radio_A"));
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 5);
+        h.answer(kName, 0);
+        CHECK(h.spp.state() == SppService::kRegistered && h.gap.sent.empty() && h.ours("Radio_A") && !h.ours("Radio_B"));
+        CHECK(h.seen.said(("SppUuidRegister name 'Radio_A', UUID " + standInUuid("Radio_A") + ", type 0: the stand-in for "
+                           "another program's serial service, ahead of the agent's own").c_str()));
+        CHECK(h.seen.said("SppUuidRegister reply for the stand-in 'Radio_A': 0 OK: it holds the name, and its place, for "
+                          "the service's program"));
+        CHECK(h.seen.said("SppUuidRegister reply for the stand-in 'Radio_B': 5 DEFAULT (the name or the UUID is "
+                          "registered already, the stack has no place left for it, or the car's Bluetooth is switched "
+                          "off): it is left as it is"));
+        CHECK_IN(h.seen.passed(), h.seen.passed() == path(SppService::kRegSent, SppService::kRegistered));
+        // tend() with nothing due sends nothing.
+        h.spp.tend();
+        CHECK(h.gap.sent.empty());
+    }
+    {   // off as the server attaches: nothing, however long; on later: the hold counts from then
+        Held h;
+        h.gap.statusOnSubscribe = 0;
+        h.gap.attach();
+        CHECK(h.spp.state() == SppService::kHeld && h.spp.bluetooth() == SppService::kBtOff);
+        CHECK(h.seen.said("the car's Bluetooth is off (Status 0) as the agent attaches: no serial registration goes out "
+                          "until it is on and has been for 10 s"));
+        gClock = 5000;
+        h.spp.tend();
+        CHECK(h.gap.sent.empty());
+        h.gap.status(1);
+        CHECK(h.spp.bluetooth() == SppService::kBtOn && h.gap.sent.empty());
+        CHECK(h.seen.said("the car's Bluetooth has been switched on (Status 1): no serial registration goes out for 10 s, "
+                          "so that the car's own are made first"));
+        gClock = 5009.9;
+        h.spp.tend();
+        CHECK(h.gap.sent.empty());
+        gClock = 5010;
+        h.spp.tend();
+        h.answer("Radio_A", 0);
+        CHECK(h.seen.said("10.0 s after the car's Bluetooth was seen on"));
+    }
+    {   // a server that says nothing of Status: the registrations go after setStatusWait() from the attach
+        Held h;
+        h.gap.statusOnSubscribe = -1;
+        h.gap.attach();
+        CHECK(h.spp.state() == SppService::kHeld && h.spp.bluetooth() == SppService::kBtUnknown);
+        gClock = 1009.9;
+        h.spp.tend();
+        CHECK(h.gap.sent.empty());
+        gClock = 1010;
+        h.spp.tend();
+        CHECK(h.seen.said("the car's Bluetooth stack has said nothing of whether it is on (Status) in 10.0 s since the "
+                          "attach: the serial registrations go out now all the same, as with no hold: the stand-ins for "
+                          "the 2 declared serial services of other programs first, then the agent's own"));
+        h.answer("Radio_A", 0);
+    }
+    {   // a Status that is neither on nor off is taken as not known; the first that comes is the current one, from the
+        // attach
+        Held h;
+        h.gap.statusOnSubscribe = 7;
+        h.gap.attach();
+        CHECK(h.spp.bluetooth() == SppService::kBtUnknown && h.seen.said("gave Status 7, which is neither on (1) nor off"));
+        Held late;
+        late.gap.statusOnSubscribe = -1;
+        late.gap.attach();
+        gClock = 1004;
+        late.gap.status(1);
+        CHECK(late.seen.said("the car's Bluetooth is on as the agent attaches (Status 1)") && late.gap.sent.empty());
+        gClock = 1010;
+        late.spp.tend();
+        late.answer("Radio_A", 0);
+    }
+    {   // with no hold, Status on: the round at once, as the server attaches
+        Held h(0);
+        h.gap.attach();
+        CHECK(h.seen.said("the car's Bluetooth is on as the agent attaches (Status 1): the serial registrations may go "
+                          "out at once (no hold)"));
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 0);
+        h.answer(kName, 0);
+        CHECK_IN(h.seen.passed(), h.seen.passed() == path(SppService::kWaiting, SppService::kRegSent, SppService::kRegistered));
+    }
+    {   // switched off while registered: everything is gone, no check, no replacement; on again: the hold, then the
+        // whole round. Attribute messages, of the type a rejection has, change no registration.
+        Held h;
+        h.registered(0, 5);
+        h.gap.localName("Test Car");
+        CHECK(h.seen.said("the car's Bluetooth name is given (LocalName, 8 characters)") && !h.seen.said("Test Car"));
+        gClock = 8000;
+        h.gap.localName("");
+        h.gap.status(0);
+        CHECK(h.spp.state() == SppService::kHeld && h.gap.sent.empty() && !h.ours("Radio_A"));
+        CHECK(h.seen.passed() == path(SppService::kHeld));
+        CHECK(h.seen.said("the car's Bluetooth name is cleared (LocalName ''), as at a switch-off"));
+        CHECK(h.seen.said("the car's Bluetooth has been switched off (Status 0): every serial registration went with it, "
+                          "the agent's own, and 1 stand-in of the agent's; no registration and no registration check "
+                          "goes out until it is on again and has been for 10 s"));
+        CHECK(!h.spp.checkRegistration(30) && h.spp.replaceWithStandIn("Radio_A") == SppService::kNotNow);
+        CHECK(h.spp.removeStandIns() == 0 && h.gap.sent.empty());
+        h.gap.status(0);                                        // the same again: nothing said
+        CHECK(count(h.seen, "has been switched off (Status 0)") == 1);
+        gClock = 8100;
+        h.gap.status(1);
+        h.spp.tend();
+        CHECK(h.gap.sent.empty());
+        gClock = 8110;
+        h.spp.tend();
+        CHECK(h.spp.state() == SppService::kRegSent);
+        h.answer("Radio_A", 0);
+        CHECK(out(h.gap) == "R:Radio_B");
+        // Status and LocalName while a registration of ours is out: neither is its answer, nor a rejection.
+        h.gap.status(1);
+        h.gap.localName("Test Car");
+        CHECK(h.spp.state() == SppService::kRegSent && h.gap.sent.empty());
+        h.gap.reply(kRspSppUuidRegister, 0);                    // Radio_B's
+        h.answer(kName, 0);
+        CHECK(h.spp.state() == SppService::kRegistered && h.ours("Radio_A") && h.ours("Radio_B"));
+        SppService::Heard heard = h.spp.heard();
+        CHECK(heard.statusChanges == 3 && heard.names == 3);
+    }
+    {   // switched off with a registration out: its answer, when it comes, is passed over, and the next round waits for
+        // it, kStaleReplyS at most
+        Held h;
+        h.registered(0, 0);
+        gClock = 2000;
+        CHECK(h.spp.checkRegistration(30));
+        CHECK(out(h.gap) == "R:Radio_A");
+        gClock = 2001;
+        h.gap.status(0);
+        gClock = 2002;
+        h.gap.status(1);
+        gClock = 2012;
+        h.spp.tend();
+        CHECK(h.spp.state() == SppService::kRegSent && h.gap.sent.empty());   // the hold has passed; the answer is out
+        h.gap.reply(kRspSppUuidRegister, 5);
+        CHECK(h.seen.said("the answer to a serial registration that went out before the car's Bluetooth was switched "
+                          "off or the server went (the stand-in 'Radio_A'): 5 DEFAULT"));
+        h.answer("Radio_A", 0);                                 // the new round's
+        h.answer("Radio_B", 0);
+        h.answer(kName, 0);
+        CHECK(h.spp.checkCounts().present == 0);
+        // And when the answer never comes.
+        gClock = 3000;
+        CHECK(h.spp.checkRegistration(30));
+        CHECK(out(h.gap) == "R:Radio_A");
+        h.gap.status(0);
+        h.gap.status(1);
+        gClock = 3014.9;
+        h.spp.tend();
+        CHECK(h.gap.sent.empty());
+        gClock = 3015;
+        h.spp.tend();
+        CHECK(h.seen.said("no answer came in 15 s to a serial registration that went out before the car's Bluetooth was "
+                          "switched off or the server went: it is passed over, and the next goes"));
+        h.answer("Radio_A", 0);
+    }
+    {   // a new link to the server, its process restarted: as at the attach, the hold from there
+        Held h;
+        h.registered(0, 0);
+        h.gap.detach();
+        CHECK(h.spp.state() == SppService::kWaiting && !h.ours("Radio_A") && h.spp.bluetooth() == SppService::kBtUnknown);
+        gClock = 9000;
+        h.gap.attach();
+        CHECK(h.spp.state() == SppService::kHeld && h.gap.sent.empty());
+        gClock = 9009.9;
+        h.spp.tend();
+        CHECK(h.gap.sent.empty());
+        gClock = 9010;
+        h.spp.tend();
+        h.answer("Radio_A", 0);
+        CHECK(out(h.gap) == "R:Radio_B");
+        // The server goes with a stand-in's registration out, and comes back with the car's Bluetooth off: nothing.
+        h.gap.detach();
+        h.gap.statusOnSubscribe = 0;
+        h.gap.attach();
+        gClock = 99999;
+        h.spp.tend();
+        CHECK(h.spp.state() == SppService::kHeld && h.gap.sent.empty());
+    }
+    {   // again() once the hold has passed goes at once; before it, it waits
+        Held h;
+        h.registered(0, 0);
+        CHECK(h.spp.remove("leaving"));
+        h.removed(kName, 0);
+        h.spp.again();
+        h.answer("Radio_A", 5);
+        h.answer("Radio_B", 5);
+        h.answer(kName, 0);
+        Held early;
+        early.gap.attach();
+        early.spp.again();                                      // in the hold already: nothing changes
+        CHECK(early.gap.sent.empty() && early.spp.state() == SppService::kHeld);
+    }
+}
+
+// The stand-ins: their rounds, their answers, what a name holds, and the agent's own registration with no place left.
+static void testStandIns() {
+    {   // a check's round: the stand-ins go first, each with a line only when its answer is news
+        Held h;
+        h.registered(0, 5);
+        size_t lines = h.seen.lines.size();
+        CHECK(h.spp.checkRegistration(30));
+        CHECK(!h.spp.checkRegistration(30));                    // one round at a time
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 5);
+        h.answer(kName, 5);
+        CHECK(h.seen.lines.size() == lines && h.spp.checkCounts().present == 1);
+        CHECK(h.spp.checkRegistration(30));
+        h.answer("Radio_A", 5);                                 // news: the stand-in had held the name
+        h.answer("Radio_B", 0);                                 // news: it holds it now
+        h.answer(kName, 5);
+        CHECK(h.seen.lines.size() == lines + 2 && h.ours("Radio_A") && h.ours("Radio_B"));
+        CHECK(h.seen.said("SppUuidRegister reply for the stand-in 'Radio_A', in a registration check's round: 5 DEFAULT"));
+        CHECK(h.seen.said("SppUuidRegister reply for the stand-in 'Radio_B', in a registration check's round: 0 OK"));
+        CHECK(count(h.seen, "SppUuidRegister name 'Radio_A'") == 1);   // the start's only: a check's round is quiet
+        // A check whose round has waited too long is given up with its stand-in, and the next round goes.
+        gClock = 6000;
+        CHECK(h.spp.checkRegistration(30));
+        CHECK(out(h.gap) == "R:Radio_A");
+        gClock = 6030;
+        CHECK(h.spp.checkRegistration(30));
+        CHECK(h.spp.checkCounts().unanswered == 1);
+        h.answer("Radio_A", 5);
+        h.answer("Radio_B", 5);
+        h.answer(kName, 5);
+        // The check found its registration gone: the stand-ins had gone before it, as they always do.
+        CHECK(h.spp.checkRegistration(30));
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 0);
+        h.answer(kName, 0);
+        CHECK(h.seen.said("the registration check found it gone and has registered it again"));
+    }
+    {   // the answers a stand-in may get: whatever it is, the round goes on to the agent's own
+        Held h(0);
+        h.gap.attach();
+        h.answer("Radio_A", 1);
+        CHECK(h.seen.said("SppUuidRegister reply for the stand-in 'Radio_A': 1 TIMEOUT (the stack was busy for too long "
+                          "and dropped the request): it is not known to be there"));
+        CHECK(out(h.gap) == "R:Radio_B");
+        h.gap.reject(kTypeRejectedA, kReqSppUuidRegister);
+        CHECK(h.seen.said("the Bluetooth server rejected the stand-in 'Radio_B' (type 0x202): it is not known to be there"));
+        h.answer(kName, 0);
+        CHECK(h.spp.state() == SppService::kRegistered && !h.ours("Radio_A") && !h.ours("Radio_B"));
+        // A TIMEOUT may have been carried out: the next round finds the name there (5), or holds it (0).
+        CHECK(h.spp.checkRegistration(30));
+        h.answer("Radio_A", 12);
+        CHECK(h.seen.said("'Radio_A', in a registration check's round: 12 HW_NOT_READY: it is not known to be there"));
+        h.answer("Radio_B", 0);
+        h.answer(kName, 5);
+        std::vector<SppService::StandInState> all = h.spp.standIns();
+        CHECK(all.size() == 2 && all[0].sent == 2 && all[0].other == 2 && all[1].placed == 1 && all[1].other == 1);
+        // One the client cannot send is passed over: the round goes on.
+        h.gap.takes = false;
+        CHECK(!h.spp.checkRegistration(30));
+        h.gap.takes = true;
+        // Our own registration answered 1 at the start: removed by name, and made once more, as any first refusal.
+        Held t(0);
+        t.gap.attach();
+        t.answer("Radio_A", 0);
+        t.answer("Radio_B", 0);
+        t.answer(kName, 1);
+        t.removed(kName, 0);
+        t.answer(kName, 0);
+        CHECK(t.spp.state() == SppService::kRegistered);
+    }
+    {   // replaceWithStandIn(): a name that holds the stand-in is left alone; another is removed, and the stand-in
+        // follows at once
+        Held h;
+        h.registered(0, 5);
+        CHECK(h.spp.replaceWithStandIn("Radio_A") == SppService::kKeptOurs && h.gap.sent.empty());
+        CHECK(h.spp.replaceWithStandIn("Radio_B") == SppService::kReplacing);
+        CHECK(h.spp.replaceWithStandIn("Radio_B") == SppService::kReplacing);   // under way: not twice
+        CHECK(h.seen.said("SppUuidDeregister name 'Radio_B': what is registered under it, whose program is not running: "
+                          "the agent's stand-in takes its place"));
+        h.removed("Radio_B", 0);
+        h.answer("Radio_B", 0);
+        CHECK(h.ours("Radio_B") && h.spp.replaceWithStandIn("Radio_B") == SppService::kKeptOurs);
+        CHECK(h.seen.removed() == "Radio_B=0");
+        // Its program was seen running: no longer known to be ours, so the next sweep replaces it.
+        h.spp.standInRuns("Radio_B");
+        CHECK(!h.ours("Radio_B") && h.spp.replaceWithStandIn("Radio_B") == SppService::kReplacing);
+        h.removed("Radio_B", 10);                               // nothing was there: the stand-in all the same
+        h.answer("Radio_B", 0);
+        // The program started between the removal and the stand-in, and registered: 5, and the name is not ours.
+        h.spp.standInRuns("Radio_B");
+        CHECK(h.spp.replaceWithStandIn("Radio_B") == SppService::kReplacing);
+        h.removed("Radio_B", 0);
+        h.answer("Radio_B", 5);
+        CHECK(!h.ours("Radio_B"));
+        // A link is up on it: left as it is, with no stand-in.
+        CHECK(h.spp.replaceWithStandIn("Radio_B") == SppService::kReplacing);
+        h.removed("Radio_B", 5);
+        CHECK(h.gap.sent.empty() && h.seen.said("what is registered under 'Radio_B' was not removed (5 DEFAULT (a link "
+                                                "on that service is up)): no stand-in is put in its place"));
+        // A name the stand-ins were not given becomes one; the agent's own name and a name the stack would not take
+        // are refused.
+        CHECK(h.spp.replaceWithStandIn(kName) == SppService::kNotNow && h.spp.replaceWithStandIn("two words") == SppService::kNotNow);
+        CHECK(h.spp.replaceWithStandIn("Radio_C") == SppService::kReplacing);
+        h.removed("Radio_C", 10);
+        h.answer("Radio_C", 0);
+        CHECK(h.ours("Radio_C"));
+        CHECK(h.spp.checkRegistration(30));
+        h.answer("Radio_A", 5);
+        h.answer("Radio_B", 5);
+        h.answer("Radio_C", 5);
+        h.answer(kName, 5);
+        // Given the list again without it: as it holds the stand-in, it is removed.
+        std::vector<std::string> two;
+        two.push_back("Radio_A");
+        two.push_back("Radio_B");
+        h.spp.setStandIns(two);
+        CHECK(h.seen.said("SppUuidDeregister name 'Radio_C': the agent's stand-in for a service that is no longer "
+                          "declared"));
+        h.removed("Radio_C", 0);
+        CHECK(h.spp.standIns().size() == 2 && h.gap.sent.empty());
+    }
+    {   // a replacement that waits for a round: the round goes first, then the stand-in
+        Held h(0);
+        h.gap.attach();
+        CHECK(out(h.gap) == "R:Radio_A");
+        CHECK(h.spp.replaceWithStandIn("Radio_B") == SppService::kReplacing);
+        CHECK(out(h.gap) == "D:Radio_B");
+        h.gap.reply(kRspSppUuidDeregister, 0);
+        CHECK(h.gap.sent.empty());                              // Radio_A's registration is out
+        h.gap.reply(kRspSppUuidRegister, 0);
+        h.answer("Radio_B", 5);                                 // the round's
+        h.answer(kName, 0);
+        h.answer("Radio_B", 0);                                 // the replacement's, after the agent's own
+        CHECK(h.ours("Radio_B") && h.gap.sent.empty());
+    }
+    {   // the list changes while a stand-in's registration is out: answered 0, it is removed; the rest go on
+        Held h(0);
+        h.gap.attach();
+        CHECK(out(h.gap) == "R:Radio_A");
+        h.spp.setStandIns(std::vector<std::string>(1, "Radio_B"));
+        h.gap.reply(kRspSppUuidRegister, 0);
+        std::string sent = out(h.gap);
+        CHECK_IN(sent, sent == "D:Radio_A R:Radio_B");
+        h.gap.reply(kRspSppUuidDeregister, 0);
+        h.gap.reply(kRspSppUuidRegister, 0);
+        h.answer(kName, 0);
+        CHECK(h.spp.standIns().size() == 1 && h.ours("Radio_B"));
+        // One whose name is not known to hold the stand-in is left as it is when it is dropped.
+        Held k;
+        k.registered(5, 0);
+        k.spp.setStandIns(std::vector<std::string>());
+        CHECK(out(k.gap) == "D:Radio_B" && k.spp.standIns().empty());
+        // And the names: each once, never the agent's own, never one the stack would not take.
+        std::vector<std::string> odd;
+        odd.push_back("Radio_A");
+        odd.push_back(kName);
+        odd.push_back("Radio_A");
+        odd.push_back("two words");
+        k.spp.setStandIns(odd);
+        CHECK(k.spp.standIns().size() == 1 && k.spp.standIns()[0].name == "Radio_A");
+    }
+    {   // no place left: the agent's own takes the place of the last stand-in that is ours, and of no more. Nothing is
+        // registered after it in that round; the first stand-in keeps its place.
+        Held h(0);
+        h.gap.attach();
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 0);
+        h.answer(kName, 5);
+        h.removed(kName, 10);                                   // nothing under our name
+        h.answer(kName, 5);                                     // and refused again: no place
+        CHECK(h.spp.state() == SppService::kRetrySent);
+        CHECK(h.seen.said("the car's Bluetooth service did not take the agent's own serial service 'Test_Service' (5 "
+                          "DEFAULT"));
+        CHECK(h.seen.said("with stand-ins of the agent's registered ahead of it: the stack may have no place left, and "
+                          "the agent's own service must have one. So the last of them, 'Radio_B', is given up: it is "
+                          "removed, and the agent's own registered once more in its place. The declared service "
+                          "'Radio_B' has no stand-in for now: its program may be refused a place, or get one that no "
+                          "phone finds"));
+        h.removed("Radio_B", 0);
+        CHECK(h.seen.said("SppUuidDeregister name 'Radio_B': the agent's stand-in, given up so that the agent's own "
+                          "serial service has a place"));
+        h.answer(kName, 0);
+        CHECK(h.spp.state() == SppService::kRegistered && h.gap.sent.empty());
+        CHECK(h.ours("Radio_A") && !h.ours("Radio_B") && h.spp.standIns().size() == 2);
+        CHECK(h.seen.said("the agent's own serial service 'Test_Service' has a place now, the one the stand-in given up "
+                          "('Radio_B') left; stand-ins that still hold their names: 'Radio_A'"));
+        CHECK(!h.seen.said("nothing was registered under the name") && count(h.seen, "is given up") == 1);
+        // The next round sends it first again, as always: refused while no place is free, which is only counted.
+        CHECK(h.spp.checkRegistration(30));
+        h.answer("Radio_A", 5);
+        h.answer("Radio_B", 5);
+        h.answer(kName, 5);
+        CHECK(h.gap.sent.empty() && !h.ours("Radio_B"));
+    }
+    {   // one stand-in: it is given up, and the agent's own takes its place
+        Held h(0);
+        h.spp.setStandIns(std::vector<std::string>(1, "Radio_A"));
+        h.gap.attach();
+        h.answer("Radio_A", 0);
+        h.answer(kName, 5);
+        h.removed(kName, 10);
+        h.answer(kName, 5);
+        h.removed("Radio_A", 0);
+        h.answer(kName, 0);
+        CHECK(h.spp.state() == SppService::kRegistered && h.gap.sent.empty() && !h.ours("Radio_A"));
+        CHECK(h.seen.said("stand-ins that still hold their names: none"));
+    }
+    {   // three, two of which must go: the last, then the next-to-last, one removal and one registration at a time
+        Held h(0);
+        std::vector<std::string> three;
+        three.push_back("Radio_A");
+        three.push_back("Radio_B");
+        three.push_back("Radio_C");
+        h.spp.setStandIns(three);
+        h.gap.attach();
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 0);
+        h.answer("Radio_C", 0);
+        h.answer(kName, 5);
+        h.removed(kName, 10);
+        h.answer(kName, 5);
+        h.removed("Radio_C", 0);
+        h.answer(kName, 5);                                     // the place one left was not enough
+        h.removed("Radio_B", 0);
+        h.answer(kName, 0);
+        CHECK(h.spp.state() == SppService::kRegistered && h.gap.sent.empty());
+        CHECK(h.ours("Radio_A") && !h.ours("Radio_B") && !h.ours("Radio_C") && count(h.seen, "is given up") == 2);
+        CHECK(h.seen.said("the one the stand-ins given up ('Radio_C', 'Radio_B') left; stand-ins that still hold their "
+                          "names: 'Radio_A'"));
+    }
+    {   // every stand-in that is ours given up, and still refused: failed, with nothing more sent
+        Held h(0);
+        h.gap.attach();
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 5);
+        h.answer(kName, 5);
+        h.removed(kName, 10);
+        h.answer(kName, 5);
+        h.removed("Radio_A", 0);
+        h.answer(kName, 5);
+        CHECK(h.spp.state() == SppService::kFailed && h.gap.sent.empty());
+        CHECK(h.seen.said("the agent's own serial service 'Test_Service' was refused after the stand-ins were given up "
+                          "too (5 DEFAULT"));
+        // With no stand-in that holds its name, nothing is given up: failed as before.
+        Held n(0);
+        n.gap.attach();
+        n.answer("Radio_A", 5);
+        n.answer("Radio_B", 5);
+        n.answer(kName, 5);
+        n.removed(kName, 10);
+        n.answer(kName, 5);
+        CHECK(n.spp.state() == SppService::kFailed && n.gap.sent.empty() && n.seen.said("nothing was registered under"));
+        CHECK(!n.seen.said("given up"));
+    }
+    {   // a removal of a stand-in answered 5 in the give-up: it is not counted as ours any more, it may hold its place
+        // still, and the agent's own goes once more all the same; refused, the next is given up
+        Held h(0);
+        h.gap.attach();
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 0);
+        h.answer(kName, 5);
+        h.removed(kName, 10);
+        h.answer(kName, 5);
+        h.removed("Radio_B", 5);
+        CHECK(h.seen.said("the removal of the stand-in 'Radio_B' was answered 5 DEFAULT (a link on that service is up): it "
+                          "may hold its place still; the agent's own serial service is registered once more all the "
+                          "same"));
+        h.answer(kName, 5);
+        h.removed("Radio_A", 0);
+        h.answer(kName, 0);
+        CHECK(h.spp.state() == SppService::kRegistered && !h.ours("Radio_A") && !h.ours("Radio_B") && h.gap.sent.empty());
+    }
+    {   // switched off in the middle of a give-up: nothing of it is left, and the next round starts afresh
+        Held h(0);
+        h.gap.attach();
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 0);
+        h.answer(kName, 5);
+        h.removed(kName, 10);
+        h.answer(kName, 5);
+        CHECK(out(h.gap) == "D:Radio_B");
+        h.gap.status(0);
+        h.gap.reply(kRspSppUuidDeregister, 0);                  // the removal's answer, after the switch-off
+        CHECK(h.gap.sent.empty() && h.spp.state() == SppService::kHeld);
+        h.gap.status(1);
+        h.answer("Radio_A", 0);
+        h.answer("Radio_B", 0);
+        h.answer(kName, 0);
+        CHECK(h.spp.state() == SppService::kRegistered && h.ours("Radio_A") && h.ours("Radio_B") && h.gap.sent.empty());
+        // And a new round's give-up goes as the first did: the server goes with its removal out, and comes back.
+        Held g(0);
+        g.gap.attach();
+        g.answer("Radio_A", 0);
+        g.answer("Radio_B", 0);
+        g.answer(kName, 5);
+        g.removed(kName, 10);
+        g.answer(kName, 5);
+        CHECK(out(g.gap) == "D:Radio_B");
+        g.gap.detach();
+        g.gap.attach();
+        g.answer("Radio_A", 0);
+        g.answer("Radio_B", 0);
+        g.answer(kName, 5);
+        g.removed(kName, 10);
+        g.answer(kName, 5);
+        g.removed("Radio_B", 0);
+        g.answer(kName, 0);
+        CHECK(g.spp.state() == SppService::kRegistered && g.ours("Radio_A") && !g.ours("Radio_B"));
+        CHECK(count(g.seen, "is given up") == 2 && g.seen.said("stand-in given up ('Radio_B') left"));
+    }
+    {   // as Bluetooth serial stops: the stand-ins that hold their names are removed, after the agent's own
+        Held h;
+        h.registered(0, 5);
+        CHECK(h.spp.remove("leaving"));
+        CHECK(h.spp.removeStandIns() == 1);
+        CHECK(out(h.gap) == "D:Test_Service" && h.spp.othersPending());   // ours first
+        h.gap.reply(kRspSppUuidDeregister, 0);
+        CHECK(h.seen.said("SppUuidDeregister name 'Radio_A': the agent's stand-in, as Bluetooth serial stops, and its "
+                          "program is not running"));
+        h.removed("Radio_A", 0);
+        CHECK(!h.spp.othersPending() && !h.ours("Radio_A") && h.spp.removeStandIns() == 0);
+        // Nothing goes out of this object's registrations after remove(), the stand-ins' among them.
+        CHECK(!h.spp.checkRegistration(30) && h.spp.replaceWithStandIn("Radio_B") == SppService::kNotNow);
+        h.spp.tend();
+        CHECK(h.gap.sent.empty());
+        // One whose program runs was told so first, and stays.
+        Held r;
+        r.registered(0, 0);
+        r.spp.standInRuns("Radio_B");
+        CHECK(r.spp.removeStandIns() == 1 && out(r.gap) == "D:Radio_A");
+        // With the server gone there is nothing to remove.
+        Held g;
+        g.registered(0, 0);
+        g.gap.detach();
+        CHECK(g.spp.removeStandIns() == 0 && !g.spp.othersPending());
+    }
+    {   // with no stand-in, a round is the agent's own registration alone, as before
+        FakeGap gap;
+        Seen seen;
+        SppService spp(&gap, &seen);
+        spp.setClock(&testClock);
+        spp.setHold(10);
+        spp.configure(kName, kUuid, 0);
+        gClock = 1000;
+        CHECK(spp.start());
+        gap.attach();
+        gClock = 1010;
+        spp.tend();
+        CHECK(seen.said("the serial registrations go out now, 10.0 s after the car's Bluetooth was seen on: the agent's "
+                        "own; no serial service of another program is declared"));
+        CHECK(out(gap) == "R:Test_Service");
+    }
+}
+
 int main() {
     // 1. UUIDs: shape, upper-casing, SIG profile UUIDs.
     std::string u;
@@ -284,8 +963,8 @@ int main() {
         CHECK(std::string(gapErrorName(16)) == "UNKNOWN" && std::string(gapErrorName(kNoError)) == "UNKNOWN");
         // What a code means depends on the request it answers.
         CHECK(registerErrorText(0) == "0 OK");
-        CHECK(registerErrorText(5) == "5 DEFAULT (the name or the UUID is registered already, or the car's Bluetooth "
-                                      "is switched off)");
+        CHECK(registerErrorText(5) == "5 DEFAULT (the name or the UUID is registered already, the stack has no place "
+                                      "left for it, or the car's Bluetooth is switched off)");
         CHECK(deregisterErrorText(10) == "10 INVALID_PARAM (no such name is registered)");
         CHECK(deregisterErrorText(5) == "5 DEFAULT (a link on that service is up)");
         CHECK(registerErrorText(10) == "10 INVALID_PARAM" && deregisterErrorText(14) == "14 PAGE_TIMEOUT");
@@ -435,8 +1114,8 @@ int main() {
         gap.reply(kRspSppUuidRegister, 5);
         CHECK(spp.state() == SppService::kFailed);
         CHECK(seen.said("nothing was registered under the name 'Test_Service', so its UUID "
-                        "0123ABCD-89EF-4A5B-8C7D-0123456789AB is registered under another name, or the car's Bluetooth "
-                        "is switched off"));
+                        "0123ABCD-89EF-4A5B-8C7D-0123456789AB is registered under another name, the stack has no place "
+                        "left for it, or the car's Bluetooth is switched off"));
     }
     {   // refused the second time too: failed, and nothing more is sent
         FakeGap gap;
@@ -1453,8 +2132,10 @@ int main() {
         spp.setPairingInforms(true);
         CHECK(spp.start());
         gap.attach();
-        CHECK(gap.informs.size() == kInforms + 2 && gap.informs[kInforms] == kInfPairingError &&
-              gap.informs[kInforms + 1] == kInfSimplePairingConfirmationRequired);
+        // After the six informs, ahead of the two attributes.
+        CHECK(gap.informs.size() == kInforms + 2 && gap.informs[6] == kInfPairingError &&
+              gap.informs[7] == kInfSimplePairingConfirmationRequired && gap.informs[8] == kAttrStatus &&
+              gap.informs[9] == kAttrLocalName);
         gap.took(kReqSppUuidRegister);
         gap.reply(kRspSppUuidRegister, 0);
         std::vector<uint8_t> p;
@@ -1856,6 +2537,10 @@ int main() {
         if (sizeof(void*) != 4) CHECK(!spp.start());
     }
 #endif
+
+    testStandInUuid();
+    testHold();
+    testStandIns();
 
     printf("test_spp_service: ok\n");
     return 0;
