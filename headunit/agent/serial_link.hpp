@@ -734,13 +734,13 @@ private:
     // The knock by dial-up (dialup_requests.hpp): whether the option has it on; the phones' requests for the car's
     // dial-up networking service (kCarDialupService), which SppService gives to sppKnockRequest() in place of
     // sppPhone() while it is on; the phone at `address` asked (dialupKnock()) or its request has ended
-    // (dialupEnded(), `how` for the log), on the Bluetooth service's thread; the agent's refusal's answer; and on the
+    // (dialupEnded(); `cameUp`: it came up), on the Bluetooth service's thread; the agent's refusal's answer; and on the
     // listener's thread, the refusals that are due and what is lost (tendDialup()).
     bool dialupConfigured() { return knockOn() && config_.dial.knockDialup; }
     virtual void sppKnockRequest(btspp::SppService::Phone what, const std::string& address, bool parsed);
     virtual void sppRejectAnswered(uint32_t error);
     void dialupKnock(const std::string& address);
-    void dialupEnded(const std::string& address, const char* how);
+    void dialupEnded(const std::string& address, bool cameUp);
     // The knock a request that ended brings (DialRules::knocked()), said in the log. mu_ held; `heardAt` in ms.
     void dialupKnocked(const std::string& address, int64_t heardAt, int64_t now, const char* how);
     void tendDialup();

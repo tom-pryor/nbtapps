@@ -1266,6 +1266,18 @@ static void testDialupRequests() {
         }
         CHECK(last == DialupRequests::kGaveUp && sends == t.retries + 1 && q.givenUp() == 1 && !q.busy());
     }
+    {   // whether a refusal of the agent's had gone for a request the stack says has ended
+        DialupRequests q(t);
+        bool after = true;
+        q.heard(kOne, 1000);
+        CHECK(q.ended(kOne, &heard, &after) && !after);                // the car ended it
+        q.heard(kOne, 2000);
+        CHECK(q.refusalDue(4000, &a) && q.ended(kOne, &heard, &after) && after);
+        CHECK(q.answered(5, 4030, &a, &heard) == DialupRequests::kAfterEnd);
+        q.heard(kOne, 5000);                                           // BUSY, then the word before the next try
+        CHECK(q.refusalDue(7000, &a) && q.answered(2, 7005, &a, &heard) == DialupRequests::kRetry);
+        CHECK(q.ended(kOne, &heard, &after) && after && !q.busy());
+    }
     {   // the car's end comes while the agent's refusal is out: the request ends then, and the answer says nothing more
         DialupRequests q(t);
         q.heard(kOne, 1000);
