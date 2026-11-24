@@ -235,9 +235,10 @@ void DialRules::count(KnockEnd why) {
     }
 }
 
-DialRules::KnockEnd DialRules::knocked(const std::string& address, int64_t now) {
+DialRules::KnockEnd DialRules::knocked(const std::string& address, int64_t now, bool dialup) {
     if (!config_.knock) return kNoKnock;
-    ++knockCounts_.byMarker;
+    if (dialup) ++knockCounts_.byDialup;
+    else ++knockCounts_.byMarker;
     std::string key = addressKey(address);
     if (key.empty()) {
         count(kKnockNotDialable);
@@ -260,6 +261,7 @@ DialRules::KnockEnd DialRules::knocked(const std::string& address, int64_t now) 
     Knock k;
     k.address = address;
     k.at = now;
+    k.dialup = dialup;
     knocks_.push_back(k);
     return kKnockWaits;
 }
@@ -281,6 +283,7 @@ void DialRules::ignore(const Knock& k, KnockEnd why, int64_t now) {
     n.number = presence_.number(k.address);
     n.end = why;
     n.waitedMs = now - k.at;
+    n.dialup = k.dialup;
     knockNews_.push_back(n);
 }
 
@@ -382,6 +385,7 @@ bool DialRules::nextKnockMode(int64_t now, const Facts& facts, Dial* out) {
         n.number = p->number;
         n.end = kKnockDialled;
         n.waitedMs = now - k.at;
+        n.dialup = k.dialup;
         knockNews_.push_back(n);
         start(*p, kKnock, now, out);
         return true;

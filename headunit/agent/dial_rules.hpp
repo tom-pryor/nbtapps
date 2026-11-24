@@ -35,6 +35,10 @@
 //   ignored after that
 //   otherwise: the car dials the phone at once (kKnock), with ServiceConnect and no ask
 //
+// A knock by dial-up, a phone's request for the car's dial-up networking service (dialup_requests.hpp), is told once
+// that request has ended (knocked() with `dialup`) and goes by the same rules; it is counted apart, and its news says
+// which kind it was.
+//
 // A knock from a phone that is not one of the agent's is dialled as any other, whether or not the pairing window is
 // open: a phone that the agent has forgotten, or whose app holds a key the agent no longer has, only knocks, and is
 // otherwise never dialled, never reaches `hello` and `auth`, and is never told that it needs pairing. The knock says
@@ -235,16 +239,19 @@ public:
         unsigned number;
         KnockEnd end;
         int64_t waitedMs;
-        KnockNews() : number(0), end(kKnockWaits), waitedMs(0) {}
+        bool dialup;       // the knock was by dial-up (knocked())
+        KnockNews() : number(0), end(kKnockWaits), waitedMs(0), dialup(false) {}
     };
     // The knocks so far, for serial.status.
     struct KnockCounts {
-        unsigned byMarker;                                                // knocks seen
-        unsigned ignoredQuiet, ignoredBusy, ignoredNotDialable;
+        unsigned byMarker;                                                // knocks seen, by the magic bytes
+        unsigned byDialup;                                                // and by dial-up
+        unsigned ignoredQuiet, ignoredBusy, ignoredNotDialable;           // of either kind
         unsigned dials, dialsFailed;                                      // dials knocks brought, and of those the
                                                                           // ones that gave the agent no link
         KnockCounts()
-            : byMarker(0), ignoredQuiet(0), ignoredBusy(0), ignoredNotDialable(0), dials(0), dialsFailed(0) {}
+            : byMarker(0), byDialup(0), ignoredQuiet(0), ignoredBusy(0), ignoredNotDialable(0), dials(0),
+              dialsFailed(0) {}
     };
     // What an answer to ServiceListQuery asks of the listener.
     enum Listing {
@@ -343,8 +350,10 @@ public:
     void afresh();
 
     // The knock (see the top of this file); with DialConfig::knock off, these take nothing and give kNoKnock.
-    // A phone knocked at `now`: kKnockWaits if its dial is to go, or why the knock is ignored.
-    KnockEnd knocked(const std::string& address, int64_t now);
+    // A phone knocked at `now`: kKnockWaits if its dial is to go, or why the knock is ignored. `dialup`: by a request
+    // for the car's dial-up networking service (the knock by dial-up), which goes by the same rules and is counted
+    // apart (KnockCounts::byDialup).
+    KnockEnd knocked(const std::string& address, int64_t now, bool dialup = false);
     // The knocks next() has dialled or ignored since the last call.
     std::vector<KnockNews> takeKnockNews();
     const KnockCounts& knockCounts() const { return knockCounts_; }
@@ -494,6 +503,7 @@ private:
     struct Knock {
         std::string address;
         int64_t at;
+        bool dialup;   // a knock by dial-up (knocked())
     };
     PhoneState& phone(const std::string& address);
     const PhoneState* find(const std::string& address) const;

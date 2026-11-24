@@ -699,6 +699,18 @@ const char* knockEndText(DialRules::KnockEnd end) {
     return "?";
 }
 
+// The time the dial-up requests go by, in milliseconds.
+int64_t dialupNow() { return (int64_t)(monoNow() * 1000.0); }
+
+DialupRequests::Timing dialupTiming(const DialConfig& c) {
+    DialupRequests::Timing t;
+    t.refuseAfterMs = c.dialupRefuseMs;
+    t.retryMs = kDialupRetryMs;
+    t.replyMs = kDialupReplyMs;
+    t.retries = kDialupRetries;
+    return t;
+}
+
 }  // namespace
 
 SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, const SerialConfig& config)
@@ -714,7 +726,8 @@ SerialListener::SerialListener(GapClient* gap, NodeGate* gate, SerialLog* log, c
       discAnswered_(false), discError_(0), staleAtStart_(false), cleanupKind_(kCleanOwn), leftFailing_(false),
       leftTimes_(0), cleanupQuiet_(false), leftPhase_(kLeftNone), leftAt_(0), leftTried_(false), pairingOpen_(false),
       onTrial_(false), checkedAtShared_(0), lastLinks_(0), problems_(0), restoredSeen_(0), problemsSaid_(false), repointNumber_(0),
-      repointDialError_(0), repointStopped_(false), repointDisconnect_(false) {
+      repointDialError_(0), repointStopped_(false), repointDisconnect_(false), dialup_(dialupTiming(config.dial)),
+      dialupAbsentSaid_(false) {
     for (int i = 0; i < NodeTracker::kNodes; ++i) {
         watched_[i] = false;
         appeared_[i] = 0;
@@ -798,6 +811,12 @@ bool SerialListener::start(std::string* why) {
 
     spp_.configure(config_.name, config_.uuid, 0);
     spp_.setPairingInforms(config_.dial.on);
+    // The knock by dial-up: the requests for the car's dial-up networking service are knocks, and the service is kept
+    // on. With the option off, such a request is any other service's, as before.
+    if (dialupConfigured()) {
+        spp_.setKnockService(kCarDialupService);
+        spp_.setKeepOn(kCarDialupService);
+    }
     // A link on the dialled instance from before this listener: ended once the car's phones are known.
     staleAtStart_ = config_.dial.on && access(config_.dial.node.c_str(), F_OK) == 0;
     if (staleAtStart_)
@@ -863,6 +882,7 @@ void SerialListener::stop() {
     if (hasThread_) pthread_join(thread_, NULL);
     hasThread_ = false;
     if (active()) shutDown();
+    restoreDialup();
     endDial("the listener stops");
     flushProblems();
     closeKept(kEvery);
@@ -1083,12 +1103,137 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
         pthread_mutex_unlock(&mu_);
         if (!spp_.askAboutRefused()) sayRefusal(RefusalFacts::kListNotAsked, PhoneInList());
     }
-    // A request for the car's dial-up networking service is never a serial link's: with the knock by dial-up, it is
-    // that phone's knock.
-    if (what == SppService::kPhoneAsked && service == kCarDialupService && knockDialupOn()) dialupKnock(address);
 }
 
-void SerialListener::dialupKnock(const std::string& /*address*/) {}
+// ---- the knock by dial-up: on the Bluetooth service's thread, but for tendDialup() -------------------------------
+
+// A request for the car's dial-up networking service is never a serial link's: with the knock by dial-up SppService
+// gives it here, and it is that phone's knock. No node is looked for, no hold put on, no refusal counted, and the
+// registration check is not held back by it.
+void SerialListener::sppKnockRequest(SppService::Phone what, const std::string& address, bool parsed) {
+    if (what == SppService::kPhoneAsked) dialupKnock(address);
+    else dialupEnded(address, what == SppService::kPhoneLinked ? "it came up, which the phone closes" : "the car ended it");
+    if (!parsed) say("a request for the car's dial-up networking service was not read whole");
+}
+
+void SerialListener::dialupKnock(const std::string& address) {
+    pthread_mutex_lock(&mu_);
+    int64_t now = dialupNow();
+    bool fresh = dialup_.heard(address, now);
+    unsigned number = addressKey(address).empty() ? 0 : rules_.number(address);
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+    char whose[32] = "a phone the car does not list";
+    if (number != 0) snprintf(whose, sizeof whose, "phone %u", number);
+    if (addressKey(address).empty())
+        say("a request for the car's dial-up networking service that names no phone: no knock, and nothing to refuse");
+    else if (!fresh)
+        say("%s asked for the car's dial-up networking service ('%s') while its request was pending already: the same "
+            "knock", whose, kCarDialupService);
+    else
+        say("%s asked for the car's dial-up networking service ('%s'): the knock by dial-up. It is taken as a knock once "
+            "the request has ended, and the agent refuses the request itself if the car has not ended it in %u ms",
+            whose, kCarDialupService, config_.dial.dialupRefuseMs);
+}
+
+void SerialListener::dialupEnded(const std::string& address, const char* how) {
+    pthread_mutex_lock(&mu_);
+    int64_t now = dialupNow(), heardAt = 0;
+    if (dialup_.ended(address, &heardAt)) dialupKnocked(address, heardAt, now, how);
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+}
+
+void SerialListener::dialupKnocked(const std::string& address, int64_t heardAt, int64_t now, const char* how) {
+    DialRules::KnockEnd end = rules_.knocked(address, now, true);
+    unsigned number = addressKey(address).empty() ? 0 : rules_.number(address);
+    char whose[32] = "a phone the car does not list";
+    if (number != 0) snprintf(whose, sizeof whose, "phone %u", number);
+    char text[400];
+    snprintf(text, sizeof text, "%s knocked by a request for the car's dial-up networking service, which ended %lld ms "
+             "after it was heard (%s), %s", whose, (long long)(now - heardAt), how, knockEndText(end));
+    log_->line(text);
+}
+
+void SerialListener::sppRejectAnswered(uint32_t error) {
+    std::string address;
+    int64_t heardAt = 0;
+    pthread_mutex_lock(&mu_);
+    int64_t now = dialupNow();
+    DialupRequests::Answer a = dialup_.answered(error, now, &address, &heardAt);
+    if (a == DialupRequests::kEnded) dialupKnocked(address, heardAt, now, "the agent's refusal was answered");
+    if (a == DialupRequests::kGaveUp)
+        dialupKnocked(address, heardAt, now, "the agent's refusal was given up, and the request may still be pending");
+    pthread_cond_signal(&wake_);
+    pthread_mutex_unlock(&mu_);
+    // 5 is the stack's answer to such a refusal whether or not it worked, and says nothing more.
+    char answer[96];
+    if (error == kNoError) snprintf(answer, sizeof answer, "with nothing (not sent, or rejected)");
+    else snprintf(answer, sizeof answer, "%s", gapErrorText(error, error == 5 ? "as always for this service" : "").c_str());
+    if (a == DialupRequests::kRetry)
+        say("ServiceReject of a request for the car's dial-up networking service answered %s: sent again in %u ms",
+            answer, kDialupRetryMs);
+    else if (a == DialupRequests::kGaveUp)
+        say("ServiceReject of a request for the car's dial-up networking service answered %s, %u times: given up",
+            answer, kDialupRetries + 1);
+    else if (a == DialupRequests::kEnded || a == DialupRequests::kAfterEnd)
+        say("ServiceReject of a request for the car's dial-up networking service answered %s%s", answer,
+            a == DialupRequests::kAfterEnd ? ", after the request had ended" : "");
+}
+
+// On the listener's thread at every pass: a request the car has not ended in its time is refused by the agent, one
+// refusal at a time; one with no answer is given up; and with the car's Bluetooth off or its service gone, every
+// request is.
+void SerialListener::tendDialup() {
+    if (!dialupConfigured()) return;
+    // The stack with no dial-up service: said once, with what follows from it.
+    if (!dialupAbsentSaid_ && spp_.kept().absentSeen) {
+        dialupAbsentSaid_ = true;
+        say("the car has no dial-up networking service, so the knock by dial-up cannot work on it: hello no longer "
+            "lists serial-knock-dialup");
+    }
+    bool gone = !spp_.attached() || spp_.bluetooth() == SppService::kBtOff;
+    std::string address, lostAddress;
+    int64_t heardAt = 0;
+    DialupRequests::Answer lost = DialupRequests::kNoneOut;
+    bool due = false, cleared = false, wasLost = false;
+    pthread_mutex_lock(&mu_);
+    int64_t now = dialupNow();
+    if (gone) {
+        cleared = dialup_.busy();
+        dialup_.clear();
+    } else {
+        wasLost = dialup_.refusalLost(now, &lost, &lostAddress, &heardAt);
+        if (wasLost && lost == DialupRequests::kGaveUp)
+            dialupKnocked(lostAddress, heardAt, now, "the agent's refusal had no answer, and was given up");
+        due = dialup_.refusalDue(now, &address);
+    }
+    unsigned number = due && !addressKey(address).empty() ? rules_.number(address) : 0;
+    pthread_mutex_unlock(&mu_);
+    if (cleared)
+        say("the car's Bluetooth %s: the pending requests for its dial-up networking service went with it",
+            spp_.attached() ? "has been switched off" : "service has gone");
+    if (wasLost)
+        say("ServiceReject of a request for the car's dial-up networking service had no answer in %u ms: %s", kDialupReplyMs,
+            lost == DialupRequests::kRetry ? "sent again shortly"
+                                           : (lost == DialupRequests::kGaveUp ? "given up" : "the request had ended"));
+    if (!due) return;
+    char whose[32] = "a phone the car does not list";
+    if (number != 0) snprintf(whose, sizeof whose, "phone %u", number);
+    say("the car has not ended the request of %s for its dial-up networking service in %u ms: the agent refuses it "
+        "(ServiceReject)", whose, config_.dial.dialupRefuseMs);
+    if (spp_.rejectRequest(address, kCarDialupService)) return;
+    // Not sent (another refusal of the agent's out, or the send failed): as BUSY, sent again shortly.
+    sppRejectAnswered(kNoError);
+}
+
+void SerialListener::restoreDialup() {
+    if (!dialupConfigured() || !spp_.switchKeptOff()) return;
+    double end = monoNow() + 3.0;
+    while (spp_.keptSetOut() && monoNow() < end) usleep(20000);
+    if (spp_.keptSetOut())
+        say("the switch-off of the car's dial-up networking service had no answer in 3 s");
+}
 
 // The car's device list has come for the refusal that waits for it: on the Bluetooth service's thread.
 void SerialListener::sppRefusedPhone(const PhoneInList& phone) { sayRefusal(RefusalFacts::kListRead, phone); }
@@ -1340,7 +1485,8 @@ void SerialListener::waitForPass() {
     if (!hot && !stop_ && !told) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += now < resetHotUntil_ || reset_.waiting || dialHot ? 20000000L : 200000000L;
+        // And while a request for the car's dial-up service is pending or the agent's refusal of one is out.
+        ts.tv_nsec += now < resetHotUntil_ || reset_.waiting || dialHot || dialup_.busy() ? 20000000L : 200000000L;
         if (ts.tv_nsec >= 1000000000L) { ++ts.tv_sec; ts.tv_nsec -= 1000000000L; }
         pthread_cond_timedwait(&wake_, &mu_, &ts);
     }
@@ -2397,9 +2543,22 @@ SerialStatus SerialListener::serialStatus() {
     s.knocksIgnoredNotDialable = k.ignoredNotDialable;
     s.knockDials = k.dials;
     s.knockDialsFailed = k.dialsFailed;
+    s.knocksByDialup = k.byDialup;
+    s.dialupRefusals = dialup_.refusalsSent();
     pthread_mutex_unlock(&mu_);
     s.dialOn = config_.dial.on;
     s.knock = config_.dial.on && config_.dial.knock;
+    s.knockDialup = knockDialupOn();
+    if (dialupConfigured()) {
+        SppService::KeptState d = spp_.kept();
+        s.dialupSwitches = d.switches;
+        switch (d.state) {
+        case SppService::kKeptOn: s.dialupService = d.switchedOn ? "switched-on" : "on"; break;
+        case SppService::kKeptOff: s.dialupService = "off"; break;
+        case SppService::kKeptAbsent: s.dialupService = "absent"; break;
+        default: s.dialupService = "not-looked"; break;
+        }
+    }
     s.stack = heard.version;
     s.checks = checks.sent;
     s.checksRestored = checks.restored;
@@ -2514,7 +2673,9 @@ void SerialListener::maybeDial(int64_t now) {
         const DialRules::KnockNews& n = news[i];
         char waited[64] = "";
         if (n.waitedMs > 0) snprintf(waited, sizeof waited, " (%lld ms after the knock)", (long long)n.waitedMs);
-        say("phone %u knocked by the knock's magic bytes, %s%s", n.number, knockEndText(n.end), waited);
+        say("phone %u knocked by %s, %s%s", n.number,
+            n.dialup ? "a request for the car's dial-up networking service" : "the knock's magic bytes",
+            knockEndText(n.end), waited);
     }
     if (!due) return;
     dial_ = d;
@@ -3824,6 +3985,7 @@ void SerialListener::run() {
         tendLetGo();
         tendReset();
         tendRefusal();
+        tendDialup();
         tendDial();
         flushProblems();
         // The hold goes off when the agent's link has ended, or when no link has come of a phone's request.

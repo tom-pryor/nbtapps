@@ -99,10 +99,16 @@ SppService::SppService(GapClient* gap, Events* events)
       otherReplyS_(kOtherRemovalReplyS), bt_(kBtUnknown), statusHeard_(false), attachedAt_(0), openSince_(0),
       attributeLines_(0), regFor_(kForNone), regAt_(0), regStale_(false), regQuiet_(false), roundOn_(false),
       roundCheck_(false), retryDue_(false), yieldTried_(false), yielding_(false), yieldLeft_(0), checkFails_(0),
-      timesRegistered_(0), unknownLeft_(0), removeError_(kNoError), clearError_(kNoError),
+      timesRegistered_(0), rejectOut_(false), keptLooked_(false), keptWasOn_(false), askOut_(false),
+      askStale_(false), askAt_(0), setOut_(false), setStale_(false), setOn_(false), setAt_(0), lookQuiet_(false),
+      unknownLeft_(0), removeError_(kNoError), clearError_(kNoError),
       disconnectOut_(false), disconnectTold_(false), disconnectQuiet_(false), disconnectSentAt_(0), disconnectReplyS_(kDisconnectReplyS),
       connectOut_(false), lateKept_(false), pairingInforms_(false), refusalAsked_(false), versionAsked_(false), endsLogged_(0), unreadSaid_(0), checkOut_(false), checkSentAt_(0),
       unansweredSaid_(false), restoredRun_(0), oddRun_(false) {
+    for (int i = 0; i < 2; ++i) {
+        keptOdd_[i] = keptOddRejected_[i] = 0;
+        keptOddKnown_[i] = false;
+    }
     pthread_mutex_init(&mu_, NULL);
 }
 
@@ -328,6 +334,7 @@ bool SppService::checkRegistration(double replyS) {
     pthread_mutex_lock(&mu_);
     bool failed = checkFails_ != fails;
     pthread_mutex_unlock(&mu_);
+    lookAtKept(true);   // and the kept service, quietly
     return !failed;
 }
 
@@ -839,6 +846,7 @@ void SppService::ownAnswered(uint32_t err, uint32_t rejectedType, bool waited) {
                 "stand-ins that still hold their names: %s", name_.c_str(), yielded == 1 ? "" : "s", given.c_str(),
                 kept.empty() ? "none" : namesText(kept).c_str());
         set(kRegistered);
+        lookAtKept(false);   // after the agent's own registration: the kept service
         return;
     }
     if (s == kRegSent) {
@@ -972,6 +980,205 @@ void SppService::otherAnswered(const Other& other, uint32_t err) {
     if (go) pump();
 }
 
+// ---- a request refused, and a service of the car's kept on --------------------------------------------------------
+
+bool SppService::rejectRequest(const std::string& address, const std::string& service) {
+    if (!gap_->attached()) return false;
+    pthread_mutex_lock(&mu_);
+    bool busy = rejectOut_;
+    rejectOut_ = true;
+    pthread_mutex_unlock(&mu_);
+    if (busy) return false;
+    if (gap_->request(kReqServiceReject, buildServiceReject(address, service))) return true;
+    pthread_mutex_lock(&mu_);
+    rejectOut_ = false;
+    pthread_mutex_unlock(&mu_);
+    return false;
+}
+
+SppService::KeptState SppService::kept() {
+    pthread_mutex_lock(&mu_);
+    KeptState k = kept_;
+    pthread_mutex_unlock(&mu_);
+    return k;
+}
+
+bool SppService::keptSetOut() {
+    pthread_mutex_lock(&mu_);
+    bool out = setOut_;
+    pthread_mutex_unlock(&mu_);
+    return out && gap_->attached();
+}
+
+// Whether an answer to the look (0) or the switch (1) that says nothing of the service is news: not the same as the
+// last such one of that kind with a good one of that kind in between. mu_ not held.
+bool SppService::keptOddNews(int which, uint32_t err, uint32_t rejectedType) {
+    pthread_mutex_lock(&mu_);
+    bool news = !keptOddKnown_[which] || keptOdd_[which] != err || keptOddRejected_[which] != rejectedType;
+    keptOddKnown_[which] = true;
+    keptOdd_[which] = err;
+    keptOddRejected_[which] = rejectedType;
+    pthread_mutex_unlock(&mu_);
+    return news;
+}
+
+void SppService::lookAtKept(bool quiet) {
+    if (keptName_.empty() || !gap_->attached()) return;
+    bool lost = false;
+    pthread_mutex_lock(&mu_);
+    double at = now();
+    // One that has had no answer in all this time is given up, so that the next may go.
+    if (askOut_ && at - askAt_ >= kStaleReplyS) {
+        askOut_ = askStale_ = false;
+        lost = true;
+    }
+    if (setOut_ && at - setAt_ >= kStaleReplyS) setOut_ = setStale_ = false;
+    bool go = !askOut_ && !setOut_ && mode_ == kModeKeep && mayRegisterLocked(at);
+    if (go) {
+        askOut_ = true;
+        askStale_ = false;
+        askAt_ = at;
+        lookQuiet_ = quiet;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (lost && keptOddNews(0, kNoError, 1))
+        say("SupportedServicesGet had no answer in %.0f s: whether the car's service '%s' is on is not known", kStaleReplyS,
+            keptName_.c_str());
+    if (!go) return;
+    if (gap_->request(kReqSupportedServicesGet, std::vector<uint8_t>())) return;
+    pthread_mutex_lock(&mu_);
+    askOut_ = false;
+    pthread_mutex_unlock(&mu_);
+    if (!quiet) say("SupportedServicesGet not sent: %s", gap_->attached() ? "the send failed" : "the server is not attached");
+}
+
+void SppService::sendKeptSet(bool on) {
+    pthread_mutex_lock(&mu_);
+    bool busy = setOut_;
+    if (!busy) {
+        setOut_ = true;
+        setStale_ = false;
+        setOn_ = on;
+        setAt_ = now();
+    }
+    pthread_mutex_unlock(&mu_);
+    if (busy) return;
+    if (gap_->request(kReqEnabledServicesSet, buildEnabledServicesSet(keptName_, on))) return;
+    pthread_mutex_lock(&mu_);
+    setOut_ = false;
+    pthread_mutex_unlock(&mu_);
+    say("EnabledServicesSet for the car's service '%s' not sent: %s; tried again at the next registration check",
+        keptName_.c_str(), gap_->attached() ? "the send failed" : "the server is not attached");
+}
+
+bool SppService::switchKeptOff() {
+    if (keptName_.empty() || !gap_->attached()) return false;
+    pthread_mutex_lock(&mu_);
+    bool go = kept_.foundOffFirst && kept_.switchedOn && !setOut_;
+    pthread_mutex_unlock(&mu_);
+    if (!go) return false;
+    sendKeptSet(false);
+    return keptSetOut();
+}
+
+void SppService::keptAnswered(uint32_t id, uint32_t rejectedType, const uint8_t* payload, uint32_t len) {
+    bool ask = rejectedType != 0 ? id == kReqSupportedServicesGet : id == kRspSupportedServicesGet;
+    const char* name = keptName_.c_str();
+    pthread_mutex_lock(&mu_);
+    bool out = ask ? askOut_ : setOut_;
+    bool stale = ask ? askStale_ : setStale_;
+    bool quiet = lookQuiet_, on = setOn_;
+    if (ask) askOut_ = askStale_ = false;
+    else setOut_ = setStale_ = false;
+    pthread_mutex_unlock(&mu_);
+    if (!out) return;   // none of ours: nothing
+    const char* what = ask ? "SupportedServicesGet" : "EnabledServicesSet";
+    if (stale) {
+        say("the answer to %s that went out before the car's Bluetooth was switched off or the server went: passed over",
+            what);
+        return;
+    }
+    if (!ask) {
+        uint32_t err = rejectedType != 0 ? kNoError : readError(payload, len);
+        if (rejectedType != 0 || err != 0) {
+            char answer[64];
+            snprintf(answer, sizeof answer, "a rejection (type 0x%x)", rejectedType);
+            if (keptOddNews(1, err, rejectedType))
+                say("EnabledServicesSet switching the car's service '%s' %s was answered %s: tried again at the next "
+                    "registration check", name, on ? "on" : "off",
+                    rejectedType != 0 ? answer : gapErrorText(err, "").c_str());
+            return;
+        }
+        unsigned switches = 0;
+        pthread_mutex_lock(&mu_);
+        keptOddKnown_[1] = false;
+        if (on) {
+            kept_.state = kKeptOn;
+            kept_.switchedOn = true;
+            switches = ++kept_.switches;
+            keptWasOn_ = true;
+        } else {
+            kept_.state = kKeptOff;
+            kept_.switchedOn = false;
+            keptWasOn_ = false;
+        }
+        pthread_mutex_unlock(&mu_);
+        if (!on) say("the car's service '%s' is switched off again, as it was found (EnabledServicesSet answered 0 OK)", name);
+        else if (switches == 1) say("the car's service '%s' is switched on (EnabledServicesSet answered 0 OK)", name);
+        return;
+    }
+    SupportedServices s;
+    if (rejectedType == 0) s = parseSupportedServices(payload, len);
+    if (rejectedType != 0 || !s.ok || s.error != 0) {
+        uint32_t err = rejectedType != 0 || !s.ok ? kNoError : s.error;
+        char answer[64];
+        snprintf(answer, sizeof answer, "a rejection (type 0x%x)", rejectedType);
+        if (keptOddNews(0, err, rejectedType != 0 ? rejectedType : (s.ok ? 0u : 2u)))
+            say("SupportedServicesGet was answered %s: whether the car's service '%s' is on is not known; asked again at "
+                "the next registration check", rejectedType != 0 ? answer : (!s.ok ? "with a reply that could not be read"
+                                                                                  : gapErrorText(err, "").c_str()),
+                name);
+        return;
+    }
+    int state = s.state(keptName_);
+    bool first = false, sayAbsent = false, switchOn = false, offAgain = false;
+    unsigned again = 0;
+    pthread_mutex_lock(&mu_);
+    keptOddKnown_[0] = false;
+    first = !keptLooked_;
+    keptLooked_ = true;
+    if (state < 0) {
+        kept_.state = kKeptAbsent;
+        sayAbsent = !kept_.absentSeen;
+        kept_.absentSeen = true;
+    } else if (state == 1) {
+        kept_.state = kKeptOn;
+        keptWasOn_ = true;
+    } else {
+        kept_.state = kKeptOff;
+        if (first) kept_.foundOffFirst = true;
+        offAgain = keptWasOn_;
+        if (offAgain) again = ++kept_.offAgain;
+        keptWasOn_ = false;
+        switchOn = mode_ == kModeKeep;
+    }
+    pthread_mutex_unlock(&mu_);
+    if (sayAbsent)
+        say("the car's Bluetooth stack lists no service '%s' among its %u (SupportedServicesGet): there is nothing to "
+            "switch on", name, (unsigned)s.names.size());
+    else if (state == 1 && first)
+        say("the car's service '%s' is on (SupportedServicesGet): it is left as it is", name);
+    else if (state == 0 && first)
+        say("the car's service '%s' is off (SupportedServicesGet): it is switched on (EnabledServicesSet), and kept on "
+            "while the agent runs", name);
+    else if (state == 0 && offAgain && again == 1)
+        say("the car's service '%s' has been switched off since it was last seen on, as the car's own software does on "
+            "some cars with no word to other clients: it is switched on again. From now on this is only counted", name);
+    else if (state == 0 && !offAgain && !quiet)
+        say("the car's service '%s' is off (SupportedServicesGet): it is switched on again", name);
+    if (switchOn) sendKeptSet(true);
+}
+
 // ---- what the server says of the car's Bluetooth ------------------------------------------------------------------
 
 void SppService::forgetRegistrationsLocked() {
@@ -993,6 +1200,11 @@ void SppService::forgetRegistrationsLocked() {
     // The registrations that removeOther() was asked to remove went too.
     otherWaiting_.clear();
     if (regFor_ != kForNone) regStale_ = true;
+    // Nothing is known of the kept service until the next look; an answer to a request of it that is out is passed
+    // over. Whether it was seen on stays: found off at the next look, it was switched off meanwhile.
+    if (askOut_) askStale_ = true;
+    if (setOut_) setStale_ = true;
+    kept_.state = kKeptNotLooked;
 }
 
 void SppService::statusTold(const uint8_t* payload, uint32_t len) {
@@ -1507,6 +1719,10 @@ void SppService::gapDetached() {
     forgetRegistrationsLocked();
     regFor_ = kForNone;
     regStale_ = false;
+    // No answer comes from a server that has gone; a new one starts its services as its settings say.
+    askOut_ = askStale_ = setOut_ = setStale_ = false;
+    rejectOut_ = false;
+    keptWasOn_ = false;
     bt_ = kBtUnknown;
     statusHeard_ = false;
     otherSent_.clear();
@@ -1535,6 +1751,14 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
         // The phone's name and address are personal data: they stay here, and only the service goes on. The address
         // is kept, for a ServiceDisconnect, and never said.
         ServiceRequest q = parseServiceRequest(id, payload, len);
+        // A request for the knock service is a knock, never a link's: it goes its own way, and is kept in nothing
+        // below.
+        if (!knockService_.empty() && q.service == knockService_) {
+            events_->sppKnockRequest(id == kInfServiceRequest ? kPhoneAsked
+                                                              : (id == kInfServiceRequestComplete ? kPhoneLinked : kPhoneRefused),
+                                     q.address, q.ok);
+            return;
+        }
         if (id == kInfServiceRequest && q.ok && !q.address.empty()) {
             pthread_mutex_lock(&mu_);
             phoneAddress_ = q.address;
@@ -1588,6 +1812,22 @@ void SppService::gapMessage(uint32_t type, uint32_t id, const uint8_t* payload, 
     // Not asked for, and a pairing that worked stops nothing: one that comes all the same is dropped, unsaid.
     if (!rejected && id == kInfPairingComplete) return;
     if (handleKnown(type, id, payload, len)) return;
+
+    // The kept service's look and switch, and a refusal of a request: before anything that takes a reply by its
+    // order, or a rejection for the registration's.
+    if ((!rejected && (id == kRspSupportedServicesGet || id == kRspEnabledServicesSet)) ||
+        (rejected && (id == kReqSupportedServicesGet || id == kReqEnabledServicesSet))) {
+        keptAnswered(id, rejected ? type : 0, payload, len);
+        return;
+    }
+    if ((!rejected && id == kRspServiceReject) || (rejected && id == kReqServiceReject)) {
+        pthread_mutex_lock(&mu_);
+        bool out = rejectOut_;
+        rejectOut_ = false;
+        pthread_mutex_unlock(&mu_);
+        if (out) events_->sppRejectAnswered(rejected ? kNoError : readError(payload, len));
+        return;   // with none of ours out, another client's
+    }
 
     // The answer to a removal of another program's registration, if one is out: it went out before any removal of
     // our own that is waiting too, so its answer is the first of the two.

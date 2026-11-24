@@ -160,7 +160,7 @@ class FakeGap : public GapClient {
 public:
     explicit FakeGap(Trace* trace)
         : canOpen(true), openFinal_(false), silent(false), registerError(0), statusOnSubscribe(1), places(0),
-          deregisterError(0),
+          dialupState(0), rejectEnds(true), deregisterError(0),
           refusesWhileDialled(false),
           answersList(true), listed(false),
           connection(0), security(0), answersQuery(true), queryLists(true), queryError(0), queryInforms(false),
@@ -208,6 +208,44 @@ public:
             if (places > 0) error = modelRegister(registered);
             putU32(reply, dialledUp() ? 5 : error);
             events_->gapMessage(kTypeResponse, kRspSppUuidRegister, &reply[0], (uint32_t)reply.size());
+        } else if (id == kReqSupportedServicesGet) {
+            // The car's services: DUN as dialupState has it (1 on, 0 off, -1 not listed), among two others.
+            trace_->add("services");
+            putU32(reply, 0);
+            int dun = dialupState;
+            putU32(reply, dun >= 0 ? 3 : 2);
+            putU32(reply, 1);
+            if (dun >= 0) putU32(reply, (uint32_t)dun);
+            putU32(reply, 1);
+            putU32(reply, dun >= 0 ? 3 : 2);
+            putString(reply, "A2DP_SOURCE");
+            if (dun >= 0) putString(reply, "DUN");
+            putString(reply, "SPP");
+            events_->gapMessage(kTypeResponse, kRspSupportedServicesGet, &reply[0], (uint32_t)reply.size());
+        } else if (id == kReqEnabledServicesSet) {
+            bool on = payload == buildEnabledServicesSet("DUN", true);
+            CHECK(on || payload == buildEnabledServicesSet("DUN", false));
+            trace_->add(on ? "enable DUN on" : "enable DUN off");
+            dialupState = on ? 1 : 0;
+            putU32(reply, 0);
+            events_->gapMessage(kTypeResponse, kRspEnabledServicesSet, &reply[0], (uint32_t)reply.size());
+        } else if (id == kReqServiceReject) {
+            // As the stack: the request ends (the inform), then the answer, 5 for this service; or the next of
+            // rejectAnswers. BUSY ends nothing.
+            Reader r(&payload[0], (uint32_t)payload.size());
+            std::string address = r.str(), service = r.str();
+            trace_->add("reject " + service);
+            pthread_mutex_lock(&connectsMu_);
+            rejectAt_.push_back(monoNow());
+            uint32_t error = 5;
+            if (!rejectAnswers.empty()) {
+                error = rejectAnswers.front();
+                rejectAnswers.erase(rejectAnswers.begin());
+            }
+            pthread_mutex_unlock(&connectsMu_);
+            if (error != 2 && rejectEnds) phone(kInfServiceRequestError, service.c_str(), address.c_str());
+            putU32(reply, error);
+            events_->gapMessage(kTypeResponse, kRspServiceReject, &reply[0], (uint32_t)reply.size());
         } else if (id == kReqSppUuidDeregister && places > 0) {
             // As the stack's places would answer it.
             Reader name(&payload[0], (uint32_t)payload.size());
@@ -492,6 +530,19 @@ public:
     // Above 0: the registrations and removals are answered as the stack's places would (stack()), this many places,
     // in place of registerError, registerErrorFor and deregisterError.
     size_t places;
+    // The car's dial-up networking service: 1 on, 0 off, -1 not in its list of services.
+    int dialupState;
+    // ServiceReject: the answers to give, in turn (5 once they are used up), and whether one that is not BUSY ends the
+    // request first with its inform, as the stack's does.
+    std::vector<uint32_t> rejectAnswers;
+    bool rejectEnds;
+    // When each ServiceReject came, by the monotonic clock.
+    std::vector<double> rejectTimes() {
+        pthread_mutex_lock(&connectsMu_);
+        std::vector<double> t = rejectAt_;
+        pthread_mutex_unlock(&connectsMu_);
+        return t;
+    }
     uint32_t deregisterError;        // and a removal
     bool refusesWhileDialled;        // both are answered 5 while the dialled node is there, as for a link on the service
     bool answersList;                // DeviceListGet is answered, with the phone in it if `listed`
@@ -521,6 +572,7 @@ public:
 
 private:
     std::vector<std::string> stack_;   // connectsMu_
+    std::vector<double> rejectAt_;     // connectsMu_
     Events* events_;
     bool up_;
     Trace* trace_;
@@ -5729,8 +5781,12 @@ static void testDialOptions() {
         std::string line = describeDial(c);
         CHECK_IN(line, has(line, "when the phone's app knocks, and otherwise only while the pairing window is open, at "
                                  "serial.dial and while this version of the agent is on trial (--dial-knock on)"));
-        CHECK_IN(line, has(line, "whatever becomes of it. The agent lists serial-knock-dialup, the knock by dial-up "
-                                 "(--knock-dialup on). A knock of any phone"));
+        CHECK_IN(line, has(line, "whatever becomes of it. A phone's request for the car's dial-up networking service "
+                                 "('DUN') is that phone's knock too, the knock by dial-up (--knock-dialup on): the agent "
+                                 "keeps that service on while its own is registered, switching it on where it is off, "
+                                 "takes the knock once the request has ended, and refuses the request itself where the "
+                                 "car has not ended it in 2000 ms; the agent lists serial-knock-dialup. A knock of any "
+                                 "phone"));
         CHECK_IN(line, has(line, "a link the phone opens that starts with the knock's magic bytes within the decide "
                                  "time is that phone's knock, and a phone's request for a serial link is no knock, "
                                  "whatever becomes of it.") &&
@@ -6530,6 +6586,196 @@ static void testKnock() {
 
 // The gate's hold with a program declared for a serial service (radiod): a phone's knock keeps it on from the
 // phone's request until the phone ends the knock's link, with no time limit, whatever the car's dialled link does.
+// ---- the knock by dial-up --------------------------------------------------------------------------------------------
+
+static const char* const kDialupService = "DUN";
+
+// The place of the first trace item at or after `from` that is `item` exactly; below 0: none.
+static int itemAfter(Trace& trace, const std::string& item, int from) {
+    std::vector<int> at = trace.placesOf(item);
+    for (size_t i = 0; i < at.size(); ++i)
+        if (at[i] >= from) return at[i];
+    return -1;
+}
+static std::string dialItem() { return std::string("gap connect BtCtrl nbtapp ") + kDialled + " NBTApp"; }
+
+// A dial of phone 1 that a knock by dial-up brought: the dialled link is the app's, and goes again once the test has
+// seen it.
+static void dialledAndGone(Knocker& k) {
+    Link* link = acceptWithin(*k.listener, 3000);
+    CHECK_IN(k.trace.text(), link != 0 && link->dialledByCar() && link->phoneAddress() == kDialled);
+    CHECK(readFrom(link, kMagic.size(), 3000) == kMagic);
+    k.dialNode.vanish();
+    k.dialNode.hangUp();
+    k.gap.ended("nbtapp", kDialled, "NBTApp", 1);
+    CHECK(endsWithin(link, 3000));
+    delete link;
+}
+
+static void testKnockDialup() {
+    {   // the service kept on: looked at once the agent's own is registered, switched on where it is off, and off
+        // again as the listener stops
+        Knocker k("dialup-keep");
+        k.start();
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "enable DUN on", 2000));
+        CHECK(k.trace.placesOf("register")[0] < k.trace.placesOf("services")[0]);   // never before
+        CHECK(k.trace.logged("the car's service 'DUN' is off (SupportedServicesGet): it is switched on"));
+        SerialStatus st = k.listener->serialStatus();
+        CHECK(st.knockDialup && st.dialupService == "switched-on" && st.dialupSwitches == 1 && k.listener->knockDialupOn());
+        k.listener->stop();
+        CHECK_IN(k.trace.text(), k.trace.placesOf("enable DUN off").size() == 1 &&
+                                     k.trace.placesOf("deregister NBTApp")[0] < k.trace.placesOf("enable DUN off")[0]);
+    }
+    {   // found on: left as it is, at the start and at the stop
+        Knocker k("dialup-on");
+        k.gap.dialupState = 1;
+        k.start();
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "it is left as it is", 2000));
+        CHECK(k.listener->serialStatus().dialupService == "on");
+        k.listener->stop();
+        CHECK(k.trace.placesOf("enable DUN on").empty() && k.trace.placesOf("enable DUN off").empty());
+    }
+    {   // not there: said, nothing switched, and hello no longer lists the knock by dial-up
+        Knocker k("dialup-absent");
+        k.gap.dialupState = -1;
+        k.start();
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "lists no service 'DUN'", 2000));
+        CHECK(!k.listener->knockDialupOn() && k.listener->knockOn());
+        CHECK(k.listener->serialStatus().dialupService == "absent" && !k.listener->serialStatus().knockDialup);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "hello no longer lists serial-knock-dialup", 2000));
+    }
+    {   // switched off behind the agent's back: on again at the next check
+        Knocker k("dialup-off-again");
+        k.config.checkMs = 100;
+        k.config.checkQuietMs = 100;
+        k.start();
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "enable DUN on", 2000));
+        k.gap.dialupState = 0;
+        double end = monoNow() + 3.0;
+        while (monoNow() < end && k.trace.placesOf("enable DUN on").size() < 2) pause(5);
+        CHECK_IN(k.trace.text(), k.trace.placesOf("enable DUN on").size() == 2 &&
+                                     k.trace.logged("has been switched off since it was last seen on"));
+    }
+    {   // the car refuses the request first: the knock is taken then, and the car dials; no refusal of the agent's
+        Knocker k("dialup-car-refuses");
+        k.config.dial.dialupRefuseMs = 300;
+        k.start();
+        k.dialNode.say(kMagic);
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        CHECK(k.trace.logged("phone 1 asked for the car's dial-up networking service ('DUN'): the knock by dial-up"));
+        k.trace.add("test: the car refuses it");
+        k.gap.phone(kInfServiceRequestError, kDialupService, kDialled);
+        dialledAndGone(k);
+        CHECK(k.trace.at("test: the car refuses it") < itemAfter(k.trace, dialItem(), 0));
+        CHECK(k.trace.logged("phone 1 knocked by a request for the car's dial-up networking service, which ended ") &&
+              k.trace.logged(" ms after it was heard (the car ended it), and the car dials it as soon as nothing "));
+        // Not a request for a serial link: no line of that kind, no refusal counted, and the agent never refuses it.
+        CHECK(!k.trace.logged("(service 'DUN')") && !k.trace.saw("reject DUN"));
+        SerialStatus st = k.listener->serialStatus();
+        CHECK(st.knocksByDialup == 1 && st.knocksByMarker == 0 && st.knockDials == 1 && st.refusals == 0 &&
+              st.dialupRefusals == 0);
+        // Never a refusal for a request that has ended (test_dial_rules shows it by the test's clock), and never the
+        // phone's address in the log.
+        CHECK(!k.trace.saw("reject DUN") && !k.trace.logged("00:11:22"));
+    }
+    {   // the car does not refuse it: the agent does, never at once, and the knock is taken at the answer (5)
+        Knocker k("dialup-agent-refuses");
+        k.config.dial.dialupRefuseMs = 300;
+        k.gap.rejectEnds = false;
+        k.start();
+        k.dialNode.say(kMagic);
+        double heard = monoNow();
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        dialledAndGone(k);
+        std::vector<double> at = k.gap.rejectTimes();
+        CHECK(at.size() == 1 && at[0] - heard >= 0.3);
+        CHECK(k.trace.placesOf("reject DUN")[0] < itemAfter(k.trace, dialItem(), 0));
+        CHECK(k.trace.logged("the car has not ended the request of phone 1 for its dial-up networking service in 300 ms: "
+                             "the agent refuses it (ServiceReject)"));
+        CHECK(k.trace.logged("ServiceReject of a request for the car's dial-up networking service answered 5 DEFAULT (as "
+                             "always for this service)"));
+        CHECK(k.trace.logged("(the agent's refusal was answered)"));
+        CHECK(k.listener->serialStatus().dialupRefusals == 1);
+    }
+    {   // the same, with the stack's own end of the request coming before the refusal's answer, as it does
+        Knocker k("dialup-agent-refuses-ends");
+        k.config.dial.dialupRefuseMs = 300;
+        k.start();
+        k.dialNode.say(kMagic);
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        dialledAndGone(k);
+        CHECK(k.trace.logged("(the car ended it)") && k.trace.logged(", after the request had ended"));
+    }
+    {   // answered BUSY, then 5: sent again 100 ms later
+        Knocker k("dialup-busy");
+        k.config.dial.dialupRefuseMs = 300;
+        k.gap.rejectAnswers.push_back(2);
+        k.start();
+        k.dialNode.say(kMagic);
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        dialledAndGone(k);
+        std::vector<double> at = k.gap.rejectTimes();
+        CHECK(at.size() == 2 && at[1] - at[0] >= 0.1);
+        CHECK(k.trace.logged("answered 2 BUSY: sent again in 100 ms"));
+        CHECK(k.trace.placesOf("reject DUN")[1] < itemAfter(k.trace, dialItem(), 0));
+        CHECK(k.listener->serialStatus().dialupRefusals == 2);
+    }
+    {   // a second request while the first is pending is the same knock; a phone the car cannot dial is refused all
+        // the same, and not dialled
+        Knocker k("dialup-twice");
+        k.config.dial.dialupRefuseMs = 300;
+        k.start();
+        k.dialNode.say(kMagic);
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        CHECK(k.trace.logged("asked for the car's dial-up networking service ('DUN') while its request was pending "
+                             "already: the same knock"));
+        dialledAndGone(k);
+        CHECK(k.gap.rejectTimes().size() == 1 && dialsOfPhone(k.gap) == 1);
+        k.gap.phone(kInfServiceRequest, kDialupService, "66:77:88:99:AA:BB");
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "phone 2 knocked by a request for the car's dial-up networking "
+                                                    "service", 3000));
+        CHECK(k.gap.rejectTimes().size() == 2);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "phone 2 knocked by a request for the car's dial-up networking "
+                                                    "service, ignored: the phone is not connected to the car and "
+                                                    "paired with it", 3000));
+        CHECK(k.gap.connects().size() == 1);
+    }
+    {   // the car's Bluetooth switched off while a request is pending: it went with it, and nothing is refused; on
+        // again, the service is looked at again after the registration
+        Knocker k("dialup-off");
+        k.config.dial.dialupRefuseMs = 600000;   // its refusal never falls due in the test, whatever the load
+        k.start();
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "enable DUN on", 2000));
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        k.gap.status(0);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "the pending requests for its dial-up networking service went with "
+                                                    "it", 3000));
+        k.gap.status(1);
+        double end = monoNow() + 3.0;
+        while (monoNow() < end && k.trace.placesOf("services").size() < 2) pause(5);
+        CHECK_IN(k.trace.text(), k.trace.placesOf("services").size() == 2);
+        // Its end, should the stack say it now, brings no knock: the request is not pending any more.
+        k.gap.phone(kInfServiceRequestError, kDialupService, kDialled);
+        CHECK(k.trace.placesOf("reject DUN").empty() && dialsOfPhone(k.gap) == 0 &&
+              !k.trace.logged("knocked by a request"));
+    }
+    {   // the knock by dial-up off: such a request is another service's, word for word as before, and nothing of the
+        // service is asked
+        Knocker k("dialup-option-off");
+        k.config.dial.knockDialup = false;
+        k.start();
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        k.gap.phone(kInfServiceRequestError, kDialupService, kDialled);
+        CHECK(k.trace.logged("a phone asked for a serial link (service 'DUN'): another service's, left alone"));
+        CHECK(k.trace.logged("a phone was refused a serial link by the car (service 'DUN')"));
+        SerialStatus st = k.listener->serialStatus();
+        CHECK(!st.knockDialup && st.dialupService == "unused" && st.knocksByDialup == 0);
+        CHECK(k.trace.placesOf("services").empty() && k.trace.placesOf("reject DUN").empty() &&
+              k.gap.connects().empty());
+    }
+}
+
 static void testKnockHold() {
     const std::string on = "gate: opens by radiod are refused as well from now on ";
     const std::string off = "gate: opens by radiod are passed on again ";
@@ -6639,6 +6885,7 @@ int main(int argc, char** argv) {
     testUndialled();
     testKnock();
     testKnockHold();
+    testKnockDialup();
     printf("test_serial: ok\n");
     return 0;
 }

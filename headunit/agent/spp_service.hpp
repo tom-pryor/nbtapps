@@ -75,6 +75,20 @@ const uint32_t kReqServiceConnect = 0x1a;            // device, instance, addres
 // that answer does not reach the client; the one good answer may reach both. Each query also sends every client
 // three ServiceListChanged informs. A query to a phone that has no link to the car pages it.
 const uint32_t kReqServiceListQuery = 0x19;          // address
+// The car's own services (A2DP_SOURCE, SPP, DUN, ...), each by its name, and whether each is on. SupportedServicesGet
+// gives every one the stack has, in an order of its own, by which nothing is to be found but the name.
+// EnabledServicesSet switches the ones it names on or off and leaves the rest as they are: its first list is the
+// values (1 on, 0 off), its second the names, in the same order. One name is enough; the answer to several says
+// nothing of each.
+const uint32_t kReqSupportedServicesGet = 0x24;      // nothing
+const uint32_t kReqEnabledServicesSet = 0x23;        // u32 values[], names[]
+const uint32_t kRspSupportedServicesGet = 0x80000039;   // u32 GapErrorCode, u32 values[], names[]
+const uint32_t kRspEnabledServicesSet = 0x80000038;     // u32 GapErrorCode
+// Refuses a phone's pending request for a service (kInfServiceRequest), which then ends with kInfServiceRequestError.
+// The stack takes one at a time from all its clients and answers one that comes while another is out BUSY (2). For
+// the car's dial-up networking service it answers 5 whether or not the refusal worked.
+const uint32_t kReqServiceReject = 0x1c;             // address, service
+const uint32_t kRspServiceReject = 0x80000031;       // u32 GapErrorCode
 const uint32_t kReqVersionGet = 0x03;                // nothing
 const uint32_t kReqDeviceListGet = 0x13;             // nothing
 const uint32_t kRspVersionGet = 0x80000019;          // u32 GapErrorCode, five strings
@@ -224,6 +238,23 @@ inline std::vector<uint8_t> buildServiceDisconnect(const std::string& device, co
 inline std::vector<uint8_t> buildServiceConnect(const std::string& device, const std::string& instance,
                                                 const std::string& address, const std::string& service) {
     return buildServiceDisconnect(device, instance, address, service);
+}
+
+// EnabledServicesSet for one service: on (1) or off (0).
+inline std::vector<uint8_t> buildEnabledServicesSet(const std::string& name, bool on) {
+    std::vector<uint8_t> p;
+    putU32(p, 1);
+    putU32(p, on ? 1 : 0);
+    putU32(p, 1);
+    putString(p, name);
+    return p;
+}
+
+inline std::vector<uint8_t> buildServiceReject(const std::string& address, const std::string& service) {
+    std::vector<uint8_t> p;
+    putString(p, address);
+    putString(p, service);
+    return p;
 }
 
 inline std::vector<uint8_t> buildServiceListQuery(const std::string& address) {
@@ -585,6 +616,35 @@ inline bool listsService(const ServiceList& list, const std::string& name) {
     return false;
 }
 
+// kRspSupportedServicesGet: the car's services and whether each is on. A reply with an error may hold nothing after
+// it: that is read whole.
+struct SupportedServices {
+    uint32_t error;
+    std::vector<uint32_t> values;
+    std::vector<std::string> names;
+    bool ok;   // read whole, with as many values as names
+    SupportedServices() : error(0), ok(false) {}
+    // 1 on, 0 off, -1 not listed.
+    int state(const std::string& name) const {
+        for (size_t i = 0; i < names.size(); ++i)
+            if (names[i] == name) return values[i] != 0 ? 1 : 0;
+        return -1;
+    }
+};
+
+inline SupportedServices parseSupportedServices(const uint8_t* p, uint32_t n) {
+    SupportedServices s;
+    Reader r(p, n);
+    s.error = r.u32();
+    if (r.ok() && s.error != 0 && r.left() == 0) {
+        s.ok = true;
+        return s;
+    }
+    bool lists = r.ok() && readValues(r, &s.values) && readStrings(r, &s.names);
+    s.ok = lists && r.ok() && s.values.size() == s.names.size();
+    return s;
+}
+
 // kRspVersionGet: the stack's version strings.
 struct StackVersion {
     uint32_t error;
@@ -851,6 +911,30 @@ public:
         // A pairing inform that stops dials, PairingError or SimplePairingConfirmationRequired
         // (setPairingInforms()), and the address it begins with, or empty. PairingComplete is never told.
         virtual void sppPairing(uint32_t /*informId*/, const std::string& /*address*/) {}
+        // A phone's request for the service setKnockService() names, in place of sppPhone(): asked (kPhoneAsked), or
+        // ended, refused (kPhoneRefused) or come up (kPhoneLinked), with the phone's address as the inform gave it,
+        // for the caller to keep and never to log.
+        virtual void sppKnockRequest(Phone /*what*/, const std::string& /*address*/, bool /*parsed*/) {}
+        // The answer to rejectRequest(): the stack's error code, or kNoError for a rejection.
+        virtual void sppRejectAnswered(uint32_t /*error*/) {}
+    };
+
+    // The service setKeepOn() keeps on, as the last look found it.
+    enum Kept {
+        kKeptNotLooked,   // no look has been answered since the server attached or the car's Bluetooth came on
+        kKeptOn,          // listed, and on
+        kKeptOff,         // listed, and off: being switched on, or that failed and is tried again at the next check
+        kKeptAbsent       // not in the stack's list of services: nothing to switch on
+    };
+    struct KeptState {
+        Kept state;
+        bool absentSeen;          // a look has found it not listed, in this object's life
+        bool foundOffFirst;       // the first look of this object's life found it off
+        bool switchedOn;          // this object has switched it on (and not off again since)
+        unsigned switches;        // switched on by this object, all told
+        unsigned offAgain;        // found off again after it had been on: switched off behind this object's back
+        KeptState() : state(kKeptNotLooked), absentSeen(false), foundOffFirst(false), switchedOn(false), switches(0),
+                      offAgain(0) {}
     };
 
     // Both outlive this object.
@@ -1002,6 +1086,33 @@ public:
     void setDisconnectReplyTime(double seconds) { disconnectReplyS_ = seconds; }
     // Before start(): the pairing informs that stop dials are asked for too (sppPairing()).
     void setPairingInforms(bool on) { pairingInforms_ = on; }
+    // Before start(): a phone's requests for the service `name` (the car's dial-up networking service, for the knock
+    // by dial-up) go to sppKnockRequest() and not to sppPhone(), and are not the request disconnectPhone() names, nor
+    // the refusal askAboutRefused() asks about. Empty, which is how it starts, for none.
+    void setKnockService(const std::string& name) { knockService_ = name; }
+    // ServiceReject for the phone's pending request for `service`: the answer goes to sppRejectAnswered(). One at a
+    // time: false, with nothing sent, while one waits for its answer, or if the server is not attached or did not
+    // take the request. Nothing is logged here. From any thread.
+    bool rejectRequest(const std::string& address, const std::string& service);
+
+    // Before start(): the car's service `name` (the dial-up networking service, for the knock by dial-up) is kept on
+    // while this object keeps its registration. Each time this object's own registration has been made, and in every
+    // registration check's round, SupportedServicesGet goes (one more request; never before registrations may go,
+    // When registrations may go, above), and a service listed and off is switched on with EnabledServicesSet, for
+    // that name alone. A service not listed is said once and left. The first time it is found off is said; found off
+    // again after that (the car's own software switches it off on some cars at some moments, with no word to other
+    // clients), it is switched on again, with a line the first time and counted after. One request of each kind out at
+    // a time; an answer to one sent before the server went or Status went to closed is passed over (kStaleReplyS at
+    // most), and after that nothing is known of it until the next look. A request answered with an error or rejected
+    // is said when that differs from the last, and asked again at the next check, never sooner. Empty, which is how
+    // it starts, for none.
+    void setKeepOn(const std::string& name) { keptName_ = name; }
+    KeptState kept();
+    // As the caller stops: switches the kept service off again, only where this object's first look found it off and
+    // this object switched it on; a service found on is left as it is. True if the request went; its answer is
+    // waited for with keptSetOut(). From any thread.
+    bool switchKeptOff();
+    bool keptSetOut();
     bool attached() const { return gap_->attached(); }
     // The server's name and the version of its interface that is asked for, for the log.
     std::string server() const { return gap_->describe(); }
@@ -1198,6 +1309,28 @@ private:
     std::vector<std::string> yielded_;        // the stand-ins this round has given up, in that order, for the log
     unsigned checkFails_;                     // checks whose registration could not be sent
     unsigned timesRegistered_;
+    // The phones' requests for this service go to sppKnockRequest() (setKnockService()).
+    std::string knockService_;
+    bool rejectOut_;                          // a ServiceReject of ours waits for its answer
+    // The kept service (setKeepOn()).
+    std::string keptName_;
+    KeptState kept_;
+    bool keptLooked_;                         // a look of this object's life has been answered
+    bool keptWasOn_;                          // since the last look that could not tell, it has been seen on
+    bool askOut_, askStale_;                  // SupportedServicesGet out, and sent before the server went or Status
+    double askAt_;                            // went to closed
+    bool setOut_, setStale_, setOn_;          // EnabledServicesSet out, and what it asks for
+    double setAt_;
+    // For the look [0] and the switch [1]: the last answer said, which is not news when it comes again.
+    uint32_t keptOdd_[2], keptOddRejected_[2];
+    bool keptOddKnown_[2];
+    // The kept service's look: SupportedServicesGet, if it may go (When registrations may go). `quiet`: in a check's
+    // round, where only news is said.
+    void lookAtKept(bool quiet);
+    void keptAnswered(uint32_t id, uint32_t type, const uint8_t* payload, uint32_t len);
+    void sendKeptSet(bool on);
+    bool keptOddNews(int which, uint32_t err, uint32_t rejectedType);
+    bool lookQuiet_;
     // The last phone's request for a link: its address and the service it asked for. In memory only; neither
     // reaches the log or leaves this class.
     std::string phoneAddress_, phoneService_;

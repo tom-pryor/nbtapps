@@ -3937,6 +3937,11 @@ public:
         status.knocksIgnoredNotDialable = 1;
         status.knockDials = 5;
         status.knockDialsFailed = 1;
+        status.knockDialup = true;
+        status.dialupService = "switched-on";
+        status.knocksByDialup = 4;
+        status.dialupRefusals = 2;
+        status.dialupSwitches = 1;
         status.refusalsNoAudio = 3;
     }
     virtual void pairingWindow(bool open) { said += open ? "open " : "closed "; }
@@ -4023,7 +4028,12 @@ static void testSerialDial() {
     CHECK(integer(st.result, "phonesPresent") == 2 && integer(st.result, "phonesEligible") == 1);
     CHECK(str(st.result, "dial") == "on" && str(st.result, "dialState") == "idle" && str(st.result, "lastResult") == "DEFAULT");
     CHECK(str(st.result, "link") == "none" && integer(st.result.find("counts"), "dials") == 3);
-    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 30);
+    CHECK(integer(st.result.find("counts"), "notListening") == 3 && st.result.find("counts").size() == 33);
+    // The knock by dial-up: whether it is on, the car's service as last seen, and its counts.
+    CHECK(st.result.find("knockDialup").isBool() && st.result.find("knockDialup").boolean());
+    CHECK(str(st.result, "dialupService") == "switched-on");
+    CHECK(integer(st.result.find("counts"), "knocksByDialup") == 4 && integer(st.result.find("counts"), "dialupRefusals") == 2 &&
+          integer(st.result.find("counts"), "dialupSwitches") == 1);
     // The knock: the mode, and its counts.
     CHECK(st.result.find("knock").isBool() && st.result.find("knock").boolean());
     const json::Value counts = st.result.find("counts");

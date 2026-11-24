@@ -139,6 +139,16 @@ public:
     virtual void sppPairing(uint32_t informId, const std::string& address) {
         pairings.push_back(std::make_pair(informId, address));
     }
+    virtual void sppKnockRequest(SppService::Phone what, const std::string& address, bool parsed) {
+        PhoneEvent e;
+        e.what = what;
+        e.address = address;
+        e.parsed = parsed;
+        knockRequests.push_back(e);
+    }
+    virtual void sppRejectAnswered(uint32_t error) { rejectAnswers.push_back(error); }
+    std::vector<PhoneEvent> knockRequests;
+    std::vector<uint32_t> rejectAnswers;
     virtual void sppOtherRemoved(const std::string& name, uint32_t error) {
         char b[32];
         snprintf(b, sizeof(b), "=%d", error == kNoError ? -1 : (int)error);
@@ -902,6 +912,355 @@ static void testStandIns() {
     }
 }
 
+// ---- the knock by dial-up: the car's service kept on, the requests for it, and their refusal ---------------------
+
+static const char* const kDialup = "DUN";
+
+// The answer to SupportedServicesGet: three services, DUN among them with `dun` (1 on, 0 off; below 0: not listed).
+static std::vector<uint8_t> supported(int dun, uint32_t error = 0) {
+    std::vector<uint8_t> p;
+    putU32(p, error);
+    std::vector<std::string> names;
+    std::vector<uint32_t> values;
+    names.push_back("A2DP_SOURCE");
+    values.push_back(1);
+    if (dun >= 0) {
+        names.push_back("DUNGW");   // another name that begins the same: never taken for it
+        values.push_back(0);
+        names.push_back(kDialup);
+        values.push_back((uint32_t)dun);
+    }
+    names.push_back("SPP");
+    values.push_back(1);
+    putU32(p, (uint32_t)values.size());
+    for (size_t i = 0; i < values.size(); ++i) putU32(p, values[i]);
+    putU32(p, (uint32_t)names.size());
+    for (size_t i = 0; i < names.size(); ++i) putString(p, names[i]);
+    return p;
+}
+
+// The kind of each request sent since the last look, in order: "R" a registration, "S" SupportedServicesGet, "on" /
+// "off" EnabledServicesSet for DUN (checked to name it alone), "J" ServiceReject, "D" a removal; not kept.
+static std::string kinds(FakeGap& gap) {
+    std::string s;
+    for (size_t i = 0; i < gap.sent.size(); ++i) {
+        const FakeGap::Sent& x = gap.sent[i];
+        std::string k = "?";
+        if (x.id == kReqSppUuidRegister) k = "R";
+        else if (x.id == kReqSppUuidDeregister) k = "D";
+        else if (x.id == kReqSupportedServicesGet) k = x.payload.empty() ? "S" : "S?";
+        else if (x.id == kReqServiceReject) k = "J";
+        else if (x.id == kReqEnabledServicesSet) {
+            if (x.payload == buildEnabledServicesSet(kDialup, true)) k = "on";
+            else if (x.payload == buildEnabledServicesSet(kDialup, false)) k = "off";
+        }
+        s += (s.empty() ? "" : " ") + k;
+    }
+    gap.sent.clear();
+    return s;
+}
+
+// A service that keeps DUN on, on the test's clock with a hold of `hold` seconds, started and not yet attached.
+struct Keeping {
+    FakeGap gap;
+    Seen seen;
+    SppService spp;
+    explicit Keeping(double hold = 0) : spp(&gap, &seen) {
+        gClock = 1000.0;
+        spp.setClock(&testClock);
+        spp.setHold(hold);
+        spp.configure(kName, kUuid, 0);
+        spp.setKeepOn(kDialup);
+        CHECK(spp.start());
+    }
+    // Attached (Status on), the hold passed, registered: the look at DUN is the one request out.
+    void registered() {
+        gap.attach();
+        if (spp.state() == SppService::kHeld) {
+            gClock += 3600;
+            spp.tend();
+        }
+        CHECK(kinds(gap) == "R");
+        gap.reply(kRspSppUuidRegister, 0);
+        CHECK(spp.state() == SppService::kRegistered);
+    }
+    // The look's answer.
+    void look(int dun) {
+        std::vector<uint8_t> p = supported(dun);
+        gap.events->gapMessage(kTypeResponse, kRspSupportedServicesGet, &p[0], (uint32_t)p.size());
+    }
+    // A check's round with no stand-ins: the check and the look; the check answered 5.
+    void check() {
+        CHECK(spp.checkRegistration(30));
+        std::string k = kinds(gap);
+        CHECK_IN(k, k == "R S");
+        gap.reply(kRspSppUuidRegister, 5);
+    }
+};
+
+static void testKeepDialup() {
+    {   // the payloads, byte for byte: the values' list first, then the names'; one name
+        std::vector<uint8_t> on = buildEnabledServicesSet(kDialup, true);
+        CHECK(on == bytes("\x01\x00\x00\x00" "\x01\x00\x00\x00" "\x01\x00\x00\x00" "\x04\x00\x00\x00" "DUN\x00", 20));
+        std::vector<uint8_t> off = buildEnabledServicesSet(kDialup, false);
+        CHECK(off == bytes("\x01\x00\x00\x00" "\x00\x00\x00\x00" "\x01\x00\x00\x00" "\x04\x00\x00\x00" "DUN\x00", 20));
+        CHECK(buildServiceReject("02:00:00:BB:BB:BB", kDialup) ==
+              bytes("\x12\x00\x00\x00" "02:00:00:BB:BB:BB\x00\x00\x00" "\x04\x00\x00\x00" "DUN\x00", 32));
+        // The answer to SupportedServicesGet, by name; one cut short, or with lists of two lengths, is not read.
+        std::vector<uint8_t> p = supported(0);
+        SupportedServices s = parseSupportedServices(&p[0], (uint32_t)p.size());
+        CHECK(s.ok && s.error == 0 && s.names.size() == 4 && s.state(kDialup) == 0 && s.state("SPP") == 1 &&
+              s.state("BTHS") == -1);
+        CHECK(!parseSupportedServices(&p[0], (uint32_t)p.size() - 6).ok);
+        std::vector<uint8_t> e = supported(-1, 5);
+        CHECK(parseSupportedServices(&e[0], 4).ok && parseSupportedServices(&e[0], 4).error == 5);
+        std::vector<uint8_t> odd;
+        putU32(odd, 0);
+        putU32(odd, 2);
+        putU32(odd, 1);
+        putU32(odd, 1);
+        putU32(odd, 1);
+        putString(odd, kDialup);
+        CHECK(!parseSupportedServices(&odd[0], (uint32_t)odd.size()).ok);
+    }
+    {   // found on: nothing is sent, and at a stop nothing is switched off
+        Keeping k;
+        k.registered();
+        CHECK(kinds(k.gap) == "S" && k.spp.kept().state == SppService::kKeptNotLooked);
+        k.look(1);
+        CHECK(k.gap.sent.empty() && k.spp.kept().state == SppService::kKeptOn && !k.spp.kept().switchedOn);
+        CHECK(k.seen.said("the car's service 'DUN' is on (SupportedServicesGet): it is left as it is"));
+        k.check();
+        k.look(1);
+        CHECK(k.gap.sent.empty() && count(k.seen, "'DUN' is on") == 1);
+        CHECK(!k.spp.switchKeptOff() && k.gap.sent.empty());
+    }
+    {   // found off at the first look: switched on, that name alone; switched off again at a stop
+        Keeping k;
+        k.registered();
+        CHECK(kinds(k.gap) == "S");
+        k.look(0);
+        CHECK(k.spp.kept().state == SppService::kKeptOff && k.spp.kept().foundOffFirst && kinds(k.gap) == "on");
+        CHECK(k.seen.said("the car's service 'DUN' is off (SupportedServicesGet): it is switched on (EnabledServicesSet), "
+                          "and kept on while the agent runs"));
+        k.gap.reply(kRspEnabledServicesSet, 0);
+        SppService::KeptState s = k.spp.kept();
+        CHECK(s.state == SppService::kKeptOn && s.switchedOn && s.switches == 1);
+        CHECK(k.seen.said("the car's service 'DUN' is switched on (EnabledServicesSet answered 0 OK)"));
+        // The checks look again, quietly: on, nothing.
+        k.check();
+        size_t lines = k.seen.lines.size();
+        k.look(1);
+        CHECK(k.gap.sent.empty() && k.seen.lines.size() == lines);
+        // Switched off behind the agent's back: on again, said the first time, counted after.
+        k.check();
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+        k.gap.reply(kRspEnabledServicesSet, 0);
+        CHECK(k.seen.said("the car's service 'DUN' has been switched off since it was last seen on, as the car's own "
+                          "software does on some cars with no word to other clients: it is switched on again. From now "
+                          "on this is only counted"));
+        lines = k.seen.lines.size();
+        k.check();
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+        k.gap.reply(kRspEnabledServicesSet, 0);
+        CHECK(k.seen.lines.size() == lines && k.spp.kept().offAgain == 2 && k.spp.kept().switches == 3);
+        // The stop: off again, as it was found.
+        CHECK(k.spp.remove("leaving"));
+        CHECK(kinds(k.gap) == "D");
+        k.gap.reply(kRspSppUuidDeregister, 0);
+        CHECK(k.spp.switchKeptOff() && kinds(k.gap) == "off" && k.spp.keptSetOut());
+        k.gap.reply(kRspEnabledServicesSet, 0);
+        CHECK(!k.spp.keptSetOut() && !k.spp.kept().switchedOn && k.spp.kept().state == SppService::kKeptOff);
+        CHECK(k.seen.said("the car's service 'DUN' is switched off again, as it was found (EnabledServicesSet answered 0 OK)"));
+        CHECK(!k.spp.switchKeptOff());
+    }
+    {   // found on first and switched off later behind the agent's back: on again, and at a stop left on
+        Keeping k;
+        k.registered();
+        kinds(k.gap);
+        k.look(1);
+        k.check();
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+        k.gap.reply(kRspEnabledServicesSet, 0);
+        CHECK(k.spp.kept().switchedOn && !k.spp.kept().foundOffFirst && !k.spp.switchKeptOff() && k.gap.sent.empty());
+    }
+    {   // not listed: said once, nothing switched; looked at again at the checks, quietly
+        Keeping k;
+        k.registered();
+        kinds(k.gap);
+        k.look(-1);
+        CHECK(k.gap.sent.empty() && k.spp.kept().state == SppService::kKeptAbsent && k.spp.kept().absentSeen);
+        CHECK(k.seen.said("the car's Bluetooth stack lists no service 'DUN' among its 2 (SupportedServicesGet): there is "
+                          "nothing to switch on"));
+        k.check();
+        k.look(-1);
+        CHECK(k.gap.sent.empty() && count(k.seen, "lists no service 'DUN'") == 1);
+    }
+    {   // answers other than 0, and rejections: said when they differ from the last, and tried again at the next check
+        Keeping k;
+        k.registered();
+        kinds(k.gap);
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+        k.gap.reply(kRspEnabledServicesSet, 5);
+        CHECK(k.seen.said("EnabledServicesSet switching the car's service 'DUN' on was answered 5 DEFAULT: tried again at "
+                          "the next registration check"));
+        CHECK(k.spp.kept().state == SppService::kKeptOff && !k.spp.kept().switchedOn && k.gap.sent.empty());
+        k.check();
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+        k.gap.reply(kRspEnabledServicesSet, 5);
+        CHECK(count(k.seen, "was answered 5 DEFAULT: tried again") == 1);   // the same again: not said
+        k.check();
+        k.gap.reply(kRspSupportedServicesGet, 12);                          // an error with nothing after it
+        CHECK(k.seen.said("SupportedServicesGet was answered 12 HW_NOT_READY: whether the car's service 'DUN' is on is "
+                          "not known; asked again at the next registration check"));
+        k.check();
+        k.gap.reject(kTypeRejectedA, kReqSupportedServicesGet);
+        CHECK(k.seen.said("SupportedServicesGet was answered a rejection (type 0x202)"));
+        CHECK(k.spp.state() == SppService::kRegistered);                    // a rejection of it is not the registration's
+        k.check();
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+        k.gap.reject(kTypeRejectedB, kReqEnabledServicesSet);
+        CHECK(k.seen.said("EnabledServicesSet switching the car's service 'DUN' on was answered a rejection (type 0x204)"));
+        // One out at a time: while the look of a check is out, the next check sends no second.
+        k.check();
+        CHECK(k.spp.checkRegistration(30));
+        CHECK(kinds(k.gap) == "R");
+        k.gap.reply(kRspSppUuidRegister, 5);
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+        k.gap.reply(kRspEnabledServicesSet, 0);
+        // An answer nothing waits for: nothing.
+        size_t lines = k.seen.lines.size();
+        k.look(0);
+        k.gap.reply(kRspEnabledServicesSet, 0);
+        CHECK(k.seen.lines.size() == lines && k.gap.sent.empty() && k.spp.kept().switches == 1);
+    }
+    {   // the gate: nothing before Status open and the hold; nothing while closed; again after the next open and hold
+        Keeping k(10);
+        k.gap.attach();
+        CHECK(k.gap.sent.empty());
+        gClock = 1009.9;
+        k.spp.tend();
+        CHECK(k.gap.sent.empty());
+        gClock = 1010;
+        k.spp.tend();
+        CHECK(kinds(k.gap) == "R");
+        k.gap.reply(kRspSppUuidRegister, 0);
+        CHECK(kinds(k.gap) == "S");
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+        k.gap.reply(kRspEnabledServicesSet, 0);
+        // Off: nothing is known any more; no check, no look.
+        gClock = 2000;
+        k.gap.status(0);
+        CHECK(k.spp.kept().state == SppService::kKeptNotLooked && !k.spp.checkRegistration(30) && k.gap.sent.empty());
+        gClock = 2100;
+        k.gap.status(1);
+        gClock = 2109.9;
+        k.spp.tend();
+        CHECK(k.gap.sent.empty());
+        gClock = 2110;
+        k.spp.tend();
+        CHECK(kinds(k.gap) == "R");
+        k.gap.reply(kRspSppUuidRegister, 0);
+        CHECK(kinds(k.gap) == "S");
+        k.look(1);   // the stack keeps it on through the switch-off
+        CHECK(k.gap.sent.empty() && k.spp.kept().state == SppService::kKeptOn);
+        // A look out as the car's Bluetooth goes off: its answer is passed over.
+        k.check();
+        k.gap.status(0);
+        k.look(0);
+        CHECK(k.gap.sent.empty() && k.seen.said("the answer to SupportedServicesGet that went out before the car's "
+                                                "Bluetooth was switched off or the server went: passed over"));
+    }
+    {   // a server that goes: nothing is out from then; a new one is looked at after its own registration
+        Keeping k;
+        k.registered();
+        CHECK(kinds(k.gap) == "S");
+        k.gap.detach();
+        k.gap.attach();
+        CHECK(kinds(k.gap) == "R");
+        k.gap.reply(kRspSppUuidRegister, 0);
+        CHECK(kinds(k.gap) == "S");
+        k.look(0);
+        CHECK(kinds(k.gap) == "on");
+    }
+    {   // with nothing to keep on, no look ever goes
+        Registered r;
+        CHECK(r.spp.checkRegistration(30));
+        CHECK(kinds(r.gap) == "R");
+    }
+}
+
+static void testKnockService() {
+    {   // without a knock service, a request for DUN is any other service's, as before
+        Registered r;
+        r.gap.inform(kInfServiceRequest, kDialup);
+        CHECK(r.seen.phone.size() == 1 && r.seen.phone[0].service == kDialup && r.seen.knockRequests.empty());
+        CHECK(r.spp.knowsPhone());
+    }
+    {   // with one, its requests go to sppKnockRequest(), with the address, and are kept in nothing else
+        FakeGap gap;
+        Seen seen;
+        SppService spp(&gap, &seen);
+        spp.configure(kName, kUuid, 0);
+        spp.setKnockService(kDialup);
+        CHECK(spp.start());
+        gap.attach();
+        gap.took(kReqSppUuidRegister);
+        gap.reply(kRspSppUuidRegister, 0);
+        gap.inform(kInfServiceRequest, kDialup);
+        gap.inform(kInfServiceRequestError, kDialup);
+        gap.inform(kInfServiceRequestComplete, kDialup);
+        CHECK(seen.phone.empty() && seen.knockRequests.size() == 3);
+        CHECK(seen.knockRequests[0].what == SppService::kPhoneAsked && seen.knockRequests[0].address == kPhoneAddress &&
+              seen.knockRequests[0].parsed);
+        CHECK(seen.knockRequests[1].what == SppService::kPhoneRefused && seen.knockRequests[1].address == kPhoneAddress);
+        CHECK(seen.knockRequests[2].what == SppService::kPhoneLinked);
+        // Not the phone disconnectPhone() names, and nothing logged with the address.
+        CHECK(!spp.knowsPhone() && !spp.disconnectPhone("", "", "") && gap.sent.empty() && !seen.said(kPhoneAddress));
+        // A serial request still goes as before, and is the one disconnectPhone() names, with its own service.
+        gap.inform(kInfServiceRequest, "SPP");
+        CHECK(seen.phone.size() == 1 && spp.knowsPhone() && spp.disconnectPhone("", "", ""));
+        std::vector<uint8_t> d = gap.took(kReqServiceDisconnect);
+        CHECK(d == buildServiceDisconnect("BtCtrl", "ExtBox1", kPhoneAddress, "SPP"));
+        // A DUN request after it does not change what a reset names.
+        gap.reply(kRspServiceDisconnect, 0);
+        gap.inform(kInfServiceRequest, kDialup);
+        CHECK(spp.disconnectPhone("", "", ""));
+        CHECK(gap.took(kReqServiceDisconnect) == d);
+    }
+    {   // rejectRequest(): its bytes, one at a time, its answer told; a rejection told as kNoError
+        Registered r;
+        CHECK(r.spp.rejectRequest("02:00:00:BB:BB:BB", kDialup));
+        CHECK(r.gap.took(kReqServiceReject) == buildServiceReject("02:00:00:BB:BB:BB", kDialup));
+        CHECK(!r.spp.rejectRequest("02:00:00:BB:BB:BB", kDialup) && r.gap.sent.empty());
+        r.gap.reply(kRspServiceReject, 5);
+        CHECK(r.seen.rejectAnswers.size() == 1 && r.seen.rejectAnswers[0] == 5);
+        CHECK(r.spp.rejectRequest("02:00:00:BB:BB:BB", kDialup));
+        r.gap.took(kReqServiceReject);
+        r.gap.reject(kTypeRejectedA, kReqServiceReject);
+        CHECK(r.seen.rejectAnswers.size() == 2 && r.seen.rejectAnswers[1] == kNoError);
+        r.gap.reply(kRspServiceReject, 5);                  // none out: another client's, nothing
+        CHECK(r.seen.rejectAnswers.size() == 2 && r.spp.state() == SppService::kRegistered);
+        // The server goes with one out: none is out from then.
+        CHECK(r.spp.rejectRequest("02:00:00:BB:BB:BB", kDialup));
+        r.gap.took(kReqServiceReject);
+        r.gap.detach();
+        r.gap.attach();
+        r.gap.took(kReqSppUuidRegister);
+        CHECK(r.spp.rejectRequest("02:00:00:BB:BB:BB", kDialup));
+        r.gap.detach();
+        CHECK(!r.spp.rejectRequest("02:00:00:BB:BB:BB", kDialup));
+    }
+}
+
 int main() {
     // 1. UUIDs: shape, upper-casing, SIG profile UUIDs.
     std::string u;
@@ -1511,9 +1870,9 @@ int main() {
         putU32(answer, 3);
         putString(answer, kPhoneAddress);
         putString(answer, kPhoneName);
-        r.gap.events->gapMessage(kTypeResponse, 0x80000031u, &answer[0], (uint32_t)answer.size());
+        r.gap.events->gapMessage(kTypeResponse, 0x8000003au, &answer[0], (uint32_t)answer.size());
         CHECK(r.seen.said("after ServiceDisconnect, a message from the Bluetooth server that the agent does not know: "
-                          "id 0x80000031, type 0x200, first value 3 (0x3)"));
+                          "id 0x8000003a, type 0x200, first value 3 (0x3)"));
         r.gap.events->gapMessage(kTypeResponse, 0x80000032u, &answer[0], 2);
         CHECK(r.seen.said("id 0x80000032, type 0x200, 2 bytes"));
         // A rejection of it, which changes nothing of the registration's.
@@ -1538,7 +1897,7 @@ int main() {
     }
     {   // before any ServiceDisconnect, an answer nobody knows is not logged
         Registered r;
-        r.gap.reply(0x80000031u, 3);
+        r.gap.reply(0x8000003au, 3);
         CHECK(!r.seen.said("does not know") && r.spp.state() == SppService::kRegistered);
     }
     {   // a request the client does not take
@@ -2541,6 +2900,8 @@ int main() {
     testStandInUuid();
     testHold();
     testStandIns();
+    testKeepDialup();
+    testKnockService();
 
     printf("test_spp_service: ok\n");
     return 0;

@@ -214,7 +214,9 @@ format and the protocol.
 - `serial.status` says how Bluetooth serial stands, and `info.get` has the same in its member `serial`: whether
   the service is registered and how long ago it was last checked, the Bluetooth stack's version strings, how many
   phones are connected to the car and how many of them the car may dial, whether the dial is on, whether it waits
-  for knocks (`knock`, true or false), where it is and
+  for knocks (`knock`, true or false), whether the knock by dial-up is on (`knockDialup`, true or false) and what
+  the car's dial-up networking service was last found as (`dialupService`: `not-looked`, `on`, `switched-on` by
+  the agent, `off`, `absent` from the car's list, or `unused` with the knock by dial-up off), where it is and
   what the last dial came to, which of the agent's serial links are up (`none`, `phone-opened`, `dialled` or
   `both`), whether a failed dial may have left the car's record of phone-opened links wrong (`recordDoubtful`),
   whether the re-points after failed dials have stopped (`repointStopped`, see "The re-point" below),
@@ -222,8 +224,10 @@ format and the protocol.
   see "Other programs' links"; not there on the local socket), counts of the asks before the dials, of the dials, their answers, the re-points and the registration checks, of the links
   phones opened that the rule left to another program unread (`leftUnread`), of the links on which bytes the agent
   had read were put back for another program (`putBack`; both in "Other programs' links"), of the knocks
-  (`knocksByMarker`, the ones seen, by the knock's magic bytes; `knocksIgnoredQuiet`, `knocksIgnoredBusy` and `knocksIgnoredNotDialable`, the ones ignored and why, as in "The knock"; `knockDials` and
-  `knockDialsFailed`, the dials knocks brought and the ones of them that gave the agent no link), of the refusals
+  (`knocksByMarker`, the ones seen, by the knock's magic bytes; `knocksByDialup`, by dial-up; `knocksIgnoredQuiet`, `knocksIgnoredBusy` and `knocksIgnoredNotDialable`, the ones ignored and why, as in "The knock"; `knockDials` and
+  `knockDialsFailed`, the dials knocks brought and the ones of them that gave the agent no link; `dialupRefusals`,
+  the agent's refusals of requests for the car's dial-up service sent, and `dialupSwitches`, the times it switched
+  that service on), of the refusals
   whose look at the car's device list found the phone with no media audio (`refusalsNoAudio`, with the refusal's
   log line below), and how many
   problems were written to the problem file and how many only counted. The count `notListening` is of the dials
@@ -1016,7 +1020,59 @@ audio at the car ("The re-point", below).
   app connects to the car's dial-up networking service, whose record names an RFCOMM channel of its own, so the
   connect cannot run into another app's link to the car's serial channel, and nothing is written on it. An agent
   with the knock lists the capability `serial-knock-dialup` in `hello` unless it was started with
-  `--knock-dialup off`. What each side does is the `serial.knockDialup*` block of `spec/protocol/constants.txt`.
+  `--knock-dialup off`. What each side does is the `serial.knockDialup*` block of `spec/protocol/constants.txt`. The
+  agent's side:
+  - *The service kept on.* The car's Bluetooth stack has the service, by the name `DUN`, on some cars on and on
+    others off, and the car's own software switches it off on cars not set up for it at some moments (a change of
+    the services switched on in iDrive), with no word to other clients. So each time the agent's own service has
+    been registered (as it starts, when the car's Bluetooth service comes back and when the car's Bluetooth has been
+    switched on again, never before registrations may go: "When the agent registers", above), and in every
+    registration check after that, the agent asks the stack for its list of services (SupportedServicesGet) and finds
+    `DUN` in it by its name. Listed and on, it is left as it is; listed and off, it is switched on (EnabledServicesSet,
+    for that name alone), and kept on: found off again later, it is switched on again, the log saying so the first
+    time and counting it after. Not listed, the log says once that the knock by dial-up cannot work on that car, and
+    `hello` no longer lists `serial-knock-dialup` from then on. A request that fails or is rejected is said when its
+    answer differs from the last and is asked again at the next check; one request of each kind is out at a time,
+    and an answer to one that went out before a switch-off of the car's Bluetooth is passed over. As Bluetooth serial
+    stops, the agent switches the service off again only where its first look of the run found it off and the agent
+    switched it on; one it found on is left on.
+  - *The request is the knock.* With the knock by dial-up on, a phone's request for the car's `DUN` service is never
+    a request for a serial link: no node is looked for, no hold put on, no refusal counted, the registration check
+    is not held back by it, and it is not the phone `serial.reset` names. It is that phone's knock, by the same rules
+    as a knock by magic bytes (who is dialled, the quiet time, the wait of 4 seconds at most, below), taken once the
+    request has ended: when the stack says it has (the car refused it), or the agent's own refusal (below) has been
+    answered. So the car's dial never meets the phone's own connect while that still waits for its answer. A second
+    request of the same phone while its first is pending is the same knock.
+  - *The backstop refusal.* The car's own software refuses such a request within milliseconds, but sends one
+    refusal at a time and may drop one, and the stack never ends a pending request by itself: the phone would wait a
+    minute, and its next connect would be refused unheard. So a request the car has not ended 2 seconds after it was
+    heard is refused by the agent (ServiceReject), never sooner and never once it has ended, one refusal of the
+    agent's at a time (the stack takes one at a time from all its clients, and answers a second one BUSY). Its answer
+    5 is the one the stack always gives for this service, and ends the request; BUSY, a rejection or no answer in 3
+    seconds has it sent again 100 ms later, 6 times at most, and then the agent gives up, says so, and takes the
+    knock all the same. This goes for every such request the agent hears, whether or not it brings a dial. A switch-off
+    of the car's Bluetooth or the car's Bluetooth service going ends every pending request.
+  - The log has each request (`phone N asked for the car's dial-up networking service ('DUN'): the knock by
+    dial-up ...`), its end and what became of the knock (`phone N knocked by a request for the car's dial-up
+    networking service, which ended T ms after it was heard (the car ended it), and the car dials it ...`), each
+    refusal of the agent's and its answer, and what the service was found as and what was done to it.
+    `serial.status` says whether the knock by dial-up is on and what the service was last found as (below), and
+    counts the knocks by dial-up, the refusals sent and the switches on. With `--knock-dialup off` none of this is
+    done, and such a request is another service's, as below.
+  - *The phone's side.* The phone app knocks this way at an agent that lists `serial-knock-dialup`, and in a probing
+    knock at one it has never greeted. Each burst of its knock then begins with one connect to the car's dial-up
+    networking service, on which it writes nothing and reads nothing; it comes before the burst's connects to the
+    serial channel and is not counted among them, and it is made in a knock of any kind, the wait after an update
+    included, since that service is on a channel of its own and cannot run into another app's link to the car. Where
+    the connect fails with the service found (the car or the agent refused the request), the knock was made, and the
+    app waits 1.5 seconds from the connect's end for the car's link; where it fails with the phone unable to tell
+    whether it found the service, it waits the same. Where the phone finds no record of the service, the burst goes
+    on at once. A connect with no answer within 3 seconds, or one that comes up, is closed, the burst goes on at
+    once, and the app makes no other such connect in that knock. Where no link has come, the burst goes on with its
+    connects to the serial channel as a knock by magic bytes, and the next burst begins with the dial-up connect
+    again. A failure of the dial-up connect never ends a burst or lengthens the pause before the next, and one that
+    does not reach the car ends the knock as any connect does. The diagnostics number it 0 in its burst ("1.0") and
+    say what came of it.
 
 The phone app listens while it is open, or busy with something that needs the link (a job, a pull of logs), with
 Bluetooth on and no link, and not after the user's own Disconnect until they connect again or come back to the
@@ -1257,7 +1313,8 @@ name no longer declared stays until the car's Bluetooth is switched off or its s
 it, so a program that takes serial links of its own meets the agent's links, and the agent meets its links. Only
 a phone's request that names the agent's service or the car's serial service is matched to a serial node; one for
 another service (audio, hands-free) never brings one, is only logged, and does not have the next node left alone.
-Three things keep the two apart, all in the agent:
+One for the car's dial-up networking service, with the knock by dial-up on, is that phone's knock ("The knock by
+dial-up", above), and the agent refuses it where the car has not. Three things keep the two apart, all in the agent:
 
 - With the knock (the default) there is no such rule: every link a phone opens is read as below, whoever the phone
   is, since it may be that phone's knock ("The car dials the phone", above), and `phoneOpenedLeft` is always false.
@@ -1331,7 +1388,7 @@ the car's dialling; all seven go with Bluetooth serial only:
 | `--register-hold <s>` | How many seconds the car's Bluetooth has to have said it is on before a serial registration goes, 0 to 600, in place of 10; with 0 they go as soon as it says so ("When the agent registers", above) |
 | `--dial on\|off` | Whether the car dials a phone of the agent's (above); on by default. With off, the agent takes only the links phones open, as before |
 | `--dial-knock on\|off` | With the dial: on (the default), the car dials a phone when its app knocks, and otherwise only in the pairing window, at `nbtctl serial dial` and for the first 2 minutes of a trial of the agent, with no ask and no poll, and lists `serial-knock`; off, it asks and polls as before the knock, with the rule that leaves some phones' own links to another program, for comparisons. Not with `--dial off` |
-| `--knock-dialup on\|off` | With the knock: on (the default), the agent lists `serial-knock-dialup`, the knock by dial-up (above); off, it does not, and a phone app knocks by magic bytes alone. Not with `--dial off` or `--dial-knock off` |
+| `--knock-dialup on\|off` | With the knock: on (the default), a phone's request for the car's dial-up networking service is its knock too, the agent keeps that service on and refuses such a request where the car has not, and lists `serial-knock-dialup` ("The knock by dial-up", above); off, none of this, and a phone app knocks by magic bytes alone. Not with `--dial off` or `--dial-knock off` |
 | `--dial-poll <f>,<l>,<t>` | With `--dial-knock off` only: the dial's polls, every f seconds (1 to 3600) for l seconds (0 to 86400) after a phone connects or a link ends, then every t seconds (1 to 3600), in place of 10,120,30 |
 
 When Bluetooth serial has started, six lines in the log say what the agent goes by: the time and what becomes
@@ -1345,7 +1402,7 @@ bluetooth: a link the agent ends keeps its node, read and with what comes droppe
 bluetooth: a serial service that the car's Bluetooth service does not take, or that is not registered for 20 s, is given up: the gate is taken away, and both are set up again 30 s later, for as long as it takes
 bluetooth: no serial registration goes until the car's Bluetooth has said for 10 s that it is on, counted from the attach when it is on then, with the stand-ins for the declared serial services of other programs ahead of the agent's own; switching Bluetooth off drops them all, and the car says so. While the service is registered, no link of the agent's is up and no phone has asked for a link for 30 s, the registration is checked every 30 s by registering it again, after the stand-ins: a car whose Bluetooth says nothing of being switched off drops it all the same
 bluetooth: while a link is being decided on or is the agent's, the gate also refuses opens by radiod
-bluetooth: the car dials a phone on its instance 'nbtapp' (/dev/nbtapp) when the phone's app knocks, and otherwise only while the pairing window is open, at serial.dial and while this version of the agent is on trial (--dial-knock on): a link the phone opens that starts with the knock's magic bytes within the decide time is that phone's knock, and a phone's request for a serial link is no knock, whatever becomes of it. The agent lists serial-knock-dialup, the knock by dial-up (--knock-dialup on). A knock of any phone that is connected to the car and paired with it, one of the agent's or not, has the car dial it at once, with no ask before it, when no link of the agent's is up and no dial is out; one that comes while a phone's request is pending, a link is being decided on or another phone's dial is out waits 4000 ms at most. After a dial a knock brought that gave the agent no link, that phone's knocks are ignored for 3000 ms. No poll, and no ask of a phone's services. While the pairing window is open every phone there is dialled every 5 s, and while this version of the agent is on trial and no link of the agent's is up, every phone of the agent's there every 5 s, for 120 s from when the trial is known, the serial service registered and the car's device list come; after that, until the version is confirmed, a phone is dialled when its app knocks, as when it is not on trial. The app's magic bytes are waited for 3000 ms; a dial with no answer is given up after 95 s; a link left behind on the instance that a dial finds is ended, and the phone dialled again at once. A dialled link that the agent ends has 5000 ms to be ended by the phone before the car is asked to, and the car's answer is waited for 3000 ms. A phone's request that the car ends while the agent's dial is out, or up to 1000 ms after it was answered, is not counted as a refusal. A registration refused while /dev/nbtapp is there: the car's device list is waited for 3000 ms and the link ended for each phone there, 15 s at most in all, and the service registered again at once if it has gone. As soon as the car answers a dial with a failure other than 10 or BUSY, one re-point request goes on the same instance, so that a link end the car may book against that instance names no phone: its answer is waited for 3000 ms, with no dial meanwhile, and an answer other than 5 within 500 ms stops these requests for the rest of the run
+bluetooth: the car dials a phone on its instance 'nbtapp' (/dev/nbtapp) when the phone's app knocks, and otherwise only while the pairing window is open, at serial.dial and while this version of the agent is on trial (--dial-knock on): a link the phone opens that starts with the knock's magic bytes within the decide time is that phone's knock, and a phone's request for a serial link is no knock, whatever becomes of it. A phone's request for the car's dial-up networking service ('DUN') is that phone's knock too, the knock by dial-up (--knock-dialup on): the agent keeps that service on while its own is registered, switching it on where it is off, takes the knock once the request has ended, and refuses the request itself where the car has not ended it in 2000 ms; the agent lists serial-knock-dialup. A knock of any phone that is connected to the car and paired with it, one of the agent's or not, has the car dial it at once, with no ask before it, when no link of the agent's is up and no dial is out; one that comes while a phone's request is pending, a link is being decided on or another phone's dial is out waits 4000 ms at most. After a dial a knock brought that gave the agent no link, that phone's knocks are ignored for 3000 ms. No poll, and no ask of a phone's services. While the pairing window is open every phone there is dialled every 5 s, and while this version of the agent is on trial and no link of the agent's is up, every phone of the agent's there every 5 s, for 120 s from when the trial is known, the serial service registered and the car's device list come; after that, until the version is confirmed, a phone is dialled when its app knocks, as when it is not on trial. The app's magic bytes are waited for 3000 ms; a dial with no answer is given up after 95 s; a link left behind on the instance that a dial finds is ended, and the phone dialled again at once. A dialled link that the agent ends has 5000 ms to be ended by the phone before the car is asked to, and the car's answer is waited for 3000 ms. A phone's request that the car ends while the agent's dial is out, or up to 1000 ms after it was answered, is not counted as a refusal. A registration refused while /dev/nbtapp is there: the car's device list is waited for 3000 ms and the link ended for each phone there, 15 s at most in all, and the service registered again at once if it has gone. As soon as the car answers a dial with a failure other than 10 or BUSY, one re-point request goes on the same instance, so that a link end the car may book against that instance names no phone: its answer is waited for 3000 ms, with no dial meanwhile, and an answer other than 5 within 500 ms stops these requests for the rest of the run
 ```
 
 With `--dial-knock off` the first of these ends as before the knock, with the rule that leaves some phones' own

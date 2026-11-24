@@ -173,6 +173,7 @@
 #include <vector>
 
 #include "dial_rules.hpp"
+#include "dialup_requests.hpp"
 #include "link.hpp"
 #include "node_reader.hpp"
 #include "phones.hpp"
@@ -673,7 +674,9 @@ public:
     virtual void pairingWindow(bool open);
     virtual bool dialOn() { return config_.dial.on; }
     virtual bool knockOn() { return config_.dial.on && config_.dial.knock; }
-    virtual bool knockDialupOn() { return knockOn() && config_.dial.knockDialup; }
+    // With the option, and but where the car's Bluetooth stack has been seen to have no dial-up networking service:
+    // then nothing can come of it, and hello does not list it.
+    virtual bool knockDialupOn() { return dialupConfigured() && !spp_.kept().absentSeen; }
     virtual void agentOnTrial(bool onTrial);
     virtual unsigned dialNow(std::string* why, const char** code);
     virtual SerialStatus serialStatus();
@@ -728,10 +731,21 @@ private:
     virtual void sppPhone(btspp::SppService::Phone what, const std::string& service, bool parsed,
                           const std::string& address);
     virtual void sppRefusedPhone(const btspp::PhoneInList& phone);
-    // The phone at `address` asked the car for its dial-up networking service (kCarDialupService) while
-    // knockDialupOn(): that phone's knock by dial-up. On the Bluetooth service's thread, from sppPhone(). It does
-    // nothing yet: the knock by dial-up is to take it as a knock (DialRules::knocked()) and see the request refused.
+    // The knock by dial-up (dialup_requests.hpp): whether the option has it on; the phones' requests for the car's
+    // dial-up networking service (kCarDialupService), which SppService gives to sppKnockRequest() in place of
+    // sppPhone() while it is on; the phone at `address` asked (dialupKnock()) or its request has ended
+    // (dialupEnded(), `how` for the log), on the Bluetooth service's thread; the agent's refusal's answer; and on the
+    // listener's thread, the refusals that are due and what is lost (tendDialup()).
+    bool dialupConfigured() { return knockOn() && config_.dial.knockDialup; }
+    virtual void sppKnockRequest(btspp::SppService::Phone what, const std::string& address, bool parsed);
+    virtual void sppRejectAnswered(uint32_t error);
     void dialupKnock(const std::string& address);
+    void dialupEnded(const std::string& address, const char* how);
+    // The knock a request that ended brings (DialRules::knocked()), said in the log. mu_ held; `heardAt` in ms.
+    void dialupKnocked(const std::string& address, int64_t heardAt, int64_t now, const char* how);
+    void tendDialup();
+    // As the listener stops: the dial-up service switched off again where the agent found it off and switched it on.
+    void restoreDialup();
     virtual void sppDevices(const std::vector<btspp::BtDevice>& devices);
     virtual void sppConnectReply(const btspp::ServiceConnectReply& reply);
     virtual void sppLateConnectReply(const btspp::ServiceConnectReply& reply);
@@ -1055,6 +1069,10 @@ private:
     // first pass at which none of another's waits; and each phone's last re-point outcome, which the log only counts.
     bool repointDisconnect_;
     std::map<unsigned, Repeat> repointRepeats_;
+    // mu_: the knock by dial-up's pending requests and the agent's refusals of them; and on the listener's thread
+    // whether the stack was seen with no dial-up service (said once).
+    DialupRequests dialup_;
+    bool dialupAbsentSaid_;
 };
 
 }  // namespace nbt

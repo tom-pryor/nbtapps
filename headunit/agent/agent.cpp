@@ -1716,6 +1716,7 @@ void Agent::writeSerial(json::Writer& w, Session* s) {
     w.endArray();
     w.key("phonesPresent").integer(st.phonesPresent).key("phonesEligible").integer(st.phonesEligible);
     w.key("dial").string(st.dialOn ? "on" : "off").key("knock").boolean(st.knock).key("dialState").string(st.dialState);
+    w.key("knockDialup").boolean(st.knockDialup).key("dialupService").string(st.dialupService);
     w.key("lastResult").string(st.lastResult).key("link").string(st.link);
     w.key("recordDoubtful").boolean(st.recordDoubtful).key("repointStopped").boolean(st.repointStopped);
     // For the phone on this link; a link that knows no address (the bench's TCP) is never left.
@@ -1734,6 +1735,8 @@ void Agent::writeSerial(json::Writer& w, Session* s) {
     w.key("knocksIgnoredQuiet").integer(st.knocksIgnoredQuiet).key("knocksIgnoredBusy").integer(st.knocksIgnoredBusy);
     w.key("knocksIgnoredNotDialable").integer(st.knocksIgnoredNotDialable);
     w.key("knockDials").integer(st.knockDials).key("knockDialsFailed").integer(st.knockDialsFailed);
+    w.key("knocksByDialup").integer(st.knocksByDialup).key("dialupRefusals").integer(st.dialupRefusals);
+    w.key("dialupSwitches").integer(st.dialupSwitches);
     w.key("refusalsNoAudio").integer(st.refusalsNoAudio);
     w.endObject();
     w.key("problems").beginObject().key("recorded").integer(st.problemsRecorded);
