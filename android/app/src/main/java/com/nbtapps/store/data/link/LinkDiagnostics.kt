@@ -70,7 +70,8 @@ data class LinkTry(
 
         /**
          * One connect of a knock's: the phone knocked at the agent ([BluetoothSerialLinkConnector.knock]), through the
-         * agent's own service or, where its [detail] says so, the car's Serial Port service.
+         * agent's own service or, where its [detail] says so, the car's Serial Port service, or its dial-up networking
+         * service (numbered 0 in its burst, as "1.0", ahead of the burst's other connects).
          */
         KNOCK("knock"),
 
@@ -116,6 +117,24 @@ data class LinkTry(
          * no second, and which the failed connect has closed. Named for the first, as it was before the second was known.
          */
         REFUSED("failed with the service found (refused by the car, or another app's link to the car in the way)"),
+
+        /**
+         * A knock's connect to the car's dial-up networking service failed where the phone had found the service: the car's
+         * side heard the request and refused it, which is the knock by dial-up, made.
+         */
+        DIALUP_KNOCKED("was refused, which made the knock,"),
+
+        /** A knock's connect to the car's dial-up networking service found no record of it: the car does not have it on. */
+        DIALUP_NONE("found no dial-up service on the car"),
+
+        /**
+         * A knock's connect to the car's dial-up networking service failed where the phone cannot tell whether it had
+         * found the service: the knock may have been made.
+         */
+        DIALUP_UNSURE("failed, which may have made the knock,"),
+
+        /** A knock's connect to the car's dial-up networking service came up, which nobody should let it, and was closed. */
+        DIALUP_UP("came up, which it should not, and was closed"),
 
         /** Given up because the connect it was part of was cancelled, or had its link. */
         CANCELLED("cancelled"),
