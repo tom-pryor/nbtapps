@@ -160,7 +160,7 @@ class FakeGap : public GapClient {
 public:
     explicit FakeGap(Trace* trace)
         : canOpen(true), openFinal_(false), silent(false), registerError(0), statusOnSubscribe(1), places(0),
-          dialupState(0), rejectEnds(true), deregisterError(0),
+          dialupState(0), rejectEnds(true), rejectEndsAfter(false), deregisterError(0),
           refusesWhileDialled(false),
           answersList(true), listed(false),
           connection(0), security(0), answersQuery(true), queryLists(true), queryError(0), queryInforms(false),
@@ -243,9 +243,11 @@ public:
                 rejectAnswers.erase(rejectAnswers.begin());
             }
             pthread_mutex_unlock(&connectsMu_);
-            if (error != 2 && rejectEnds) phone(kInfServiceRequestError, service.c_str(), address.c_str());
+            bool ends = error != 2 && rejectEnds;
+            if (ends && !rejectEndsAfter) phone(kInfServiceRequestError, service.c_str(), address.c_str());
             putU32(reply, error);
             events_->gapMessage(kTypeResponse, kRspServiceReject, &reply[0], (uint32_t)reply.size());
+            if (ends && rejectEndsAfter) phone(kInfServiceRequestError, service.c_str(), address.c_str());
         } else if (id == kReqSppUuidDeregister && places > 0) {
             // As the stack's places would answer it.
             Reader name(&payload[0], (uint32_t)payload.size());
@@ -536,6 +538,7 @@ public:
     // request first with its inform, as the stack's does.
     std::vector<uint32_t> rejectAnswers;
     bool rejectEnds;
+    bool rejectEndsAfter;            // and that inform comes after the answer, not before it
     // When each ServiceReject came, by the monotonic clock.
     std::vector<double> rejectTimes() {
         pthread_mutex_lock(&connectsMu_);
@@ -6694,17 +6697,55 @@ static void testKnockDialup() {
                              "the agent refuses it (ServiceReject)"));
         CHECK(k.trace.logged("ServiceReject of a request for the car's dial-up networking service answered 5 DEFAULT (as "
                              "always for this service)"));
-        CHECK(k.trace.logged("(the agent's refusal was answered)"));
-        CHECK(k.listener->serialStatus().dialupRefusals == 1);
+        CHECK(k.trace.logged("phone 1 knocked by a request for the car's dial-up networking service, which ended ") &&
+              k.trace.logged(" ms after it was heard (it ended after the agent's own refusal, which was answered), and "
+                             "the car dials it"));
+        CHECK(!k.trace.logged("the car ended it") && k.listener->serialStatus().dialupRefusals == 1);
     }
-    {   // the same, with the stack's own end of the request coming before the refusal's answer, as it does
+    {   // the same, with the stack's word that the request has ended coming before the refusal's answer, as the
+        // stack's does: the request ended after the agent's refusal, not by the car's
         Knocker k("dialup-agent-refuses-ends");
         k.config.dial.dialupRefuseMs = 300;
         k.start();
         k.dialNode.say(kMagic);
         k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
         dialledAndGone(k);
-        CHECK(k.trace.logged("(the car ended it)") && k.trace.logged(", after the request had ended"));
+        CHECK(k.trace.logged(" ms after it was heard (it ended after the agent's own refusal), and the car dials it") &&
+              k.trace.logged(", after the request had ended"));
+        CHECK(!k.trace.logged("the car ended it") &&
+              k.trace.loggedCount("knocked by a request for the car's dial-up networking service, which ended") == 1);
+    }
+    {   // and with that word after the refusal's answer: the answer ends it, and the word then brings nothing more
+        Knocker k("dialup-agent-refuses-ends-after");
+        k.config.dial.dialupRefuseMs = 300;
+        k.gap.rejectEndsAfter = true;
+        k.start();
+        k.dialNode.say(kMagic);
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        dialledAndGone(k);
+        CHECK(k.trace.logged("(it ended after the agent's own refusal, which was answered), and the car dials it"));
+        CHECK(!k.trace.logged("the car ended it") &&
+              k.trace.loggedCount("knocked by a request for the car's dial-up networking service, which ended") == 1 &&
+              dialsOfPhone(k.gap) == 1);
+    }
+    {   // a request that comes in the phone's quiet time after a failed dial: no dial, said so, and still followed to
+        // its end (the agent's refusal where the car does not end it)
+        Knocker k("dialup-quiet");
+        k.config.dial.dialupRefuseMs = 300;
+        k.config.dial.knockQuietMs = 600000;   // the whole test is inside it, whatever the load
+        k.gap.nextConnectErrors.push_back(14);  // the car's dial fails: the phone does not take the link
+        k.start();
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);
+        k.gap.phone(kInfServiceRequestError, kDialupService, kDialled);
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "the car's dial answered 14", 3000));
+        CHECK(dialsOfPhone(k.gap) == 1);
+        k.gap.phone(kInfServiceRequest, kDialupService, kDialled);   // the car does not end this one
+        CHECK_IN(k.trace.text(), sawWithin(k.trace, "(it ended after the agent's own refusal), ignored: it came in the "
+                                                    "phone's quiet time after a dial that a knock brought had failed",
+                                           3000));
+        CHECK(k.gap.rejectTimes().size() == 1 && dialsOfPhone(k.gap) == 1);
+        // The re-point after the failed dial went as for any knock's.
+        CHECK(k.trace.saw("gap repoint BtCtrl nbtapp"));
     }
     {   // answered BUSY, then 5: sent again 100 ms later
         Knocker k("dialup-busy");

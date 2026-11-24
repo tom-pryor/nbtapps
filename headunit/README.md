@@ -1052,27 +1052,42 @@ audio at the car ("The re-point", below).
     seconds has it sent again 100 ms later, 6 times at most, and then the agent gives up, says so, and takes the
     knock all the same. This goes for every such request the agent hears, whether or not it brings a dial. A switch-off
     of the car's Bluetooth or the car's Bluetooth service going ends every pending request.
+  - *What the car keeps.* At a phone's first request for the car's dial-up networking service, the car's Bluetooth
+    stack notes that service in its list of that phone's services, and the car's own software keeps, in its stored
+    list of devices, that the phone offers dial-up. Nothing on the car acts on that for such a phone, and it stays
+    until the phone is removed from the car or paired with it again. A request for the car's serial service is noted
+    the same way, as it always was.
   - The log has each request (`phone N asked for the car's dial-up networking service ('DUN'): the knock by
     dial-up ...`), its end and what became of the knock (`phone N knocked by a request for the car's dial-up
-    networking service, which ended T ms after it was heard (the car ended it), and the car dials it ...`), each
-    refusal of the agent's and its answer, and what the service was found as and what was done to it.
+    networking service, which ended T ms after it was heard (the car ended it), and the car dials it ...`; where the
+    agent's own refusal had gone for it, `(it ended after the agent's own refusal)` in place of `(the car ended it)`,
+    or `(..., which was answered)` where the refusal's answer came before the stack's word), each refusal of the
+    agent's and its answer, and what the service was found as and what was done to it. A request that ends in that
+    phone's quiet time after a failed dial is `ignored: it came in the phone's quiet time ...`, and brings no dial.
     `serial.status` says whether the knock by dial-up is on and what the service was last found as (below), and
     counts the knocks by dial-up, the refusals sent and the switches on. With `--knock-dialup off` none of this is
     done, and such a request is another service's, as below.
   - *The phone's side.* The phone app knocks this way at an agent that lists `serial-knock-dialup`, and in a probing
-    knock at one it has never greeted. Each burst of its knock then begins with one connect to the car's dial-up
-    networking service, on which it writes nothing and reads nothing; it comes before the burst's connects to the
-    serial channel and is not counted among them, and it is made in a knock of any kind, the wait after an update
-    included, since that service is on a channel of its own and cannot run into another app's link to the car. Where
-    the connect fails with the service found (the car or the agent refused the request), the knock was made, and the
-    app waits 1.5 seconds from the connect's end for the car's link; where it fails with the phone unable to tell
-    whether it found the service, it waits the same. Where the phone finds no record of the service, the burst goes
-    on at once. A connect with no answer within 3 seconds, or one that comes up, is closed, the burst goes on at
-    once, and the app makes no other such connect in that knock. Where no link has come, the burst goes on with its
-    connects to the serial channel as a knock by magic bytes, and the next burst begins with the dial-up connect
-    again. A failure of the dial-up connect never ends a burst or lengthens the pause before the next, and one that
-    does not reach the car ends the knock as any connect does. The diagnostics number it 0 in its burst ("1.0") and
-    say what came of it.
+    knock at one it has never greeted. Each burst of its knock begins with one connect to the car's dial-up
+    networking service, on which it writes nothing and reads nothing; it is not counted among the burst's connects
+    to the serial channel, and it is made in a knock of any kind, the wait after an update included, since that
+    service is on a channel of its own and cannot run into another app's link to the car. Where the connect fails
+    with the service found (the car or the agent refused the request), the knock was made, and the app waits 1.5
+    seconds from the connect's end for the car's link; where it fails with the phone unable to tell whether it found
+    the service, it waits the same. A connect with no answer within 3 seconds is closed, and the car's link is
+    waited for 1.5 seconds more, as the agent's own refusal of a request the car left pending is the knock too.
+    Where the knock by dial-up was made, may have been, or had no answer, and no link came, the burst ends there,
+    with no connect to the serial channel: an agent that hears the one knock hears the other, and those connects
+    would add nothing but the risk of running into another app's link. The next burst follows 4 seconds later, so
+    that its knock does not fall in the agent's quiet time after a dial of its own that failed, and begins with the
+    dial-up connect again. Only the knock's last burst (so the one burst of a knock of one, and a probing knock's)
+    goes on with its connects to the serial channel, as a knock by magic bytes, so that an agent that does not
+    answer the knock by dial-up is still reached, once. Where the phone finds no record of the service, the burst
+    goes on at once with its connects to the serial channel, in every burst. A connect that comes up is closed at
+    once, the burst goes on at once, and the app makes no other such connect in that knock. A failure of the dial-up
+    connect is never taken as one that ran into another app's link, and one that does not reach the car ends the
+    knock as any connect does. The diagnostics number it 0 in its burst ("1.0") and say what came of it, and a burst
+    that ended with it says so.
 
 The phone app listens while it is open, or busy with something that needs the link (a job, a pull of logs), with
 Bluetooth on and no link, and not after the user's own Disconnect until they connect again or come back to the

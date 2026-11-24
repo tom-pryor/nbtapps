@@ -70,11 +70,15 @@ public:
         return true;
     }
     // The stack says that the phone's request has ended. True, with when it was heard, if it was pending: its knock
-    // goes now. A refusal of the agent's that is out for it stays out until its answer, which then says nothing more.
-    bool ended(const std::string& address, int64_t* heardAt) {
+    // goes now. *afterRefusal, if given: a refusal of the agent's had gone for it, so the stack's word may be that
+    // refusal's doing (the stack says the request has ended before it answers the refusal); false: none had, and the
+    // car ended it. A refusal of the agent's that is out for it stays out until its answer, which then says nothing
+    // more.
+    bool ended(const std::string& address, int64_t* heardAt, bool* afterRefusal = 0) {
         int i = find(btspp::addressKey(address));
         if (i < 0) return false;
         *heardAt = pending_[(size_t)i].heardAt;
+        if (afterRefusal != 0) *afterRefusal = pending_[(size_t)i].tries > 0;
         pending_.erase(pending_.begin() + i);
         return true;
     }

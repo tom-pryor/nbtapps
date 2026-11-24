@@ -1112,7 +1112,7 @@ void SerialListener::sppPhone(SppService::Phone what, const std::string& service
 // registration check is not held back by it.
 void SerialListener::sppKnockRequest(SppService::Phone what, const std::string& address, bool parsed) {
     if (what == SppService::kPhoneAsked) dialupKnock(address);
-    else dialupEnded(address, what == SppService::kPhoneLinked ? "it came up, which the phone closes" : "the car ended it");
+    else dialupEnded(address, what == SppService::kPhoneLinked);
     if (!parsed) say("a request for the car's dial-up networking service was not read whole");
 }
 
@@ -1136,10 +1136,16 @@ void SerialListener::dialupKnock(const std::string& address) {
             whose, kCarDialupService, config_.dial.dialupRefuseMs);
 }
 
-void SerialListener::dialupEnded(const std::string& address, const char* how) {
+// The stack's word that the request has ended. Where the agent's own refusal had gone for it, the stack says so as
+// that refusal ends it, ahead of the refusal's answer: it ended after the agent's refusal, not by the car's.
+void SerialListener::dialupEnded(const std::string& address, bool cameUp) {
     pthread_mutex_lock(&mu_);
     int64_t now = dialupNow(), heardAt = 0;
-    if (dialup_.ended(address, &heardAt)) dialupKnocked(address, heardAt, now, how);
+    bool afterRefusal = false;
+    if (dialup_.ended(address, &heardAt, &afterRefusal))
+        dialupKnocked(address, heardAt, now,
+                      cameUp ? "it came up, which the phone closes"
+                             : (afterRefusal ? "it ended after the agent's own refusal" : "the car ended it"));
     pthread_cond_signal(&wake_);
     pthread_mutex_unlock(&mu_);
 }
@@ -1161,7 +1167,8 @@ void SerialListener::sppRejectAnswered(uint32_t error) {
     pthread_mutex_lock(&mu_);
     int64_t now = dialupNow();
     DialupRequests::Answer a = dialup_.answered(error, now, &address, &heardAt);
-    if (a == DialupRequests::kEnded) dialupKnocked(address, heardAt, now, "the agent's refusal was answered");
+    if (a == DialupRequests::kEnded)
+        dialupKnocked(address, heardAt, now, "it ended after the agent's own refusal, which was answered");
     if (a == DialupRequests::kGaveUp)
         dialupKnocked(address, heardAt, now, "the agent's refusal was given up, and the request may still be pending");
     pthread_cond_signal(&wake_);
