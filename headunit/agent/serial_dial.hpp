@@ -52,6 +52,15 @@ struct SerialStatus {
     // trouble, no phone named); the dials knocks brought, and of those the ones that gave the agent no link.
     unsigned knocksByMarker, knocksIgnoredQuiet, knocksIgnoredBusy, knocksIgnoredNotDialable, knockDials,
         knockDialsFailed;
+    // The knock by dial-up (dialup_requests.hpp): whether it is on (the option, and the car's stack not seen without
+    // the service); the car's dial-up networking service as the agent last saw it: "not-looked", "on" (found so),
+    // "switched-on" (by the agent), "off" (being switched on, or that failed and is tried again), "absent" (not in the
+    // stack's list), "unused" (the knock by dial-up is off); the knocks by dial-up seen (the ignored ones and the dials
+    // they brought are among the counts above); the agent's refusals of such requests sent; and how many times the
+    // agent switched the service on.
+    bool knockDialup;
+    std::string dialupService;
+    unsigned knocksByDialup, dialupRefusals, dialupSwitches;
     // The refusals whose look at the car's device list (the first, and every 20th) found the phone connected with no
     // service connected: no media audio, while which the car refuses a phone's own links.
     unsigned refusalsNoAudio;
@@ -63,7 +72,8 @@ struct SerialStatus {
           answeredOk(0), notListening(0), notInReach(0), busy(0), otherAnswers(0), noAnswer(0), notTheApp(0),
           leftBehind(0), asks(0), asksListed(0), asksNotListed(0), asksNoAnswer(0), askErrors(0), repoints(0),
           repointsExpected(0), repointsUnexpected(0), repointsNotSent(0), checks(0), checksRestored(0), refusals(0),
-          leftUnread(0), putBack(0), knocksByMarker(0), knocksIgnoredQuiet(0), knocksIgnoredBusy(0), knocksIgnoredNotDialable(0), knockDials(0), knockDialsFailed(0), refusalsNoAudio(0),
+          leftUnread(0), putBack(0), knocksByMarker(0), knocksIgnoredQuiet(0), knocksIgnoredBusy(0), knocksIgnoredNotDialable(0), knockDials(0), knockDialsFailed(0), knockDialup(false), dialupService("unused"),
+          knocksByDialup(0), dialupRefusals(0), dialupSwitches(0), refusalsNoAudio(0),
           problemsRecorded(0), problemsCounted(0) {}
 };
 

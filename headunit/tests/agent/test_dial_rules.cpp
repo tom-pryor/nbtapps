@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-// Host test for agent/dial_rules.cpp: when the car dials a phone of the agent's, and what comes of each answer. The
-// time is the test's own, in milliseconds. All addresses are made up.
+// Host test for agent/dial_rules.cpp: when the car dials a phone of the agent's, and what comes of each answer; and
+// for agent/dialup_requests.hpp, the requests of the knock by dial-up and the agent's refusals of them. The time is
+// the test's own, in milliseconds. All addresses are made up.
 
 #include "../../agent/dial_rules.hpp"
 
+#include "../../agent/dialup_requests.hpp"
 #include "../../agent/spp_service.hpp"
 #include "test_util.hpp"
 
@@ -1175,6 +1177,123 @@ static bool newsIs(DialRules& r, DialRules::KnockEnd end, unsigned number) {
     return n.size() == 1 && n[0].end == end && n[0].number == number;
 }
 
+// The knock by dial-up: the same rules as a knock by its magic bytes, counted apart, and told as such.
+static void testKnockByDialup() {
+    {   // dialled as any knock; counted as one by dial-up
+        DialRules r(knocks());
+        present(r, 1000);
+        CHECK(r.knocked(kOne, 2000, true) == DialRules::kKnockWaits);
+        DialRules::Dial d = knockDial(r, 2000, facts(), DialRules::kKnock);
+        std::vector<DialRules::KnockNews> n = r.takeKnockNews();
+        CHECK(d.address == kOne && n.size() == 1 && n[0].dialup && n[0].end == DialRules::kKnockDialled);
+        CHECK(r.knockCounts().byDialup == 1 && r.knockCounts().byMarker == 0 && r.knockCounts().dials == 1);
+        // A knock of either kind while its dial is out adds nothing.
+        CHECK(r.knocked(kOne, 2100, true) == DialRules::kKnockBusy && r.knocked(kOne, 2100) == DialRules::kKnockBusy);
+        CHECK(r.knockCounts().byDialup == 2 && r.knockCounts().byMarker == 1 && r.knockCounts().ignoredBusy == 2);
+        // Failed: the quiet time, for knocks of both kinds.
+        CHECK(r.reply(kOne, kService, kService, 5, 2200) == DialRules::kNotListening);
+        CHECK(r.knocked(kOne, 3000, true) == DialRules::kKnockQuiet && r.knocked(kOne, 3000) == DialRules::kKnockQuiet);
+    }
+    {   // not dialable, and the knock's wait while the service is not registered
+        DialRules r(knocks());
+        present(r, 1000);
+        CHECK(r.knocked(kTwo, 2000, true) == DialRules::kKnockWaits);   // not in the car's list
+        DialRules::Dial d;
+        CHECK(!r.next(2000, facts(), &d));
+        std::vector<DialRules::KnockNews> n = r.takeKnockNews();
+        CHECK(n.size() == 1 && n[0].dialup && n[0].end == DialRules::kKnockNotDialable);
+        DialRules::Facts held = facts();
+        held.registered = false;
+        CHECK(r.knocked(kOne, 3000, true) == DialRules::kKnockWaits);
+        CHECK(!r.next(3000, held, &d) && !r.next(3000 + 3999, held, &d) && r.takeKnockNews().empty());
+        knockDial(r, 3000 + 3999, facts(), DialRules::kKnock);   // registered within its wait: dialled
+        CHECK(r.takeKnockNews()[0].dialup);
+    }
+    {   // a wait that runs out while not registered: ignored, said as a knock by dial-up
+        DialRules r(knocks());
+        present(r, 1000);
+        DialRules::Facts held = facts();
+        held.registered = false;
+        CHECK(r.knocked(kOne, 2000, true) == DialRules::kKnockWaits);
+        DialRules::Dial d;
+        CHECK(!r.next(2000 + 4000, held, &d));
+        std::vector<DialRules::KnockNews> n = r.takeKnockNews();
+        CHECK(n.size() == 1 && n[0].dialup && n[0].end == DialRules::kKnockBusy && n[0].waitedMs == 4000);
+    }
+}
+
+// The pending requests for the car's dial-up service, and the agent's refusals of them, by the test's clock.
+static void testDialupRequests() {
+    DialupRequests::Timing t;
+    CHECK(t.refuseAfterMs == 2000 && t.retryMs == 100 && t.retries == 5 && t.replyMs == 3000);
+    std::string a;
+    int64_t heard = 0;
+    {   // the car ends it first: nothing is ever sent for it
+        DialupRequests q(t);
+        CHECK(q.heard(kOne, 1000) && !q.heard(kOne, 1500) && q.pending() == 1);   // a second while pending: the same
+        CHECK(!q.refusalDue(1000, &a) && !q.refusalDue(2999, &a));                 // never at once
+        CHECK(q.ended(kOne, &heard) && heard == 1000 && !q.busy());
+        CHECK(!q.refusalDue(3000, &a) && !q.refusalDue(99999, &a) && q.refusalsSent() == 0);   // never after its end
+        CHECK(!q.ended(kOne, &heard));                                                          // ended once
+        CHECK(q.answered(5, 3000, &a, &heard) == DialupRequests::kNoneOut);
+    }
+    {   // not ended in 2 s: the agent's refusal, answered 5: the request ends
+        DialupRequests q(t);
+        q.heard(kOne, 1000);
+        CHECK(q.refusalDue(3000, &a) && a == kOne && q.refusalOut() && q.refusalsSent() == 1);
+        CHECK(!q.refusalDue(3000, &a));                                       // one at a time
+        CHECK(q.answered(5, 3040, &a, &heard) == DialupRequests::kEnded && a == kOne && heard == 1000 && !q.busy());
+    }
+    {   // answered BUSY, then 5: sent again 100 ms later
+        DialupRequests q(t);
+        q.heard(kOne, 1000);
+        CHECK(q.refusalDue(3000, &a));
+        CHECK(q.answered(2, 3010, &a, &heard) == DialupRequests::kRetry && q.busy() && !q.refusalOut());
+        CHECK(!q.refusalDue(3109, &a) && q.refusalDue(3110, &a) && q.refusalsSent() == 2);
+        CHECK(q.answered(5, 3150, &a, &heard) == DialupRequests::kEnded);
+    }
+    {   // BUSY every time: given up after retries more, and its knock goes all the same
+        DialupRequests q(t);
+        q.heard(kOne, 1000);
+        int64_t now = 3000;
+        DialupRequests::Answer last = DialupRequests::kRetry;
+        unsigned sends = 0;
+        while (last == DialupRequests::kRetry) {
+            CHECK(q.refusalDue(now, &a));
+            ++sends;
+            last = q.answered(2, now + 5, &a, &heard);
+            now += 5 + 100;
+        }
+        CHECK(last == DialupRequests::kGaveUp && sends == t.retries + 1 && q.givenUp() == 1 && !q.busy());
+    }
+    {   // the car's end comes while the agent's refusal is out: the request ends then, and the answer says nothing more
+        DialupRequests q(t);
+        q.heard(kOne, 1000);
+        CHECK(q.refusalDue(3000, &a));
+        CHECK(q.ended(kOne, &heard) && q.refusalOut());
+        CHECK(q.answered(5, 3030, &a, &heard) == DialupRequests::kAfterEnd && !q.busy());
+        // A rejection or no answer counts as BUSY.
+        q.heard(kOne, 4000);
+        CHECK(q.refusalDue(6000, &a) && q.answered(kNoError, 6001, &a, &heard) == DialupRequests::kRetry);
+        CHECK(q.refusalDue(6101, &a));
+        DialupRequests::Answer w;
+        CHECK(!q.refusalLost(6101 + 2999, &w, &a, &heard) && q.refusalLost(6101 + 3000, &w, &a, &heard));
+        CHECK(w == DialupRequests::kRetry && q.answered(5, 9200, &a, &heard) == DialupRequests::kNoneOut);
+    }
+    {   // two phones: each its own time, one refusal at a time, the earlier first; clear() forgets them all
+        DialupRequests q(t);
+        q.heard(kTwo, 1000);
+        q.heard(kOne, 1200);
+        CHECK(q.refusalDue(3300, &a) && a == kTwo);
+        CHECK(!q.refusalDue(3300, &a));
+        CHECK(q.answered(5, 3320, &a, &heard) == DialupRequests::kEnded && a == kTwo);
+        CHECK(q.refusalDue(3320, &a) && a == kOne);
+        q.clear();
+        CHECK(!q.busy() && q.answered(5, 3400, &a, &heard) == DialupRequests::kNoneOut && !q.ended(kOne, &heard));
+        CHECK(!q.heard("", 5000) && !q.busy());   // a request that names no phone is nothing to follow
+    }
+}
+
 static void testKnock() {
     {   // no ask and no poll: a phone of the agent's that is there is never dialled by itself, nor by its requests
         DialRules r(knocks());
@@ -1535,6 +1654,8 @@ static void testTrialTime() {
 
 int main() {
     testKnock();
+    testKnockByDialup();
+    testDialupRequests();
     testTrialTime();
     testRepoint();
     testAnswers();

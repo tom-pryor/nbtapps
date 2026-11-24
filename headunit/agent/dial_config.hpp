@@ -24,6 +24,16 @@ namespace nbt {
 // (DialRules::dialFailures()).
 const unsigned kDialFailsToUnmark = 3;
 
+// The knock by dial-up (dialup_requests.hpp): a phone's request for the car's dial-up networking service that the car
+// has not ended this long after it was heard is refused by the agent (ServiceReject); the car's own software refuses
+// such a request within milliseconds, so this is the backstop for one it has dropped. A refusal answered BUSY (the
+// stack takes one refusal at a time, from every client) is sent again kDialupRetryMs later, kDialupRetries times at
+// most; one with no answer in kDialupReplyMs counts as BUSY.
+const unsigned kDialupRefuseAfterMs = 2000;
+const unsigned kDialupRetryMs = 100;
+const unsigned kDialupRetries = 5;
+const unsigned kDialupReplyMs = 3000;
+
 struct DialConfig {
     bool on;                     // the car dials the agent's phones at all
     bool knock;                  // and only when a phone's app knocks, and in the pairing window, at serial.dial and
@@ -32,6 +42,7 @@ struct DialConfig {
     bool knockDialup;            // with the knock: the knock by dial-up, a phone's request for the car's dial-up
                                  // networking service (constants.txt, serial.knockDialupUuid), and the agent lists
                                  // serial-knock-dialup (nbtagent --knock-dialup)
+    unsigned dialupRefuseMs;     // kDialupRefuseAfterMs, but for a test
     unsigned knockQuietMs;       // a dial a knock brought gave the agent no link: further knocks of that phone are
                                  // ignored for this long
     unsigned knockWaitMs;        // a knock that came while a phone's request was pending, a link was being decided on
@@ -81,7 +92,7 @@ struct DialConfig {
     std::string node;            // the dialled link's node, /dev/<instance>
 
     DialConfig()
-        : on(true), knock(true), knockDialup(true), knockQuietMs(3000), knockWaitMs(4000), trialDialMs(5000),
+        : on(true), knock(true), knockDialup(true), dialupRefuseMs(kDialupRefuseAfterMs), knockQuietMs(3000), knockWaitMs(4000), trialDialMs(5000),
           trialDialForMs(120000), pollFirstMs(10000),pollFirstForMs(120000), pollLaterMs(30000), signalWaitMs(1000),
           askLimitMs(6000), settleMs(8000), signalAskMs(10000), pairingRoundMs(5000), replyLimitMs(95000),
           retryMs(15000), backOffMs(30000), backOffMostMs(300000), magicWaitMs(3000),
@@ -135,6 +146,16 @@ inline std::string describeDial(const DialConfig& c) {
                "for them";
     char text[4000];
     if (c.knock) {
+        char dialup[600];
+        if (c.knockDialup)
+            snprintf(dialup, sizeof dialup,
+                     "A phone's request for the car's dial-up networking service ('DUN') is that phone's knock too, the "
+                     "knock by dial-up (--knock-dialup on): the agent keeps that service on while its own is registered, "
+                     "switching it on where it is off, takes the knock once the request has ended, and refuses the "
+                     "request itself where the car has not ended it in %u ms; the agent lists serial-knock-dialup",
+                     c.dialupRefuseMs);
+        else
+            snprintf(dialup, sizeof dialup, "The agent does not list serial-knock-dialup (--knock-dialup off)");
         snprintf(text, sizeof text,
                  "the car dials a phone on its instance 'nbtapp' (%s) when the phone's app knocks, and otherwise only "
                  "while the pairing window is open, at serial.dial and while this version of the agent is on trial "
@@ -161,10 +182,7 @@ inline std::string describeDial(const DialConfig& c) {
                  "re-point request goes on the same instance, so that a link end the car may book against that "
                  "instance names no phone: its answer is waited for %u ms, with no dial meanwhile, and an answer other "
                  "than 5 within %u ms stops these requests for the rest of the run",
-                 c.node.c_str(),
-                 c.knockDialup ? "The agent lists serial-knock-dialup, the knock by dial-up (--knock-dialup on)"
-                               : "The agent does not list serial-knock-dialup (--knock-dialup off)",
-                 c.knockWaitMs, c.knockQuietMs,
+                 c.node.c_str(), dialup, c.knockWaitMs, c.knockQuietMs,
                  c.pairingRoundMs / 1000, c.trialDialMs / 1000, c.trialDialForMs / 1000, c.magicWaitMs,
                  c.replyLimitMs / 1000, c.closeWaitMs,
                  c.disconnectWaitMs, c.overtakeMs, c.node.c_str(), c.listWaitMs, c.registerCleanupMs / 1000,
