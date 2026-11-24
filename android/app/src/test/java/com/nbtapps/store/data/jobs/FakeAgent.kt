@@ -903,6 +903,10 @@ class FakeConnector(
     @Volatile
     var knockAway = false
 
+    /** Whether a knock that brings no link ends as the app's does after a connect that may have run into another app's link. */
+    @Volatile
+    var knockInTheWay = false
+
     /**
      * As the app's serial connector: over [serial], no link of the phone's, only one the car opens ([dialIn]) while the
      * knock listens for it, and [KnockUnansweredException] where none comes in [knockMs], [knockAway] as it says. Over
@@ -913,7 +917,7 @@ class FakeConnector(
         knockFallbacks += fallback
         if (!serial) return connect(endpoint, dials = true)
         return withTimeoutOrNull(knockMs) { accept(listOf(endpoint)).link }
-            ?: throw KnockUnansweredException("The car didn't connect to this app after it knocked", carAway = knockAway)
+            ?: throw KnockUnansweredException("The car didn't connect to this app after it knocked", carAway = knockAway, inTheWay = knockInTheWay)
     }
 
     override fun supports(endpoint: Endpoint): Boolean = if (serial) endpoint is SerialEndpoint else endpoint is TcpEndpoint

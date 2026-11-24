@@ -110,15 +110,20 @@ interface LinkConnector {
 
 /**
  * How often a knock ([LinkConnector.knock]) may go through the car's standard Serial Port service, after one of its
- * connects to the agent's service failed: a connect there that comes up reaches another program at the car where no
- * agent takes it. Each allows at most [SerialConnectTimes.knockStandardAttempts] such connects at a time, and none
- * after one of them came up; see [BluetoothSerialLinkConnector.knock].
+ * connects to the agent's service found no record of it, or could not tell: one connect there at a time, whatever came
+ * of it, as one that comes up reaches another program at the car where no agent takes it, and one that fails may have
+ * run into another app's link; see [BluetoothSerialLinkConnector.knock]. It also says how far a knock goes on after a
+ * connect that may have run into another app's link: to its next burst, after a longer pause, or, for the app's own
+ * knocks ([ONCE_PER_KNOCK]), no further.
  */
 enum class KnockFallback {
     /** Never: for the wait after an agent's update, whose agent on trial dials the phone by itself. */
     NONE,
 
-    /** Once in the whole knock: for the knocks the app makes by itself, as on coming back to the foreground. */
+    /**
+     * Once in the whole knock: for the knocks the app makes by itself, as on coming back to the foreground. A connect
+     * that may have run into another app's link ends the knock.
+     */
     ONCE_PER_KNOCK,
 
     /**
@@ -178,7 +183,9 @@ open class NoCarLinkException(message: String, cause: Throwable? = null) : IOExc
 /**
  * A connect that knocked ([LinkConnector.knock]) and had no link from the car after all its knocks, or [carAway]: it
  * stopped after a connect of its that did not reach the car (no answer in its time, or a failure while the phone had
- * no connection to the car), as the car is off or out of range then. What the user is told is the caller's to say, as
- * it knows how the phone and the car stand: the message here says only what happened.
+ * no connection to the car), as the car is off or out of range then; or [inTheWay]: it ended after a connect of its that
+ * may have run into another app's link to the car, which Android takes no second of (and which that connect closed),
+ * or that the car refused: the phone cannot tell the two. What the user is told is the caller's to say, as it knows how
+ * the phone and the car stand: the message here says only what happened.
  */
-class KnockUnansweredException(message: String, val carAway: Boolean = false) : NoCarLinkException(message)
+class KnockUnansweredException(message: String, val carAway: Boolean = false, val inTheWay: Boolean = false) : NoCarLinkException(message)

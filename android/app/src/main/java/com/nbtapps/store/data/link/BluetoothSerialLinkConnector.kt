@@ -126,14 +126,17 @@ class SerialConnectTimes(
     /** The pause between two bursts, after that wait, in which the car's link is still taken. */
     val knockPauseMillis: Long = 2_000,
     /**
-     * The most connects a knock makes at a time to the car's standard Serial Port service, which it turns to after a
-     * connect to the agent's own failed, in the places of connects to the agent's ([BluetoothSerialLinkConnector.knock]):
-     * a connect there that comes up reaches another program at the car where no agent takes it, and so they are few.
-     * None follows one of them that came up. So where nothing answers, a knock makes at most this many there, of which
-     * one at most comes up, in the whole knock ([KnockFallback.ONCE_PER_KNOCK]) or in each of its bursts
-     * ([KnockFallback.ONCE_PER_BURST]). None at all, where it is 0: the knock then stays with the agent's own service.
+     * The pause before the next burst, after the wait for the car's link, where a burst ended because one of its connects
+     * may have run into another app's link to the car ([BluetoothSerialLinkConnector.knock]): Android has closed that
+     * app's link, which the app opens again at once, and a connect while it does so would fail with it and harm both.
      */
-    val knockStandardAttempts: Int = 2,
+    val knockCollisionPauseMillis: Long = 6_000,
+    /**
+     * The wait, in place of [knockGapMillis], after a knock's connect to the agent's service that failed where the phone
+     * cannot read whether it had found the service: it may have run into another app's link, whose next link is then up
+     * again, not half made, when the knock's next connect goes out.
+     */
+    val knockUnsureWaitMillis: Long = 1_500,
 )
 
 /**
@@ -171,8 +174,12 @@ class SerialConnectTimes(
  * connect to it knocks ([knock]): it listens for the car's link and makes bursts of short connects to the agent's
  * service. One that comes up carries the knock's magic bytes and nothing else, and is closed once the car's link has
  * come or its hold is over; one the car refuses reaches no agent and is no knock, so where the car refuses the phone's
- * links (it has no media audio connection to the phone) the app cannot knock. A burst has several connects because
- * one may fail on the phone while another app's link to the car is up. A connect that does not reach the car at all
+ * links (it has no media audio connection to the phone) the app cannot knock. A burst has several connects, as one may
+ * fail for a while. But every serial service of the car's is on one RFCOMM channel, and Android takes no second link
+ * from the phone to the same channel of a device: a connect while another app on the phone has its link to the car
+ * fails on the phone, and Android's clean-up of it closes that app's link, which the app then opens again at once. A
+ * connect right after would fail with that half-made link and harm both, so a connect that may have run into another
+ * app's link ends its burst, and the next burst waits longer ([knock]). A connect that does not reach the car at all
  * (no answer in its time, or a failure while the phone has no connection to the car) ends the knock at once: the car
  * is off or out of range, and more connects would only keep the user waiting. The car's link that follows a knock is
  * the link, and no link of the phone's own is made.
@@ -188,13 +195,12 @@ class SerialConnectTimes(
  * is in no service record, though the car still dials from it, so the phone finds no channel for it, and a connect to
  * it fails before it reaches the car. Every serial service of the car's is on the same RFCOMM channel, and the agent
  * tells a knock by its magic bytes, not by the service it was opened to. So where a knock's connect to the agent's
- * service fails, its next connects go through the car's standard Serial Port service ([STANDARD_SERVICE_UUID])
- * instead, with the same bytes and the same hold, a few at most ([SerialConnectTimes.knockStandardAttempts]), and the
- * knock then goes back to the agent's service: where no agent runs, such a connect that comes up reaches another
- * program at the car, which may count it against its own service. That is once in the whole knock, once in each of its
- * bursts for a connect the user starts, or never for the wait after an agent's update ([KnockFallback], [knock]). A
- * knock whose connects to the agent's service come up makes none. Only the knock does this; the phone's own link is
- * always to the agent's service.
+ * service finds no record of it, its next connect goes through the car's standard Serial Port service
+ * ([STANDARD_SERVICE_UUID]) instead, with the same bytes and the same hold: one at most, in the whole knock, in each of
+ * its bursts for a connect the user starts, or none for the wait after an agent's update ([KnockFallback], [knock]).
+ * Where no agent runs, such a connect that comes up reaches another program at the car, which may count it against
+ * its own service. A knock whose connects to the agent's service come up makes none. Only the knock does this; the
+ * phone's own link is always to the agent's service.
  *
  * The socket is the authenticated, encrypted kind, so the link is to the car the phone is paired with, and
  * nobody listens in. That does not say who opened it: any app on a paired phone can. The agent therefore asks
@@ -233,7 +239,9 @@ class BluetoothSerialLinkConnector(
      * is not known to knock: the phone listens for the car's link from the start, so a link the car opens at any time,
      * while the probe knocks, between its end and the dial's start, or during the dial, is taken. The probe takes nothing
      * from the dial: its window begins after the probe, and the probe's connects are not among the tries whose failures
-     * the user is told of. A connect that only listens makes none, as its agent leaves the phone's own links to another
+     * the user is told of. A probe that ended because one of its connects may have run into another app's link to the
+     * car has the dial wait [SerialConnectTimes.knockCollisionPauseMillis] first, as a knock's next burst does, while
+     * the phone listens on. A connect that only listens makes none, as its agent leaves the phone's own links to another
      * program at the car, which a knock's link would reach.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -268,7 +276,13 @@ class BluetoothSerialLinkConnector(
                     }
                 }
                 val dialling = launch {
-                    if (probing != null && probeKnock(serial, won, probing, deaf)) return@launch
+                    if (probing != null) {
+                        when (probeKnock(serial, won, probing, deaf)) {
+                            ProbeEnd.TAKEN -> return@launch
+                            ProbeEnd.IN_THE_WAY -> if (carCame(won, times.knockCollisionPauseMillis)) return@launch
+                            ProbeEnd.NOTHING -> Unit
+                        }
+                    }
                     try {
                         offer(SerialLink(connectWithRetry(window, times.pauseMillis, now, times.maxPauseMillis) { dial(serial.address, tries) }), "phone's")
                     } catch (e: ConnectFailedException) {
@@ -340,34 +354,44 @@ class BluetoothSerialLinkConnector(
      * is off or out of range then, and the rest would only take their time, with the user waiting. The first connect is
      * always made, so a car in range whose connection to the phone that connect brings up is knocked at all the same.
      *
-     * The connects go to the agent's service, but for those that follow one of them that failed ([Knocked.FAILED]: the
-     * car refused it, or it failed otherwise, while the car was reached or may have been). Those go to the car's
-     * standard Serial Port service ([STANDARD_SERVICE_UUID]), in their places in the bursts, for as long as the knock
-     * may make connects there: at most [SerialConnectTimes.knockStandardAttempts] of them at a time, and none after one
-     * of them came up, which was the knock, and where no agent took it, another program at the car may have. Once they
-     * are over, the connects that remain go to the agent's service again, and the knock goes on and ends as it would
-     * have: where the car advertises the agent's service, a connect there may have failed only for a while, as one does
-     * while another app's link to the car is up. So the connects to that service take the places of connects to the
-     * agent's, and a knock makes no more connects than it would without them.
+     * A connect that may have run into another app's link to the car ends its burst, with no connect after it in that
+     * burst: Android has closed that app's link, the app opens it again at once, and a connect right after would fail
+     * with that half-made link and harm both. That is a connect that failed (not one with no answer, and not one that
+     * did not reach the car) where the service was there to be connected to: one to the agent's service where the phone
+     * had found its channel ([Knocked.FAILED_FOUND]), and any one to the car's Serial Port service, which the car always
+     * has. The car's link is still waited for [SerialConnectTimes.knockSettleMillis], and the next burst follows
+     * [SerialConnectTimes.knockCollisionPauseMillis] later, in place of [SerialConnectTimes.knockPauseMillis]; where it
+     * was the last burst, or the knock is [KnockFallback.ONCE_PER_KNOCK]'s (the app's own), the knock ends there, as
+     * [KnockUnansweredException.inTheWay]. Such a connect may also be one the car refused: the phone cannot tell the two.
      *
-     * How often that may be is [fallback]'s. With [KnockFallback.ONCE_PER_KNOCK], once in the whole knock: where nothing
-     * answers, it makes at most [SerialConnectTimes.knockStandardAttempts] connects to that service, of which one at
-     * most comes up. With [KnockFallback.ONCE_PER_BURST], once in each burst: a connect to the agent's service that
-     * failed is remembered for the whole knock, so each later burst begins at the Serial Port service, with as many
-     * connects there as the first had, and none after one of them came up in that burst; where nothing answers, it
-     * makes at most [bursts] times that many, of which one in each burst at most comes up (3 with the connector's own
-     * bursts). With [KnockFallback.NONE], none: the wait after an agent's update knocks so, as its agent on trial dials
-     * the phone by itself, and a link of the phone's that came up while that agent is not running would reach another
-     * program at the car. Whether the phone found a channel for the agent's service decides nothing here; it is only
-     * said in the diagnostics. The rule of the car away is the same for both services. Each connect's line in the
-     * diagnostics names the Serial Port service where it went there, and so does the knock's last line where the
-     * knocking was at such a connect.
+     * The connects go to the agent's service. One that failed where the phone found no channel for it
+     * ([Knocked.NOT_FOUND]: the car has no record of it a phone can find, and the connect went no further than the
+     * look-up, disturbing nobody) has the next connect go to the car's standard Serial Port service
+     * ([STANDARD_SERVICE_UUID]) at the gap. Where the phone cannot read whether it had found the channel
+     * ([Knocked.UNSURE]), it cannot tell a missing record from a connect that ran into another app's link, so the next
+     * connect, to the Serial Port service, waits [SerialConnectTimes.knockUnsureWaitMillis] in place of the gap, for that
+     * app's link to be up again rather than half made. So the channel the phone reads, which Android does not publish,
+     * only makes the knock quicker (no record) or more careful (another app's link in the way); where it cannot be read
+     * the knock still works, a little slower. One connect to the Serial Port service at most is made, whatever came of it:
+     * in the whole knock with [KnockFallback.ONCE_PER_KNOCK], the app's own knocks; in each burst with
+     * [KnockFallback.ONCE_PER_BURST], a connect the user starts; none with [KnockFallback.NONE], the wait after an agent's
+     * update, whose agent on trial dials the phone by itself. Where one of them came up and brought no link, the
+     * burst's remaining connects go to the agent's service, whose last failure found no record, or could not tell. A
+     * later burst begins at the Serial Port service where the agent's service last failed so, as long as it may make a
+     * connect there, and at the agent's service where that last ran into another app's link, as the service is there.
+     * Where nothing answers, a knock makes one connect to that service in all, or one in each burst; where no agent runs,
+     * one that comes up reaches another program at the car. The connects to that service take the places of connects to
+     * the agent's, and a knock makes no more connects than it would without them. The rule of the car away is the same
+     * for both services. Each connect's line in the diagnostics names the Serial Port service where it went there, and
+     * so does the knock's last line where the knocking was at such a connect; a burst that ended so says so in its
+     * line, and with how long the next waits.
      *
      * A caller that is cancelled leaves nothing open: no connect of the knock's, no wait on the listener, no car's link,
      * even one handed over as the caller gave up.
      *
      * @throws KnockUnansweredException if no link of the car's came after the last burst, or, [KnockUnansweredException.carAway],
-     *   after a connect that did not reach the car.
+     *   after a connect that did not reach the car, or, [KnockUnansweredException.inTheWay], after a connect that may
+     *   have run into another app's link ended the knock.
      * @throws NoCarLinkException if the phone cannot listen for it: then knocking would bring a link nobody takes.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -396,6 +420,7 @@ class BluetoothSerialLinkConnector(
                     when (knockAt(serial.address, came, most, fallback, at)) {
                         KnockEnd.AWAY -> came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED, carAway = true))
                         KnockEnd.UNANSWERED -> came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED))
+                        KnockEnd.IN_THE_WAY -> came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED, inTheWay = true))
                         // Settled already, by the car's link or by the listener's failure.
                         KnockEnd.CAME, KnockEnd.CAME_UP, KnockEnd.DEAF -> Unit
                     }
@@ -405,6 +430,7 @@ class BluetoothSerialLinkConnector(
                 } catch (e: KnockUnansweredException) {
                     val detail = when {
                         e.carAway -> "${at.get()}, which did not reach the car,"
+                        e.inTheWay -> "${at.get()}, $IN_THE_WAY_OF,"
                         most == 1 -> "of 1 burst"
                         else -> "of $most bursts"
                     }
@@ -440,6 +466,12 @@ class BluetoothSerialLinkConnector(
         /** After the last burst, with no link of the car's. */
         UNANSWERED,
 
+        /**
+         * After a connect that may have run into another app's link to the car, which ended the knock's last burst, or,
+         * for [KnockFallback.ONCE_PER_KNOCK], the knock, with no link of the car's.
+         */
+        IN_THE_WAY,
+
         /** After its first connect that came up, its hold and the wait after it, with no link of the car's: a probe's end. */
         CAME_UP,
 
@@ -450,10 +482,10 @@ class BluetoothSerialLinkConnector(
     /**
      * The knocking of [knock], [most] bursts at the car at [address], until [came] is settled, with its connects to the
      * car's Serial Port service as [fallback] allows, and [at] kept at the connect it is at; each burst that had nothing
-     * is kept in the diagnostics. With [probing], it ends after the first of its connects that came up, to either
-     * service, its hold and [SerialConnectTimes.knockSettleMillis] after it: an agent that knows knocks has had the car
-     * dial by then. Before each connect it ends where [deaf] says that the phone cannot listen. It settles nothing: what
-     * it stopped at is its caller's to make something of.
+     * and is followed by another is kept in the diagnostics. With [probing], it ends after the first of its connects that
+     * came up, to either service, its hold and [SerialConnectTimes.knockSettleMillis] after it: an agent that knows
+     * knocks has had the car dial by then. Before each connect it ends where [deaf] says that the phone cannot listen. It
+     * settles nothing: what it stopped at is its caller's to make something of.
      */
     private suspend fun knockAt(
         address: String,
@@ -464,45 +496,92 @@ class BluetoothSerialLinkConnector(
         probing: Boolean = false,
         deaf: () -> Boolean = { false },
     ): KnockEnd {
-        // Whether a connect to the agent's service has failed, and how many connects the knock may still make to the
-        // car's Serial Port service: see [knock].
-        var failedOwn = false
-        val allowed = if (fallback == KnockFallback.NONE) 0 else times.knockStandardAttempts.coerceAtLeast(0)
-        var standardLeft = allowed
+        // Whether the agent's service last failed where no record of it was found, or the phone could not tell: then
+        // a burst begins at the Serial Port service, where it may make a connect there. See [knock].
+        var missing = false
+        // Whether the knock may still make its connect to the Serial Port service.
+        var standardLeft = fallback != KnockFallback.NONE
+        // Whether the last burst ended after a connect that may have run into another app's link.
+        var inTheWay = false
         for (burst in 1..most) {
-            if (burst > 1 && carCame(came, times.knockPauseMillis)) return KnockEnd.CAME
-            if (fallback == KnockFallback.ONCE_PER_BURST) standardLeft = allowed
+            if (burst > 1 && carCame(came, if (inTheWay) times.knockCollisionPauseMillis else times.knockPauseMillis)) return KnockEnd.CAME
+            if (fallback == KnockFallback.ONCE_PER_BURST) standardLeft = true
+            inTheWay = false
             val burstBegan = now()
+            // Whether the next connect is to the Serial Port service, and how long it waits.
+            var toStandard = missing
+            var wait = times.knockGapMillis
             for (attempt in 1..times.knockAttempts) {
-                if (attempt > 1 && carCame(came, times.knockGapMillis)) return KnockEnd.CAME
+                if (attempt > 1 && carCame(came, wait)) return KnockEnd.CAME
                 if (deaf()) return KnockEnd.DEAF
-                val standard = failedOwn && standardLeft > 0
+                val standard = toStandard && standardLeft
                 val to = if (standard) " $TO_STANDARD" else ""
                 at.set("in burst $burst of $most, after connect $attempt$to")
                 val knocked = knockOnce(address, came, "$burst.$attempt$to", if (standard) STANDARD_SERVICE_UUID else SERVICE_UUID)
                 if (came.isCompleted) return KnockEnd.CAME
                 if (knocked == Knocked.AWAY) return KnockEnd.AWAY
                 if (probing && knocked == Knocked.UP) return if (carCame(came, times.knockSettleMillis)) KnockEnd.CAME else KnockEnd.CAME_UP
-                when {
-                    // One that came up was the knock: none follows it there.
-                    standard -> standardLeft = if (knocked == Knocked.UP) 0 else standardLeft - 1
-                    knocked == Knocked.FAILED -> failedOwn = true
+                toStandard = false
+                wait = times.knockGapMillis
+                if (standard) {
+                    // One there at most, whatever came of it; one that failed, where the service is always there, may have
+                    // run into another app's link.
+                    standardLeft = false
+                    inTheWay = knocked in FAILURES
+                } else {
+                    when (knocked) {
+                        Knocked.FAILED_FOUND -> {
+                            missing = false
+                            inTheWay = true
+                        }
+                        Knocked.NOT_FOUND -> {
+                            missing = true
+                            toStandard = true
+                        }
+                        Knocked.UNSURE -> {
+                            missing = true
+                            toStandard = true
+                            wait = times.knockUnsureWaitMillis
+                        }
+                        else -> Unit
+                    }
                 }
+                if (inTheWay) break
             }
             if (carCame(came, times.knockSettleMillis)) return KnockEnd.CAME
-            log.line(diagnostics.record(LinkTry.Path.KNOCK_BURST, LinkTry.Outcome.NO_LINK, now() - burstBegan, detail = "$burst of $most").describe())
+            if (inTheWay && (burst == most || fallback == KnockFallback.ONCE_PER_KNOCK)) return KnockEnd.IN_THE_WAY
+            val detail = if (inTheWay) {
+                "$burst of $most, which ended after a connect that another app's link to the car may have been in the way of, " +
+                    "so the next waits ${times.knockCollisionPauseMillis / 1000} s,"
+            } else {
+                "$burst of $most"
+            }
+            log.line(diagnostics.record(LinkTry.Path.KNOCK_BURST, LinkTry.Outcome.NO_LINK, now() - burstBegan, detail = detail).describe())
         }
         return KnockEnd.UNANSWERED
     }
 
+    /** What a [probeKnock] came to, for what the connect does next. */
+    private enum class ProbeEnd {
+        /** The car's link came, and is the connect's. */
+        TAKEN,
+
+        /** None came: the connect dials. */
+        NOTHING,
+
+        /** None came, after a connect that may have run into another app's link: the connect dials after a pause. */
+        IN_THE_WAY,
+    }
+
     /**
      * The probing knock of a [connect] to [serial], whose agent is not known to knock: one burst ([knockAt]), with its
-     * Serial Port connects as [fallback] allows, that ends after the first of its connects that came up, while the
+     * Serial Port connect as [fallback] allows, that ends after the first of its connects that came up, while the
      * connect listens for the car's link, which settles [won]. What it came to is kept in the diagnostics, in one line.
-     * Whether the car's link came: where it did not, for whatever reason, the connect dials as it would have without it.
-     * The phone cannot listen where [deaf] says so, and then it knocks no more.
+     * Where the car's link did not come, for whatever reason, the connect dials as it would have without it, after
+     * [SerialConnectTimes.knockCollisionPauseMillis] where the probe ended after a connect that may have run into another
+     * app's link. The phone cannot listen where [deaf] says so, and then it knocks no more.
      */
-    private suspend fun probeKnock(serial: SerialEndpoint, won: CompletableDeferred<Link>, fallback: KnockFallback, deaf: AtomicBoolean): Boolean {
+    private suspend fun probeKnock(serial: SerialEndpoint, won: CompletableDeferred<Link>, fallback: KnockFallback, deaf: AtomicBoolean): ProbeEnd {
         val began = now()
         val at = AtomicReference<String?>(null)
         fun line(outcome: LinkTry.Outcome, detail: String?) =
@@ -517,15 +596,20 @@ class BluetoothSerialLinkConnector(
         when (end) {
             KnockEnd.CAME -> {
                 line(LinkTry.Outcome.TAKEN, at.get())
-                return true
+                return ProbeEnd.TAKEN
             }
             KnockEnd.AWAY -> line(LinkTry.Outcome.NO_LINK, "${at.get()}, which did not reach the car,")
             KnockEnd.CAME_UP -> line(LinkTry.Outcome.NO_LINK, "${at.get()}, which came up,")
             KnockEnd.UNANSWERED -> line(LinkTry.Outcome.NO_LINK, "of 1 burst")
             KnockEnd.DEAF -> line(LinkTry.Outcome.NO_LINK, "where the phone cannot listen for the car's link,")
+            KnockEnd.IN_THE_WAY -> {
+                line(LinkTry.Outcome.NO_LINK, "${at.get()}, $IN_THE_WAY_OF, so the phone dials after ${times.knockCollisionPauseMillis / 1000} s,")
+                log.line("connect: the probing knock brought no link of the car's: the phone dials the agent after the pause")
+                return ProbeEnd.IN_THE_WAY
+            }
         }
         log.line("connect: the probing knock brought no link of the car's: the phone dials the agent as it would have")
-        return false
+        return ProbeEnd.NOTHING
     }
 
     /** Waits up to [millis] for [came] to be settled, a link or a failure, and says whether it is. */
@@ -545,12 +629,14 @@ class BluetoothSerialLinkConnector(
      * It is made to [service]: the agent's, or the car's Serial Port service. What came of it ([Knocked]): it did not
      * reach the car ([Knocked.AWAY]) where it failed while the phone had no connection to the car
      * ([TryFacts.carConnected] false), or had no answer in its time while the phone had none or could not tell; then the
-     * car is off or out of range, and the knock ends ([knock]). One that came up or was refused by the car did, and so
-     * did one that failed while the phone was connected to the car or could not tell. One that had no answer while the
-     * phone was connected to the car did too: the car is there, and leaves a request without an answer at times, as
-     * after a dial of its own that failed ([Knocked.UNANSWERED]). One of the others that did not come up failed
-     * ([Knocked.FAILED]), whatever the phone tells of the channel it found; that is no failure of the knock, which goes
-     * on.
+     * car is off or out of range, and the knock ends ([knock]). One that came up did, and so did one that failed where
+     * the phone had found the service's channel, and one that failed while the phone was connected to the car or could
+     * not tell. One that had no answer while the phone was connected to the car did too: the car is there, and leaves a
+     * request without an answer at times, as after a dial of its own that failed ([Knocked.UNANSWERED]). One of the
+     * others that did not come up failed: where the phone had found the channel ([Knocked.FAILED_FOUND]: the car refused
+     * it, or another app's link to the car was in the way, which Android takes no second of, and which the failed connect
+     * has closed), where it had found none ([Knocked.NOT_FOUND]: the car has no record of the service a phone can find,
+     * and the connect went no further), or where it cannot tell ([Knocked.UNSURE]).
      */
     private suspend fun knockOnce(address: String, came: CompletableDeferred<Link>, which: String, service: UUID): Knocked {
         val began = now()
@@ -575,7 +661,7 @@ class BluetoothSerialLinkConnector(
             return Knocked.UP
         } catch (e: IOException) {
             val facts = facts(address, made, e)
-            // The socket found the service's channel, so the request reached the car, which turned it down.
+            // The socket found the service's channel: the car turned the request down, or another app's link was in the way.
             val outcome = when {
                 e is NoAnswer -> LinkTry.Outcome.NO_ANSWER
                 facts.channel != null && facts.channel >= 0 -> LinkTry.Outcome.REFUSED
@@ -583,10 +669,11 @@ class BluetoothSerialLinkConnector(
             }
             note(outcome, e, facts)
             return when {
-                outcome == LinkTry.Outcome.REFUSED -> Knocked.FAILED
+                outcome == LinkTry.Outcome.REFUSED -> Knocked.FAILED_FOUND
                 outcome == LinkTry.Outcome.NO_ANSWER -> if (facts.carConnected == true) Knocked.UNANSWERED else Knocked.AWAY
                 facts.carConnected == false -> Knocked.AWAY
-                else -> Knocked.FAILED
+                facts.channel != null -> Knocked.NOT_FOUND
+                else -> Knocked.UNSURE
             }
         } catch (e: CancellationException) {
             made?.closeQuietly()
@@ -600,8 +687,17 @@ class BluetoothSerialLinkConnector(
         /** It came up, and the knock's magic bytes were sent on it. */
         UP,
 
-        /** It reached the car, or may have, and failed: the car refused it, or it failed otherwise. */
-        FAILED,
+        /**
+         * It failed where the phone had found the service's channel: the car refused it, or another app's link to the car
+         * was in the way (Android takes no second link to the same channel, and the failed connect has closed that one).
+         */
+        FAILED_FOUND,
+
+        /** It failed where the phone found no channel for the service: the car has no record of it that a phone finds. */
+        NOT_FOUND,
+
+        /** It failed, the car reached or may have been, where the phone cannot read whether it had found the channel. */
+        UNSURE,
 
         /** It had no answer in its time while the phone was connected to the car. */
         UNANSWERED,
@@ -730,6 +826,12 @@ class BluetoothSerialLinkConnector(
 
         /** How a knock's connect to [STANDARD_SERVICE_UUID] is named in the diagnostics, after its place in the bursts. */
         private const val TO_STANDARD = "to the Serial Port service"
+
+        /** What the diagnostics say of a knock's connect that may have run into another app's link to the car. */
+        private const val IN_THE_WAY_OF = "which another app's link to the car may have been in the way of"
+
+        /** A knock's connect that failed: to the Serial Port service, any of these may have run into another app's link. */
+        private val FAILURES = setOf(Knocked.FAILED_FOUND, Knocked.NOT_FOUND, Knocked.UNSURE)
 
         /** What [knock] fails with where no link of the car's came: what happened, which the caller words for the user. */
         const val KNOCK_UNANSWERED = "The car didn't connect to this app after it knocked"

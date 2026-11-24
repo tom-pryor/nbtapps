@@ -664,8 +664,11 @@ class JobRepository(
      * phone says that the car has no media audio connection to it, that is the likely cause: the car turns the phone's
      * requests down, and no knock reaches the agent. Android also says there is none while the car is off or out of
      * range, so that is not said where the phone has no connection to the car: a knock that did not reach it says that
-     * the car is not in reach. The phone's own connect is offered after the other two as the last thing to try; the
-     * failure offers it in every case, as any connect that only listened does ([ConnectionState.Failed.listenedOnly]).
+     * the car is not in reach. Otherwise, where the knock ended after a connect that may have run into another app's
+     * link to the car ([KnockUnansweredException.inTheWay]), that is said, with a wait before the next try: Android takes
+     * no second link from the phone to the car's serial service, and the app whose link that connect closed opens it
+     * again at once. The phone's own connect is offered after the others as the last thing to try; the failure offers it
+     * in every case, as any connect that only listened does ([ConnectionState.Failed.listenedOnly]).
      */
     private fun knockFailure(endpoint: Endpoint, failure: KnockUnansweredException): String {
         val serial = endpoint as? SerialEndpoint
@@ -681,6 +684,7 @@ class JobRepository(
         return when {
             connected && audio == false -> KNOCK_NO_MEDIA_AUDIO + " " + KNOCK_FROM_PHONE
             !connected -> KNOCK_NOT_IN_REACH
+            failure.inTheWay -> KNOCK_IN_THE_WAY + " " + KNOCK_FROM_PHONE
             else -> KNOCK_NO_LINK + " " + KNOCK_FROM_PHONE
         }
     }
@@ -2153,6 +2157,10 @@ class JobRepository(
         /** A knock that brought no link from the car, where the car has no media audio connection to the phone: see [knockFailure]. */
         const val KNOCK_NO_MEDIA_AUDIO = "The car didn't connect to this app. It has no media audio connection to this phone: " +
             "choose this phone in the car's media menu to reconnect it, then connect again."
+
+        /** A knock that ended after a connect that may have run into another app's link to the car: see [knockFailure]. */
+        const val KNOCK_IN_THE_WAY = "The car didn't connect to this app. Another app on this phone, such as Android Auto, " +
+            "may have been connecting to the car, and Android lets only one app at a time do so. Wait a few seconds, then connect again."
 
         /** A knock that brought no link from the car otherwise. */
         const val KNOCK_NO_LINK = "The car didn't connect to this app. Check that the agent is running and the car is in range."
