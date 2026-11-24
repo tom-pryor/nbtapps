@@ -28,9 +28,9 @@ The app's set-up offers both ways. With the agent installed that way, carry on f
 | The Android app | <https://catalogue.nbtapps.com/v1/app/nbtapps.apk> |
 
 Both addresses always serve the newest release. The agent zip is the agent's own package, the same file the
-app installs updates from. The examples below use agent version 1.7.0; where a path contains `1.7.0`, use the
-version you downloaded (`cat /var/opt/nbtapp/agent/current` on the car shows it once installed). Agent 1.6.2 and
-later need app 0.8.2 or later.
+app installs updates from. The examples below use agent version 1.8.0; where a path contains `1.8.0`, use the
+version you downloaded (`cat /var/opt/nbtapp/agent/current` on the car shows it once installed). Agent 1.8.0 and
+later need app 0.10.0 or later.
 
 ## 1. Put the agent's files on the car
 
@@ -92,8 +92,8 @@ restarts, so carry on with step 2 before the car is switched off.
    Expect:
 
    ```
-   hu_install: nbtagent 1.7.0 ...
-   hu_install: version 1.7.0 is in /var/opt/nbtapp/agent/1.7.0, and is the one the launcher starts.
+   hu_install: nbtagent 1.8.0 ...
+   hu_install: version 1.8.0 is in /var/opt/nbtapp/agent/1.8.0, and is the one the launcher starts.
    ```
 
    The script copies the agent to `/var/opt/nbtapp/agent`, which survives a restart. It starts nothing.
@@ -111,7 +111,7 @@ It keeps running after you log out. Check that it is up:
 
 ```sh
 cat /tmp/nbtapp/log/agent.log
-/var/opt/nbtapp/agent/1.7.0/nbtctl info
+/var/opt/nbtapp/agent/1.8.0/nbtctl info
 ```
 
 `nbtctl info` prints the head unit's profile; if it says there is no agent, read the log for the reason.
@@ -129,7 +129,7 @@ start it again with the same command.
    it is.
 
 The app updates itself from then on: when a new release is published, a card at the top of its catalogue
-screen offers it. If the app is on the phone already, update it to 0.8.2 or later that way before you go on.
+screen offers it. If the app is on the phone already, update it to 0.10.0 or later that way before you go on.
 
 ## 5. Connect the phone to the car
 
@@ -157,7 +157,7 @@ no car is saved.
    same):
 
    ```sh
-   /var/opt/nbtapp/agent/1.7.0/nbtctl pair
+   /var/opt/nbtapp/agent/1.8.0/nbtctl pair
    ```
 
    It prints `code NNNNNN`. Type the six digits into the app within two minutes and tap **Pair**. `nbtctl`
@@ -249,7 +249,7 @@ Over SSH, `nbtctl checks` prints a line for each check, `nbtctl checks --list` w
 remove, and `nbtctl checks fix aa-fix` (or `system-writable`) runs that check's fix on what it finds:
 
 ```sh
-/var/opt/nbtapp/agent/1.7.0/nbtctl checks --list
+/var/opt/nbtapp/agent/1.8.0/nbtctl checks --list
 ```
 
 ## 7. The same by hand
@@ -270,7 +270,7 @@ can connect now**. Starting it again over SSH, as in step 3, does the same. Then
 The same switch over SSH:
 
 ```sh
-/var/opt/nbtapp/agent/1.7.0/nbtctl autostart on
+/var/opt/nbtapp/agent/1.8.0/nbtctl autostart on
 ```
 
 From the next start of the head unit, the plugin starts the agent about 15 seconds after iDrive comes up.
@@ -286,8 +286,8 @@ From now on:
 - **Packages** are installed, updated and removed from the app's catalogue.
 - **The agent updates itself**: when a newer agent is published, the app offers it on the head unit's page.
   The new version gets one trial start; if it fails, the car goes back to the version before. An agent older
-  than 1.6.0 is updated to 1.6.0 first and to the newest version after that. Agent 1.6.2 and later need app
-  0.8.2 or later: where the app is older it says that the version needs a newer version of the app, so update
+  than 1.6.0 is updated to 1.6.0 first and to the newest version after that. Agent 1.8.0 and later need app
+  0.10.0 or later: where the app is older it says that the version needs a newer version of the app, so update
   the app first.
 - **The app updates itself** from the card on its catalogue screen.
 - **Open the app to connect**: with agent 1.6.2 and app 0.8.2 or later, the app connects when it is opened,
@@ -296,18 +296,22 @@ From now on:
   needs the phone to be connected to the car for media audio, since the car takes no link the phone opens
   without that; where it is not, the app says so (see [When something goes wrong](#when-something-goes-wrong)).
   The app makes the knock up to five times in a row, as one may fail while another app's link to the car, such
-  as wireless Android Auto's, is up.
+  as wireless Android Auto's, is up. With agent 1.8.0 and app 0.10.0 or later the app first asks through the
+  car's dial-up networking service, which the agent keeps switched on and which cannot get in the way of
+  another app's link; the short link of its own follows only where that brings nothing.
 
 ## When something goes wrong
 
 | What you see | What to do |
 |---|---|
-| `hu_install: version 1.7.0 is there already` | The script never writes over an installed version. Stop the agent (`slay nbtagent`), remove that version (`rm -rf /var/opt/nbtapp/agent/1.7.0`) and run the script again |
+| `hu_install: version 1.8.0 is there already` | The script never writes over an installed version. Stop the agent (`slay nbtagent`), remove that version (`rm -rf /var/opt/nbtapp/agent/1.8.0`) and run the script again |
 | `hu_install: an update of the agent was begun and is not finished` | Start the agent (step 3) and let it finish the update, then try again |
 | The app cannot connect, or the set-up stops at connecting | Check the agent runs: **NBTApp**, **Start the agent** on the car's screen, or `nbtctl info` over SSH. With agent 1.6.0 or later, show the pairing code on the car (**NBTApp**, **Pair a phone**, or `nbtctl pair` over SSH) and keep the app open: the car connects to it by itself within a few seconds, with wireless Android Auto on or off. If it still does not connect, send with your report: the text of **Copy diagnostics** on the app's page that says the connect failed; the output of `nbtctl serial status` (agent 1.6.0 or later); the agent's log, `/tmp/nbtapp/log/agent.log`; and the problem file, `/var/opt/nbtapp/serial-problems.log`, if there is one (`cat` prints each). None of these holds a phone's Bluetooth address |
 | The app says **The car didn't connect to this app. It has no media audio connection to this phone** | The car takes no link that the phone opens while it has no media audio connection to the phone, so the app's knock cannot reach it. Choose this phone in the car's media menu, so that it is connected for media audio again, then connect again in the app. If it still fails, try **Connect from the phone** |
 | The app says **The car isn't in reach of this phone** | The phone could not reach the car over Bluetooth. Check that the car is on, the phone is near it and its Bluetooth is on, then connect again |
 | The app says **The car didn't connect to this app. Check that the agent is running and the car is in range.** | Check the agent runs (**NBTApp**, **Start the agent** on the car's screen), then connect again. If it still fails, try **Connect from the phone**, which can interrupt another app's link to the car, and see the row on the app not connecting above |
+| Wireless Android Auto does not connect, or connects only now and then, while the agent runs | Update the app to 0.10.0 or later and then the agent to 1.8.0 or later, and restart the head unit once. The car's Bluetooth shows phones only its first few serial services, and an older agent could take the last of those places, so that the phone no longer found Android Auto's. Agent 1.8.0 keeps a place for each package that declares such a service before it takes its own, from the next start of the head unit |
+| The app says **The car didn't connect to this app. Another app on this phone, such as Android Auto, may have been connecting to the car** | Android lets only one app at a time open a link to the car. Wait a few seconds, then connect again |
 | The phone's music over Bluetooth stops, or wireless Android Auto stops connecting, while the phone is paired with NBTApp | Update the app to 0.8.2 or later and then the agent to 1.6.2 or later. Agent 1.6.0 had the car dial the phone by itself, also while the app was closed, and a dial that fails can leave the car's Bluetooth with a wrong record of the phone's links. Where the music has stopped, choose the phone in the car's media menu again |
 | **Start with the car**, or the **Setting up** card, stopped with a reason | Put right what it names (the phone's internet connection, the link to the head unit) and tap **Retry**. Or do step 7 by hand |
 | The app says a thing on the head unit **needs a look** | The checks found something that was put onto the car by hand. **Show** opens the head unit's page, which lists it under **Checks** with its fix; see step 6 |

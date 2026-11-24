@@ -3,6 +3,24 @@
 What changed in each release of the NBTApps app, the agent and the iDrive plugin.
 Generated from the catalogue's release notes.
 
+## 2026-11-24
+
+### App 0.10.0
+- The app reaches an agent whose Bluetooth service the car does not advertise to phones: it then asks for the car's link through the car's Serial Port service.
+- With agent 1.8.0 the app asks for the car's link through the car's dial-up networking service first, which cannot disturb another app's Bluetooth link to the car, such as wireless Android Auto's.
+- A connect that may have run into another app's link to the car stops there and says so, and can be tried again a few seconds later.
+- A first connect to a head unit asks for the car's link before the phone opens a link of its own.
+- Agent 1.8.0 needs this version.
+
+### Agent 1.8.0
+- Wireless Android Auto could fail to connect while the agent was running: the agent could take the last place in the car's Bluetooth that a phone can find.
+- The agent now keeps such a place for every package that declares a Bluetooth serial service, such as wireless Android Auto, and gives it up when that package's program starts.
+- The agent waits until the car's Bluetooth has been on for 10 seconds before it registers its services, so the car's own come first.
+- These changes take effect from the next start of the head unit after the update.
+- The open app can ask for the car's link through the car's dial-up networking service, which cannot disturb another app's Bluetooth link to the car, such as wireless Android Auto's.
+- The agent keeps that service switched on; nbtagent --knock-dialup off turns this off.
+- Needs app 0.10.0 or later. An agent older than 1.6.0 updates to 1.6.0 first.
+
 ## 2026-11-23
 
 ### App 0.9.0
