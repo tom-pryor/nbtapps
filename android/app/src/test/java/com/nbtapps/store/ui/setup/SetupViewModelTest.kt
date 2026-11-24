@@ -21,6 +21,7 @@ import com.nbtapps.store.data.jobs.FakeConnector
 import com.nbtapps.store.data.jobs.FakePhones
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.link.IncomingLink
+import com.nbtapps.store.data.link.KnockFallback
 import com.nbtapps.store.data.link.Link
 import com.nbtapps.store.data.link.LinkConnector
 import com.nbtapps.store.data.packages.PackageDownloader
@@ -89,9 +90,9 @@ class SetupViewModelTest {
         }
 
         // A knock, as a connect to an agent that dials only when knocked makes: no link of the phone's own.
-        override suspend fun knock(endpoint: Endpoint, bursts: Int?): Link {
+        override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link {
             gate?.await()
-            return inner.knock(endpoint, bursts)
+            return inner.knock(endpoint, bursts, fallback)
         }
 
         // A link the car opens is never held.

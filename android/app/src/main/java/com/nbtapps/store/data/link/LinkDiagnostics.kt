@@ -16,10 +16,10 @@ data class TryFacts(
     /** `BluetoothSocketException.errorCode`, which Android has from version 14 (API 34). */
     val errorCode: Int? = null,
     /**
-     * The RFCOMM channel the socket found for the agent's service on the car: a channel number where the car
-     * advertised it and the link was refused or failed; -1 where the socket found none, which is either the car
-     * answering that it has no such service or the phone not reaching the car to ask ([carConnected] is a hint of
-     * which).
+     * The RFCOMM channel the socket found on the car for the service it was opened to, the agent's or, for a knock's
+     * connect that names it, the car's Serial Port service: a channel number where the car advertised it and the link
+     * was refused or failed; -1 where the socket found none, which is either the car answering that it has no such
+     * service or the phone not reaching the car to ask ([carConnected] is a hint of which).
      */
     val channel: Int? = null,
     /** The car had a hands-free or audio connection to the phone ([com.nbtapps.store.data.PhoneBluetooth.connected]). */
@@ -45,7 +45,11 @@ data class LinkTry(
     val error: String? = null,
     val message: String? = null,
     val facts: TryFacts = TryFacts(),
-    /** Which of several it was, as a knock's burst and attempt: words that follow the path in [describe]. */
+    /**
+     * Which of several it was, as a knock's burst and attempt, and where a knock's connect went to the car's Serial Port
+     * service, that service ("1.2 to the Serial Port service"; one to the agent's own has no such words): words that
+     * follow the path in [describe].
+     */
     val detail: String? = null,
 ) {
     enum class Path(val label: String) {
@@ -64,13 +68,19 @@ data class LinkTry(
          */
         LISTEN_ONLY("listen-only connect"),
 
-        /** One connect of a knock's: the phone knocked at the agent ([BluetoothSerialLinkConnector.knock]). */
+        /**
+         * One connect of a knock's: the phone knocked at the agent ([BluetoothSerialLinkConnector.knock]), through the
+         * agent's own service or, where its [detail] says so, the car's Serial Port service.
+         */
         KNOCK("knock"),
 
         /** A burst of a knock's connects that had no link from the car. */
         KNOCK_BURST("knock burst"),
 
-        /** A connect that knocked, and what came of it: the car's link, or none. Its time is from its start. */
+        /**
+         * A connect that knocked, and what came of it: the car's link, or none. Its time is from its start; its detail
+         * names the connect the knocking was at, and its service where that was the car's Serial Port service.
+         */
         KNOCK_CONNECT("knocking connect"),
     }
 

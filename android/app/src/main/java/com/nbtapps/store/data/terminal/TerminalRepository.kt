@@ -119,7 +119,7 @@ object TerminalText {
 interface TerminalLink {
     val connection: StateFlow<ConnectionState>
 
-    /** A connect as the user's is: [JobRepository.connect]. */
+    /** A connect as the user's is: [JobRepository.connect], `byUser`, as a terminal is opened by the user. */
     suspend fun connect(headUnitId: String): Result<Unit>
 
     /** [block] with the link to [headUnitId], as a use of it: [JobRepository.usingSession]. */
@@ -136,7 +136,7 @@ interface TerminalLink {
 class JobTerminalLink(private val jobs: JobRepository) : TerminalLink {
     override val connection: StateFlow<ConnectionState> get() = jobs.connection
 
-    override suspend fun connect(headUnitId: String): Result<Unit> = jobs.connect(headUnitId)
+    override suspend fun connect(headUnitId: String): Result<Unit> = jobs.connect(headUnitId, byUser = true)
 
     override suspend fun <T> usingSession(headUnitId: String, block: suspend (AgentSession) -> T): Result<T> =
         jobs.usingSession(headUnitId, block)

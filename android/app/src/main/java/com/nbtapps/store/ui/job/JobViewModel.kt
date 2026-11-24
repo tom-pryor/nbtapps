@@ -212,7 +212,7 @@ class JobViewModel @Inject constructor(
     fun reconnect() {
         val headUnitId = uiState.value.job?.headUnitId ?: return
         // On Cancel at the question nothing is done, and nothing is said.
-        act { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId) else Result.success(Unit) }
+        act { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId, byUser = true) else Result.success(Unit) }
     }
 
     /** One connect with the phone dialling the car as well: see [JobRepository.connectFromPhone]. */

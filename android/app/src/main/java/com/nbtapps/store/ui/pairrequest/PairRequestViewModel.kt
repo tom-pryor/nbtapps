@@ -475,7 +475,7 @@ class PairRequestViewModel @Inject constructor(
                     // A terminal or the SSH port of another head unit is not ended unasked; on Cancel nothing changes.
                     if (!guard.mayConnect(unit.id) || mine != request) return@launch
                     step.value = PairRequestStep.Connecting
-                    val result = if (fromPhone) jobs.connectFromPhone(unit.id) else jobs.connect(unit.id)
+                    val result = if (fromPhone) jobs.connectFromPhone(unit.id) else jobs.connect(unit.id, byUser = true)
                     if (mine != request) return@launch
                     val failure = result.exceptionOrNull()
                     when {

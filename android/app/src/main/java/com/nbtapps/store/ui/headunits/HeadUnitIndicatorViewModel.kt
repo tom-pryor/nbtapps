@@ -118,7 +118,7 @@ class HeadUnitIndicatorViewModel @Inject constructor(
      * for twenty seconds, so the user may well have moved between them before it is settled.
      */
     fun connect(id: String) {
-        appScope.launch { if (guard.mayConnect(id)) jobs.connect(id) }
+        appScope.launch { if (guard.mayConnect(id)) jobs.connect(id, byUser = true) }
     }
 
     /**

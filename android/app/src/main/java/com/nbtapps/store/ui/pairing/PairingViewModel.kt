@@ -178,7 +178,7 @@ class PairingViewModel @Inject constructor(
 
     /** Opens the app's link to the head unit, for the code to go over. As in the top bar's menu, the attempt is the app's. */
     fun connect() {
-        appScope.launch { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId) }
+        appScope.launch { if (guard.mayConnect(headUnitId)) jobs.connect(headUnitId, byUser = true) }
     }
 
     /** One connect with the phone dialling the car as well, see [JobRepository.connectFromPhone]: after the same question. */
