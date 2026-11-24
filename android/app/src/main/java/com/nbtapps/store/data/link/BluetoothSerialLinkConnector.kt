@@ -242,10 +242,10 @@ class BluetoothSerialLinkConnector(
      * the user is told of. A probe that ended because one of its connects may have run into another app's link to the
      * car has the dial wait [SerialConnectTimes.knockCollisionPauseMillis] first, as a knock's next burst does, while
      * the phone listens on. A connect that only listens makes none, as its agent leaves the phone's own links to another
-     * program at the car, which a knock's link would reach.
+     * program at the car, which a knock's link would reach. [dialup] is the probe's, as [knock]'s.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?): Link {
+    override suspend fun connect(endpoint: Endpoint, dials: Boolean, listenOnly: Boolean, probe: KnockFallback?, dialup: Boolean): Link {
         val serial = endpoint as? SerialEndpoint ?: throw IOException("Not a Bluetooth serial endpoint")
         radio.unavailable(serial.address)?.let { throw IOException(it) }
         if (listenOnly && dials) waitForCar(serial)?.let { return it }
@@ -277,7 +277,7 @@ class BluetoothSerialLinkConnector(
                 }
                 val dialling = launch {
                     if (probing != null) {
-                        when (probeKnock(serial, won, probing, deaf)) {
+                        when (probeKnock(serial, won, probing, deaf, dialup)) {
                             ProbeEnd.TAKEN -> return@launch
                             ProbeEnd.IN_THE_WAY -> if (carCame(won, times.knockCollisionPauseMillis)) return@launch
                             ProbeEnd.NOTHING -> Unit
@@ -389,13 +389,17 @@ class BluetoothSerialLinkConnector(
      * A caller that is cancelled leaves nothing open: no connect of the knock's, no wait on the listener, no car's link,
      * even one handed over as the caller gave up.
      *
+     * [dialup]: whether each burst may first make one connect to the car's dial-up networking service, the knock by
+     * dial-up ([ProtocolConstants.SERIAL_KNOCK_DIALUP_UUID]), and wait [ProtocolConstants.SERIAL_KNOCK_DIALUP_WAIT_MS]
+     * for the car's link after it; handed on to [knockAt], which makes nothing of it yet.
+     *
      * @throws KnockUnansweredException if no link of the car's came after the last burst, or, [KnockUnansweredException.carAway],
      *   after a connect that did not reach the car, or, [KnockUnansweredException.inTheWay], after a connect that may
      *   have run into another app's link ended the knock.
      * @throws NoCarLinkException if the phone cannot listen for it: then knocking would bring a link nobody takes.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback): Link {
+    override suspend fun knock(endpoint: Endpoint, bursts: Int?, fallback: KnockFallback, dialup: Boolean): Link {
         val serial = endpoint as? SerialEndpoint ?: throw IOException("Not a Bluetooth serial endpoint")
         radio.unavailable(serial.address)?.let { throw IOException(it) }
         val most = (bursts ?: times.knockBursts).coerceAtLeast(1)
@@ -417,7 +421,7 @@ class BluetoothSerialLinkConnector(
                     }
                 }
                 val knocking = launch {
-                    when (knockAt(serial.address, came, most, fallback, at)) {
+                    when (knockAt(serial.address, came, most, fallback, at, dialup = dialup)) {
                         KnockEnd.AWAY -> came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED, carAway = true))
                         KnockEnd.UNANSWERED -> came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED))
                         KnockEnd.IN_THE_WAY -> came.completeExceptionally(KnockUnansweredException(KNOCK_UNANSWERED, inTheWay = true))
@@ -485,7 +489,8 @@ class BluetoothSerialLinkConnector(
      * and is followed by another is kept in the diagnostics. With [probing], it ends after the first of its connects that
      * came up, to either service, its hold and [SerialConnectTimes.knockSettleMillis] after it: an agent that knows
      * knocks has had the car dial by then. Before each connect it ends where [deaf] says that the phone cannot listen. It
-     * settles nothing: what it stopped at is its caller's to make something of.
+     * settles nothing: what it stopped at is its caller's to make something of. [dialup]: whether each burst may first
+     * connect to the car's dial-up networking service ([knock]); nothing is made of it yet.
      */
     private suspend fun knockAt(
         address: String,
@@ -495,6 +500,7 @@ class BluetoothSerialLinkConnector(
         at: AtomicReference<String?>,
         probing: Boolean = false,
         deaf: () -> Boolean = { false },
+        @Suppress("UNUSED_PARAMETER") dialup: Boolean = false,
     ): KnockEnd {
         // Whether the agent's service last failed where no record of it was found, or the phone could not tell: then
         // a burst begins at the Serial Port service, where it may make a connect there. See [knock].
@@ -579,15 +585,22 @@ class BluetoothSerialLinkConnector(
      * connect listens for the car's link, which settles [won]. What it came to is kept in the diagnostics, in one line.
      * Where the car's link did not come, for whatever reason, the connect dials as it would have without it, after
      * [SerialConnectTimes.knockCollisionPauseMillis] where the probe ended after a connect that may have run into another
-     * app's link. The phone cannot listen where [deaf] says so, and then it knocks no more.
+     * app's link. The phone cannot listen where [deaf] says so, and then it knocks no more. [dialup] is the knock by
+     * dial-up's, as [knockAt]'s.
      */
-    private suspend fun probeKnock(serial: SerialEndpoint, won: CompletableDeferred<Link>, fallback: KnockFallback, deaf: AtomicBoolean): ProbeEnd {
+    private suspend fun probeKnock(
+        serial: SerialEndpoint,
+        won: CompletableDeferred<Link>,
+        fallback: KnockFallback,
+        deaf: AtomicBoolean,
+        dialup: Boolean,
+    ): ProbeEnd {
         val began = now()
         val at = AtomicReference<String?>(null)
         fun line(outcome: LinkTry.Outcome, detail: String?) =
             log.line(diagnostics.record(LinkTry.Path.KNOCK_PROBE, outcome, now() - began, detail = detail).describe())
         val end = try {
-            knockAt(serial.address, won, 1, fallback, at, probing = true, deaf = deaf::get)
+            knockAt(serial.address, won, 1, fallback, at, probing = true, deaf = deaf::get, dialup = dialup)
         } catch (e: CancellationException) {
             // The car's link ends the connect, and with it the probe, as it does a knock; or the caller gave up.
             if (won.isCompleted && won.getCompletionExceptionOrNull() == null) line(LinkTry.Outcome.TAKEN, at.get()) else line(LinkTry.Outcome.CANCELLED, at.get())

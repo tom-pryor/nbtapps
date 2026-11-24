@@ -32,6 +32,11 @@ const char* const kSerialKnockMagic = "NBTK";
 const unsigned kSerialKnockAttempts = 5;
 const int64_t kSerialKnockGapMs = 250;
 const int64_t kSerialKnockHoldMs = 1000;
+// The knock by dial-up (constants.txt says what each is): the class of the car's dial-up networking service, whose
+// request is a phone's knock at an agent that lists kCapabilitySerialKnockDialup, and how long the app waits for the
+// car's link after such a connect.
+const char* const kSerialKnockDialupUuid = "00001103-0000-1000-8000-00805F9B34FB";
+const int64_t kSerialKnockDialupWaitMs = 1500;
 
 const unsigned kPairingCodeDigits = 6;
 const int64_t kPairingWindowSeconds = 120;
@@ -61,6 +66,10 @@ const char* const kCapabilitySerialDial = "serial-dial";
 // serial.knockMagic), and, but for the pairing window and a version on trial, not otherwise. Only an agent whose
 // Bluetooth serial listener has the dial on with knocks (nbtagent --dial-knock) lists it, and it lists serial-dial too.
 const char* const kCapabilitySerialKnock = "serial-knock";
+// A capability: a phone's request for the car's dial-up networking service is that phone's knock too (constants.txt,
+// serial.knockDialupUuid). Only an agent that lists serial-knock lists it, and only with the knock by dial-up on
+// (nbtagent --knock-dialup).
+const char* const kCapabilitySerialKnockDialup = "serial-knock-dialup";
 // A capability: this agent has settings.get and settings.set, for the settings a package's manifest names
 // (settings.hpp).
 const char* const kCapabilitySettings = "settings";

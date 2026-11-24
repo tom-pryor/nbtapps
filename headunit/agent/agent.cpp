@@ -1291,7 +1291,11 @@ void Agent::hello(Session* s, int64_t id, const json::Value& params) {
     if (serialReset_ != 0) w.string(kCapabilitySerialReset);
     if (serialDial_ != 0 && serialDial_->dialOn()) w.string(kCapabilitySerialDial);
     // The car dials a phone when its app knocks: only with the dial, which the app's knock is for.
-    if (serialDial_ != 0 && serialDial_->dialOn() && serialDial_->knockOn()) w.string(kCapabilitySerialKnock);
+    if (serialDial_ != 0 && serialDial_->dialOn() && serialDial_->knockOn()) {
+        w.string(kCapabilitySerialKnock);
+        // And a phone's request for the car's dial-up service is a knock too: only with the knock.
+        if (serialDial_->knockDialupOn()) w.string(kCapabilitySerialKnockDialup);
+    }
     w.endArray().endObject();
     // What `auth` signs: the two payloads as they travel. The reply's is what respond() sends for this result.
     const std::string& asked = peer->incoming();

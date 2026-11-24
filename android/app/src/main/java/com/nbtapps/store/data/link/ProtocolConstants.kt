@@ -49,8 +49,9 @@ object ProtocolConstants {
     /**
      * The knock, to an agent that lists [CAPABILITY_SERIAL_KNOCK]: such an agent has the car dial a phone when that
      * phone's app knocks, and not otherwise. The app, listening for the car's link, makes up to [SERIAL_KNOCK_ATTEMPTS]
-     * connects to the agent's service, [SERIAL_KNOCK_GAP_MS] after each that fails: several, because one may fail on
-     * the phone while another app's link to the car is up. One that comes up is sent [SERIAL_KNOCK_MAGIC] and nothing
+     * connects to the agent's service, [SERIAL_KNOCK_GAP_MS] after each that fails: several, because one may find no
+     * record of the service or bring no link, while one that may have run into another app's link to the car ends its
+     * burst ([BluetoothSerialLinkConnector.knock]). One that comes up is sent [SERIAL_KNOCK_MAGIC] and nothing
      * else, and is kept until the car's link has come or [SERIAL_KNOCK_HOLD_MS] have passed: see
      * [BluetoothSerialLinkConnector]. The agent takes those bytes at the start of a link the phone opened as the
      * knock. A connect that the car refuses reaches no agent, so while the car refuses the phone's links (it does so
@@ -60,6 +61,21 @@ object ProtocolConstants {
     const val SERIAL_KNOCK_ATTEMPTS = 5
     const val SERIAL_KNOCK_GAP_MS = 250L
     const val SERIAL_KNOCK_HOLD_MS = 1_000L
+
+    /**
+     * The knock by dial-up, to an agent that lists [CAPABILITY_SERIAL_KNOCK_DIALUP], beside the knock by
+     * [SERIAL_KNOCK_MAGIC] and not in its place. The car's Bluetooth stack has a dial-up networking service whose record,
+     * of class [SERIAL_KNOCK_DIALUP_UUID], names an RFCOMM channel of its own, apart from the one every serial service of
+     * the car is on; such an agent has it on while it runs, and takes a phone's request for it as that phone's knock.
+     * A phone app knocks this way by one connect to it, the first of each burst of a knock, with nothing written on it
+     * and nothing read, and then waits up to [SERIAL_KNOCK_DIALUP_WAIT_MS] from that connect's end for the car's link; where none has come, the
+     * burst goes on as a knock by [SERIAL_KNOCK_MAGIC]. The car refuses the connect, or the agent does where the car has
+     * not within about 2 s; one that comes up all the same is closed at once. Android takes no second link from a phone
+     * to the same channel of a device, so such a connect cannot run into another app's link to the car's serial channel,
+     * and it may be made in a knock of any kind. Where the car has no record of it, it fails at the look-up.
+     */
+    const val SERIAL_KNOCK_DIALUP_UUID = "00001103-0000-1000-8000-00805F9B34FB"
+    const val SERIAL_KNOCK_DIALUP_WAIT_MS = 1_500L
 
     /** Pairing a phone: the car's screen shows a code of this many digits, which the user types into the app. */
     const val PAIRING_CODE_DIGITS = 6
@@ -123,6 +139,13 @@ object ProtocolConstants {
      * at an agent that lists it, and such an agent also lists [CAPABILITY_SERIAL_DIAL].
      */
     const val CAPABILITY_SERIAL_KNOCK = "serial-knock"
+
+    /**
+     * A capability: the agent also takes a phone's request for the car's dial-up networking service as that phone's
+     * knock ([SERIAL_KNOCK_DIALUP_UUID]). The app knocks that way at an agent that lists it, and in a probing knock at
+     * one it has never greeted; such an agent also lists [CAPABILITY_SERIAL_KNOCK].
+     */
+    const val CAPABILITY_SERIAL_KNOCK_DIALUP = "serial-knock-dialup"
 
     /**
      * A capability: the agent has `settings.get` and `settings.set`, which give and change the settings an installed

@@ -747,6 +747,11 @@ class RealAgentTest {
         assertTrue(jobs.connect("bench").isSuccess)
         assertFalse(ProtocolConstants.CAPABILITY_SERIAL_RESET in connected().capabilities)
         assertFalse(connected().serialReset)
+        // Nor does the car dial the phone, so it lists neither way to knock, and none is kept.
+        val listed = connected().capabilities
+        assertFalse(ProtocolConstants.CAPABILITY_SERIAL_KNOCK in listed || ProtocolConstants.CAPABILITY_SERIAL_KNOCK_DIALUP in listed)
+        val unit = requireNotNull(headUnits.headUnit("bench").first())
+        assertFalse(unit.serialKnock || unit.serialKnockDialup)
         // The repository does not ask such an agent.
         assertTrue(jobs.resetSerial().isFailure)
 

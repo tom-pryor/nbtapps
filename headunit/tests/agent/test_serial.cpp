@@ -5716,12 +5716,21 @@ static void testDialOptions() {
         CHECK(!parseDialKnock("", &on) && !parseDialKnock(0, &on) && !parseDialKnock("On", &on) &&
               !parseDialKnock("1", &on) && !parseDialKnock("off ", &on) && on);
     }
+    {   // --knock-dialup on|off
+        bool on = false;
+        CHECK(parseKnockDialup("on", &on) && on && parseKnockDialup("off", &on) && !on);
+        on = true;
+        CHECK(!parseKnockDialup("", &on) && !parseKnockDialup(0, &on) && !parseKnockDialup("OFF", &on) &&
+              !parseKnockDialup("0", &on) && !parseKnockDialup(" on", &on) && on);
+    }
     {   // the start-up line with the knock, the default: the values in effect, and no poll or ask
         DialConfig c;
-        CHECK(c.on && c.knock);
+        CHECK(c.on && c.knock && c.knockDialup);
         std::string line = describeDial(c);
         CHECK_IN(line, has(line, "when the phone's app knocks, and otherwise only while the pairing window is open, at "
                                  "serial.dial and while this version of the agent is on trial (--dial-knock on)"));
+        CHECK_IN(line, has(line, "whatever becomes of it. The agent lists serial-knock-dialup, the knock by dial-up "
+                                 "(--knock-dialup on). A knock of any phone"));
         CHECK_IN(line, has(line, "a link the phone opens that starts with the knock's magic bytes within the decide "
                                  "time is that phone's knock, and a phone's request for a serial link is no knock, "
                                  "whatever becomes of it.") &&
@@ -5740,6 +5749,10 @@ static void testDialOptions() {
         CHECK(has(describeDial(c), "every phone of the agent's there every 7 s, for 300 s from when") &&
               has(describeDial(c), "an answer other than 5 within 500 ms stops these requests for the rest of the run") &&
               has(describeDial(c), "ignored for 2500 ms"));
+        c.knockDialup = false;
+        line = describeDial(c);
+        CHECK_IN(line, has(line, "The agent does not list serial-knock-dialup (--knock-dialup off).") &&
+                           !has(line, "the knock by dial-up") && has(line, "ignored for 2500 ms"));
     }
     {   // the start-up line says the values in effect
         DialConfig c;
@@ -6389,7 +6402,20 @@ static void testKnock() {
         CHECK_IN(k.trace.text(), sawWithin(k.trace, "btspp0 let go ", 3000));
         CHECK(!k.trace.saw("knock's") && !k.trace.saw("knocked") && !k.listener->serialStatus().knock &&
               dialsOfPhone(k.gap) == 0);
+        // Nor the knock by dial-up, which is a kind of knock, though DialConfig has it on.
+        CHECK(k.config.dial.knockDialup && !k.listener->knockOn() && !k.listener->knockDialupOn());
         node.vanish();
+    }
+    {   // --knock-dialup off: the knock by magic bytes alone
+        Knocker k("knock-dialup-off");
+        k.config.dial.knockDialup = false;
+        k.start();
+        CHECK(k.listener->knockOn() && !k.listener->knockDialupOn());
+    }
+    {   // and on, the default, with the knock
+        Knocker k("knock-dialup-on");
+        k.start();
+        CHECK(k.listener->knockOn() && k.listener->knockDialupOn());
     }
     {   // the agent behind it lists the knock's capability in hello, with the dial's
         Car car;
@@ -6423,7 +6449,8 @@ static void testKnock() {
         Answered answered(&app);
         CHECK_IN(car.trace.text(), turnsUntil(car.agent, apps, answered, 3000));
         CHECK_IN(app.answers.caps, has(app.answers.caps + " ", " serial-dial ") &&
-                                       has(app.answers.caps + " ", " serial-knock "));
+                                       has(app.answers.caps + " ", " serial-knock ") &&
+                                       has(app.answers.caps + " ", " serial-knock-dialup "));
         app.peer->close("done");
         node.vanish();
         car.gap.ended("nbtapp", kDialled, "NBTApp", 1);
