@@ -3,11 +3,8 @@
 package com.nbtapps.store.ui.about
 
 import com.nbtapps.store.MainDispatcherRule
-import com.nbtapps.store.data.InMemoryHeadUnitRepository
 import com.nbtapps.store.data.update.RUNNING
 import com.nbtapps.store.data.whatsnew.VersionNotes
-import com.nbtapps.store.model.HeadUnit
-import com.nbtapps.store.model.TcpEndpoint
 import com.nbtapps.store.ui.catalogue.longReleaseDate
 import com.nbtapps.store.ui.catalogue.whatsNewByline
 import com.nbtapps.store.ui.catalogue.whatsNewTitle
@@ -19,7 +16,7 @@ import org.junit.Rule
 import org.junit.Test
 
 /**
- * The words of the app's settings and of the pages opened from them: the rows, what they say and where they go, and
+ * The words of the About page and of the pages opened from it: the rows, what they say and where they go, and
  * their view model; the title of what is new and the line under it, with the release date in long form, as the sheet
  * and the page show them, and what the page says with no notes; and the line over a licence's text that names the
  * projects under it.
@@ -31,8 +28,7 @@ class AboutRowsTest {
 
     private val notes = VersionNotes(900, "0.9.0", "2026-11-23", listOf("A terminal on the head unit"))
 
-    private fun state(version: String = "0.9.0", notes: VersionNotes? = this.notes, noHeadUnit: Boolean = false) =
-        AboutUiState(version, notes, noHeadUnit)
+    private fun state(version: String = "0.9.0", notes: VersionNotes? = this.notes) = AboutUiState(version, notes)
 
     @Test
     fun `the version row gives the version name only, and opens nothing`() {
@@ -57,25 +53,13 @@ class AboutRowsTest {
     }
 
     @Test
-    fun `the set-up row is for a first car with no head unit saved, and for another car otherwise`() {
-        assertEquals(
-            AboutRow("Set up your car", "Add your head unit and pair it", AboutTarget.SetUp),
-            moreRows(state(noHeadUnit = true)).first(),
-        )
-        assertEquals(
-            AboutRow("Set up another car", "Add another head unit and pair it", AboutTarget.AddCar),
-            moreRows(state(noHeadUnit = false)).first(),
-        )
-    }
-
-    @Test
-    fun `the licences and the app's page on GitHub follow`() {
+    fun `under More are the licences and the app's page on GitHub, and no way into the set-up`() {
         assertEquals(
             listOf(
                 AboutRow("Open-source licences", "The code this app includes", AboutTarget.Licences),
                 AboutRow("NBTApps on GitHub", "Source, issues and releases", AboutTarget.WebPage("https://github.com/tom-pryor/nbtapps")),
             ),
-            moreRows(state()).drop(1),
+            moreRows,
         )
     }
 
@@ -101,16 +85,14 @@ class AboutRowsTest {
     }
 
     @Test
-    fun `the view model gives the version, the notes and whether a head unit is saved`() = runTest {
-        val headUnits = InMemoryHeadUnitRepository()
+    fun `the view model gives the version and the notes`() = runTest {
         val notesFlow = MutableStateFlow<VersionNotes?>(null)
-        val viewModel = mainDispatcherRule.track(AboutViewModel(RUNNING, headUnits, notesFlow))
+        val viewModel = mainDispatcherRule.track(AboutViewModel(RUNNING, notesFlow))
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
 
-        assertEquals(AboutUiState("0.1.0", notes = null, noHeadUnit = true), viewModel.uiState.value)
+        assertEquals(AboutUiState("0.1.0", notes = null), viewModel.uiState.value)
         notesFlow.value = notes
-        headUnits.add(HeadUnit("car", "Car", listOf(TcpEndpoint("192.168.0.1", 7144))))
-        assertEquals(AboutUiState("0.1.0", notes, noHeadUnit = false), viewModel.uiState.value)
+        assertEquals(AboutUiState("0.1.0", notes), viewModel.uiState.value)
     }
 
     @Test

@@ -84,14 +84,11 @@ object SppTestRoute
 @Serializable
 data class SetupRoute(val furtherCar: Boolean)
 
-/**
- * The app's own settings, reached by the gear on both tabs: apart from [SettingsRoute], which is the settings of a
- * package on a head unit.
- */
+/** About the app: its version, what is new in it, the licences and its page on GitHub. Reached by the gear on both tabs. */
 @Serializable
 object AboutRoute
 
-/** What is new in the version of the app that runs, as a page opened from the app's settings. */
+/** What is new in the version of the app that runs, as a page opened from the About page. */
 @Serializable
 object WhatsNewRoute
 
@@ -237,15 +234,13 @@ fun NbtNavHost(
                     onOpenSppTest = { navController.navigate(SppTestRoute) },
                     onSetUp = setUp,
                     onAddCar = addCar,
-                    onOpenSettings = openAbout,
+                    onOpenAbout = openAbout,
                 )
             }
             composable<AboutRoute> {
                 AboutScreen(
                     onBack = { navController.popBackStack() },
                     onOpenWhatsNew = { navController.navigate(WhatsNewRoute) },
-                    onSetUp = setUp,
-                    onAddCar = addCar,
                     onOpenLicences = { navController.navigate(LicencesRoute) },
                 )
             }
@@ -333,7 +328,7 @@ fun NbtNavHost(
                     onOpenHeadUnit = openHeadUnit,
                     onSetUp = setUp,
                     onPairHeadUnit = pairHeadUnit,
-                    onOpenSettings = openAbout,
+                    onOpenAbout = openAbout,
                 )
             }
             composable<CataloguePackageRoute> {

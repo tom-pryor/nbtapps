@@ -35,8 +35,8 @@ import com.nbtapps.store.ui.about.AboutButton
 
 /**
  * The saved head units. With none, it offers the set-up ([onSetUp]); "+" opens the set-up for a further car
- * ([onAddCar]), which begins at picking it. The gear at the right of the top bar opens the app's settings
- * ([onOpenSettings]).
+ * ([onAddCar]), which begins at picking it. The gear at the right of the top bar opens the app's About page
+ * ([onOpenAbout]).
  */
 @Composable
 fun HeadUnitsScreen(
@@ -44,7 +44,7 @@ fun HeadUnitsScreen(
     onOpenSppTest: () -> Unit,
     onSetUp: () -> Unit,
     onAddCar: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenAbout: () -> Unit,
     viewModel: HeadUnitsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -57,7 +57,7 @@ fun HeadUnitsScreen(
         onRemoveHeadUnit = viewModel::removeHeadUnit,
         onSetUp = onSetUp,
         onAddClick = onAddCar,
-        onOpenSettings = onOpenSettings,
+        onOpenAbout = onOpenAbout,
     )
 }
 
@@ -70,7 +70,7 @@ private fun HeadUnitsContent(
     onRemoveHeadUnit: (String) -> Unit,
     onSetUp: () -> Unit,
     onAddClick: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenAbout: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -78,7 +78,7 @@ private fun HeadUnitsContent(
                 title = { Text("Head units") },
                 actions = {
                     onOpenSppTest?.let { TextButton(onClick = it) { Text("Bluetooth test") } }
-                    AboutButton(onOpenSettings)
+                    AboutButton(onOpenAbout)
                 },
             )
         },
