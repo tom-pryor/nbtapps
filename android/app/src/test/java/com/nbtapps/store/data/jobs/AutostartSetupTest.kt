@@ -188,7 +188,12 @@ class AutostartSetupTest {
     private val source = FileCatalogueSource(null, archives)
     private val catalogue = TestCatalogue()
     private val prereleases = InMemoryPrereleaseRepository()
-    private val setup by lazy { AutostartSetup(jobs, catalogue, store, PackageDownloader(source, store, scope), prereleases, scope, settleMs = 2_000) }
+
+    /** How long the set-up waits for a newer index, which a test sets before it uses [setup]. */
+    private var freshenMs = 60_000L
+    private val setup by lazy {
+        AutostartSetup(jobs, catalogue, store, PackageDownloader(source, store, scope), prereleases, scope, settleMs = 2_000, freshenMs = freshenMs)
+    }
     private val car = HeadUnit("car", "Car", listOf(TcpEndpoint("192.168.0.1", 7144)))
 
     /** A catalogue that holds [loaded] once it has been refreshed, and counts its refreshes. */
@@ -212,7 +217,25 @@ class AutostartSetupTest {
             state.value = loaded?.let { CatalogueState(index = it) } ?: CatalogueState(error = "no network")
         }
 
-        override suspend fun refreshIfStale() = Unit
+        /**
+         * When set, [refreshIfStale] waits for this, after it has completed [asked]: then the catalogue holds what
+         * [loaded] is by then.
+         */
+        @Volatile
+        var fetch: CompletableDeferred<Unit>? = null
+        val asked = CompletableDeferred<Unit>()
+
+        override suspend fun refreshIfStale() {
+            val fetch = fetch ?: return
+            asked.complete(Unit)
+            fetch.await()
+            state.value = CatalogueState(index = loaded)
+        }
+
+        /** Has the catalogue hold [loaded], as a fetch before the set-up left it. */
+        fun hold() {
+            state.value = CatalogueState(index = loaded)
+        }
 
         override suspend fun details(packageId: String): Result<PackageDetails> = Result.failure(UnsupportedOperationException())
     }
@@ -548,6 +571,44 @@ class AutostartSetupTest {
 
         assertEquals(AutostartStep.Failed("The iDrive plugin couldn't be downloaded: no network"), ended())
         assertEquals(0, plans.get())
+    }
+
+    @Test
+    fun `a newer index that comes in time decides which plugin is installed`() = test {
+        catalogueWith("0.9.0")
+        catalogue.hold()
+        val fetch = CompletableDeferred<Unit>().also { catalogue.fetch = it }
+        assertTrue(jobs.connect("car").isSuccess)
+
+        setup.begin("car")
+        catalogue.asked.await()
+        // The index that is held has no version that would do.
+        catalogueWith("1.0.0")
+        fetch.complete(Unit)
+        installing()
+        finishJob("1.0.0")
+
+        assertEquals(AutostartStep.Done(changed = true), ended())
+        assertEquals(listOf("$PLUGIN 1.0.0"), store.packages.value.map { "${it.id} ${it.version}" })
+        assertEquals("an index was held", 0, catalogue.refreshes.get())
+    }
+
+    @Test
+    fun `an index that does not come in time is not waited for, and the one held decides`() = test {
+        catalogueWith("1.0.0")
+        catalogue.hold()
+        // Never completed: only the limit has the set-up go on, whenever it comes.
+        catalogue.fetch = CompletableDeferred()
+        freshenMs = 50
+        assertTrue(jobs.connect("car").isSuccess)
+
+        setup.begin("car")
+        installing()
+        assertTrue("a newer one was asked for", catalogue.asked.isCompleted)
+        finishJob("1.0.0")
+
+        assertEquals(AutostartStep.Done(changed = true), ended())
+        assertEquals(0, catalogue.refreshes.get())
     }
 
     @Test
