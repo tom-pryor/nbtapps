@@ -2945,6 +2945,7 @@ class JobRepositoryTest {
         dialler.onConnect = { knocks(it) }
         val connecting = scope.async { jobs.connect("bt", byUser = true) }
         until("the connect probes") { dialler.probes.size == 1 }
+        inUseFromHere(jobs)
         dialIn()
 
         assertTrue(connecting.await().isSuccess)
