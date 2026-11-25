@@ -31,12 +31,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.DebugTools
 import com.nbtapps.store.R
 import com.nbtapps.store.model.HeadUnit
-import com.nbtapps.store.ui.about.AboutButton
+import com.nbtapps.store.ui.menu.MenuButton
 
 /**
  * The saved head units. With none, it offers the set-up ([onSetUp]); "+" opens the set-up for a further car
- * ([onAddCar]), which begins at picking it. The gear at the right of the top bar opens the app's About page
- * ([onOpenAbout]).
+ * ([onAddCar]), which begins at picking it. The button at the left of the top bar opens the side menu
+ * ([onOpenMenu]).
  */
 @Composable
 fun HeadUnitsScreen(
@@ -44,7 +44,7 @@ fun HeadUnitsScreen(
     onOpenSppTest: () -> Unit,
     onSetUp: () -> Unit,
     onAddCar: () -> Unit,
-    onOpenAbout: () -> Unit,
+    onOpenMenu: () -> Unit,
     viewModel: HeadUnitsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -57,7 +57,7 @@ fun HeadUnitsScreen(
         onRemoveHeadUnit = viewModel::removeHeadUnit,
         onSetUp = onSetUp,
         onAddClick = onAddCar,
-        onOpenAbout = onOpenAbout,
+        onOpenMenu = onOpenMenu,
     )
 }
 
@@ -70,16 +70,14 @@ private fun HeadUnitsContent(
     onRemoveHeadUnit: (String) -> Unit,
     onSetUp: () -> Unit,
     onAddClick: () -> Unit,
-    onOpenAbout: () -> Unit,
+    onOpenMenu: () -> Unit,
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Head units") },
-                actions = {
-                    onOpenSppTest?.let { TextButton(onClick = it) { Text("Bluetooth test") } }
-                    AboutButton(onOpenAbout)
-                },
+                navigationIcon = { MenuButton(onOpenMenu) },
+                actions = { onOpenSppTest?.let { TextButton(onClick = it) { Text("Bluetooth test") } } },
             )
         },
         floatingActionButton = {

@@ -2,21 +2,29 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.navigation
 
+import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.EnterTransition
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -38,6 +46,9 @@ import com.nbtapps.store.ui.detail.HeadUnitDetailScreen
 import com.nbtapps.store.ui.headunits.HeadUnitsScreen
 import com.nbtapps.store.ui.job.JobScreen
 import com.nbtapps.store.ui.logs.LogPullScreen
+import com.nbtapps.store.ui.menu.SideMenu
+import com.nbtapps.store.ui.menu.menuGivesWay
+import com.nbtapps.store.ui.menu.menuShows
 import com.nbtapps.store.ui.pairing.PairingScreen
 import com.nbtapps.store.ui.settings.SettingsScreen
 import com.nbtapps.store.ui.setup.SetupScreen
@@ -45,6 +56,7 @@ import com.nbtapps.store.ui.spptest.SppTestScreen
 import com.nbtapps.store.ui.ssh.SshAccessScreen
 import com.nbtapps.store.ui.terminal.TerminalScreen
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -84,7 +96,7 @@ object SppTestRoute
 @Serializable
 data class SetupRoute(val furtherCar: Boolean)
 
-/** About the app: its version, what is new in it, the licences and its page on GitHub. Reached by the gear on both tabs. */
+/** About the app: its version, what is new in it, the licences and its page on GitHub. Reached by the menu. */
 @Serializable
 object AboutRoute
 
@@ -128,7 +140,8 @@ private val topLevelDestinations = listOf(
 /**
  * The app's screens. It opens on the catalogue; with [openSetupAtStart], the set-up is opened over it at once, and
  * [onSetupOpened] told, so that the caller can keep it from being opened again by a rotation or a restored process.
- * Leaving the set-up goes back to the catalogue.
+ * Leaving the set-up goes back to the catalogue. The button on both tabs opens the side menu, over the bottom bar too;
+ * it names the app's version, [versionName]. Screens opened from the tabs have no way to it.
  *
  * [headUnitToOpen], when it is not null, is the head unit whose page another screen of the app asked to be shown, as
  * the screen for a handed-over pairing code does: the page is opened, and [onHeadUnitOpened] told. [terminalToOpen] is
@@ -137,6 +150,7 @@ private val topLevelDestinations = listOf(
  */
 @Composable
 fun NbtNavHost(
+    versionName: String,
     openSetupAtStart: Boolean,
     onSetupOpened: () -> Unit,
     navController: NavHostController = rememberNavController(),
@@ -161,7 +175,6 @@ fun NbtNavHost(
     val openHeadUnit = { id: String -> navController.navigate(HeadUnitDetailRoute(id)) }
     val setUp = { navController.navigate(SetupRoute(furtherCar = false)) }
     val addCar = { navController.navigate(SetupRoute(furtherCar = true)) }
-    val openAbout = { navController.navigate(AboutRoute) }
     // Only the set-up itself is popped: a second tap while it goes must not pop the screen under it.
     val leaveSetup = {
         if (navController.currentBackStackEntry?.destination?.hasRoute(SetupRoute::class) == true) navController.popBackStack()
@@ -175,6 +188,24 @@ fun NbtNavHost(
         val below = navController.currentBackStackEntry?.takeIf { it.destination.hasRoute(HeadUnitDetailRoute::class) }
         if (below?.toRoute<HeadUnitDetailRoute>()?.headUnitId != id) navController.navigate(HeadUnitDetailRoute(id))
     }
+
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val menuShown by remember(drawerState) { derivedStateOf { menuShows(drawerState.currentValue, drawerState.targetValue) } }
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val openMenu: () -> Unit = {
+        keyboard?.hide()
+        focusManager.clearFocus()
+        scope.launch { drawerState.open() }
+    }
+    // Also what Back does on both tabs, in handlers of their own: the one of Material's sheet is composed before NavHost's,
+    // which would win over it and go from Head units to the catalogue, and is on only once the menu has come to rest.
+    val closeMenu: () -> Unit = { scope.launch { drawerState.close() } }
+    val menuInTheWay = menuShown && menuGivesWay(screenKnown = currentDestination != null, tabOnTop = currentTopLevel != null)
+    // Not closed within the effect, which ends as the menu begins to go and would leave it halfway.
+    LaunchedEffect(menuInTheWay) { if (menuInTheWay) closeMenu() }
+
     LaunchedEffect(openSetupAtStart) {
         if (openSetupAtStart) {
             setupAtLaunch.set(true)
@@ -204,144 +235,164 @@ fun NbtNavHost(
         }
     }
 
-    Scaffold(
-        bottomBar = {
-            // Only the top-level screens show the bar; screens opened from them use the full height.
-            if (currentTopLevel != null) {
-                NavigationBar {
-                    topLevelDestinations.forEach { destination ->
-                        NavigationBarItem(
-                            selected = destination == currentTopLevel,
-                            onClick = { openTopLevel(destination.route) },
-                            icon = { Icon(painterResource(destination.icon), contentDescription = null) },
-                            label = { Text(destination.label) },
-                        )
+    ModalNavigationDrawer(
+        drawerContent = {
+            SideMenu(
+                drawerState,
+                versionName,
+                onOpenAbout = {
+                    closeMenu()
+                    // A second tap before the menu has gone finds it on top.
+                    navController.navigate(AboutRoute) { launchSingleTop = true }
+                },
+            )
+        },
+        drawerState = drawerState,
+        // Only the button opens the menu, so no swipe while it is closed; open, a swipe or a tap beside it closes it.
+        gesturesEnabled = drawerState.isOpen,
+    ) {
+        Scaffold(
+            bottomBar = {
+                // Only the top-level screens show the bar; screens opened from them use the full height.
+                if (currentTopLevel != null) {
+                    NavigationBar {
+                        topLevelDestinations.forEach { destination ->
+                            NavigationBarItem(
+                                selected = destination == currentTopLevel,
+                                onClick = { openTopLevel(destination.route) },
+                                icon = { Icon(painterResource(destination.icon), contentDescription = null) },
+                                label = { Text(destination.label) },
+                            )
+                        }
                     }
                 }
-            }
-        },
-        // Each screen has its own Scaffold that handles the system bars; this one only makes room for the bar.
-        contentWindowInsets = WindowInsets(),
-    ) { padding ->
-        NavHost(
-            navController = navController,
-            startDestination = CatalogueRoute,
-            modifier = Modifier.padding(padding).consumeWindowInsets(padding),
-        ) {
-            composable<HeadUnitsRoute> {
-                HeadUnitsScreen(
-                    onOpenHeadUnit = { id -> navController.navigate(HeadUnitDetailRoute(id)) },
-                    onOpenSppTest = { navController.navigate(SppTestRoute) },
-                    onSetUp = setUp,
-                    onAddCar = addCar,
-                    onOpenAbout = openAbout,
-                )
-            }
-            composable<AboutRoute> {
-                AboutScreen(
-                    onBack = { navController.popBackStack() },
-                    onOpenWhatsNew = { navController.navigate(WhatsNewRoute) },
-                    onOpenLicences = { navController.navigate(LicencesRoute) },
-                )
-            }
-            composable<WhatsNewRoute> {
-                WhatsNewScreen(onBack = { navController.popBackStack() })
-            }
-            composable<LicencesRoute> {
-                LicencesScreen(
-                    onBack = { navController.popBackStack() },
-                    onOpenLicence = { id -> navController.navigate(LicenceRoute(id)) },
-                )
-            }
-            composable<LicenceRoute> { entry ->
-                LicenceScreen(entry.toRoute<LicenceRoute>().licenceId, onBack = { navController.popBackStack() })
-            }
-            composable<SetupRoute>(enterTransition = { if (setupAtLaunch.getAndSet(false)) EnterTransition.None else null }) {
-                SetupScreen(
-                    onLeave = leaveSetup,
-                    onBrowse = {
-                        leaveSetup()
-                        openTopLevel(CatalogueRoute)
-                    },
-                    onOpenHeadUnit = { id ->
-                        leaveSetup()
-                        navController.navigate(HeadUnitDetailRoute(id))
-                    },
-                )
-            }
-            composable<HeadUnitDetailRoute> { entry ->
-                val headUnitId = entry.toRoute<HeadUnitDetailRoute>().headUnitId
-                HeadUnitDetailScreen(
-                    onBack = { navController.popBackStack() },
-                    onUninstall = { id -> navController.navigate(JobRoute(removeId = id)) },
-                    onOpenJob = { navController.navigate(JobRoute()) },
-                    onPair = pairHeadUnit,
-                    onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
-                    onOpenLogs = { id -> navController.navigate(LogPullRoute(headUnitId, id)) },
-                    onOpenSettings = { id -> navController.navigate(SettingsRoute(headUnitId, id)) },
-                    onOpenTerminal = { id -> navController.navigate(TerminalRoute(id)) },
-                    onOpenSshAccess = { id -> navController.navigate(SshAccessRoute(id)) },
-                )
-            }
-            composable<SshAccessRoute> {
-                SshAccessScreen(onBack = { navController.popBackStack() })
-            }
-            composable<TerminalRoute> {
-                TerminalScreen(
-                    onBack = { navController.popBackStack() },
-                    onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
-                )
-            }
-            composable<LogPullRoute> {
-                LogPullScreen(onBack = { navController.popBackStack() })
-            }
-            composable<SettingsRoute> {
-                SettingsScreen(
-                    onBack = { navController.popBackStack() },
-                    onUpdateAgent = { navController.navigate(CataloguePackageRoute(AGENT_PACKAGE_ID)) },
-                )
-            }
-            composable<PairingRoute> {
-                PairingScreen(
-                    onBack = { navController.popBackStack() },
-                    onOpenJob = { navController.navigate(JobRoute()) },
-                    onOpenHeadUnit = headUnitAfterPairing,
-                )
-            }
-            composable<JobRoute> {
-                JobScreen(
-                    onBack = { navController.popBackStack() },
-                    // In place of the job that offered it: that one is over, and this screen shows the newest job.
-                    onInstall = { id, version ->
-                        navController.navigate(JobRoute(installId = id, installVersion = version)) {
-                            popUpTo<JobRoute> { inclusive = true }
-                        }
-                    },
-                )
-            }
-            composable<SppTestRoute> {
-                SppTestScreen(onBack = { navController.popBackStack() })
-            }
-            composable<CatalogueRoute> {
-                CatalogueScreen(
-                    onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
-                    onOpenHeadUnit = openHeadUnit,
-                    onSetUp = setUp,
-                    onPairHeadUnit = pairHeadUnit,
-                    onOpenAbout = openAbout,
-                )
-            }
-            composable<CataloguePackageRoute> {
-                CataloguePackageScreen(
-                    onBack = { navController.popBackStack() },
-                    onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
-                    onInstall = { id, version -> navController.navigate(JobRoute(installId = id, installVersion = version)) },
-                    onOpenHeadUnit = openHeadUnit,
-                    onSetUp = setUp,
-                    onPairHeadUnit = pairHeadUnit,
-                    onOpenSettings = { headUnitId, id -> navController.navigate(SettingsRoute(headUnitId, id)) },
-                    onUninstall = { id -> navController.navigate(JobRoute(removeId = id)) },
-                )
+            },
+            // Each screen has its own Scaffold that handles the system bars; this one only makes room for the bar.
+            contentWindowInsets = WindowInsets(),
+        ) { padding ->
+            NavHost(
+                navController = navController,
+                startDestination = CatalogueRoute,
+                modifier = Modifier.padding(padding).consumeWindowInsets(padding),
+            ) {
+                composable<HeadUnitsRoute> {
+                    BackHandler(enabled = menuShown, onBack = closeMenu)
+                    HeadUnitsScreen(
+                        onOpenHeadUnit = { id -> navController.navigate(HeadUnitDetailRoute(id)) },
+                        onOpenSppTest = { navController.navigate(SppTestRoute) },
+                        onSetUp = setUp,
+                        onAddCar = addCar,
+                        onOpenMenu = openMenu,
+                    )
+                }
+                composable<AboutRoute> {
+                    AboutScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenWhatsNew = { navController.navigate(WhatsNewRoute) },
+                        onOpenLicences = { navController.navigate(LicencesRoute) },
+                    )
+                }
+                composable<WhatsNewRoute> {
+                    WhatsNewScreen(onBack = { navController.popBackStack() })
+                }
+                composable<LicencesRoute> {
+                    LicencesScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenLicence = { id -> navController.navigate(LicenceRoute(id)) },
+                    )
+                }
+                composable<LicenceRoute> { entry ->
+                    LicenceScreen(entry.toRoute<LicenceRoute>().licenceId, onBack = { navController.popBackStack() })
+                }
+                composable<SetupRoute>(enterTransition = { if (setupAtLaunch.getAndSet(false)) EnterTransition.None else null }) {
+                    SetupScreen(
+                        onLeave = leaveSetup,
+                        onBrowse = {
+                            leaveSetup()
+                            openTopLevel(CatalogueRoute)
+                        },
+                        onOpenHeadUnit = { id ->
+                            leaveSetup()
+                            navController.navigate(HeadUnitDetailRoute(id))
+                        },
+                    )
+                }
+                composable<HeadUnitDetailRoute> { entry ->
+                    val headUnitId = entry.toRoute<HeadUnitDetailRoute>().headUnitId
+                    HeadUnitDetailScreen(
+                        onBack = { navController.popBackStack() },
+                        onUninstall = { id -> navController.navigate(JobRoute(removeId = id)) },
+                        onOpenJob = { navController.navigate(JobRoute()) },
+                        onPair = pairHeadUnit,
+                        onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
+                        onOpenLogs = { id -> navController.navigate(LogPullRoute(headUnitId, id)) },
+                        onOpenSettings = { id -> navController.navigate(SettingsRoute(headUnitId, id)) },
+                        onOpenTerminal = { id -> navController.navigate(TerminalRoute(id)) },
+                        onOpenSshAccess = { id -> navController.navigate(SshAccessRoute(id)) },
+                    )
+                }
+                composable<SshAccessRoute> {
+                    SshAccessScreen(onBack = { navController.popBackStack() })
+                }
+                composable<TerminalRoute> {
+                    TerminalScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
+                    )
+                }
+                composable<LogPullRoute> {
+                    LogPullScreen(onBack = { navController.popBackStack() })
+                }
+                composable<SettingsRoute> {
+                    SettingsScreen(
+                        onBack = { navController.popBackStack() },
+                        onUpdateAgent = { navController.navigate(CataloguePackageRoute(AGENT_PACKAGE_ID)) },
+                    )
+                }
+                composable<PairingRoute> {
+                    PairingScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenJob = { navController.navigate(JobRoute()) },
+                        onOpenHeadUnit = headUnitAfterPairing,
+                    )
+                }
+                composable<JobRoute> {
+                    JobScreen(
+                        onBack = { navController.popBackStack() },
+                        // In place of the job that offered it: that one is over, and this screen shows the newest job.
+                        onInstall = { id, version ->
+                            navController.navigate(JobRoute(installId = id, installVersion = version)) {
+                                popUpTo<JobRoute> { inclusive = true }
+                            }
+                        },
+                    )
+                }
+                composable<SppTestRoute> {
+                    SppTestScreen(onBack = { navController.popBackStack() })
+                }
+                composable<CatalogueRoute> {
+                    BackHandler(enabled = menuShown, onBack = closeMenu)
+                    CatalogueScreen(
+                        onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
+                        onOpenHeadUnit = openHeadUnit,
+                        onSetUp = setUp,
+                        onPairHeadUnit = pairHeadUnit,
+                        onOpenMenu = openMenu,
+                        menuShown = menuShown,
+                    )
+                }
+                composable<CataloguePackageRoute> {
+                    CataloguePackageScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
+                        onInstall = { id, version -> navController.navigate(JobRoute(installId = id, installVersion = version)) },
+                        onOpenHeadUnit = openHeadUnit,
+                        onSetUp = setUp,
+                        onPairHeadUnit = pairHeadUnit,
+                        onOpenSettings = { headUnitId, id -> navController.navigate(SettingsRoute(headUnitId, id)) },
+                        onUninstall = { id -> navController.navigate(JobRoute(removeId = id)) },
+                    )
+                }
             }
         }
     }

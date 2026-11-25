@@ -35,14 +35,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.ui.setup.openWebPage
 
-/** The gear in a top bar, which opens the app's About page. */
-@Composable
-fun AboutButton(onClick: () -> Unit) {
-    IconButton(onClick = onClick) {
-        Icon(painterResource(R.drawable.ic_settings), contentDescription = "About")
-    }
-}
-
 /**
  * About the app: its version and what is new in it ([onOpenWhatsNew]), the licences of the code it includes
  * ([onOpenLicences]), and its page on GitHub.

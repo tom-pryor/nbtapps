@@ -56,6 +56,13 @@ internal fun longReleaseDate(released: String): String =
     }
 
 /**
+ * The notes the sheet shows now: [notes], those that are due, while the catalogue is on top ([onTop]) and the side menu
+ * is not over it ([menuShown]). Otherwise they wait, and stay due.
+ */
+internal fun notesOverCatalogue(notes: VersionNotes?, onTop: Boolean, menuShown: Boolean): VersionNotes? =
+    notes.takeIf { onTop && !menuShown }
+
+/**
  * What is new in the version that runs, over the catalogue, the first time it is opened after an update. The notes
  * scroll within the sheet, with OK always in sight under them. However the sheet goes, by OK, a swipe down, a tap
  * beside it or Back, [onDismiss] is told once it has gone, and the notes count as seen.

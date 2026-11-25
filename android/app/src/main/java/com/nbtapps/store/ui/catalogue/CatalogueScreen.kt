@@ -76,19 +76,20 @@ import com.nbtapps.store.data.jobs.PackageStatus
 import com.nbtapps.store.data.update.AppUpdateOffer
 import com.nbtapps.store.data.update.UpdateState
 import com.nbtapps.store.model.AgentText
-import com.nbtapps.store.ui.about.AboutButton
 import com.nbtapps.store.ui.headunits.HeadUnitIndicator
 import com.nbtapps.store.ui.headunits.checksLine
+import com.nbtapps.store.ui.menu.MenuButton
 
 /**
  * The catalogue's packages, against the head unit the app is working with: which of them it has, in which
  * version, and which have an update, with those first. The top bar names that head unit ([HeadUnitIndicator]):
  * [onOpenHeadUnit] opens its screen, and [onPairHeadUnit] goes to where the phone is paired with it. With no head
- * unit saved, a banner at the top of the list offers the set-up ([onSetUp]) in its place. The gear after the head
- * unit opens the app's About page ([onOpenAbout]).
+ * unit saved, a banner at the top of the list offers the set-up ([onSetUp]) in its place. The button at the left
+ * of the top bar opens the side menu ([onOpenMenu]).
  *
  * The first time the app is opened after an update, what is new in it comes up over the list ([WhatsNewSheet]),
- * once this screen is on top: not under the set-up, nor while another tab is shown.
+ * once this screen is on top: not under the set-up, nor while another tab is shown, nor with the side menu over it
+ * ([menuShown]).
  */
 @Composable
 fun CatalogueScreen(
@@ -96,7 +97,8 @@ fun CatalogueScreen(
     onOpenHeadUnit: (String) -> Unit,
     onSetUp: () -> Unit,
     onPairHeadUnit: (String) -> Unit,
-    onOpenAbout: () -> Unit,
+    onOpenMenu: () -> Unit,
+    menuShown: Boolean,
     viewModel: CatalogueViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -108,10 +110,8 @@ fun CatalogueScreen(
     CatalogueContent(
         uiState = uiState,
         // The banner says it: the bar has nothing to add with no head unit.
-        actions = {
-            HeadUnitIndicator(onOpenHeadUnit, onSetUp = null, onPairHeadUnit)
-            AboutButton(onOpenAbout)
-        },
+        actions = { HeadUnitIndicator(onOpenHeadUnit, onSetUp = null, onPairHeadUnit) },
+        onOpenMenu = onOpenMenu,
         onSetUp = onSetUp.takeIf { noHeadUnit },
         onQueryChange = viewModel::setQuery,
         onSelectFilter = viewModel::selectFilter,
@@ -120,7 +120,7 @@ fun CatalogueScreen(
         onOpenPackage = onOpenPackage,
         onOpenHeadUnit = onOpenHeadUnit,
     )
-    whatsNew?.takeIf { lifecycle.isAtLeast(Lifecycle.State.RESUMED) }?.let { notes ->
+    notesOverCatalogue(whatsNew, onTop = lifecycle.isAtLeast(Lifecycle.State.RESUMED), menuShown)?.let { notes ->
         WhatsNewSheet(notes, onDismiss = viewModel::dismissWhatsNew)
     }
 }
@@ -129,8 +129,9 @@ fun CatalogueScreen(
 @Composable
 private fun CatalogueContent(
     uiState: CatalogueUiState,
-    /** The top bar's: the head unit, then the gear. */
+    /** The top bar's: the head unit. */
     actions: @Composable () -> Unit,
+    onOpenMenu: () -> Unit,
     onSetUp: (() -> Unit)?,
     onQueryChange: (String) -> Unit,
     onSelectFilter: (CatalogueFilter) -> Unit,
@@ -147,7 +148,13 @@ private fun CatalogueContent(
     val atTop = !listState.canScrollBackward && !listState.isScrollInProgress
     SideEffect { if (atTop) listState.requestScrollToItem(0) }
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Catalogue") }, actions = { actions() }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Catalogue") },
+                navigationIcon = { MenuButton(onOpenMenu) },
+                actions = { actions() },
+            )
+        },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (unit != null) {

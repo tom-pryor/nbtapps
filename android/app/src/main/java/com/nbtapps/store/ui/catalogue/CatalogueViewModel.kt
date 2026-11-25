@@ -297,7 +297,7 @@ class CatalogueViewModel internal constructor(
     /**
      * What is new in the version that runs, for a sheet over the list, shown once after an update: null where there is
      * nothing to show, and from the moment it is dismissed ([dismissWhatsNew]). The screen shows it only while it is on
-     * top.
+     * top, with no menu over it.
      */
     val whatsNew: StateFlow<VersionNotes?> =
         combine(notesToShow, whatsNewDismissed) { notes, dismissed -> notes.takeIf { !dismissed } }
