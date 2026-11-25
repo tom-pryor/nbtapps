@@ -76,7 +76,7 @@ import com.nbtapps.store.data.jobs.PackageStatus
 import com.nbtapps.store.data.update.AppUpdateOffer
 import com.nbtapps.store.data.update.UpdateState
 import com.nbtapps.store.model.AgentText
-import com.nbtapps.store.ui.appsettings.AppSettingsButton
+import com.nbtapps.store.ui.about.AboutButton
 import com.nbtapps.store.ui.headunits.HeadUnitIndicator
 import com.nbtapps.store.ui.headunits.checksLine
 
@@ -110,7 +110,7 @@ fun CatalogueScreen(
         // The banner says it: the bar has nothing to add with no head unit.
         actions = {
             HeadUnitIndicator(onOpenHeadUnit, onSetUp = null, onPairHeadUnit)
-            AppSettingsButton(onOpenSettings)
+            AboutButton(onOpenSettings)
         },
         onSetUp = onSetUp.takeIf { noHeadUnit },
         onQueryChange = viewModel::setQuery,

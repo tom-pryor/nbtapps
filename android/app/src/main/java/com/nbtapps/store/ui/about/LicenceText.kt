@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-package com.nbtapps.store.ui.appsettings
+package com.nbtapps.store.ui.about
 
 /**
  * A licence's text as its page shows it: flowed ([flowLicenceText]), and with a paragraph in Markdown's bold markers

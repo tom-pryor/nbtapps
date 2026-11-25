@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-package com.nbtapps.store.ui.appsettings
+package com.nbtapps.store.ui.about
 
 import com.nbtapps.store.MainDispatcherRule
 import com.nbtapps.store.data.InMemoryHeadUnitRepository
@@ -24,7 +24,7 @@ import org.junit.Test
  * and the page show them, and what the page says with no notes; and the line over a licence's text that names the
  * projects under it.
  */
-class AppSettingsRowsTest {
+class AboutRowsTest {
 
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
@@ -32,25 +32,25 @@ class AppSettingsRowsTest {
     private val notes = VersionNotes(900, "0.9.0", "2026-11-23", listOf("A terminal on the head unit"))
 
     private fun state(version: String = "0.9.0", notes: VersionNotes? = this.notes, noHeadUnit: Boolean = false) =
-        AppSettingsUiState(version, notes, noHeadUnit)
+        AboutUiState(version, notes, noHeadUnit)
 
     @Test
     fun `the version row gives the version name only, and opens nothing`() {
-        assertEquals(AppSettingsRow("Version", "0.9.0"), aboutRows(state()).first())
-        assertEquals(AppSettingsRow("Version", "0.9.0-trial"), aboutRows(state(version = "0.9.0-trial")).first())
+        assertEquals(AboutRow("Version", "0.9.0"), aboutRows(state()).first())
+        assertEquals(AboutRow("Version", "0.9.0-trial"), aboutRows(state(version = "0.9.0-trial")).first())
     }
 
     @Test
     fun `what's new opens the page of the notes where the phone has them, and the changelog where it has none`() {
         assertEquals(
-            AppSettingsRow("What's new", "The notes of version 0.9.0", AppSettingsTarget.WhatsNew),
+            AboutRow("What's new", "The notes of version 0.9.0", AboutTarget.WhatsNew),
             aboutRows(state()).last(),
         )
         assertEquals(
-            AppSettingsRow(
+            AboutRow(
                 "What's new",
                 "The changelog on GitHub",
-                AppSettingsTarget.WebPage("https://github.com/tom-pryor/nbtapps/blob/main/CHANGELOG.md"),
+                AboutTarget.WebPage("https://github.com/tom-pryor/nbtapps/blob/main/CHANGELOG.md"),
             ),
             aboutRows(state(notes = null)).last(),
         )
@@ -59,11 +59,11 @@ class AppSettingsRowsTest {
     @Test
     fun `the set-up row is for a first car with no head unit saved, and for another car otherwise`() {
         assertEquals(
-            AppSettingsRow("Set up your car", "Add your head unit and pair it", AppSettingsTarget.SetUp),
+            AboutRow("Set up your car", "Add your head unit and pair it", AboutTarget.SetUp),
             moreRows(state(noHeadUnit = true)).first(),
         )
         assertEquals(
-            AppSettingsRow("Set up another car", "Add another head unit and pair it", AppSettingsTarget.AddCar),
+            AboutRow("Set up another car", "Add another head unit and pair it", AboutTarget.AddCar),
             moreRows(state(noHeadUnit = false)).first(),
         )
     }
@@ -72,8 +72,8 @@ class AppSettingsRowsTest {
     fun `the licences and the app's page on GitHub follow`() {
         assertEquals(
             listOf(
-                AppSettingsRow("Open-source licences", "The code this app includes", AppSettingsTarget.Licences),
-                AppSettingsRow("NBTApps on GitHub", "Source, issues and releases", AppSettingsTarget.WebPage("https://github.com/tom-pryor/nbtapps")),
+                AboutRow("Open-source licences", "The code this app includes", AboutTarget.Licences),
+                AboutRow("NBTApps on GitHub", "Source, issues and releases", AboutTarget.WebPage("https://github.com/tom-pryor/nbtapps")),
             ),
             moreRows(state()).drop(1),
         )
@@ -104,13 +104,13 @@ class AppSettingsRowsTest {
     fun `the view model gives the version, the notes and whether a head unit is saved`() = runTest {
         val headUnits = InMemoryHeadUnitRepository()
         val notesFlow = MutableStateFlow<VersionNotes?>(null)
-        val viewModel = mainDispatcherRule.track(AppSettingsViewModel(RUNNING, headUnits, notesFlow))
+        val viewModel = mainDispatcherRule.track(AboutViewModel(RUNNING, headUnits, notesFlow))
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.uiState.collect {} }
 
-        assertEquals(AppSettingsUiState("0.1.0", notes = null, noHeadUnit = true), viewModel.uiState.value)
+        assertEquals(AboutUiState("0.1.0", notes = null, noHeadUnit = true), viewModel.uiState.value)
         notesFlow.value = notes
         headUnits.add(HeadUnit("car", "Car", listOf(TcpEndpoint("192.168.0.1", 7144))))
-        assertEquals(AppSettingsUiState("0.1.0", notes, noHeadUnit = false), viewModel.uiState.value)
+        assertEquals(AboutUiState("0.1.0", notes, noHeadUnit = false), viewModel.uiState.value)
     }
 
     @Test

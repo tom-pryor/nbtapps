@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-package com.nbtapps.store.ui.appsettings
+package com.nbtapps.store.ui.about
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -22,7 +22,7 @@ const val GITHUB_URL = "https://github.com/tom-pryor/nbtapps"
 /** The changelog of every version, for where the phone has no notes of the version that runs. */
 const val CHANGELOG_URL = "https://github.com/tom-pryor/nbtapps/blob/main/CHANGELOG.md"
 
-data class AppSettingsUiState(
+data class AboutUiState(
     /** The version name of the copy that runs, such as "0.9.0" or "0.9.0-trial". */
     val version: String,
     /** The notes of the version that runs, where the phone has them, seen or not; null where it has none. */
@@ -32,50 +32,50 @@ data class AppSettingsUiState(
 )
 
 /** Where a row of the app's settings goes. */
-sealed interface AppSettingsTarget {
+sealed interface AboutTarget {
     /** The notes of the version that runs, as a page. */
-    data object WhatsNew : AppSettingsTarget
+    data object WhatsNew : AboutTarget
 
     /** The set-up, for the first car. */
-    data object SetUp : AppSettingsTarget
+    data object SetUp : AboutTarget
 
     /** The set-up, for a further car. */
-    data object AddCar : AppSettingsTarget
+    data object AddCar : AboutTarget
 
     /** The projects whose code the app includes, with their licences. */
-    data object Licences : AppSettingsTarget
+    data object Licences : AboutTarget
 
     /** A page in the phone's browser. */
-    data class WebPage(val url: String) : AppSettingsTarget
+    data class WebPage(val url: String) : AboutTarget
 }
 
 /** A row of the app's settings: [target] is null for a row that only says something. */
-data class AppSettingsRow(val title: String, val detail: String, val target: AppSettingsTarget? = null)
+data class AboutRow(val title: String, val detail: String, val target: AboutTarget? = null)
 
 /**
  * The rows under "About": the version, and what is new in it. With no notes of it on the phone, the second opens the
  * changelog on GitHub in their place.
  */
-internal fun aboutRows(state: AppSettingsUiState): List<AppSettingsRow> = listOf(
-    AppSettingsRow("Version", state.version),
-    state.notes?.let { AppSettingsRow("What's new", "The notes of version ${it.versionName}", AppSettingsTarget.WhatsNew) }
-        ?: AppSettingsRow("What's new", "The changelog on GitHub", AppSettingsTarget.WebPage(CHANGELOG_URL)),
+internal fun aboutRows(state: AboutUiState): List<AboutRow> = listOf(
+    AboutRow("Version", state.version),
+    state.notes?.let { AboutRow("What's new", "The notes of version ${it.versionName}", AboutTarget.WhatsNew) }
+        ?: AboutRow("What's new", "The changelog on GitHub", AboutTarget.WebPage(CHANGELOG_URL)),
 )
 
 /** The rows under "More": the set-up, for a first car or a further one, the licences and the app's source. */
-internal fun moreRows(state: AppSettingsUiState): List<AppSettingsRow> = listOf(
+internal fun moreRows(state: AboutUiState): List<AboutRow> = listOf(
     if (state.noHeadUnit) {
-        AppSettingsRow("Set up your car", "Add your head unit and pair it", AppSettingsTarget.SetUp)
+        AboutRow("Set up your car", "Add your head unit and pair it", AboutTarget.SetUp)
     } else {
-        AppSettingsRow("Set up another car", "Add another head unit and pair it", AppSettingsTarget.AddCar)
+        AboutRow("Set up another car", "Add another head unit and pair it", AboutTarget.AddCar)
     },
-    AppSettingsRow("Open-source licences", "The code this app includes", AppSettingsTarget.Licences),
-    AppSettingsRow("NBTApps on GitHub", "Source, issues and releases", AppSettingsTarget.WebPage(GITHUB_URL)),
+    AboutRow("Open-source licences", "The code this app includes", AboutTarget.Licences),
+    AboutRow("NBTApps on GitHub", "Source, issues and releases", AboutTarget.WebPage(GITHUB_URL)),
 )
 
 /** The app's own settings, and the page of what is new in the version that runs, which is opened from them. */
 @HiltViewModel
-class AppSettingsViewModel internal constructor(
+class AboutViewModel internal constructor(
     installed: InstalledApp,
     headUnits: HeadUnitRepository,
     /** [WhatsNewRepository.notes]. */
@@ -87,8 +87,8 @@ class AppSettingsViewModel internal constructor(
         this(installed, headUnits, whatsNew.notes)
 
     /** Null until the saved head units and the notes have been read. */
-    val uiState: StateFlow<AppSettingsUiState?> =
+    val uiState: StateFlow<AboutUiState?> =
         combine(notes, headUnits.headUnits) { versionNotes, saved ->
-            AppSettingsUiState(installed.versionName, versionNotes, noHeadUnit = saved.isEmpty())
+            AboutUiState(installed.versionName, versionNotes, noHeadUnit = saved.isEmpty())
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 }

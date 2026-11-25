@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-package com.nbtapps.store.ui.appsettings
+package com.nbtapps.store.ui.about
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -37,7 +37,7 @@ import com.nbtapps.store.ui.setup.openWebPage
 
 /** The gear in a top bar, which opens the app's own settings. */
 @Composable
-fun AppSettingsButton(onClick: () -> Unit) {
+fun AboutButton(onClick: () -> Unit) {
     IconButton(onClick = onClick) {
         Icon(painterResource(R.drawable.ic_settings), contentDescription = "Settings")
     }
@@ -49,30 +49,30 @@ fun AppSettingsButton(onClick: () -> Unit) {
  * ([onOpenLicences]), and its page on GitHub. A head unit's packages have their settings on its own page.
  */
 @Composable
-fun AppSettingsScreen(
+fun AboutScreen(
     onBack: () -> Unit,
     onOpenWhatsNew: () -> Unit,
     onSetUp: () -> Unit,
     onAddCar: () -> Unit,
     onOpenLicences: () -> Unit,
-    viewModel: AppSettingsViewModel = hiltViewModel(),
+    viewModel: AboutViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    AppSettingsContent(uiState, onBack) { target ->
+    AboutContent(uiState, onBack) { target ->
         when (target) {
-            AppSettingsTarget.WhatsNew -> onOpenWhatsNew()
-            AppSettingsTarget.SetUp -> onSetUp()
-            AppSettingsTarget.AddCar -> onAddCar()
-            AppSettingsTarget.Licences -> onOpenLicences()
-            is AppSettingsTarget.WebPage -> openWebPage(context, target.url)
+            AboutTarget.WhatsNew -> onOpenWhatsNew()
+            AboutTarget.SetUp -> onSetUp()
+            AboutTarget.AddCar -> onAddCar()
+            AboutTarget.Licences -> onOpenLicences()
+            is AboutTarget.WebPage -> openWebPage(context, target.url)
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppSettingsContent(uiState: AppSettingsUiState?, onBack: () -> Unit, onOpen: (AppSettingsTarget) -> Unit) {
+private fun AboutContent(uiState: AboutUiState?, onBack: () -> Unit, onOpen: (AboutTarget) -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -102,7 +102,7 @@ internal fun BackButton(onBack: () -> Unit) {
 
 /** A heading, and its rows on one card. */
 @Composable
-private fun RowGroup(title: String, rows: List<AppSettingsRow>, onOpen: (AppSettingsTarget) -> Unit, modifier: Modifier = Modifier) {
+private fun RowGroup(title: String, rows: List<AboutRow>, onOpen: (AboutTarget) -> Unit, modifier: Modifier = Modifier) {
     Text(
         title,
         modifier.padding(horizontal = 4.dp).semantics { heading() },
@@ -119,7 +119,7 @@ private fun RowGroup(title: String, rows: List<AppSettingsRow>, onOpen: (AppSett
 
 /** A row: a chevron where it opens a page of the app, an arrow out where it opens the browser, nothing where it only says. */
 @Composable
-private fun SettingsRow(row: AppSettingsRow, onOpen: (AppSettingsTarget) -> Unit) {
+private fun SettingsRow(row: AboutRow, onOpen: (AboutTarget) -> Unit) {
     val target = row.target
     ListItem(
         modifier = if (target != null) Modifier.clickable { onOpen(target) } else Modifier,
@@ -128,7 +128,7 @@ private fun SettingsRow(row: AppSettingsRow, onOpen: (AppSettingsTarget) -> Unit
         trailingContent = target?.let {
             {
                 Icon(
-                    painterResource(if (it is AppSettingsTarget.WebPage) R.drawable.ic_open_in_new else R.drawable.ic_chevron_right),
+                    painterResource(if (it is AboutTarget.WebPage) R.drawable.ic_open_in_new else R.drawable.ic_chevron_right),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
