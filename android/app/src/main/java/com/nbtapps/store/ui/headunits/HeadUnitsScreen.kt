@@ -31,7 +31,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.DebugTools
 import com.nbtapps.store.R
 import com.nbtapps.store.model.HeadUnit
-import com.nbtapps.store.ui.appsettings.AppSettingsButton
+import com.nbtapps.store.ui.about.AboutButton
 
 /**
  * The saved head units. With none, it offers the set-up ([onSetUp]); "+" opens the set-up for a further car
@@ -78,7 +78,7 @@ private fun HeadUnitsContent(
                 title = { Text("Head units") },
                 actions = {
                     onOpenSppTest?.let { TextButton(onClick = it) { Text("Bluetooth test") } }
-                    AppSettingsButton(onOpenSettings)
+                    AboutButton(onOpenSettings)
                 },
             )
         },

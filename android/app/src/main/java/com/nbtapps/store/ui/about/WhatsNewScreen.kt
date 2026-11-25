@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Strict-1.0.0
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
-package com.nbtapps.store.ui.appsettings
+package com.nbtapps.store.ui.about
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -40,7 +40,7 @@ internal fun noNotesText(version: String): String = "The notes of version $versi
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun WhatsNewScreen(onBack: () -> Unit, viewModel: AppSettingsViewModel = hiltViewModel()) {
+fun WhatsNewScreen(onBack: () -> Unit, viewModel: AboutViewModel = hiltViewModel()) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     Scaffold(

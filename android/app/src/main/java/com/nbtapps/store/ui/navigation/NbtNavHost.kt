@@ -28,10 +28,10 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.nbtapps.store.R
 import com.nbtapps.store.data.jobs.AGENT_PACKAGE_ID
-import com.nbtapps.store.ui.appsettings.AppSettingsScreen
-import com.nbtapps.store.ui.appsettings.LicenceScreen
-import com.nbtapps.store.ui.appsettings.LicencesScreen
-import com.nbtapps.store.ui.appsettings.WhatsNewScreen
+import com.nbtapps.store.ui.about.AboutScreen
+import com.nbtapps.store.ui.about.LicenceScreen
+import com.nbtapps.store.ui.about.LicencesScreen
+import com.nbtapps.store.ui.about.WhatsNewScreen
 import com.nbtapps.store.ui.catalogue.CataloguePackageScreen
 import com.nbtapps.store.ui.catalogue.CatalogueScreen
 import com.nbtapps.store.ui.detail.HeadUnitDetailScreen
@@ -89,7 +89,7 @@ data class SetupRoute(val furtherCar: Boolean)
  * package on a head unit.
  */
 @Serializable
-object AppSettingsRoute
+object AboutRoute
 
 /** What is new in the version of the app that runs, as a page opened from the app's settings. */
 @Serializable
@@ -164,7 +164,7 @@ fun NbtNavHost(
     val openHeadUnit = { id: String -> navController.navigate(HeadUnitDetailRoute(id)) }
     val setUp = { navController.navigate(SetupRoute(furtherCar = false)) }
     val addCar = { navController.navigate(SetupRoute(furtherCar = true)) }
-    val openAppSettings = { navController.navigate(AppSettingsRoute) }
+    val openAbout = { navController.navigate(AboutRoute) }
     // Only the set-up itself is popped: a second tap while it goes must not pop the screen under it.
     val leaveSetup = {
         if (navController.currentBackStackEntry?.destination?.hasRoute(SetupRoute::class) == true) navController.popBackStack()
@@ -237,11 +237,11 @@ fun NbtNavHost(
                     onOpenSppTest = { navController.navigate(SppTestRoute) },
                     onSetUp = setUp,
                     onAddCar = addCar,
-                    onOpenSettings = openAppSettings,
+                    onOpenSettings = openAbout,
                 )
             }
-            composable<AppSettingsRoute> {
-                AppSettingsScreen(
+            composable<AboutRoute> {
+                AboutScreen(
                     onBack = { navController.popBackStack() },
                     onOpenWhatsNew = { navController.navigate(WhatsNewRoute) },
                     onSetUp = setUp,
@@ -333,7 +333,7 @@ fun NbtNavHost(
                     onOpenHeadUnit = openHeadUnit,
                     onSetUp = setUp,
                     onPairHeadUnit = pairHeadUnit,
-                    onOpenSettings = openAppSettings,
+                    onOpenSettings = openAbout,
                 )
             }
             composable<CataloguePackageRoute> {
