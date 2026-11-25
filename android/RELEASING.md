@@ -54,7 +54,8 @@ commit (`tools/compare_apks.py`).
 7. Record the release in the catalogue repo from `release/release.json`, which takes the notes from
    `release/notes.txt` beside it (`tools/nbtcat.py set-app`). Write the changelog into this repo from there
    (`tools/nbtcat.py changelog --out ../nbtapps-mono/CHANGELOG.md`) and commit it here, then publish the catalogue.
-   Phones see the release on their next catalogue refresh.
+   Phones see the release the next time they fetch the catalogue: when the app starts, when it comes to the front
+   or a package's page is opened with a copy that is at least 30 minutes old, and when the list is pulled down.
 
 `tools/sign.sh VERSION --from FILE` signs an unsigned APK you have here and leaves GitHub out: for a trial, or if
 GitHub is not to be used. `--notes` is optional there; without it no `release/notes.txt` is left, and one from an
