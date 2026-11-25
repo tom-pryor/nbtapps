@@ -26,6 +26,7 @@ import com.nbtapps.store.data.SppEchoClient
 import com.nbtapps.store.data.headUnitStore
 import com.nbtapps.store.data.prereleaseStore
 import com.nbtapps.store.data.setupStore
+import com.nbtapps.store.data.catalogue.CatalogueKeeper
 import com.nbtapps.store.data.catalogue.CatalogueRepository
 import com.nbtapps.store.data.catalogue.CatalogueSource
 import com.nbtapps.store.data.catalogue.DefaultCatalogueRepository
@@ -134,6 +135,15 @@ abstract class AppModule {
             // The catalogue's age counts the time the phone slept.
             clock = clock::millis,
         )
+
+        /** Has the catalogue fetched again as the app comes to the front, once it is old. The application starts it. */
+        @Provides
+        @Singleton
+        fun provideCatalogueKeeper(
+            catalogue: CatalogueRepository,
+            foreground: AppForeground,
+            @ApplicationScope scope: CoroutineScope,
+        ): CatalogueKeeper = CatalogueKeeper(catalogue, foreground, scope)
 
         @Provides
         @Singleton
