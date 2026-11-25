@@ -202,6 +202,23 @@ data class AutostartSetupState(
     val running: Boolean get() = !ended
 }
 
+/** How long [freshIndex] waits for a newer index where an old one is held, in milliseconds. */
+internal const val FRESHEN_MS = 5_000L
+
+/**
+ * The index to choose a version from: where one is held and is old, it is fetched again first, and the one held
+ * serves where that takes longer than [limitMs] or fails. The fetch itself goes on. With none held, the fetch is
+ * waited for as long as it takes; null where it brings none.
+ */
+internal suspend fun freshIndex(catalogue: CatalogueRepository, limitMs: Long = FRESHEN_MS): CatalogueIndex? {
+    if (catalogue.catalogue.value.index == null) {
+        catalogue.refresh()
+    } else {
+        withTimeoutOrNull(limitMs) { catalogue.refreshIfStale() }
+    }
+    return catalogue.catalogue.value.index
+}
+
 /**
  * Sets up a head unit to start the agent with the car, as the pairing screens offer once the phone is paired: it
  * installs the iDrive plugin where the agent says it is wanting ([autostartPlan]), without showing the plan, since
@@ -233,10 +250,10 @@ class AutostartSetup(
      */
     private val settleMs: Long = 10_000,
     /**
-     * How long the plugin's choice waits for a newer index where an old one is held, which it then goes by. The fetch
-     * itself goes on. In milliseconds; a test sets it.
+     * How long the plugin's choice waits for a newer index where an old one is held: see [freshIndex]. In
+     * milliseconds; a test takes the limit away.
      */
-    private val freshenMs: Long = 5_000,
+    private val freshenMs: Long = FRESHEN_MS,
 ) {
     private val current = MutableStateFlow<AutostartSetupState?>(null)
 
@@ -531,12 +548,7 @@ class AutostartSetup(
         needs: PackageNeed,
         show: (AutostartStep) -> Unit,
     ): AutostartStep.Failed? {
-        if (catalogue.catalogue.value.index == null) {
-            catalogue.refresh()
-        } else {
-            withTimeoutOrNull(freshenMs) { catalogue.refreshIfStale() }
-        }
-        val index = catalogue.catalogue.value.index ?: return AutostartStep.Failed("The catalogue couldn't be loaded. Check the phone's internet connection, then retry.")
+        val index = freshIndex(catalogue, freshenMs) ?: return AutostartStep.Failed("The catalogue couldn't be loaded. Check the phone's internet connection, then retry.")
         val switchedOn = prereleases.switchedOn.first()
         val installed = connected.installed
         val agentVersion = connected.info.agentVersion
