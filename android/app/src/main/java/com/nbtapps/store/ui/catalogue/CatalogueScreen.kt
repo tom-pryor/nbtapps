@@ -85,7 +85,7 @@ import com.nbtapps.store.ui.headunits.checksLine
  * version, and which have an update, with those first. The top bar names that head unit ([HeadUnitIndicator]):
  * [onOpenHeadUnit] opens its screen, and [onPairHeadUnit] goes to where the phone is paired with it. With no head
  * unit saved, a banner at the top of the list offers the set-up ([onSetUp]) in its place. The gear after the head
- * unit opens the app's settings ([onOpenSettings]).
+ * unit opens the app's About page ([onOpenAbout]).
  *
  * The first time the app is opened after an update, what is new in it comes up over the list ([WhatsNewSheet]),
  * once this screen is on top: not under the set-up, nor while another tab is shown.
@@ -96,7 +96,7 @@ fun CatalogueScreen(
     onOpenHeadUnit: (String) -> Unit,
     onSetUp: () -> Unit,
     onPairHeadUnit: (String) -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenAbout: () -> Unit,
     viewModel: CatalogueViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -110,7 +110,7 @@ fun CatalogueScreen(
         // The banner says it: the bar has nothing to add with no head unit.
         actions = {
             HeadUnitIndicator(onOpenHeadUnit, onSetUp = null, onPairHeadUnit)
-            AboutButton(onOpenSettings)
+            AboutButton(onOpenAbout)
         },
         onSetUp = onSetUp.takeIf { noHeadUnit },
         onQueryChange = viewModel::setQuery,

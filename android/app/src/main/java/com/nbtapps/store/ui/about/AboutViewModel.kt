@@ -4,7 +4,6 @@ package com.nbtapps.store.ui.about
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.update.InstalledApp
 import com.nbtapps.store.data.whatsnew.VersionNotes
 import com.nbtapps.store.data.whatsnew.WhatsNewRepository
@@ -13,7 +12,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 /** The address of the app's source, its issues and its releases. */
@@ -27,20 +26,12 @@ data class AboutUiState(
     val version: String,
     /** The notes of the version that runs, where the phone has them, seen or not; null where it has none. */
     val notes: VersionNotes?,
-    /** No head unit is saved: the set-up is offered as for a first car. */
-    val noHeadUnit: Boolean,
 )
 
-/** Where a row of the app's settings goes. */
+/** Where a row of the About page goes. */
 sealed interface AboutTarget {
     /** The notes of the version that runs, as a page. */
     data object WhatsNew : AboutTarget
-
-    /** The set-up, for the first car. */
-    data object SetUp : AboutTarget
-
-    /** The set-up, for a further car. */
-    data object AddCar : AboutTarget
 
     /** The projects whose code the app includes, with their licences. */
     data object Licences : AboutTarget
@@ -49,12 +40,12 @@ sealed interface AboutTarget {
     data class WebPage(val url: String) : AboutTarget
 }
 
-/** A row of the app's settings: [target] is null for a row that only says something. */
+/** A row of the About page: [target] is null for a row that only says something. */
 data class AboutRow(val title: String, val detail: String, val target: AboutTarget? = null)
 
 /**
- * The rows under "About": the version, and what is new in it. With no notes of it on the phone, the second opens the
- * changelog on GitHub in their place.
+ * The rows under "About NBTApps": the version, and what is new in it. With no notes of it on the phone, the second
+ * opens the changelog on GitHub in their place.
  */
 internal fun aboutRows(state: AboutUiState): List<AboutRow> = listOf(
     AboutRow("Version", state.version),
@@ -62,33 +53,25 @@ internal fun aboutRows(state: AboutUiState): List<AboutRow> = listOf(
         ?: AboutRow("What's new", "The changelog on GitHub", AboutTarget.WebPage(CHANGELOG_URL)),
 )
 
-/** The rows under "More": the set-up, for a first car or a further one, the licences and the app's source. */
-internal fun moreRows(state: AboutUiState): List<AboutRow> = listOf(
-    if (state.noHeadUnit) {
-        AboutRow("Set up your car", "Add your head unit and pair it", AboutTarget.SetUp)
-    } else {
-        AboutRow("Set up another car", "Add another head unit and pair it", AboutTarget.AddCar)
-    },
+/** The rows under "More": the licences and the app's source. */
+internal val moreRows: List<AboutRow> = listOf(
     AboutRow("Open-source licences", "The code this app includes", AboutTarget.Licences),
     AboutRow("NBTApps on GitHub", "Source, issues and releases", AboutTarget.WebPage(GITHUB_URL)),
 )
 
-/** The app's own settings, and the page of what is new in the version that runs, which is opened from them. */
+/** The About page, and the page of what is new in the version that runs, which is opened from it. */
 @HiltViewModel
 class AboutViewModel internal constructor(
     installed: InstalledApp,
-    headUnits: HeadUnitRepository,
     /** [WhatsNewRepository.notes]. */
     notes: Flow<VersionNotes?>,
 ) : ViewModel() {
 
     @Inject
-    constructor(installed: InstalledApp, headUnits: HeadUnitRepository, whatsNew: WhatsNewRepository) :
-        this(installed, headUnits, whatsNew.notes)
+    constructor(installed: InstalledApp, whatsNew: WhatsNewRepository) : this(installed, whatsNew.notes)
 
-    /** Null until the saved head units and the notes have been read. */
+    /** Null until the notes have been read. */
     val uiState: StateFlow<AboutUiState?> =
-        combine(notes, headUnits.headUnits) { versionNotes, saved ->
-            AboutUiState(installed.versionName, versionNotes, noHeadUnit = saved.isEmpty())
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        notes.map { AboutUiState(installed.versionName, it) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 }

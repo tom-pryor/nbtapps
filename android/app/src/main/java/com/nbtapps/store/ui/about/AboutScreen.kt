@@ -35,25 +35,22 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.ui.setup.openWebPage
 
-/** The gear in a top bar, which opens the app's own settings. */
+/** The gear in a top bar, which opens the app's About page. */
 @Composable
 fun AboutButton(onClick: () -> Unit) {
     IconButton(onClick = onClick) {
-        Icon(painterResource(R.drawable.ic_settings), contentDescription = "Settings")
+        Icon(painterResource(R.drawable.ic_settings), contentDescription = "About")
     }
 }
 
 /**
- * The app's own settings, apart from a head unit's: its version and what is new in it ([onOpenWhatsNew]), the set-up
- * for a first car ([onSetUp]) or a further one ([onAddCar]), the licences of the code it includes
- * ([onOpenLicences]), and its page on GitHub. A head unit's packages have their settings on its own page.
+ * About the app: its version and what is new in it ([onOpenWhatsNew]), the licences of the code it includes
+ * ([onOpenLicences]), and its page on GitHub.
  */
 @Composable
 fun AboutScreen(
     onBack: () -> Unit,
     onOpenWhatsNew: () -> Unit,
-    onSetUp: () -> Unit,
-    onAddCar: () -> Unit,
     onOpenLicences: () -> Unit,
     viewModel: AboutViewModel = hiltViewModel(),
 ) {
@@ -62,8 +59,6 @@ fun AboutScreen(
     AboutContent(uiState, onBack) { target ->
         when (target) {
             AboutTarget.WhatsNew -> onOpenWhatsNew()
-            AboutTarget.SetUp -> onSetUp()
-            AboutTarget.AddCar -> onAddCar()
             AboutTarget.Licences -> onOpenLicences()
             is AboutTarget.WebPage -> openWebPage(context, target.url)
         }
@@ -76,7 +71,7 @@ private fun AboutContent(uiState: AboutUiState?, onBack: () -> Unit, onOpen: (Ab
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Settings") },
+                title = { Text("About") },
                 navigationIcon = { BackButton(onBack) },
             )
         },
@@ -87,12 +82,12 @@ private fun AboutContent(uiState: AboutUiState?, onBack: () -> Unit, onOpen: (Ab
         ) {
             if (uiState == null) return@Column
             RowGroup("About NBTApps", aboutRows(uiState), onOpen)
-            RowGroup("More", moreRows(uiState), onOpen, Modifier.padding(top = 16.dp))
+            RowGroup("More", moreRows, onOpen, Modifier.padding(top = 16.dp))
         }
     }
 }
 
-/** The back arrow of a page opened from the app's settings. */
+/** The back arrow of the About page, and of the pages opened from it. */
 @Composable
 internal fun BackButton(onBack: () -> Unit) {
     IconButton(onClick = onBack) {
@@ -112,14 +107,14 @@ private fun RowGroup(title: String, rows: List<AboutRow>, onOpen: (AboutTarget) 
     Card(Modifier.fillMaxWidth()) {
         rows.forEachIndexed { i, row ->
             if (i > 0) HorizontalDivider(Modifier.padding(horizontal = 16.dp))
-            SettingsRow(row, onOpen)
+            RowItem(row, onOpen)
         }
     }
 }
 
 /** A row: a chevron where it opens a page of the app, an arrow out where it opens the browser, nothing where it only says. */
 @Composable
-private fun SettingsRow(row: AboutRow, onOpen: (AboutTarget) -> Unit) {
+private fun RowItem(row: AboutRow, onOpen: (AboutTarget) -> Unit) {
     val target = row.target
     ListItem(
         modifier = if (target != null) Modifier.clickable { onOpen(target) } else Modifier,
