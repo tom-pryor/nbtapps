@@ -505,7 +505,7 @@ class RealAgentTest {
     /** The set-up the pairing screens begin, over the sample catalogue as the debug build has it, which it loads itself. */
     private fun autostartSetup(): AutostartSetup {
         val source = FileCatalogueSource(File(sampleRoot, "v1"), File(sampleRoot, "packages"))
-        return AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+        return AutostartSetup(jobs, DefaultCatalogueRepository(source, scope), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
     }
 
     private suspend fun AutostartSetup.ended(): AutostartStep =

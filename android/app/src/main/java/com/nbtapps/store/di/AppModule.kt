@@ -95,9 +95,6 @@ abstract class AppModule {
     abstract fun bindPhoneBluetooth(impl: AndroidPhoneBluetooth): PhoneBluetooth
 
     @Binds
-    abstract fun bindCatalogueRepository(impl: DefaultCatalogueRepository): CatalogueRepository
-
-    @Binds
     abstract fun bindJobKeeper(impl: ServiceJobKeeper): JobKeeper
 
     @Binds
@@ -123,6 +120,20 @@ abstract class AppModule {
         /** Since the phone started, its sleep included: the same in every process of the app. */
         @Provides
         fun provideElapsedClock(): ElapsedClock = ElapsedClock(SystemClock::elapsedRealtime)
+
+        /** The catalogue, in memory. Its fetches go on when the screen that asked for one is left. */
+        @Provides
+        @Singleton
+        fun provideCatalogueRepository(
+            source: CatalogueSource,
+            @ApplicationScope scope: CoroutineScope,
+            clock: ElapsedClock,
+        ): CatalogueRepository = DefaultCatalogueRepository(
+            source,
+            scope,
+            // The catalogue's age counts the time the phone slept.
+            clock = clock::millis,
+        )
 
         @Provides
         @Singleton

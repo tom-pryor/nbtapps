@@ -75,6 +75,8 @@ class CatalogueViewModelTest {
             catalogue.value = result
         }
 
+        override suspend fun refreshIfStale() = Unit
+
         override suspend fun details(packageId: String): Result<PackageDetails> =
             Result.failure(UnsupportedOperationException())
     }

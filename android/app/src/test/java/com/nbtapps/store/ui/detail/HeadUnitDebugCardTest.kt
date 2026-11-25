@@ -78,7 +78,7 @@ class HeadUnitDebugCardTest {
     private val jobs by lazy { JobRepository(headUnits, connector, identity, MemoryPairingKeys(), store, {}, scope, now = { 1234L }) }
     private val setup by lazy {
         val source = FileCatalogueSource(null, AgentVectors.file("packages/good"))
-        AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+        AutostartSetup(jobs, DefaultCatalogueRepository(source, scope), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
     }
     private val terminal = MutableStateFlow<TerminalState>(TerminalState.Idle)
     private val catalogue = MutableStateFlow(CatalogueState())

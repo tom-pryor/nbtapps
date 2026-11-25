@@ -53,7 +53,7 @@ class HeadUnitSettingsEntryTest {
     private val jobs by lazy { JobRepository(headUnits, connector, identity, MemoryPairingKeys(), store, {}, scope) }
     private val setup by lazy {
         val source = FileCatalogueSource(null, AgentVectors.file("packages/good"))
-        AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+        AutostartSetup(jobs, DefaultCatalogueRepository(source, scope), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
     }
 
     private val installed = """[{"id":"org.nbtapp.dial","name":"Dial","version":"1.0.0","settings":true},""" +

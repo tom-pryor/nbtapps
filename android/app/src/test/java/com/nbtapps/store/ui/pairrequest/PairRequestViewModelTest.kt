@@ -108,7 +108,7 @@ class PairRequestViewModelTest {
     }
     private val setup by lazy {
         val source = FileCatalogueSource(null, AgentVectors.file("packages/good"))
-        AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+        AutostartSetup(jobs, DefaultCatalogueRepository(source, scope), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
     }
 
     /** Whether the stand-in car starts the agent with it. */

@@ -124,7 +124,7 @@ class SetupViewModelTest {
     }
     private val setup by lazy {
         val source = FileCatalogueSource(null, AgentVectors.file("packages/good"))
-        AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+        AutostartSetup(jobs, DefaultCatalogueRepository(source, scope), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
     }
     private val car = PairedDevice("BMW 12345", "AA:BB:CC:DD:EE:FF", car = true)
     private val phone = FakePhoneBluetooth(devices = listOf(car, PairedDevice("Headphones", "11:22:33:44:55:66")))

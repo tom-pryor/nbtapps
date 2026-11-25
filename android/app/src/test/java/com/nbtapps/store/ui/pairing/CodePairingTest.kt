@@ -57,7 +57,7 @@ class CodePairingTest {
     private val jobs by lazy { JobRepository(headUnits, connector, identity, keys, store, {}, scope, shareDir = folder.newFolder("share")) }
     private val setup by lazy {
         val source = FileCatalogueSource(null, AgentVectors.file("packages/good"))
-        AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+        AutostartSetup(jobs, DefaultCatalogueRepository(source, scope), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
     }
     private val codes by lazy { CodePairing(jobs, setup, scope) }
 

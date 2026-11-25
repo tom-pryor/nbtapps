@@ -212,6 +212,8 @@ class AutostartSetupTest {
             state.value = loaded?.let { CatalogueState(index = it) } ?: CatalogueState(error = "no network")
         }
 
+        override suspend fun refreshIfStale() = Unit
+
         override suspend fun details(packageId: String): Result<PackageDetails> = Result.failure(UnsupportedOperationException())
     }
 
