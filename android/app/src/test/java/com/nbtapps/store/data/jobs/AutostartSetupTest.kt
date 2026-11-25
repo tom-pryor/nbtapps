@@ -189,10 +189,9 @@ class AutostartSetupTest {
     private val catalogue = TestCatalogue()
     private val prereleases = InMemoryPrereleaseRepository()
 
-    /** How long the set-up waits for a newer index, which a test sets before it uses [setup]. */
-    private var freshenMs = 60_000L
+    /** With no limit on the wait for a newer index, so that none decides here: [FreshIndexTest] has the limit's tests. */
     private val setup by lazy {
-        AutostartSetup(jobs, catalogue, store, PackageDownloader(source, store, scope), prereleases, scope, settleMs = 2_000, freshenMs = freshenMs)
+        AutostartSetup(jobs, catalogue, store, PackageDownloader(source, store, scope), prereleases, scope, settleMs = 2_000, freshenMs = Long.MAX_VALUE)
     }
     private val car = HeadUnit("car", "Car", listOf(TcpEndpoint("192.168.0.1", 7144)))
 
@@ -574,7 +573,7 @@ class AutostartSetupTest {
     }
 
     @Test
-    fun `a newer index that comes in time decides which plugin is installed`() = test {
+    fun `a newer index decides which plugin is installed`() = test {
         catalogueWith("0.9.0")
         catalogue.hold()
         val fetch = CompletableDeferred<Unit>().also { catalogue.fetch = it }
@@ -591,24 +590,6 @@ class AutostartSetupTest {
         assertEquals(AutostartStep.Done(changed = true), ended())
         assertEquals(listOf("$PLUGIN 1.0.0"), store.packages.value.map { "${it.id} ${it.version}" })
         assertEquals("an index was held", 0, catalogue.refreshes.get())
-    }
-
-    @Test
-    fun `an index that does not come in time is not waited for, and the one held decides`() = test {
-        catalogueWith("1.0.0")
-        catalogue.hold()
-        // Never completed: only the limit has the set-up go on, whenever it comes.
-        catalogue.fetch = CompletableDeferred()
-        freshenMs = 50
-        assertTrue(jobs.connect("car").isSuccess)
-
-        setup.begin("car")
-        installing()
-        assertTrue("a newer one was asked for", catalogue.asked.isCompleted)
-        finishJob("1.0.0")
-
-        assertEquals(AutostartStep.Done(changed = true), ended())
-        assertEquals(0, catalogue.refreshes.get())
     }
 
     @Test
