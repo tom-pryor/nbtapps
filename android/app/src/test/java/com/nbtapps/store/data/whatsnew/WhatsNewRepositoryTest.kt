@@ -45,6 +45,8 @@ class WhatsNewRepositoryTest {
 
         override suspend fun refresh() = Unit
 
+        override suspend fun refreshIfStale() = Unit
+
         override suspend fun details(packageId: String): Result<PackageDetails> = Result.failure(UnsupportedOperationException())
     }
 

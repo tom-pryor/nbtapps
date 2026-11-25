@@ -138,7 +138,7 @@ class SetupRealAgentTest {
             val store = PackageStore(File(work, "phone")).also { it.load() }
             val jobs = JobRepository(headUnits, connector, Phone, keys, store, {}, scope, shareDir = File(work, "share"))
             val source = FileCatalogueSource(File(sampleRoot, "v1"), File(sampleRoot, "packages"))
-            val setup = AutostartSetup(jobs, DefaultCatalogueRepository(source), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
+            val setup = AutostartSetup(jobs, DefaultCatalogueRepository(source, scope), store, PackageDownloader(source, store, scope), InMemoryPrereleaseRepository(), scope)
             val choice = InMemorySetupRepository()
             val carScreen = CarScreen(socket).also { screen = it }
             val wizard = mainDispatcherRule.track(SetupViewModel(SavedStateHandle(), headUnits, jobs, setup, FakePhoneBluetooth(), choice, connector, scope))
