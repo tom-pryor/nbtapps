@@ -6,6 +6,7 @@ import android.app.Activity
 import android.app.Application
 import android.os.Bundle
 import com.nbtapps.store.data.ActivityForeground
+import com.nbtapps.store.data.catalogue.CatalogueKeeper
 import com.nbtapps.store.data.update.InstalledApp
 import com.nbtapps.store.model.AppVersion
 import dagger.hilt.android.HiltAndroidApp
@@ -19,6 +20,9 @@ class NbtApplication : Application() {
 
     @Inject
     lateinit var installed: InstalledApp
+
+    @Inject
+    lateinit var catalogueKeeper: CatalogueKeeper
 
     override fun onCreate() {
         super.onCreate()
@@ -42,5 +46,7 @@ class NbtApplication : Application() {
                 override fun onActivityDestroyed(activity: Activity) = Unit
             },
         )
+        // The catalogue is fetched again as the app comes to the front, once it is old.
+        catalogueKeeper.start()
     }
 }
