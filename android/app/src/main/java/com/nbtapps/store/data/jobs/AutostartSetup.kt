@@ -409,11 +409,17 @@ class AutostartSetup(
     private suspend fun run(headUnitId: String, fresh: Boolean, mine: Int, show: (AutostartStep) -> Unit): AutostartStep {
         // Up to the questions every step needs the link, the plugin's download too, since its install follows: the
         // app leaving the foreground meanwhile does not end it. A question waits for the user, and so does not.
-        val end = jobs.usingLink { setUp(headUnitId, fresh, mine, show) }
+        // What the questions are about is read within the same use: with the app away the link goes as the use ends,
+        // and without a link there is nothing to read.
+        val (end, checks) = jobs.usingLink {
+            val end = setUp(headUnitId, fresh, mine, show)
+            // As they are kept now; asked for again, in case the first run was refused.
+            end to if (end is AutostartStep.Done) jobs.ensureChecked() else null
+        }
         if (end !is AutostartStep.Done) return end
-        // Last, the questions, as they are kept now; asked for again, in case the first run was refused.
+        // Last, the questions.
         var done: AutostartStep.Done = end
-        for (problem in jobs.ensureChecked()?.open.orEmpty().filter { it.changesFiles }) {
+        for (problem in checks?.open.orEmpty().filter { it.changesFiles }) {
             done = removal(headUnitId, problem, done, mine, show) ?: return done
             if (done.fixFailed != null) break
         }

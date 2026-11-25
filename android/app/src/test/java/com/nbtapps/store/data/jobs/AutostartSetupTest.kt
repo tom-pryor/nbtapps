@@ -33,6 +33,7 @@ import com.nbtapps.store.withTestTimeout
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -42,6 +43,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -176,8 +178,11 @@ class AutostartSetupTest {
     private val store by lazy { PackageStore(folder.newFolder("packages")) }
     /** Whether the app is in front of the user: so throughout, unless a test says otherwise. */
     private val shown = FakeForeground()
+
+    /** What the repository's own coroutines run on, which a test sets before it uses [jobs]. */
+    private var repositoryOn: CoroutineDispatcher = Dispatchers.Default
     private val jobs by lazy {
-        JobRepository(headUnits, connector, identity, MemoryPairingKeys(), store, {}, scope, shareDir = folder.newFolder("share"), foreground = shown)
+        JobRepository(headUnits, connector, identity, MemoryPairingKeys(), store, {}, scope + repositoryOn, shareDir = folder.newFolder("share"), foreground = shown)
     }
     private val archives = AgentVectors.file("packages/good")
     private val source = FileCatalogueSource(null, archives)
@@ -884,8 +889,11 @@ class AutostartSetupTest {
         assertEquals(1, checks.fixes.size)
     }
 
-    @Test
-    fun `the set-up keeps the link while the app is away, until it waits for the user's answer`() = test {
+    /**
+     * The set-up runs with the app away from its install on, and the link goes as its use of it ends: the question is
+     * asked all the same, and waits for the user.
+     */
+    private suspend fun askedWhileAway() {
         catalogueWith("1.0.0")
         withChecks(demo())
         assertTrue(jobs.connect("car").isSuccess)
@@ -902,6 +910,34 @@ class AutostartSetupTest {
         // A question waits for the user, who is not there: the link goes meanwhile.
         assertTrue(connector.agent.phoneLeft())
         await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        setup.skipRemoval()
+        assertEquals(AutostartStep.Done(changed = true), ended())
+    }
+
+    @Test
+    fun `the set-up keeps the link while the app is away, until it waits for the user's answer`() = test { askedWhileAway() }
+
+    @Test
+    fun `the set-up asks though the link is gone the moment its use of it ends`() = test {
+        // The repository's leaving runs within the end of the use that brings it about: the set-up goes on only after it.
+        repositoryOn = Dispatchers.Unconfined
+        askedWhileAway()
+    }
+
+    @Test
+    fun `the set-up asks before the link goes, and the question stays as it goes`() = test {
+        catalogueWith("1.0.0")
+        withChecks(demo())
+        assertTrue(jobs.connect("car").isSuccess)
+        setup.begin("car")
+        installing()
+        finishJob("1.0.0")
+        val question = asked()
+
+        shown.state.value = false
+
+        await(jobs.connection, "the end") { it == ConnectionState.Disconnected }
+        assertEquals(question, setup.state.value?.step)
         setup.skipRemoval()
         assertEquals(AutostartStep.Done(changed = true), ended())
     }
