@@ -33,7 +33,7 @@ commit (`tools/compare_apks.py`).
 5. Write the release's notes, what is new for the user, in a file outside the repo, one note on each line. They
    are what the release on GitHub, the app and the changelog say of it, so they keep to the catalogue's rule for
    notes: no blank line, none over 200 characters, no control character. The app shows them to everyone who
-   updates to the release: in a sheet the first time they open the app after the update, and under Settings,
+   updates to the release: in a sheet the first time they open the app after the update, and under About,
    What's new. So they are written for the user, not for a developer. `tools/sign.sh` publishes no release on
    GitHub without them; a release that the catalogue records with no notes, as one signed with `--from` and no
    `--notes` would be, shows no sheet.
