@@ -218,7 +218,9 @@ class BlobServerTest {
         link.agent.message()
         assertFalse(link.agent.frame().last)
 
-        val cancelled = async { link.session.blobs.cancel(link.session.peer) }
+        // Undispatched: the stream is taken away before the agent reads another frame, while most of it still waits for
+        // room on the link. Started in its own time, the stop could come after the last frame, with nothing to stop.
+        val cancelled = async(start = CoroutineStart.UNDISPATCHED) { link.session.blobs.cancel(link.session.peer) }
         var received = 0
         while (true) {
             val frame = link.agent.frame()
@@ -241,6 +243,21 @@ class BlobServerTest {
         assertFalse(link.session.blobs.cancel(link.session.peer))
         link.agent.fetch(2, manifestHash, 0, 5)
         assertEquals("""{"stream":2,"size":5}""", link.agent.message().result().toString())
+    }
+
+    @Test
+    fun `stopping on the phone after the last frame stops nothing, and says nothing to the agent`() = test {
+        val link = linked()
+        link.agent.fetch(1, manifestHash, 0)
+        assertEquals("""{"stream":1,"size":3000}""", link.agent.message().result().toString())
+        assertArrayEquals(manifest, link.agent.stream(1, 1024))
+
+        assertFalse(link.session.blobs.cancel(link.session.peer))
+
+        // No blob.error went out: the next thing the agent hears is the answer to its next fetch, which is served.
+        link.agent.fetch(2, manifestHash, 0, 5)
+        assertEquals("""{"stream":2,"size":5}""", link.agent.message().result().toString())
+        assertArrayEquals(manifest.copyOf(5), link.agent.stream(2, 1024))
     }
 
     @Test
