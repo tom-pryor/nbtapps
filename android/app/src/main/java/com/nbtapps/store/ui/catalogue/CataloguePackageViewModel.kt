@@ -425,8 +425,8 @@ private fun getState(
 }
 
 @HiltViewModel
-class CataloguePackageViewModel @Inject constructor(
-    savedStateHandle: SavedStateHandle,
+class CataloguePackageViewModel internal constructor(
+    private val packageId: String,
     private val repository: CatalogueRepository,
     private val store: PackageStore,
     private val downloader: PackageDownloader,
@@ -435,7 +435,18 @@ class CataloguePackageViewModel @Inject constructor(
     private val prereleases: PrereleaseRepository,
 ) : ViewModel() {
 
-    private val packageId = savedStateHandle.toRoute<CataloguePackageRoute>().packageId
+    @Inject
+    constructor(
+        savedStateHandle: SavedStateHandle,
+        repository: CatalogueRepository,
+        store: PackageStore,
+        downloader: PackageDownloader,
+        jobs: JobRepository,
+        headUnits: HeadUnitRepository,
+        prereleases: PrereleaseRepository,
+    ) : this(
+        savedStateHandle.toRoute<CataloguePackageRoute>().packageId, repository, store, downloader, jobs, headUnits, prereleases,
+    )
 
     private val details = MutableStateFlow<DetailsState>(DetailsState.Loading)
 
@@ -459,17 +470,30 @@ class CataloguePackageViewModel @Inject constructor(
             cataloguePackageUiState(catalogue, packageId, details, sides.stored, sides.downloads, sides.head, switchedOn, sides.busy)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CataloguePackageUiState())
 
+    /** The loads of the details are numbered, from 1: the last one begun. The main thread's, as the two below are. */
+    private var lastLoad = 0
+
+    /** The load whose details are shown; 0 while none are. */
+    private var shownLoad = 0
+
+    /** The serial of the index that was held as the last load began. */
+    private var loadSerial: Long? = null
+
     init {
         viewModelScope.launch {
-            // The catalogue is only in memory, so it is gone if the process was restored onto this screen.
-            if (repository.catalogue.value.index == null) repository.refresh()
+            // The catalogue is only in memory, so it is gone if the process was restored onto this screen. One that is
+            // held is shown at once, and fetched again beside that if it is old.
+            if (repository.catalogue.value.index == null) repository.refresh() else launch { repository.refreshIfStale() }
             loadDetails()
+            // A newer index may offer another version, whose changelog is in newer details.
+            repository.catalogue.collect { state ->
+                val serial = state.index?.serial ?: return@collect
+                if (loadSerial.let { it == null || serial > it }) loadDetails()
+            }
         }
     }
 
-    fun retryDetails() {
-        viewModelScope.launch { loadDetails() }
-    }
+    fun retryDetails() = loadDetails()
 
     /** Downloads the offered version and the dependencies it needs that are not on the phone yet. */
     fun download() {
@@ -484,11 +508,29 @@ class CataloguePackageViewModel @Inject constructor(
         viewModelScope.launch { prereleases.set(id, on) }
     }
 
-    private suspend fun loadDetails() {
-        details.value = DetailsState.Loading
-        details.value = repository.details(packageId).fold(
-            onSuccess = { DetailsState.Loaded(it) },
-            onFailure = { DetailsState.Failed(it.message ?: it.javaClass.simpleName) },
-        )
+    /**
+     * Loads the details, again if they are there. Details that are shown stay until newer ones are there, and stay
+     * where there come none. Loads may overlap: an older one's answer never takes the place of a newer one's.
+     */
+    private fun loadDetails() {
+        val load = ++lastLoad
+        loadSerial = repository.catalogue.value.index?.serial
+        if (details.value !is DetailsState.Loaded) details.value = DetailsState.Loading
+        viewModelScope.launch {
+            repository.details(packageId).fold(
+                onSuccess = {
+                    if (load > shownLoad) {
+                        shownLoad = load
+                        details.value = DetailsState.Loaded(it)
+                    }
+                },
+                onFailure = {
+                    // Where a newer load has begun, that one says how it stands; an older one may still bring details.
+                    if (load == lastLoad && details.value !is DetailsState.Loaded) {
+                        details.value = DetailsState.Failed(it.message ?: it.javaClass.simpleName)
+                    }
+                },
+            )
+        }
     }
 }
