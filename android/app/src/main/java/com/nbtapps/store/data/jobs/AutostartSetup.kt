@@ -232,6 +232,11 @@ class AutostartSetup(
      * answer is lost. In milliseconds; a test shortens it.
      */
     private val settleMs: Long = 10_000,
+    /**
+     * How long the plugin's choice waits for a newer index where an old one is held, which it then goes by. The fetch
+     * itself goes on. In milliseconds; a test sets it.
+     */
+    private val freshenMs: Long = 5_000,
 ) {
     private val current = MutableStateFlow<AutostartSetupState?>(null)
 
@@ -526,7 +531,11 @@ class AutostartSetup(
         needs: PackageNeed,
         show: (AutostartStep) -> Unit,
     ): AutostartStep.Failed? {
-        if (catalogue.catalogue.value.index == null) catalogue.refresh()
+        if (catalogue.catalogue.value.index == null) {
+            catalogue.refresh()
+        } else {
+            withTimeoutOrNull(freshenMs) { catalogue.refreshIfStale() }
+        }
         val index = catalogue.catalogue.value.index ?: return AutostartStep.Failed("The catalogue couldn't be loaded. Check the phone's internet connection, then retry.")
         val switchedOn = prereleases.switchedOn.first()
         val installed = connected.installed
