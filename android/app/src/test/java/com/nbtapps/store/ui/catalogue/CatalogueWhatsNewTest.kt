@@ -116,6 +116,18 @@ class CatalogueWhatsNewTest {
     }
 
     @Test
+    fun `the sheet waits while another screen is on top or the menu is over the catalogue, and is not marked seen by that`() = runTest {
+        var seen = 0
+        val viewModel = viewModel(MutableStateFlow(thisNotes)) { seen++ }
+        collect(viewModel)
+
+        assertNull(notesOverCatalogue(viewModel.whatsNew.value, onTop = true, menuShown = true))
+        assertNull(notesOverCatalogue(viewModel.whatsNew.value, onTop = false, menuShown = false))
+        assertEquals(thisNotes, notesOverCatalogue(viewModel.whatsNew.value, onTop = true, menuShown = false))
+        assertEquals(0, seen)
+    }
+
+    @Test
     fun `over the real store, the fetch brings the sheet, and once dismissed a later start shows none`() = runTest {
         val store = whatsNewStore(File(folder.root, "whats-new.json"), storeScope)
         store.updateData { it.copy(seen = 90) }

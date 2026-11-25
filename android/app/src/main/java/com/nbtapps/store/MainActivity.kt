@@ -18,6 +18,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.nbtapps.store.data.update.AppUpdater
+import com.nbtapps.store.data.update.InstalledApp
 import com.nbtapps.store.data.update.SessionApkInstaller
 import com.nbtapps.store.service.JobService
 import com.nbtapps.store.ui.headunits.ConnectGate
@@ -39,6 +40,9 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var updater: AppUpdater
+
+    @Inject
+    lateinit var installed: InstalledApp
 
     /** Asks before a connect of the user's ends a terminal or the SSH port of another head unit. */
     @Inject
@@ -74,6 +78,7 @@ class MainActivity : ComponentActivity() {
                 val sshAccess by sshAccessToOpen.collectAsStateWithLifecycle()
                 openSetup?.let {
                     NbtNavHost(
+                        versionName = installed.versionName,
                         openSetupAtStart = it,
                         onSetupOpened = start::setupOpened,
                         headUnitToOpen = toOpen,
