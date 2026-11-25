@@ -16,15 +16,19 @@ import com.nbtapps.store.withTestTimeout
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.BindException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
@@ -32,9 +36,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
@@ -57,13 +64,11 @@ class SshPortTest {
     // ever one a test brings about.
     private val session = AgentSession(MemoryLink.pair(readLimitSeconds = null).first, sessionScope)
     private val sockets = CopyOnWriteArrayList<Socket>()
-    private val held = CopyOnWriteArrayList<ServerSocket>()
 
     @After
     fun tearDown() {
         scope.cancel()
         sockets.forEach { runCatching { it.close() } }
-        held.forEach { runCatching { it.close() } }
         session.close("the test is over")
         sessionScope.cancel()
     }
@@ -121,7 +126,17 @@ class SshPortTest {
         @Volatile
         var closed = false
 
-        override val input: InputStream = object : InputStream() {
+        /** Run as the port takes [input], before it has it. */
+        @Volatile
+        var onInput: () -> Unit = {}
+
+        override val input: InputStream
+            get() {
+                onInput()
+                return echoes
+            }
+
+        private val echoes: InputStream = object : InputStream() {
             private var piece = ByteArray(0)
             private var at = 0
 
@@ -172,6 +187,40 @@ class SshPortTest {
         }
     }
 
+    /**
+     * The saved keys, with the port's watch of them in the test's hands: the second to collect them, after the read as
+     * the port goes on, so long as no client connects before [watchBegan].
+     */
+    private class HeldClients(private val keys: InMemoryAuthorizedClients = InMemoryAuthorizedClients()) : AuthorizedClients by keys {
+        private val collections = AtomicInteger()
+
+        /** The watch has begun, and has seen nothing. */
+        val watchBegan = CompletableDeferred<Unit>()
+
+        /** The watch may see the keys. */
+        val letWatchSee = CompletableDeferred<Unit>()
+
+        /** The watch has seen the keys once, and is done with that. */
+        val watchSaw = CompletableDeferred<Unit>()
+
+        override val clients: Flow<List<ClientKey>> = flow {
+            if (collections.incrementAndGet() != WATCH) {
+                emitAll(keys.clients)
+            } else {
+                watchBegan.complete(Unit)
+                letWatchSee.await()
+                keys.clients.collect {
+                    emit(it)
+                    watchSaw.complete(Unit)
+                }
+            }
+        }
+
+        private companion object {
+            const val WATCH = 2
+        }
+    }
+
     private class FakeChannel : PortChannel {
         val tunnels = CopyOnWriteArrayList<EchoTunnel>()
         val keysSent = CopyOnWriteArrayList<List<String>>()
@@ -182,10 +231,26 @@ class SshPortTest {
         @Volatile
         var reading = SwitchReading.ON
 
+        /** What a test sets on a tunnel before the port has it. */
+        @Volatile
+        var prepare: (EchoTunnel) -> Unit = {}
+
+        /** An open waits for this, once it has told [opening]. */
+        @Volatile
+        var letOpen: CompletableDeferred<Unit>? = null
+        val opening = CompletableDeferred<Unit>()
+
         override suspend fun open(session: AgentSession, keys: List<String>): PortTunnel {
             keysSent += keys
             failure?.let { throw it }
-            return EchoTunnel(listOf(HOST_KEY)).also { tunnels += it }
+            letOpen?.let {
+                opening.complete(Unit)
+                it.await()
+            }
+            return EchoTunnel(listOf(HOST_KEY)).also {
+                prepare(it)
+                tunnels += it
+            }
         }
 
         override suspend fun switch(session: AgentSession): SwitchReading = reading
@@ -198,13 +263,12 @@ class SshPortTest {
         blocked: String? = null,
         sockets: PortSockets = PlainPortSockets,
         addresses: () -> List<PortAddress> = { listOf(PortAddress(PortAddress.Kind.WIFI, "192.0.2.23")) },
+        val clients: AuthorizedClients = InMemoryAuthorizedClients(),
     ) {
         val link = FakeLink()
         val channel = FakeChannel()
-        val clients = InMemoryAuthorizedClients()
         val kept = AtomicInteger()
         val now = AtomicLong(1_000)
-        val first = firstPort
         val port = SshPort(
             link, channel, clients, { kept.incrementAndGet() }, scope,
             clock = { now.get() },
@@ -227,6 +291,11 @@ class SshPortTest {
 
         suspend fun on(): SshPortState.On {
             if (clients.clients.first().isEmpty()) key()
+            return switchedOn()
+        }
+
+        /** [on] where a key is saved: the keys are read by the port alone. */
+        suspend fun switchedOn(): SshPortState.On {
             assertTrue(port.switchOn(CAR))
             return await("on") { it is SshPortState.On }
         }
@@ -257,9 +326,11 @@ class SshPortTest {
         return buffer.copyOf(got).decodeToString()
     }
 
-    /** Whether the far side has closed [socket]: a read gives its end. */
+    /** Whether the far side has closed [socket]: a read gives its end, or fails. One that only waits in vain is open. */
     private fun closedByFarSide(socket: Socket): Boolean = try {
         socket.getInputStream().read() < 0
+    } catch (e: SocketTimeoutException) {
+        false
     } catch (e: IOException) {
         true
     }
@@ -268,12 +339,13 @@ class SshPortTest {
 
     @Test
     fun `switching on checks the way, listens on 127_0_0_1, holds the link, and passes the bytes both ways untouched`() = test {
-        val rig = Rig()
+        val listened = CopyOnWriteArrayList<ServerSocket>()
+        val rig = Rig(sockets = { allDevices, port -> PlainPortSockets.listen(allDevices, port).also { listened += it } })
         rig.key()
         assertTrue(rig.port.switchOn(CAR))
         assertEquals(1, rig.kept.get())
         val on = rig.await<SshPortState.On>("on") { it is SshPortState.On }
-        assertEquals(rig.first, on.port)
+        assertEquals(listened.single().localPort, on.port)
         assertFalse(on.otherDevices)
         assertEquals(0, on.connections)
         assertEquals(SshKeyLines.fingerprint(SshKeyLines.blob(HOST_KEY)!!), on.hostKey)
@@ -298,7 +370,7 @@ class SshPortTest {
         assertEquals(SshPortState.Off(CAR), rig.off())
         assertEquals(0, rig.link.uses.get())
         // The socket is gone.
-        assertTrue(runCatching { Socket("127.0.0.1", on.port).close() }.isFailure)
+        assertTrue(listened.single().isClosed)
     }
 
     @Test
@@ -339,18 +411,25 @@ class SshPortTest {
 
     @Test
     fun `the port is the first free one from 2222 on, up to the last, and none free is a failure`() = test {
-        val first = freePort()
-        held += ServerSocket(first, 8, InetAddress.getByName("127.0.0.1"))
-        val rig = Rig(firstPort = first, lastPort = first + 9)
-        assertEquals(first + 1, rig.on().port)
+        // Which ports are taken is the test's say, not the machine's: the sockets themselves are on whatever is free.
+        val taken = CopyOnWriteArrayList(listOf(SshPort.FIRST_PORT))
+        val some = PortSockets { _, port ->
+            if (port in taken) throw BindException("Address already in use")
+            ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
+        }
+        val rig = Rig(firstPort = SshPort.FIRST_PORT, lastPort = SshPort.LAST_PORT, sockets = some)
+        assertEquals(2223, rig.on().port)
         rig.port.switchOff()
         rig.off()
 
-        held += ServerSocket(first + 1, 8, InetAddress.getByName("127.0.0.1"))
-        val full = Rig(firstPort = first, lastPort = first + 1)
-        full.key()
-        assertTrue(full.port.switchOn(CAR))
-        assertEquals(SshPortState.Off(CAR, failure = SshPort.NO_FREE_PORT), full.off())
+        taken += 2223..2230
+        assertEquals(2231, rig.on().port)
+        rig.port.switchOff()
+        rig.off()
+
+        taken += 2231
+        assertTrue(rig.port.switchOn(CAR))
+        assertEquals(SshPortState.Off(CAR, failure = SshPort.NO_FREE_PORT), rig.off())
         assertEquals(SshPort.FIRST_PORT, 2222)
         assertEquals(SshPort.LAST_PORT, 2231)
     }
@@ -387,6 +466,101 @@ class SshPortTest {
 
         rig.clients.remove(rig.clients.clients.first().single().fingerprint)
         assertEquals(SshPortState.Off(CAR), rig.off())
+    }
+
+    /** Two keys saved and two connections open, and the test's hand on the port's watch of the keys. */
+    private suspend fun twoConnections(clients: HeldClients, whenOn: suspend () -> Unit): Triple<Rig, Socket, Socket> {
+        val rig = Rig(clients = clients)
+        rig.key()
+        rig.key("Phone app", PHONE)
+        val on = rig.switchedOn()
+        whenOn()
+        val a = rig.client(on)
+        val b = rig.client(on)
+        assertEquals("a", echo(a, "a"))
+        assertEquals("b", echo(b, "b"))
+        rig.connections(2)
+        return Triple(rig, a, b)
+    }
+
+    /** The user's own switching off: a fault of a connection before it would show as the failure it goes off with. */
+    private suspend fun Rig.offByTheUser() {
+        port.switchOff()
+        assertEquals(SshPortState.Off(CAR), off())
+    }
+
+    private suspend fun Rig.removePhone() = clients.remove(SshKeyLines.fingerprint(SshKeyLines.blob(PHONE)!!))
+
+    @Test
+    fun `a key removed before the port first looks at the keys closes every connection`() = test {
+        val clients = HeldClients()
+        val (rig, a, b) = twoConnections(clients) { clients.watchBegan.await() }
+        rig.removePhone()
+        clients.letWatchSee.complete(Unit)
+        assertTrue(closedByFarSide(a))
+        assertTrue(closedByFarSide(b))
+        rig.connections(0)
+    }
+
+    @Test
+    fun `a key removed after the port first looked at the keys closes every connection`() = test {
+        val clients = HeldClients()
+        val (rig, a, b) = twoConnections(clients) {
+            clients.watchBegan.await()
+            clients.letWatchSee.complete(Unit)
+            clients.watchSaw.await()
+        }
+        rig.removePhone()
+        assertTrue(closedByFarSide(a))
+        assertTrue(closedByFarSide(b))
+        rig.connections(0)
+    }
+
+    @Test
+    fun `a key removed while a connection's tunnel opens closes that connection, and the port stays on`() = test {
+        val rig = Rig()
+        rig.key()
+        rig.key("Phone app", PHONE)
+        val on = rig.on()
+        val letOpen = CompletableDeferred<Unit>()
+        rig.channel.letOpen = letOpen
+        val client = rig.client(on)
+        rig.channel.opening.await()
+        rig.removePhone()
+        assertTrue(closedByFarSide(client))
+        letOpen.complete(Unit)
+        rig.connections(0)
+        assertTrue(rig.channel.tunnels.last().closed)
+        rig.channel.letOpen = null
+        assertEquals("c", echo(rig.client(on), "c"))
+        assertEquals(listOf(LAPTOP), rig.channel.keysSent.last())
+        rig.offByTheUser()
+    }
+
+    @Test
+    fun `a key removed as a connection's bytes begin to pass closes that connection, and the port stays on`() = test {
+        val rig = Rig()
+        rig.key()
+        rig.key("Phone app", PHONE)
+        val on = rig.on()
+        val taking = CompletableDeferred<Unit>()
+        val go = CountDownLatch(1)
+        rig.channel.prepare = {
+            it.onInput = {
+                taking.complete(Unit)
+                go.await()
+            }
+        }
+        val client = rig.client(on)
+        taking.await()
+        rig.removePhone()
+        assertTrue(closedByFarSide(client))
+        go.countDown()
+        rig.connections(0)
+        assertTrue(rig.channel.tunnels.last().closed)
+        rig.channel.prepare = {}
+        assertEquals("c", echo(rig.client(on), "c"))
+        rig.offByTheUser()
     }
 
     // ---- Refused ----
@@ -675,7 +849,7 @@ class SshPortTest {
         val calls = AtomicInteger()
         // The first socket is the real one; every later one cannot be had.
         val failing = PortSockets { allDevices, port ->
-            if (calls.getAndIncrement() == 0) PlainPortSockets.listen(allDevices, port) else throw java.net.BindException("Address already in use")
+            if (calls.getAndIncrement() == 0) PlainPortSockets.listen(allDevices, port) else throw BindException("Address already in use")
         }
         val rig = Rig(sockets = failing)
         rig.on()

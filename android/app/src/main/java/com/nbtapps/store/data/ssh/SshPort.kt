@@ -330,7 +330,12 @@ class SshPort(
         @Volatile
         var paused = false
 
+        /** Set before [close] looks at [tunnel], as [tunnel] is set before this is looked at: one of the two sees the other. */
+        @Volatile
+        var closed = false
+
         fun close() {
+            closed = true
             runCatching { socket.close() }
             tunnel?.close()
         }
@@ -474,7 +479,7 @@ class SshPort(
 
     private suspend fun attempt(run: Run): SshPortState {
         val id = run.headUnitId
-        val keys = clients.clients.first().map { it.line }
+        val keys = clients.clients.first()
         if (keys.isEmpty()) return SshPortState.Off(id, failure = NO_KEYS)
         val connected = (link.connection.value as? ConnectionState.Connected)?.takeIf { it.headUnitId == id }
             ?: return SshPortState.Off(id, failure = NOT_CONNECTED)
@@ -485,10 +490,10 @@ class SshPort(
     }
 
     /** The check, the socket, and the port served until it is to go off, as a use of the link. */
-    private suspend fun over(run: Run, session: AgentSession, keys: List<String>, version: String): SshPortState {
+    private suspend fun over(run: Run, session: AgentSession, keys: List<ClientKey>, version: String): SshPortState {
         val id = run.headUnitId
         val hostKey = try {
-            val tunnel = channel.open(session, keys)
+            val tunnel = channel.open(session, keys.map { it.line })
             try {
                 hostKeyFingerprint(tunnel.hostKeys)
             } finally {
@@ -518,7 +523,7 @@ class SshPort(
                 launch { watchPackage(run, version) },
                 launch { pollSwitch(run, session) },
                 launch { idle(run) },
-                launch { watchKeys(run) },
+                launch { watchKeys(run, keys.map { it.fingerprint }.toSet()) },
                 launch { watchJob(run) },
             )
             val why = run.ending.await()
@@ -594,11 +599,11 @@ class SshPort(
             }
             connection.tunnel = tunnel
             // Closed while it opened: the tunnel goes too.
-            if (synchronized(lock) { connection !in run.connections }) return@coroutineScope
+            if (connection.closed) return@coroutineScope
             val watch = launch { follow(run, connection, tunnel) }
             listOf(
-                launch(Dispatchers.IO) { pipe(connection.socket.getInputStream(), tunnel.output, connection) },
-                launch(Dispatchers.IO) { pipe(tunnel.input, connection.socket.getOutputStream(), connection) },
+                launch(Dispatchers.IO) { pipe(connection, { connection.socket.getInputStream() }, { tunnel.output }) },
+                launch(Dispatchers.IO) { pipe(connection, { tunnel.input }, { connection.socket.getOutputStream() }) },
             ).joinAll()
             watch.cancel()
             // The channel's end is in its state before its stream ends, so it is there now, though [follow] may have
@@ -614,9 +619,14 @@ class SshPort(
         }
     }
 
-    /** Copies [from] to [to] until either ends, then closes both sides of [connection]. */
-    private fun pipe(from: InputStream, to: OutputStream, connection: Connection) {
+    /**
+     * Copies from the one stream to the other until either ends, then closes both sides of [connection]. A socket that
+     * has been closed meanwhile gives no stream, which is an end as any other.
+     */
+    private fun pipe(connection: Connection, source: () -> InputStream, sink: () -> OutputStream) {
         try {
+            val from = source()
+            val to = sink()
             val buffer = ByteArray(PIPE_BUFFER)
             while (true) {
                 val n = from.read(buffer)
@@ -703,15 +713,18 @@ class SshPort(
         run.end(PortOffReason.IDLE)
     }
 
-    /** A saved key removed: every connection is closed; with none left, the port goes off. */
-    private suspend fun watchKeys(run: Run) {
-        var known: Set<String>? = null
+    /**
+     * A saved key removed: every connection is closed; with none left, the port goes off. [atCheck] are the fingerprints
+     * of the keys as they were for the port's check: a key can be removed before the first look here.
+     */
+    private suspend fun watchKeys(run: Run, atCheck: Set<String>) {
+        var known = atCheck
         clients.clients.collect { now ->
             val prints = now.map { it.fingerprint }.toSet()
             val before = known
             known = prints
             if (prints.isEmpty()) run.end(null)
-            if (before != null && !prints.containsAll(before)) {
+            if (!prints.containsAll(before)) {
                 synchronized(lock) { run.connections.toList() }.forEach { withContext(Dispatchers.IO) { it.close() } }
             }
         }
