@@ -313,9 +313,9 @@ private fun JobContent(
                 Text("$need what was installed.")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (result.restart == RestartKind.HMI) {
-                        Button(onClick = viewModel::askRestart, enabled = uiState.connected) { Text("Restart iDrive now") }
+                        Button(onClick = viewModel::askRestart, enabled = uiState.connectedToJob) { Text("Restart iDrive now") }
                     } else {
-                        Button(onClick = viewModel::reboot, enabled = uiState.connected) { Text("Reboot now") }
+                        Button(onClick = viewModel::reboot, enabled = uiState.connectedToJob) { Text("Reboot now") }
                     }
                 }
             }
