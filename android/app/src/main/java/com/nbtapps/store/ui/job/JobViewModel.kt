@@ -222,8 +222,11 @@ class JobViewModel @Inject constructor(
         act { if (guard.mayConnect(headUnitId)) jobs.connectFromPhone(headUnitId) else Result.success(Unit) }
     }
 
-    /** [kind] is `hmi` or `reboot`. */
-    fun restart(kind: String) = act { jobs.restart(kind) }
+    /** [kind] is `hmi` or `reboot`, on the job's head unit. */
+    fun restart(kind: String) {
+        val headUnitId = uiState.value.job?.headUnitId ?: return
+        act { jobs.restart(headUnitId, kind) }
+    }
 
     private fun act(action: suspend () -> Result<Unit>) {
         viewModelScope.launch {

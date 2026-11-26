@@ -429,7 +429,7 @@ class HeadUnitDetailViewModel internal constructor(
     fun restart(kind: String) {
         viewModelScope.launch {
             local.update { it.copy(restartError = null) }
-            jobs.restart(kind).onFailure { failure -> local.update { it.copy(restartError = failure.message) } }
+            jobs.restart(headUnitId, kind).onFailure { failure -> local.update { it.copy(restartError = failure.message) } }
             jobs.refresh()
         }
     }

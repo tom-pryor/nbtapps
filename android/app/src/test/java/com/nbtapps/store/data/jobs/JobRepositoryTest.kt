@@ -744,7 +744,7 @@ class JobRepositoryTest {
             assertEquals(ConnectionState.Disconnected, jobs.connection.value)
             assertEquals(1, counting.opened.get())
             assertEquals("the link stayed open", 1, counting.closed.get())
-            assertTrue(jobs.restart("hmi").isFailure)
+            assertTrue(jobs.restart("car", "hmi").isFailure)
         } finally {
             release.countDown()
         }
@@ -930,13 +930,26 @@ class JobRepositoryTest {
 
     @Test
     fun `restart is passed on, and nothing can be asked without a link`() = test {
-        assertTrue(jobs.restart("hmi").isFailure)
+        assertTrue(jobs.restart("car", "hmi").isFailure)
         assertTrue(jobs.refresh().isFailure)
 
         connector.onConnect = { it.handlers["system.restart"] = { "{}" } }
         assertTrue(jobs.connect("car").isSuccess)
-        assertTrue(jobs.restart("hmi").isSuccess)
+        assertTrue(jobs.restart("car", "hmi").isSuccess)
         assertEquals("""{"kind":"hmi"}""", connector.agent.requestsOf("system.restart").single().toString())
+    }
+
+    @Test
+    fun `a restart meant for a head unit that is not the one connected is refused as with no link, and nothing is sent`() = test {
+        connector.onConnect = { it.handlers["system.restart"] = { "{}" } }
+        assertTrue(jobs.connect("car").isSuccess)
+
+        val failure = jobs.restart("other", "hmi").exceptionOrNull()
+
+        assertTrue("$failure", failure is IOException)
+        assertEquals("Not connected to a head unit", failure?.message)
+        assertTrue(connector.agent.requestsOf("system.restart").isEmpty())
+        assertTrue(jobs.connection.value is ConnectionState.Connected)
     }
 
     // How a link ends: the agent says `link.closing` before it ends one of its own accord, and the app ends it.
@@ -1732,7 +1745,7 @@ class JobRepositoryTest {
             answer.await(30, TimeUnit.SECONDS)
             "{}"
         }
-        val call = scope.launch { jobs.restart("hmi") }
+        val call = scope.launch { jobs.restart("car", "hmi") }
         until("the request") { connector.agent.requestsOf("system.restart").isNotEmpty() }
 
         shown.state.value = false
