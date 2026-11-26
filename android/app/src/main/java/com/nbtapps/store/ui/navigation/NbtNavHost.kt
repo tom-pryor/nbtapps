@@ -54,6 +54,7 @@ import com.nbtapps.store.ui.menu.SshMenuTarget
 import com.nbtapps.store.ui.menu.menuGivesWay
 import com.nbtapps.store.ui.menu.menuShows
 import com.nbtapps.store.ui.pairing.PairingScreen
+import com.nbtapps.store.ui.restart.RestartDialog
 import com.nbtapps.store.ui.settings.SettingsScreen
 import com.nbtapps.store.ui.setup.SetupScreen
 import com.nbtapps.store.ui.spptest.SppTestScreen
@@ -247,6 +248,7 @@ fun NbtNavHost(
     }
 
     val ssh by menu.ssh.collectAsStateWithLifecycle()
+    val restartItem by menu.restartItem.collectAsStateWithLifecycle()
     ModalNavigationDrawer(
         drawerContent = {
             SideMenu(
@@ -262,6 +264,12 @@ fun NbtNavHost(
                         is SshMenuTarget.HeadUnit -> navController.navigate(HeadUnitDetailRoute(target.headUnitId)) { launchSingleTop = true }
                         is SshMenuTarget.Ssh -> navController.navigate(SshRoute(target.headUnitId)) { launchSingleTop = true }
                     }
+                },
+                restart = restartItem,
+                onRestart = {
+                    closeMenu()
+                    // Greyed, as SSH's: to connect. The question is hosted below, so it stays once the menu has gone.
+                    if (!menu.tapRestart(restartItem)) openTopLevel(HeadUnitsRoute)
                 },
                 onOpenAbout = {
                     closeMenu()
@@ -426,4 +434,8 @@ fun NbtNavHost(
             }
         }
     }
+
+    // The menu's question before iDrive restarts: here, and not in the menu, which closes as it is asked.
+    val restartStep by menu.restart.state.collectAsStateWithLifecycle()
+    RestartDialog(restartStep, onConfirm = menu.restart::confirm, onCancel = menu.restart::cancel)
 }

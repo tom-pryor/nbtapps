@@ -57,7 +57,8 @@ fun MenuButton(onClick: () -> Unit) {
 
 /**
  * The menu at the side: the app's name and [versionName]; under a line, the section of the head unit the app is
- * connected to with its SSH entry ([ssh], tapped: [onOpenSsh] with where it goes); under another, About ([onOpenAbout]).
+ * connected to with its SSH entry ([ssh], tapped: [onOpenSsh] with where it goes) and under it Restart iDrive
+ * ([restart], tapped: [onRestart]); under another, About ([onOpenAbout]).
  */
 @Composable
 fun SideMenu(
@@ -65,6 +66,8 @@ fun SideMenu(
     versionName: String,
     ssh: SshMenuItem,
     onOpenSsh: (SshMenuTarget) -> Unit,
+    restart: RestartMenuItem,
+    onRestart: () -> Unit,
     onOpenAbout: () -> Unit,
 ) {
     ModalDrawerSheet(drawerState, Modifier.width(MENU_WIDTH)) {
@@ -92,6 +95,7 @@ fun SideMenu(
                 overflow = TextOverflow.Ellipsis,
             )
             SshItem(ssh, onClick = { onOpenSsh(ssh.target) })
+            Item("Restart iDrive", restart.line, restart.greyed, R.drawable.ic_restart, onClick = onRestart)
             HorizontalDivider(Modifier.padding(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 8.dp))
             NavigationDrawerItem(
                 label = { Text("About", style = MaterialTheme.typography.labelLarge) },
@@ -105,27 +109,16 @@ fun SideMenu(
     }
 }
 
-/**
- * The SSH entry: its name with its line under it, read out together as one; greyed in colour only, so that it can be
- * tapped in every state. The dot beside it is not read on its own: the line says the same.
- */
+/** The SSH entry: see [Item]. The dot beside it is not read on its own: the line says the same. */
 @Composable
 private fun SshItem(item: SshMenuItem, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
-    val text = if (item.greyed) colors.onSurfaceVariant else colors.onSurface
-    NavigationDrawerItem(
-        label = {
-            Column(Modifier.padding(vertical = 8.dp)) {
-                Text("SSH", style = MaterialTheme.typography.labelLarge, color = text)
-                item.line?.let {
-                    Text(it, Modifier.padding(top = 2.dp), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                }
-            }
-        },
-        selected = false,
-        onClick = onClick,
-        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
-        icon = { Icon(painterResource(R.drawable.ic_terminal), contentDescription = null) },
+    Item(
+        "SSH",
+        item.line,
+        item.greyed,
+        R.drawable.ic_terminal,
+        onClick,
         badge = when {
             item.install -> {
                 { Text("Install…", style = MaterialTheme.typography.labelLarge, color = colors.primary) }
@@ -135,6 +128,31 @@ private fun SshItem(item: SshMenuItem, onClick: () -> Unit) {
             }
             else -> null
         },
+    )
+}
+
+/**
+ * An entry of the head unit's section: its [label] with its [line] under it where it has one, read out together as
+ * one; [greyed] in colour only, so that it can be tapped in every state.
+ */
+@Composable
+private fun Item(label: String, line: String?, greyed: Boolean, icon: Int, onClick: () -> Unit, badge: (@Composable () -> Unit)? = null) {
+    val colors = MaterialTheme.colorScheme
+    val text = if (greyed) colors.onSurfaceVariant else colors.onSurface
+    NavigationDrawerItem(
+        label = {
+            Column(Modifier.padding(vertical = 8.dp)) {
+                Text(label, style = MaterialTheme.typography.labelLarge, color = text)
+                line?.let {
+                    Text(it, Modifier.padding(top = 2.dp), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                }
+            }
+        },
+        selected = false,
+        onClick = onClick,
+        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+        icon = { Icon(painterResource(icon), contentDescription = null) },
+        badge = badge,
         colors = NavigationDrawerItemDefaults.colors(unselectedTextColor = text, unselectedIconColor = colors.onSurfaceVariant),
     )
 }
