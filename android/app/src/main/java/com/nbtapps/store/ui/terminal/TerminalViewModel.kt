@@ -14,11 +14,11 @@ import androidx.navigation.toRoute
 import com.nbtapps.store.data.HeadUnitRepository
 import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.ssh.SshTunnel
+import com.nbtapps.store.data.ssh.sshSwitchError
 import com.nbtapps.store.data.terminal.TerminalRepository
 import com.nbtapps.store.data.terminal.TerminalSnapshot
 import com.nbtapps.store.data.terminal.TerminalState
 import com.nbtapps.store.model.ChannelSwitch
-import com.nbtapps.store.ui.detail.sshSwitchError
 import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.navigation.TerminalRoute
 import dagger.hilt.android.lifecycle.HiltViewModel

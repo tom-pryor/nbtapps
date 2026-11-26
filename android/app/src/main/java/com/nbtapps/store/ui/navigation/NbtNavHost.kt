@@ -54,6 +54,7 @@ import com.nbtapps.store.ui.settings.SettingsScreen
 import com.nbtapps.store.ui.setup.SetupScreen
 import com.nbtapps.store.ui.spptest.SppTestScreen
 import com.nbtapps.store.ui.ssh.SshAccessScreen
+import com.nbtapps.store.ui.ssh.SshScreen
 import com.nbtapps.store.ui.terminal.TerminalScreen
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.launch
@@ -80,6 +81,10 @@ data class SettingsRoute(val headUnitId: String, val packageId: String)
 /** The terminal on the head unit [headUnitId]: a shell through the SSH package, held by the app when the screen is left. */
 @Serializable
 data class TerminalRoute(val headUnitId: String)
+
+/** SSH on the head unit [headUnitId]: SSH access switched on and off, and the ways to the terminal and to SSH from other apps. */
+@Serializable
+data class SshRoute(val headUnitId: String)
 
 /** "SSH from other apps" for the head unit [headUnitId]: the port on the phone for other SSH clients, and their keys. */
 @Serializable
@@ -327,8 +332,15 @@ fun NbtNavHost(
                         onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
                         onOpenLogs = { id -> navController.navigate(LogPullRoute(headUnitId, id)) },
                         onOpenSettings = { id -> navController.navigate(SettingsRoute(headUnitId, id)) },
+                        onOpenSsh = { id -> navController.navigate(SshRoute(id)) },
+                    )
+                }
+                composable<SshRoute> {
+                    SshScreen(
+                        onBack = { navController.popBackStack() },
                         onOpenTerminal = { id -> navController.navigate(TerminalRoute(id)) },
                         onOpenSshAccess = { id -> navController.navigate(SshAccessRoute(id)) },
+                        onOpenPackage = { id -> navController.navigate(CataloguePackageRoute(id)) },
                     )
                 }
                 composable<SshAccessRoute> {
