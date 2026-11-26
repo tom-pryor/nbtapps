@@ -81,8 +81,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nbtapps.store.R
 import com.nbtapps.store.data.ssh.SshTunnel
 import com.nbtapps.store.data.terminal.TerminalLine
-import com.nbtapps.store.ui.detail.TurnOnSshDialog
 import com.nbtapps.store.ui.rememberNotificationAsk
+import com.nbtapps.store.ui.ssh.TurnOnSshDialog
 import kotlinx.coroutines.launch
 
 /** The shell's lines: a fixed-width face, as the cell the pty's size is worked out from. */

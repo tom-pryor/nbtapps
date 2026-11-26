@@ -77,8 +77,7 @@ fun HeadUnitDetailScreen(
     onOpenPackage: (packageId: String) -> Unit,
     onOpenLogs: (packageId: String) -> Unit,
     onOpenSettings: (packageId: String) -> Unit,
-    onOpenTerminal: (headUnitId: String) -> Unit,
-    onOpenSshAccess: (headUnitId: String) -> Unit,
+    onOpenSsh: (headUnitId: String) -> Unit,
     viewModel: HeadUnitDetailViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -152,18 +151,10 @@ fun HeadUnitDetailScreen(
             InstalledCard(uiState, connected, onUninstall, onOpenLogs, onOpenSettings)
             TroubleshootingCard(uiState, viewModel::resetSerial)
             uiState.debug?.let { card ->
-                DebugCardSection(
-                    card,
-                    onInstall = { onOpenPackage(SshTunnel.PACKAGE) },
-                    onSwitch = viewModel::switchSsh,
-                    onOpenTerminal = { onOpenTerminal(unit.id) },
-                    onOpenPort = { onOpenSshAccess(unit.id) },
-                )
+                DebugCardSection(card, onInstall = { onOpenPackage(SshTunnel.PACKAGE) }, onOpen = { onOpenSsh(unit.id) })
             }
         }
     }
-
-    if (uiState.confirmingSsh) TurnOnSshDialog(onConfirm = viewModel::confirmSsh, onDismiss = viewModel::cancelSsh)
 
     uiState.fix?.let { step ->
         CheckFixDialog(step, onConfirm = viewModel::confirmFix, onRetry = viewModel::retryFix, onClose = viewModel::closeFix)
