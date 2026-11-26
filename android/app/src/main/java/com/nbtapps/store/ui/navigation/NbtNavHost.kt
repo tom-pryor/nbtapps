@@ -26,6 +26,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
@@ -47,6 +49,8 @@ import com.nbtapps.store.ui.headunits.HeadUnitsScreen
 import com.nbtapps.store.ui.job.JobScreen
 import com.nbtapps.store.ui.logs.LogPullScreen
 import com.nbtapps.store.ui.menu.SideMenu
+import com.nbtapps.store.ui.menu.SideMenuViewModel
+import com.nbtapps.store.ui.menu.SshMenuTarget
 import com.nbtapps.store.ui.menu.menuGivesWay
 import com.nbtapps.store.ui.menu.menuShows
 import com.nbtapps.store.ui.pairing.PairingScreen
@@ -146,7 +150,8 @@ private val topLevelDestinations = listOf(
  * The app's screens. It opens on the catalogue; with [openSetupAtStart], the set-up is opened over it at once, and
  * [onSetupOpened] told, so that the caller can keep it from being opened again by a rotation or a restored process.
  * Leaving the set-up goes back to the catalogue. The button on both tabs opens the side menu, over the bottom bar too;
- * it names the app's version, [versionName]. Screens opened from the tabs have no way to it.
+ * it names the app's version, [versionName], and has the SSH entry of the head unit the app is connected to ([menu]).
+ * Screens opened from the tabs have no way to it.
  *
  * [headUnitToOpen], when it is not null, is the head unit whose page another screen of the app asked to be shown, as
  * the screen for a handed-over pairing code does: the page is opened, and [onHeadUnitOpened] told. [terminalToOpen] is
@@ -165,6 +170,7 @@ fun NbtNavHost(
     onTerminalOpened: () -> Unit = {},
     sshAccessToOpen: String? = null,
     onSshAccessOpened: () -> Unit = {},
+    menu: SideMenuViewModel = hiltViewModel(),
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
@@ -240,11 +246,23 @@ fun NbtNavHost(
         }
     }
 
+    val ssh by menu.ssh.collectAsStateWithLifecycle()
     ModalNavigationDrawer(
         drawerContent = {
             SideMenu(
                 drawerState,
                 versionName,
+                ssh,
+                onOpenSsh = { target ->
+                    closeMenu()
+                    // As About: a second tap before the menu has gone finds the page on top.
+                    when (target) {
+                        SshMenuTarget.HeadUnits -> openTopLevel(HeadUnitsRoute)
+                        is SshMenuTarget.Package -> navController.navigate(CataloguePackageRoute(target.packageId)) { launchSingleTop = true }
+                        is SshMenuTarget.HeadUnit -> navController.navigate(HeadUnitDetailRoute(target.headUnitId)) { launchSingleTop = true }
+                        is SshMenuTarget.Ssh -> navController.navigate(SshRoute(target.headUnitId)) { launchSingleTop = true }
+                    }
+                },
                 onOpenAbout = {
                     closeMenu()
                     // A second tap before the menu has gone finds it on top.

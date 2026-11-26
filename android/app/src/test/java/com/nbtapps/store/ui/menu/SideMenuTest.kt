@@ -4,12 +4,27 @@ package com.nbtapps.store.ui.menu
 
 import androidx.compose.material3.DrawerValue.Closed
 import androidx.compose.material3.DrawerValue.Open
+import com.nbtapps.store.MainDispatcherRule
+import com.nbtapps.store.data.ssh.SshEntry
+import com.nbtapps.store.data.ssh.SshPortState
+import com.nbtapps.store.data.ssh.SshTunnel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 
-/** When the side menu counts as in sight, and when it has to close for the screen on top. */
+/**
+ * When the side menu counts as in sight, and when it has to close for the screen on top; its section for the head unit
+ * the app is connected to, with the SSH entry in each state, where a tap on it goes, and its view model.
+ */
 class SideMenuTest {
+
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule()
 
     @Test
     fun `the menu shows from the tap that opens it until it has gone`() {
@@ -28,5 +43,71 @@ class SideMenuTest {
     @Test
     fun `the menu stays as it is while the screen on top is not known, as just after a rotation`() {
         assertFalse(menuGivesWay(screenKnown = false, tabOnTop = false))
+    }
+
+    // ---- The section of the head unit connected ----
+
+    @Test
+    fun `with no head unit connected the entry is greyed, says to connect, and opens the Head units tab`() {
+        assertEquals(
+            SshMenuItem("No head unit connected", "Connect to a head unit first", greyed = true, install = false, dot = false, SshMenuTarget.HeadUnits),
+            sshMenuItem(SshEntry.NotConnected),
+        )
+    }
+
+    @Test
+    fun `without the package the entry is greyed, offers the install, and opens the package's page`() {
+        assertEquals(
+            SshMenuItem(
+                "Test car",
+                "SSH access isn't installed on this head unit",
+                greyed = true,
+                install = true,
+                dot = false,
+                SshMenuTarget.Package(SshTunnel.PACKAGE),
+            ),
+            sshMenuItem(SshEntry.NotInstalled("car", "Test car")),
+        )
+    }
+
+    @Test
+    fun `where the agent cannot run it the entry is greyed, says to update the agent, and opens the head unit's page`() {
+        assertEquals(
+            SshMenuItem(
+                "Test car",
+                "This head unit's agent can't run SSH access. Update the agent.",
+                greyed = true,
+                install = false,
+                dot = false,
+                SshMenuTarget.HeadUnit("car"),
+            ),
+            sshMenuItem(SshEntry.CantRun("car", "Test car")),
+        )
+    }
+
+    @Test
+    fun `ready, the entry opens the SSH page, says how SSH stands, and has the dot while it is on`() {
+        val ready = SshEntry.Ready("car", "Test car")
+        val ssh = SshMenuTarget.Ssh("car")
+        assertEquals(SshMenuItem("Test car", null, greyed = false, install = false, dot = false, ssh), sshMenuItem(ready))
+        assertEquals(SshMenuItem("Test car", "Off", greyed = false, install = false, dot = false, ssh), sshMenuItem(ready.copy(on = false)))
+        assertEquals(SshMenuItem("Test car", "On", greyed = false, install = false, dot = true, ssh), sshMenuItem(ready.copy(on = true)))
+        val busiest = ready.copy(on = true, terminalOpen = true, port = SshPortState.On("car", 2222, hostKey = "SHA256:x"))
+        assertEquals(
+            SshMenuItem("Test car", "On · terminal open · port 2222", greyed = false, install = false, dot = true, ssh),
+            sshMenuItem(busiest),
+        )
+    }
+
+    @Test
+    fun `the view model follows the entry`() = runTest {
+        val entry = MutableStateFlow<SshEntry>(SshEntry.NotConnected)
+        val viewModel = mainDispatcherRule.track(SideMenuViewModel(entry))
+        assertEquals(sshMenuItem(SshEntry.NotConnected), viewModel.ssh.value)
+        backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.ssh.collect {} }
+        entry.value = SshEntry.Ready("car", "Test car", on = true)
+        assertEquals("On", viewModel.ssh.value.line)
+        entry.value = SshEntry.NotConnected
+        assertEquals(SshMenuTarget.HeadUnits, viewModel.ssh.value.target)
     }
 }
