@@ -59,6 +59,8 @@ data class JobUiState(
     val job: JobView? = null,
     /** Whether there is a link to the head unit now. */
     val connected: Boolean = false,
+    /** Whether that link is to the job's own head unit, which Restart iDrive now and Reboot now are sent to. */
+    val connectedToJob: Boolean = false,
     /**
      * The last connect to the job's head unit failed having only waited for the car's link, so the screen offers to
      * connect from the phone: see [ConnectionState.Failed.listenedOnly].
@@ -142,6 +144,7 @@ class JobViewModel @Inject constructor(
                     emptyList()
                 },
                 connected = connected != null,
+                connectedToJob = connected != null && connected.headUnitId == shown?.headUnitId,
                 fromPhone = offersConnectFromPhone(shown, connection),
                 names = names,
                 removal = route.removeId != null,
