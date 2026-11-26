@@ -2,6 +2,7 @@
 // Required Notice: Copyright (c) 2026 Tom Pryor - NBTApps (https://github.com/tom-pryor/nbtapps)
 package com.nbtapps.store.ui.menu
 
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -136,7 +137,14 @@ private fun SshItem(item: SshMenuItem, onClick: () -> Unit) {
  * one; [greyed] in colour only, so that it can be tapped in every state.
  */
 @Composable
-private fun Item(label: String, line: String?, greyed: Boolean, icon: Int, onClick: () -> Unit, badge: (@Composable () -> Unit)? = null) {
+private fun Item(
+    label: String,
+    line: String?,
+    greyed: Boolean,
+    @DrawableRes icon: Int,
+    onClick: () -> Unit,
+    badge: (@Composable () -> Unit)? = null,
+) {
     val colors = MaterialTheme.colorScheme
     val text = if (greyed) colors.onSurfaceVariant else colors.onSurface
     NavigationDrawerItem(
