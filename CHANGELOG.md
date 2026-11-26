@@ -3,6 +3,18 @@
 What changed in each release of the NBTApps app, the agent and the iDrive plugin.
 Generated from the catalogue's release notes.
 
+## 2026-11-26
+
+### App 0.11.0
+- The first time you open the app after an update, what is new in it comes up once. It is also under About, What's new.
+- A menu at the top left of Catalogue and Head units has About: the app's version, what is new and the licences of the code the app includes. It takes the place of the gear.
+- The menu has a section for the head unit you are connected to, with SSH and Restart iDrive.
+- SSH has a page of its own, with the switch, the terminal and SSH from other apps. Open it from the menu or from the Debug card on the head unit's page.
+- Restart iDrive asks first wherever you tap it, and goes only to the head unit it is meant for.
+- The catalogue is fetched again when you come back to the app and the list is over 30 minutes old, so new versions show without pulling the list down.
+- Setting up autostart chooses the iDrive plugin from an up-to-date catalogue, and asks about software installed outside NBTApps even if you left the app while it ran.
+- Fixes for the SSH port, which could stay on after SSH access was switched off or the package changed.
+
 ## 2026-11-24
 
 ### App 0.10.0
