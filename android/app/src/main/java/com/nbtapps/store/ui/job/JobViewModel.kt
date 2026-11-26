@@ -23,6 +23,8 @@ import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RemoveTarget
 import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.navigation.JobRoute
+import com.nbtapps.store.ui.restart.RestartQuestion
+import com.nbtapps.store.ui.restart.RestartQuestions
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -69,7 +71,7 @@ data class JobUiState(
     /** Also delete the package's data folder. */
     val deleteData: Boolean = false,
     val starting: Boolean = false,
-    /** Why the last start, stop, reconnect or restart failed. */
+    /** Why the last start, stop, reconnect or reboot failed: Restart iDrive now says its own in its question. */
     val actionError: String? = null,
     /**
      * For a job that updated the head unit's agent and went well: what the new agent runs and the one before did
@@ -101,9 +103,13 @@ class JobViewModel @Inject constructor(
     private val prereleases: PrereleaseRepository,
     /** What the user's connect goes through first: [com.nbtapps.store.ui.headunits.ConnectGate]. */
     private val guard: ConnectGuard,
+    restarts: RestartQuestions,
 ) : ViewModel() {
 
     private val route = savedStateHandle.toRoute<JobRoute>()
+
+    /** The question before iDrive restarts on the job's head unit, which Restart iDrive now asks ([askRestart]). */
+    val restartQuestion: RestartQuestion = restarts.question(viewModelScope)
 
     private data class Local(
         val review: Review,
@@ -222,10 +228,16 @@ class JobViewModel @Inject constructor(
         act { if (guard.mayConnect(headUnitId)) jobs.connectFromPhone(headUnitId) else Result.success(Unit) }
     }
 
-    /** [kind] is `hmi` or `reboot`, on the job's head unit. */
-    fun restart(kind: String) {
+    /** Restart iDrive now, where the job leaves iDrive to restart: asks first, as the side menu and the head unit's page do. */
+    fun askRestart() {
         val headUnitId = uiState.value.job?.headUnitId ?: return
-        act { jobs.restart(headUnitId, kind) }
+        restartQuestion.ask(headUnitId)
+    }
+
+    /** Reboot now, where the job leaves the head unit to reboot: at once, on the job's head unit. */
+    fun reboot() {
+        val headUnitId = uiState.value.job?.headUnitId ?: return
+        act { jobs.restart(headUnitId, "reboot") }
     }
 
     private fun act(action: suspend () -> Result<Unit>) {

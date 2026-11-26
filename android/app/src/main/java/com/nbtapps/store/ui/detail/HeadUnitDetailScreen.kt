@@ -66,6 +66,7 @@ import com.nbtapps.store.ui.headunits.Moves
 import com.nbtapps.store.ui.headunits.Paths
 import com.nbtapps.store.ui.headunits.movesHeading
 import com.nbtapps.store.ui.headunits.removesHeading
+import com.nbtapps.store.ui.restart.RestartDialog
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -125,7 +126,14 @@ fun HeadUnitDetailScreen(
             )
             uiState.job?.let { JobCard(it, onOpenJob) }
             uiState.profile?.let {
-                AgentCard(it, connected, uiState.restartError, viewModel::restart, onLogs = { onOpenLogs(AGENT_PACKAGE_ID) }.takeIf { uiState.logs })
+                AgentCard(
+                    it,
+                    connected,
+                    uiState.restartError,
+                    onRestart = viewModel::askRestart,
+                    onReboot = viewModel::reboot,
+                    onLogs = { onOpenLogs(AGENT_PACKAGE_ID) }.takeIf { uiState.logs },
+                )
             }
             // While the set-up runs, the problems it is about are its to ask.
             if (uiState.setup?.running != true) {
@@ -159,6 +167,8 @@ fun HeadUnitDetailScreen(
     uiState.fix?.let { step ->
         CheckFixDialog(step, onConfirm = viewModel::confirmFix, onRetry = viewModel::retryFix, onClose = viewModel::closeFix)
     }
+    val restartStep by viewModel.restartQuestion.state.collectAsStateWithLifecycle()
+    RestartDialog(restartStep, onConfirm = viewModel.restartQuestion::confirm, onCancel = viewModel.restartQuestion::cancel)
 }
 
 /** Whether the checks' card has anything to show: problems that are not put aside, or a link to check again over. */
@@ -340,8 +350,20 @@ private fun JobCard(view: JobView, onOpenJob: () -> Unit) {
     }
 }
 
+/**
+ * The agent's card: its version and free space, what has to restart, Restart iDrive ([onRestart], which asks first)
+ * and, where the head unit has to reboot, Reboot ([onReboot], at once), with why the last reboot failed
+ * ([restartError]), and the agent's logs.
+ */
 @Composable
-private fun AgentCard(profile: HeadUnitProfile, connected: Boolean, restartError: String?, onRestart: (String) -> Unit, onLogs: (() -> Unit)?) {
+private fun AgentCard(
+    profile: HeadUnitProfile,
+    connected: Boolean,
+    restartError: String?,
+    onRestart: () -> Unit,
+    onReboot: () -> Unit,
+    onLogs: (() -> Unit)?,
+) {
     val context = LocalContext.current
     Section("Agent") {
         Text("Version ${profile.agentVersion}")
@@ -359,9 +381,9 @@ private fun AgentCard(profile: HeadUnitProfile, connected: Boolean, restartError
         }
         if (connected) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { onRestart("hmi") }) { Text("Restart iDrive") }
+                OutlinedButton(onClick = onRestart) { Text("Restart iDrive") }
                 if (profile.restartNeeded == RestartKind.REBOOT) {
-                    OutlinedButton(onClick = { onRestart("reboot") }) { Text("Reboot") }
+                    OutlinedButton(onClick = onReboot) { Text("Reboot") }
                 }
             }
         }

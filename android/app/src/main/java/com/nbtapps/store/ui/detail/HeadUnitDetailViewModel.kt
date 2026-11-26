@@ -25,8 +25,10 @@ import com.nbtapps.store.data.packages.StoredPackage
 import com.nbtapps.store.data.serialUnavailable
 import com.nbtapps.store.data.ssh.SshAccess
 import com.nbtapps.store.data.ssh.SshEntry
+import com.nbtapps.store.data.ssh.SshPortState
 import com.nbtapps.store.data.ssh.SshTunnel
 import com.nbtapps.store.data.ssh.sshOffered
+import com.nbtapps.store.data.terminal.TerminalState
 import com.nbtapps.store.di.ApplicationScope
 import com.nbtapps.store.model.Autostart
 import com.nbtapps.store.model.HeadUnit
@@ -39,6 +41,8 @@ import com.nbtapps.store.ui.headunits.CheckFixFlow
 import com.nbtapps.store.ui.headunits.CheckFixStep
 import com.nbtapps.store.ui.headunits.ConnectGuard
 import com.nbtapps.store.ui.navigation.HeadUnitDetailRoute
+import com.nbtapps.store.ui.restart.RestartQuestion
+import com.nbtapps.store.ui.restart.RestartQuestions
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -133,7 +137,7 @@ data class HeadUnitDetailUiState(
     val laterFormat: Set<String> = emptySet(),
     /** The running or last job on this head unit. */
     val job: JobView? = null,
-    /** Why the last restart request failed. */
+    /** Why the last ask to reboot failed: Restart iDrive says its own in its question ([HeadUnitDetailViewModel.restartQuestion]). */
     val restartError: String? = null,
     /**
      * Whether the agent is started with the car, as it says over the link that is open. Null with no link, and
@@ -224,6 +228,13 @@ class HeadUnitDetailViewModel internal constructor(
     refreshSsh: (headUnitId: String) -> Unit = {},
     /** What the user's connect goes through first: [com.nbtapps.store.ui.headunits.ConnectGate]. */
     private val guard: ConnectGuard = ConnectGuard.NONE,
+    /** Makes the question before iDrive restarts: by default over [jobs]' link, with no terminal or port open. */
+    restarts: RestartQuestions = RestartQuestions(
+        jobs.connection,
+        MutableStateFlow(TerminalState.Idle),
+        MutableStateFlow(SshPortState.Off()),
+        { id -> jobs.restart(id, "hmi") },
+    ),
 ) : ViewModel() {
 
     @Inject
@@ -241,9 +252,10 @@ class HeadUnitDetailViewModel internal constructor(
         prereleases: PrereleaseRepository,
         ssh: SshAccess,
         guard: ConnectGuard,
+        restarts: RestartQuestions,
     ) : this(
         savedStateHandle.toRoute<HeadUnitDetailRoute>().headUnitId, repository, jobs, connector, bluetooth, setup, appScope, store.packages,
-        diagnostics, catalogue.catalogue, prereleases.switchedOn, ssh.entry, ssh::refresh, guard,
+        diagnostics, catalogue.catalogue, prereleases.switchedOn, ssh.entry, ssh::refresh, guard, restarts,
     )
 
     private data class Local(
@@ -260,6 +272,9 @@ class HeadUnitDetailViewModel internal constructor(
 
     /** The confirmation of a check's fix: it is the app's, so a fix goes on when the screen is left. */
     private val fixes = CheckFixFlow(jobs, appScope)
+
+    /** The question before iDrive restarts on this head unit, which Restart iDrive asks ([askRestart]), with its answer and refusal. */
+    val restartQuestion: RestartQuestion = restarts.question(viewModelScope)
 
     private val page =
         combine(repository.headUnit(headUnitId), jobs.connection, jobs.job, local, setup.state) { unit, connection, job, local, setup ->
@@ -425,11 +440,14 @@ class HeadUnitDetailViewModel internal constructor(
         }
     }
 
-    /** [kind] is `hmi` or `reboot`. */
-    fun restart(kind: String) {
+    /** Restart iDrive on the agent's card: asks first, in the same question as the side menu's. */
+    fun askRestart() = restartQuestion.ask(headUnitId)
+
+    /** Reboot on the agent's card, where the agent says the head unit has to: at once, and a refusal goes under the card. */
+    fun reboot() {
         viewModelScope.launch {
             local.update { it.copy(restartError = null) }
-            jobs.restart(headUnitId, kind).onFailure { failure -> local.update { it.copy(restartError = failure.message) } }
+            jobs.restart(headUnitId, "reboot").onFailure { failure -> local.update { it.copy(restartError = failure.message) } }
             jobs.refresh()
         }
     }

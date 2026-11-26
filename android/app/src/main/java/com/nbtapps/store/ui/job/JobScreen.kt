@@ -47,6 +47,7 @@ import com.nbtapps.store.model.Plan
 import com.nbtapps.store.model.RestartKind
 import com.nbtapps.store.ui.headunits.CONNECT_FROM_PHONE
 import com.nbtapps.store.ui.rememberNotificationAsk
+import com.nbtapps.store.ui.restart.RestartDialog
 
 /** The words every plan and every running job carry: the head unit must stay powered until the job is done. */
 internal const val IGNITION_NOTICE =
@@ -106,6 +107,8 @@ fun JobScreen(
             uiState.actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }
+    val restartStep by viewModel.restartQuestion.state.collectAsStateWithLifecycle()
+    RestartDialog(restartStep, onConfirm = viewModel.restartQuestion::confirm, onCancel = viewModel.restartQuestion::cancel)
 }
 
 // ---- before the job: the plan ----
@@ -310,9 +313,9 @@ private fun JobContent(
                 Text("$need what was installed.")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (result.restart == RestartKind.HMI) {
-                        Button(onClick = { viewModel.restart("hmi") }, enabled = uiState.connected) { Text("Restart iDrive now") }
+                        Button(onClick = viewModel::askRestart, enabled = uiState.connected) { Text("Restart iDrive now") }
                     } else {
-                        Button(onClick = { viewModel.restart("reboot") }, enabled = uiState.connected) { Text("Reboot now") }
+                        Button(onClick = viewModel::reboot, enabled = uiState.connected) { Text("Reboot now") }
                     }
                 }
             }
