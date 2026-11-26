@@ -5,9 +5,15 @@ package com.nbtapps.store.ui.menu
 import androidx.compose.material3.DrawerValue.Closed
 import androidx.compose.material3.DrawerValue.Open
 import com.nbtapps.store.MainDispatcherRule
+import com.nbtapps.store.data.jobs.ConnectionState
 import com.nbtapps.store.data.ssh.SshEntry
+import com.nbtapps.store.data.ssh.SshFixtures
 import com.nbtapps.store.data.ssh.SshPortState
 import com.nbtapps.store.data.ssh.SshTunnel
+import com.nbtapps.store.data.terminal.TerminalState
+import com.nbtapps.store.model.TcpEndpoint
+import com.nbtapps.store.ui.restart.RestartQuestions
+import com.nbtapps.store.ui.restart.RestartStep
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
@@ -19,7 +25,8 @@ import org.junit.Test
 
 /**
  * When the side menu counts as in sight, and when it has to close for the screen on top; its section for the head unit
- * the app is connected to, with the SSH entry in each state, where a tap on it goes, and its view model.
+ * the app is connected to, with the SSH entry and Restart iDrive in each state, where a tap on them goes, and its view
+ * model.
  */
 class SideMenuTest {
 
@@ -99,10 +106,67 @@ class SideMenuTest {
         )
     }
 
+    // ---- Restart iDrive ----
+
+    @Test
+    fun `with no link up, Restart iDrive is greyed, says to connect first, and opens the Head units tab`() {
+        val notConnected = listOf(
+            ConnectionState.Disconnected,
+            ConnectionState.Connecting("car"),
+            ConnectionState.NeedsPairing("car", TcpEndpoint("192.0.2.1", 7144), stale = false),
+            ConnectionState.Failed("car", "The car didn't connect to this app."),
+        )
+        notConnected.forEach { connection ->
+            val item = restartMenuItem(connection)
+            assertEquals("$connection", RestartMenuItem(null), item)
+            assertTrue(item.greyed)
+            assertEquals("Connect to a head unit first", item.line)
+        }
+    }
+
+    @Test
+    fun `with a link up, Restart iDrive asks about that head unit, with or without SSH there`() {
+        val withSsh = SshFixtures.connected("car")
+        val noPackage = SshFixtures.connected("car", ssh = null)
+        val noChannels = SshFixtures.connected("car", channels = false)
+        listOf(withSsh, noPackage, noChannels).forEach { connection ->
+            val item = restartMenuItem(connection)
+            assertEquals(RestartMenuItem("car"), item)
+            assertFalse(item.greyed)
+            assertEquals(null, item.line)
+        }
+    }
+
+    private val connection = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+
+    private fun viewModel(entry: MutableStateFlow<SshEntry> = MutableStateFlow(SshEntry.NotConnected)) = mainDispatcherRule.track(
+        SideMenuViewModel(
+            entry,
+            connection,
+            RestartQuestions(connection, MutableStateFlow(TerminalState.Idle), MutableStateFlow(SshPortState.Off()), { Result.success(Unit) }),
+        ),
+    )
+
+    @Test
+    fun `the view model's Restart iDrive follows the link, and its tap asks the question or says to open Head units`() = runTest {
+        val viewModel = viewModel()
+        backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.restartItem.collect {} }
+        assertEquals(RestartMenuItem(null), viewModel.restartItem.value)
+        assertFalse("greyed: Head units opens", viewModel.tapRestart(viewModel.restartItem.value))
+        assertEquals(RestartStep.Closed, viewModel.restart.state.value)
+
+        connection.value = SshFixtures.connected("car", ssh = null)
+        assertEquals(RestartMenuItem("car"), viewModel.restartItem.value)
+        assertTrue(viewModel.tapRestart(viewModel.restartItem.value))
+        assertEquals(RestartStep.Asking("car", terminalOpen = false, portOpen = false), viewModel.restart.state.value)
+        assertTrue("a second tap leaves the one question", viewModel.tapRestart(viewModel.restartItem.value))
+        assertEquals(RestartStep.Asking("car", terminalOpen = false, portOpen = false), viewModel.restart.state.value)
+    }
+
     @Test
     fun `the view model follows the entry`() = runTest {
         val entry = MutableStateFlow<SshEntry>(SshEntry.NotConnected)
-        val viewModel = mainDispatcherRule.track(SideMenuViewModel(entry))
+        val viewModel = viewModel(entry)
         assertEquals(sshMenuItem(SshEntry.NotConnected), viewModel.ssh.value)
         backgroundScope.launch(mainDispatcherRule.testDispatcher) { viewModel.ssh.collect {} }
         entry.value = SshEntry.Ready("car", "Test car", on = true)

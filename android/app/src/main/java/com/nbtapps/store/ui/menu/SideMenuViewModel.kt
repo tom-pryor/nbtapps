@@ -4,9 +4,13 @@ package com.nbtapps.store.ui.menu
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.nbtapps.store.data.jobs.ConnectionState
+import com.nbtapps.store.data.jobs.JobRepository
 import com.nbtapps.store.data.ssh.SshAccess
 import com.nbtapps.store.data.ssh.SshEntry
 import com.nbtapps.store.data.ssh.SshTunnel
+import com.nbtapps.store.ui.restart.RestartQuestion
+import com.nbtapps.store.ui.restart.RestartQuestions
 import com.nbtapps.store.ui.ssh.SSH_CANT_RUN
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -58,13 +62,52 @@ fun sshMenuItem(entry: SshEntry): SshMenuItem = when (entry) {
     is SshEntry.Ready -> SshMenuItem(entry.name, entry.line, greyed = false, install = false, dot = entry.on == true, SshMenuTarget.Ssh(entry.headUnitId))
 }
 
-/** The side menu's view model: its section for the connected head unit, from the app's SSH switch ([SshAccess.entry]). */
+/**
+ * The menu's entry Restart iDrive, under SSH. With a link up, to [headUnitId], it asks first whether to restart iDrive
+ * there, whether SSH is there or not; with none it is [greyed], though it may still be tapped, [line] says to connect
+ * first, and a tap opens the Head units tab, as the SSH entry's does then.
+ */
+data class RestartMenuItem(val headUnitId: String?) {
+    val greyed: Boolean get() = headUnitId == null
+    val line: String? get() = CONNECT_FIRST.takeIf { greyed }
+}
+
+/** The menu's entry Restart iDrive for [connection]: see [RestartMenuItem]. A link being made or waiting for pairing is none. */
+fun restartMenuItem(connection: ConnectionState): RestartMenuItem = RestartMenuItem((connection as? ConnectionState.Connected)?.headUnitId)
+
+/**
+ * The side menu's view model: its section for the connected head unit, from the app's SSH switch ([SshAccess.entry])
+ * and the app's link, and the question before iDrive restarts that its entry Restart iDrive asks, which stays once
+ * the menu has closed.
+ */
 @HiltViewModel
-class SideMenuViewModel internal constructor(entry: StateFlow<SshEntry>) : ViewModel() {
+class SideMenuViewModel internal constructor(
+    entry: StateFlow<SshEntry>,
+    /** The app's link: [JobRepository.connection]. */
+    connection: StateFlow<ConnectionState>,
+    restarts: RestartQuestions,
+) : ViewModel() {
 
     @Inject
-    constructor(access: SshAccess) : this(access.entry)
+    constructor(access: SshAccess, jobs: JobRepository, restarts: RestartQuestions) : this(access.entry, jobs.connection, restarts)
 
     val ssh: StateFlow<SshMenuItem> =
         entry.map(::sshMenuItem).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), sshMenuItem(entry.value))
+
+    /** The entry Restart iDrive. */
+    val restartItem: StateFlow<RestartMenuItem> =
+        connection.map(::restartMenuItem).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), restartMenuItem(connection.value))
+
+    /** The question its tap asks. */
+    val restart: RestartQuestion = restarts.question(viewModelScope)
+
+    /**
+     * A tap on Restart iDrive, as the menu showed it ([item]): asks the question about its head unit and says so, or,
+     * greyed, says that the Head units tab is to be opened in its place.
+     */
+    fun tapRestart(item: RestartMenuItem): Boolean {
+        val id = item.headUnitId ?: return false
+        restart.ask(id)
+        return true
+    }
 }
