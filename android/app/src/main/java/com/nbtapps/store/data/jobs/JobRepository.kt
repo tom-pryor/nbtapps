@@ -1446,8 +1446,12 @@ class JobRepository(
         else -> SettingsFailure.LinkLost(e.message ?: "The link to the head unit was lost")
     }
 
-    /** Restarts iDrive ([kind] `hmi`) or the whole head unit (`reboot`). */
-    suspend fun restart(kind: String): Result<Unit> = withSession { current -> current.client.restart(kind) }
+    /**
+     * Restarts iDrive ([kind] `hmi`) or the whole head unit (`reboot`) on the head unit [headUnitId]: only where the link
+     * in use is to that head unit, as [usingSession] checks with the session the request goes over, so that a question
+     * asked of one head unit never restarts another that connected meanwhile. Elsewhere it fails as with no link.
+     */
+    suspend fun restart(headUnitId: String, kind: String): Result<Unit> = usingSession(headUnitId) { it.client.restart(kind) }
 
     /**
      * Has the car end this phone's Bluetooth serial link (`serial.reset`), which the agent closing its end does not

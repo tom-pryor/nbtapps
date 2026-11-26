@@ -333,7 +333,7 @@ class RealAgentTest {
         assertEquals(JobState.SUCCEEDED, result.job.state)
         assertEquals("hmi-restart", result.job.result?.restart)
         await(jobs.connection, "the restart need") { (it as? ConnectionState.Connected)?.info?.restartNeeded == "hmi-restart" }
-        assertTrue(jobs.restart("hmi").isSuccess)
+        assertTrue(jobs.restart("bench", "hmi").isSuccess)
 
         // A package that writes outside its own folders is flagged, and asks for a reboot.
         val tweaks = planInstall("org.nbtapp.menutweaks", "1.0.1")

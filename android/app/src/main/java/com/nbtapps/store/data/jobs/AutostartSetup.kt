@@ -316,18 +316,19 @@ class AutostartSetup(
     }
 
     /**
-     * Asks the agent to restart iDrive, once the set-up is done: the plugin is loaded only then. That restarts the
-     * whole head unit, and the link with it; the app does not connect again by itself. A refusal is shown in
-     * [AutostartStep.Done.restartError].
+     * Asks the agent of the head unit that was set up to restart iDrive, once the set-up is done: the plugin is loaded
+     * only then. That restarts the whole head unit, and the link with it; the app does not connect again by itself. A
+     * refusal, or a link that is now to another head unit, is shown in [AutostartStep.Done.restartError].
      */
     fun restart() {
         synchronized(lock) {
-            val done = current.value?.step as? AutostartStep.Done ?: return
+            val last = current.value ?: return
+            val done = last.step as? AutostartStep.Done ?: return
             if (underWay) return
             val mine = ++generation
             publish(mine, done.copy(restartError = null))
             work = scope.launch {
-                val failure = jobs.restart("hmi").exceptionOrNull()
+                val failure = jobs.restart(last.headUnitId, "hmi").exceptionOrNull()
                 finish(mine, if (failure == null) AutostartStep.Restarting else done.copy(restartError = failure.message ?: "The head unit didn't answer"))
             }
         }
