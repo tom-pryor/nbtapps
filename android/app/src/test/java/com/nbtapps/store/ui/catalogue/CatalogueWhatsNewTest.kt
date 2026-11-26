@@ -18,6 +18,7 @@ import com.nbtapps.store.data.update.release
 import com.nbtapps.store.data.whatsnew.VersionNotes
 import com.nbtapps.store.data.whatsnew.WhatsNewRepository
 import com.nbtapps.store.data.whatsnew.WhatsNewSettings
+import com.nbtapps.store.data.whatsnew.WhatsNewStep
 import com.nbtapps.store.data.whatsnew.whatsNewStore
 import com.nbtapps.store.model.CatalogueIndex
 import com.nbtapps.store.model.CatalogueSourceInfo
@@ -139,13 +140,15 @@ class CatalogueWhatsNewTest {
         assertEquals(thisNotes, first.whatsNew.await("the sheet") { it != null })
         first.dismissWhatsNew()
         assertNull(first.whatsNew.value)
-        assertEquals(WhatsNewSettings(seen = 100, notes = listOf(thisNotes)), store.data.await("the version seen") { it.seen == 100L })
+        // The version seen and the notes kept are two writes, in either order: wait for both.
+        val saved = WhatsNewSettings(seen = 100, notes = listOf(thisNotes))
+        assertEquals(saved, store.data.await("the version seen, with its notes kept") { it == saved })
 
         // As the next start of the app finds it: the catalogue in memory, the store on the phone.
         val later = WhatsNewRepository(catalogue, store, RUNNING, scope)
         val second = viewModel(later.toShow, later::markSeen)
         collect(second)
-        later.step.await("the later step") { it != null }
+        assertEquals(WhatsNewStep.Nothing, later.step.await("the later step") { it != null })
         assertNull(second.whatsNew.value)
     }
 }
