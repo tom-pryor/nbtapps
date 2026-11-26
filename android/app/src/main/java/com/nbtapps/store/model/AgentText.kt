@@ -61,6 +61,15 @@ object AgentText {
     }
 
     /**
+     * For the `error` of `system.restart`: the agent refuses it as `busy` while a job runs, while a restart is on its
+     * way and while the agent is on trial.
+     */
+    fun restartRefusal(code: String): String = when (code) {
+        "busy" -> "The head unit is busy with a job or a restart. Try again when it's done."
+        else -> request(code)
+    }
+
+    /**
      * For the `error` of `settings.get` and `settings.set`, where the app has no state of its own for it: `busy`,
      * `unsupported`, `not-found` and `invalid` each have one, with its own words (see
      * [com.nbtapps.store.data.settings.SettingsFailure]), and never come here.
