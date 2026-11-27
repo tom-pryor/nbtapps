@@ -15,11 +15,15 @@
 
 #include "../../src/phone_screens.hpp"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <map>
@@ -284,6 +288,87 @@ static void testCrc() {
     CHECK(plugin::crc32(0, data.data(), data.size()) == nbt::crc32(0, data.data(), data.size()));
     uint32_t parts = plugin::crc32(plugin::crc32(0, data.data(), 1234), data.data() + 1234, data.size() - 1234);
     CHECK(parts == nbt::crc32(0, data.data(), data.size()));
+}
+
+// The lowest file number that is free: the same before and after a call that leaves nothing open.
+static int lowestFree() {
+    int fd = dup(0);
+    CHECK(fd >= 0);
+    close(fd);
+    return fd;
+}
+
+// A listening socket at `path`, made here and not by the agent, so that the test chooses its backlog.
+static int rawListener(const std::string& path, int backlog) {
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof address);
+    address.sun_family = AF_UNIX;
+    CHECK(path.size() < sizeof address.sun_path);
+    memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(fd >= 0 && bind(fd, (struct sockaddr*)&address, sizeof address) == 0 && listen(fd, backlog) == 0);
+    return fd;
+}
+
+// A connect that is not made at once is no agent, and so is a path with no socket at it: QuietLocalLink::connectTo
+// never waits, and leaves nothing open when it fails.
+static void testConnect() {
+    std::string why;
+    const int freeBefore = lowestFree();
+    // No file at the path: it fails before it makes a socket.
+    const std::string missing = gSocketDir + "/missing.sock";
+    CHECK(QuietLocalLink::connectTo(missing, &why) == 0);
+    CHECK_IN(why, why.find("no socket at " + missing) == 0);
+    // A plain file at the path: the same.
+    const std::string plain = gSocketDir + "/plain.sock";
+    CHECK_IN(why, fs::writeFile(plain, "not a socket\n", 0644, &why));
+    CHECK(QuietLocalLink::connectTo(plain, &why) == 0);
+    CHECK_IN(why, why == plain + " is not a socket");
+    // A socket that nobody listens on any more: refused at once.
+    const std::string stale = gSocketDir + "/stale.sock";
+    close(rawListener(stale, 1));
+    CHECK(QuietLocalLink::connectTo(stale, &why) == 0);
+    CHECK_IN(why, why.find("cannot connect to " + stale + " at once") == 0);
+    CHECK(lowestFree() == freeBefore);
+
+    // A listener that takes no link off its backlog, which is full: the connect comes back at once with no link,
+    // where a blocking one would wait for the listener. The alarm is there only to end the test if it does wait.
+    const std::string full = gSocketDir + "/full.sock";
+    int listener = rawListener(full, 0);
+    std::vector<int> queued;
+    for (int i = 0; i < 64; ++i) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(fd >= 0 && fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
+        struct sockaddr_un address;
+        memset(&address, 0, sizeof address);
+        address.sun_family = AF_UNIX;
+        memcpy(address.sun_path, full.c_str(), full.size() + 1);
+        if (connect(fd, (struct sockaddr*)&address, sizeof address) != 0) {
+            CHECK(errno == EAGAIN || errno == EWOULDBLOCK);
+            close(fd);
+            break;
+        }
+        queued.push_back(fd);
+    }
+    CHECK(!queued.empty() && queued.size() < 64);
+    const int freeNow = lowestFree();
+    alarm(20);
+    QuietLocalLink* link = QuietLocalLink::connectTo(full, &why);
+    alarm(0);
+    CHECK(link == 0);
+    CHECK_IN(why, why.find("cannot connect to " + full + " at once") == 0);
+    CHECK(lowestFree() == freeNow);
+    // With room again, the same path connects, and the link's socket does not wait and is not handed on.
+    close(listener);
+    for (size_t i = 0; i < queued.size(); ++i) close(queued[i]);
+    unlink(full.c_str());
+    listener = rawListener(full, 4);
+    link = QuietLocalLink::connectTo(full, &why);
+    CHECK_IN(why, link != 0);
+    CHECK((fcntl(link->fd(), F_GETFL, 0) & O_NONBLOCK) != 0 && (fcntl(link->fd(), F_GETFD, 0) & FD_CLOEXEC) != 0);
+    delete link;
+    close(listener);
+    CHECK(lowestFree() == freeBefore);
 }
 
 static void testPair() {
@@ -828,6 +913,7 @@ int main(int argc, char** argv) {
     CHECK_IN(why, fs::removeTree(gSocketDir, &why) && mkdir(dir, 0700) == 0);
 
     testCrc();
+    testConnect();
     testPair();
     testForget();
     testReset();
