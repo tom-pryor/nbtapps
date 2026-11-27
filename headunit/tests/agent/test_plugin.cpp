@@ -796,6 +796,132 @@ static void testStart() {
     }
 }
 
+// The app's timer: the ticks the screens asked for, one on its way at most, run when the test says.
+class FakeTimer : public TickTimer {
+public:
+    FakeTimer() : pending(false) {}
+    virtual void post(unsigned ms) {
+        CHECK(!pending);
+        pending = true;
+        asked.push_back(ms);
+    }
+    // The tick that is on its way comes.
+    void fire(MenuScreens* menu) {
+        CHECK(pending);
+        pending = false;
+        menu->tick();
+    }
+    // What was asked for since the last call, joined by ", ": "0, 200".
+    std::string take() {
+        std::string all;
+        for (size_t i = 0; i < asked.size(); ++i) {
+            char ms[16];
+            snprintf(ms, sizeof ms, "%u", asked[i]);
+            all += (i == 0 ? "" : ", ") + std::string(ms);
+        }
+        asked.clear();
+        return all;
+    }
+    bool pending;
+    std::vector<unsigned> asked;
+};
+
+// The ticks that come one after another, with the agent's turns between them, `most` at most.
+static void ticks(MenuScreens* menu, FakeTimer* timer, Car* car, int most) {
+    for (int i = 0; i < most && timer->pending; ++i) {
+        if (car != 0) car->agent.turn(0);
+        timer->fire(menu);
+    }
+}
+
+// The screens as the app drives them: a press does nothing but ask for a tick at once, and that tick does what
+// the press asks.
+static void testPresses() {
+    View view;
+    FakeStarter starter;
+    {
+        Car car("presses");
+        PairedPhone phone;
+        phone.id = std::string(32, '1');
+        phone.name = "Test phone";
+        std::string why;
+        CHECK_IN(why, car.agent.phones().put(phone, &why));
+        FakeTimer timer;
+        MenuScreens menu(car.socket, &view, &view, &view, &view, &view, &starter, &timer);
+        menu.forgetShown();
+        CHECK(view.take() == "forget ask" && timer.take().empty());
+        // The press: nothing shown, no link, nothing sent, and a tick asked for at once.
+        menu.forgetPressed();
+        car.agent.turn(0);
+        CHECK(view.take().empty() && timer.take() == "0" && menu.forget().status() == kForgetAsk);
+        CHECK(!menu.forget().wantsTick() && car.agent.sessions() == 0 && car.agent.phones().all().size() == 1);
+        // Pressed again before the tick has come: the same press, and no second tick.
+        menu.forgetPressed();
+        CHECK(view.take().empty() && timer.take().empty());
+        // The tick does it, and the screen's own tick comes kScreenTickMs after that, as it did after a press.
+        timer.fire(&menu);
+        CHECK(view.take() == "forget working" && timer.take() == "200" && menu.forget().wantsTick());
+        ticks(&menu, &timer, &car, 12);
+        CHECK(view.take() == "forget done" && !timer.pending && car.agent.phones().all().empty());
+        timer.take();
+        // Pressed, and left before the tick: the press is dropped with its showing.
+        menu.forgetShown();
+        menu.forgetPressed();
+        menu.forgetHidden();
+        CHECK(view.take() == "forget ask" && timer.take() == "0");
+        timer.fire(&menu);
+        car.agent.turn(0);
+        CHECK(view.take().empty() && !timer.pending && menu.forget().status() == kForgetAsk && car.agent.sessions() == 0);
+    }
+    // No agent: each press shows its "no agent" only when its tick comes.
+    FakeTimer timer;
+    MenuScreens menu(gSocketDir + "/nobody.sock", &view, &view, &view, &view, &view, &starter, &timer);
+    menu.forgetShown();
+    menu.forgetPressed();
+    CHECK(view.take() == "forget ask" && timer.take() == "0");
+    timer.fire(&menu);
+    CHECK(view.take() == "forget no-agent" && !timer.pending);
+    menu.resetShown();
+    menu.resetPressed();
+    CHECK(view.take() == "reset ask" && timer.take() == "0");
+    timer.fire(&menu);
+    CHECK(view.take() == "reset no-agent" && !timer.pending);
+    // A press the screen has nothing to do with is a tick that does nothing, as the press did before.
+    menu.resetPressed();
+    timer.fire(&menu);
+    CHECK(view.take().empty() && timer.take() == "0" && !timer.pending);
+    menu.stopShown();
+    menu.stopPressed();
+    CHECK(view.take() == "stop ask" && timer.take() == "0");
+    timer.fire(&menu);
+    CHECK(view.take() == "stop no-agent" && !timer.pending);
+    // Start: the launcher is not started by the press, but by its tick.
+    menu.startShown();
+    CHECK(view.take() == "start checking, start ask" && timer.take().empty());
+    starter.result = kLaunched;
+    menu.startPressed();
+    CHECK(view.take().empty() && starter.calls == 0 && timer.take() == "0");
+    timer.fire(&menu);
+    CHECK(view.take() == "start starting" && starter.calls == 1 && timer.take() == "200");
+    // A press while a tick is on its way: that tick does it, and no screen's tick, so the start's wait goes on
+    // from where it was.
+    menu.resetShown();
+    menu.resetPressed();
+    CHECK(view.take() == "reset ask" && timer.take().empty());
+    timer.fire(&menu);
+    CHECK(view.take() == "reset no-agent" && timer.take() == "200" && menu.start().status() == kStartStarting);
+    ticks(&menu, &timer, 0, kStartWaitTicks - 1);
+    CHECK(view.take().empty() && timer.pending && menu.start().status() == kStartStarting);
+    ticks(&menu, &timer, 0, 1);
+    CHECK(view.take() == "start failed" && !timer.pending);
+    timer.take();
+    // Taken down with a press waiting: it is not done.
+    menu.startPressed();
+    menu.closeLinks();
+    timer.fire(&menu);
+    CHECK(view.take().empty() && starter.calls == 1 && !timer.pending);
+}
+
 // An agent that is not there, one that goes, one that says nothing, and one that will not have the plugin.
 static void testNoAgent() {
     View view;
@@ -921,6 +1047,7 @@ int main(int argc, char** argv) {
     testStop();
     testStopAnswers();
     testStart();
+    testPresses();
     testNoAgent();
 
     fs::removeTree(gSocketDir, 0);

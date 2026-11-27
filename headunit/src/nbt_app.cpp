@@ -30,6 +30,11 @@
 // time. This file is the part that needs the HU Framework: it hears when a state is shown and left, turns what a
 // screen has to say into texts of the text DB, and runs the timer the screens are driven by.
 //
+// The HMI calls all of this, handlers, timer and create(), on one thread of its own, the one that also drives the
+// iDrive screen, so nothing here may wait: a call that waited would stop all of iDrive until it returned. A handler
+// of a press only records it and has the timer tick at once, and the tick does what the press asks
+// (phone_screens.hpp, MenuScreens).
+//
 // The HMI shows texts of the text DB only, so everything a screen can say is a text there (tools/make_db.py), and
 // a model is pointed at another text to change what a row reads. The code's two halves are two of the thousand
 // texts "000" to "999".
@@ -210,7 +215,16 @@ void tickRun(void*);
 void* g_tickVtbl[2 + 3] = {0, 0, reinterpret_cast<void*>(&tickDestroy), reinterpret_cast<void*>(&tickDestroy),
                            reinterpret_cast<void*>(&tickRun)};
 TickRunnable g_tick = {g_tickVtbl + 2};
-bool g_tickQueued = false;
+
+// The screens' timer: the one runnable above, posted to the app. nbt::MenuScreens posts it once at a time.
+class AppTimer : public nbt::TickTimer {
+public:
+    explicit AppTimer(bmw::PluginApp* app) : app_(app) {}
+    virtual void post(unsigned ms) { app_->post(reinterpret_cast<bmw::Runnable*>(&g_tick), ms); }
+
+private:
+    bmw::PluginApp* app_;
+};
 
 // ---- the start by hand --------------------------------------------------------------------------------------------
 // What the Start the agent screen starts: the launcher, as agent_start.hpp starts it by hand, with no wait.
@@ -230,72 +244,13 @@ public:
 };
 
 // ---- the screens ---------------------------------------------------------------------------------------------------
+// The views of the screens, which turn what a screen says into texts of the text DB. What the screens do, and when,
+// is nbt::MenuScreens (phone_screens.hpp), which the handlers below drive.
 class Screens : public nbt::PairView, public nbt::ForgetView, public nbt::StartView, public nbt::ResetView,
                 public nbt::StopView {
 public:
     explicit Screens(bmw::PluginApp* app)
-        : app_(app), pair_(nbt::kHeadUnitSocket, this), forget_(nbt::kHeadUnitSocket, this),
-          start_(nbt::kHeadUnitSocket, this, &starter_), reset_(nbt::kHeadUnitSocket, this),
-          stop_(nbt::kHeadUnitSocket, this) {}
-
-    // A state of ours is shown (or has the focus), or was left.
-    void pairShown() {
-        // Told twice, as visible and as focused, it is one showing: the code on the screen stays.
-        if (!pair_.wantsTick() || (pair_.status() != nbt::kPairAsking && pair_.status() != nbt::kPairCode)) pair_.shown();
-        arm();
-    }
-    void pairHidden() { pair_.hidden(); }
-    void forgetShown() {
-        if (forget_.status() != nbt::kForgetWorking) forget_.shown();
-    }
-    void forgetHidden() { forget_.hidden(); }
-    void startShown() {
-        start_.shown();
-        arm();
-    }
-    void startHidden() { start_.hidden(); }
-    void resetShown() {
-        if (reset_.status() != nbt::kResetWorking) reset_.shown();
-    }
-    void resetHidden() { reset_.hidden(); }
-    void stopShown() {
-        // Told twice while it waits for the agent, it is one showing.
-        if (stop_.status() != nbt::kStopWorking && stop_.status() != nbt::kStopStopping) stop_.shown();
-    }
-    void stopHidden() { stop_.hidden(); }
-    // The app is being taken down: no link to the agent outlasts it.
-    void closeLinks() {
-        pair_.hidden();
-        forget_.hidden();
-        start_.hidden();
-        reset_.hidden();
-        stop_.hidden();
-    }
-    void forgetPressed() {
-        forget_.confirmed();
-        arm();
-    }
-    void startPressed() {
-        start_.pressed();
-        arm();
-    }
-    void resetPressed() {
-        reset_.pressed();
-        arm();
-    }
-    void stopPressed() {
-        stop_.pressed();
-        arm();
-    }
-
-    void tick() {
-        pair_.tick();
-        forget_.tick();
-        start_.tick();
-        reset_.tick();
-        stop_.tick();
-        arm();
-    }
+        : app_(app), timer_(app), menu(nbt::kHeadUnitSocket, this, this, this, this, this, &starter_, &timer_) {}
 
     // PairView
     virtual void pairShow(nbt::PairStatus status, const std::string& code) {
@@ -401,23 +356,12 @@ public:
     }
 
 private:
-    // Keeps the timer running for as long as a screen has a link to the agent, and not a tick longer.
-    void arm() {
-        if (g_tickQueued ||
-            !(pair_.wantsTick() || forget_.wantsTick() || start_.wantsTick() || reset_.wantsTick() || stop_.wantsTick())) {
-            return;
-        }
-        g_tickQueued = true;
-        app_->post(reinterpret_cast<bmw::Runnable*>(&g_tick), nbt::kScreenTickMs);
-    }
-
     bmw::PluginApp* app_;
-    nbt::PairScreen pair_;
-    nbt::ForgetScreen forget_;
-    HandStarter starter_;   // before start_, which is handed it
-    nbt::StartScreen start_;
-    nbt::ResetScreen reset_;
-    nbt::StopScreen stop_;
+    HandStarter starter_;   // these two before menu, which is handed them
+    AppTimer timer_;
+
+public:
+    nbt::MenuScreens menu;
 };
 
 Screens* g_screens = NULL;
@@ -430,10 +374,7 @@ Screens* g_screens = NULL;
         } catch (...) { alog("%s: failed", what); }          \
     } while (0)
 
-void tickRun(void*) {
-    g_tickQueued = false;
-    NBT_GUARDED("tick", g_screens->tick());
-}
+void tickRun(void*) { NBT_GUARDED("tick", g_screens->menu.tick()); }
 
 bool readFlag(const bmw::Parcel& parcel) {
     bool value = false;
@@ -444,8 +385,8 @@ bool readFlag(const bmw::Parcel& parcel) {
 bool onPairVisible(void*, const bmw::Parcel& parcel) {
     bool visible = readFlag(parcel);
     alog("state %u: visible=%d", kPairState, (int)visible);
-    if (visible) NBT_GUARDED("pair shown", g_screens->pairShown());
-    else NBT_GUARDED("pair hidden", g_screens->pairHidden());
+    if (visible) NBT_GUARDED("pair shown", g_screens->menu.pairShown());
+    else NBT_GUARDED("pair hidden", g_screens->menu.pairHidden());
     return true;
 }
 
@@ -453,63 +394,63 @@ bool onPairFocus(void*, const bmw::Parcel& parcel) {
     bool focus = readFlag(parcel);
     alog("state %u: focus=%d", kPairState, (int)focus);
     // Losing the focus is not leaving: only `visible` closes the window.
-    if (focus) NBT_GUARDED("pair focus", g_screens->pairShown());
+    if (focus) NBT_GUARDED("pair focus", g_screens->menu.pairShown());
     return true;
 }
 
 bool onForgetVisible(void*, const bmw::Parcel& parcel) {
     bool visible = readFlag(parcel);
     alog("state %u: visible=%d", kForgetState, (int)visible);
-    if (visible) NBT_GUARDED("forget shown", g_screens->forgetShown());
-    else NBT_GUARDED("forget hidden", g_screens->forgetHidden());
+    if (visible) NBT_GUARDED("forget shown", g_screens->menu.forgetShown());
+    else NBT_GUARDED("forget hidden", g_screens->menu.forgetHidden());
     return true;
 }
 
 bool onStartVisible(void*, const bmw::Parcel& parcel) {
     bool visible = readFlag(parcel);
     alog("state %u: visible=%d", kStartState, (int)visible);
-    if (visible) NBT_GUARDED("start shown", g_screens->startShown());
-    else NBT_GUARDED("start hidden", g_screens->startHidden());
+    if (visible) NBT_GUARDED("start shown", g_screens->menu.startShown());
+    else NBT_GUARDED("start hidden", g_screens->menu.startHidden());
     return true;
 }
 
 bool onStartPressed(void*, const bmw::Parcel&) {
     alog("action %u: start the agent", kStartAction);
-    NBT_GUARDED("start pressed", g_screens->startPressed());
+    NBT_GUARDED("start pressed", g_screens->menu.startPressed());
     return true;
 }
 
 bool onForgetPressed(void*, const bmw::Parcel&) {
     alog("action %u: forget all phones", kForgetAction);
-    NBT_GUARDED("forget pressed", g_screens->forgetPressed());
+    NBT_GUARDED("forget pressed", g_screens->menu.forgetPressed());
     return true;
 }
 
 bool onResetVisible(void*, const bmw::Parcel& parcel) {
     bool visible = readFlag(parcel);
     alog("state %u: visible=%d", kResetState, (int)visible);
-    if (visible) NBT_GUARDED("reset shown", g_screens->resetShown());
-    else NBT_GUARDED("reset hidden", g_screens->resetHidden());
+    if (visible) NBT_GUARDED("reset shown", g_screens->menu.resetShown());
+    else NBT_GUARDED("reset hidden", g_screens->menu.resetHidden());
     return true;
 }
 
 bool onResetPressed(void*, const bmw::Parcel&) {
     alog("action %u: reset bluetooth link", kResetAction);
-    NBT_GUARDED("reset pressed", g_screens->resetPressed());
+    NBT_GUARDED("reset pressed", g_screens->menu.resetPressed());
     return true;
 }
 
 bool onStopVisible(void*, const bmw::Parcel& parcel) {
     bool visible = readFlag(parcel);
     alog("state %u: visible=%d", kStopState, (int)visible);
-    if (visible) NBT_GUARDED("stop shown", g_screens->stopShown());
-    else NBT_GUARDED("stop hidden", g_screens->stopHidden());
+    if (visible) NBT_GUARDED("stop shown", g_screens->menu.stopShown());
+    else NBT_GUARDED("stop hidden", g_screens->menu.stopHidden());
     return true;
 }
 
 bool onStopPressed(void*, const bmw::Parcel&) {
     alog("action %u: stop the agent", kStopAction);
-    NBT_GUARDED("stop pressed", g_screens->stopPressed());
+    NBT_GUARDED("stop pressed", g_screens->menu.stopPressed());
     return true;
 }
 
@@ -547,7 +488,7 @@ void appOnError(bmw::PluginApp* /*self*/, unsigned code, const bmw::BasicString<
 
 void appOnFinalize(bmw::PluginApp* self) {
     alog("onFinalize");
-    NBT_GUARDED("finalize", g_screens->closeLinks());
+    NBT_GUARDED("finalize", g_screens->menu.closeLinks());
     self->onFinalize();
 }
 
