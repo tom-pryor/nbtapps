@@ -11,6 +11,9 @@
 
 #include "../../src/agent_start.hpp"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -55,6 +58,51 @@ static std::vector<int64_t> times(int64_t a, int64_t b = -1, int64_t c = -1, int
     if (d >= 0) v.push_back(d);
     return v;
 }
+
+// Hears how a start on a thread of its own came out, as the plugin's log does.
+class Heard : public StartReport {
+public:
+    Heard() {
+        pthread_mutex_init(&mu_, NULL);
+        pthread_cond_init(&cv_, NULL);
+    }
+    ~Heard() {
+        pthread_cond_destroy(&cv_);
+        pthread_mutex_destroy(&mu_);
+    }
+    virtual void startedWithHeadUnit(const Outcome& outcome) {
+        pthread_mutex_lock(&mu_);
+        outcomes_.push_back(outcome);
+        pthread_cond_broadcast(&cv_);
+        pthread_mutex_unlock(&mu_);
+    }
+    // The n-th outcome heard (from 1), once it has come. A start's thread tells its outcome before it ends, so the
+    // limit only ends a test that would otherwise hang.
+    Outcome waitFor(size_t n) {
+        pthread_mutex_lock(&mu_);
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_sec += 30;
+        while (outcomes_.size() < n) {
+            if (pthread_cond_timedwait(&cv_, &mu_, &until) == ETIMEDOUT) break;
+        }
+        CHECK(outcomes_.size() >= n);
+        Outcome o = outcomes_[n - 1];
+        pthread_mutex_unlock(&mu_);
+        return o;
+    }
+    size_t count() {
+        pthread_mutex_lock(&mu_);
+        size_t n = outcomes_.size();
+        pthread_mutex_unlock(&mu_);
+        return n;
+    }
+
+private:
+    pthread_mutex_t mu_;
+    pthread_cond_t cv_;
+    std::vector<Outcome> outcomes_;
+};
 
 // Stands in for nbtagent: writes down that it was started and with what, runs for a moment, ends as stopped.
 static const char kAgent[] =
@@ -272,6 +320,66 @@ int main(int argc, char** argv) {
     CHECK(!has(testutil::readFile(work + "/ram/log/agent.log"), "waited"));
     CHECK(testutil::readFile(record) == "1790000000\n1790000020\n1790000030\n" && fs::kindOf(wanted) == fs::kNone);
     CHECK(unlink(paths.stopped.c_str()) == 0);
+
+    // 6. The start with the head unit on a thread of its own, as create() has it made: the same decisions in the
+    // same order, the same line for the log, told from that thread, and an owner that waits for it a time at most.
+    // The pipes below are what the test waits on; the alarm only ends a test that would otherwise hang.
+    alarm(120);
+    Heard heard;
+    put(wanted, "on\n");
+    StartThread* start = StartThread::begin(paths, now + 40, vars, &heard, &why);
+    CHECK_IN(why, start != 0);
+    CHECK(start->finish(30000));
+    o = heard.waitFor(1);
+    CHECK_IN(o.line, o.decision == kTooManyStarts && has(o.line, "NOT started: 3 starts with the head unit are on record"));
+    CHECK(unlink(wanted.c_str()) == 0);
+    // A folder of its own, whose launcher stands in for the starter and says what the record held when it was
+    // started: the start is on record before the launcher is started.
+    Paths alone = paths;
+    alone.home = work + "/thread";
+    alone.lock = work + "/thread-ram/launcher.pid";
+    alone.stopped = work + "/thread-ram/agent.stopped";
+    const std::string aloneRecord = alone.home + "/" + kAutostartBoots, seen = work + "/seen";
+    put(alone.home + "/" + kAutostartSwitch, "on\n");
+    put(alone.home + "/launcher", "cat \"$NBT_TEST_RECORD\" > \"$NBT_TEST_SEEN\"\n", 0755);
+    CHECK(mkfifo(seen.c_str(), 0600) == 0);
+    std::vector<std::string> aloneVars;
+    aloneVars.push_back("PATH=/usr/bin:/bin");
+    aloneVars.push_back("NBT_TEST_RECORD=" + aloneRecord);
+    aloneVars.push_back("NBT_TEST_SEEN=" + seen);
+    start = StartThread::begin(alone, now, aloneVars, &heard, &why);
+    CHECK_IN(why, start != 0);
+    CHECK(start->finish(30000));
+    o = heard.waitFor(2);
+    CHECK_IN(o.line, o.decision == kStarted && o.pid > 0 && has(o.line, "as start 1 of the 3"));
+    CHECK(testutil::readFile(seen) == "1790000000\n");
+    CHECK(waitpid((pid_t)o.pid, &status, 0) == (pid_t)o.pid);
+    // A launcher that cannot be started is not on record as a start, on this thread as anywhere.
+    Paths aloneNoShell = alone;
+    aloneNoShell.shell = work + "/no-such-shell";
+    start = StartThread::begin(aloneNoShell, now + 5, aloneVars, &heard, &why);
+    CHECK_IN(why, start != 0);
+    CHECK(start->finish(30000));
+    o = heard.waitFor(3);
+    CHECK_IN(o.line, o.decision == kNotStarted && has(o.line, "NOT started: cannot start "));
+    CHECK(testutil::readFile(aloneRecord) == "1790000000\n");
+    // The owner waits a time at most, and a thread that has not ended goes on and ends by itself. Here the record
+    // is a pipe, whose read waits until the test has opened it to write and closed it again: until then the thread
+    // cannot end.
+    CHECK(unlink(aloneRecord.c_str()) == 0 && mkfifo(aloneRecord.c_str(), 0600) == 0);
+    start = StartThread::begin(alone, now, aloneVars, &heard, &why);
+    CHECK_IN(why, start != 0);
+    CHECK(!start->finish(0));
+    CHECK(heard.count() == 3);
+    int writer = open(aloneRecord.c_str(), O_WRONLY);   // comes back once the thread has opened it to read
+    CHECK(writer >= 0 && close(writer) == 0);           // nothing in it: no start on record
+    // The thread writes its start to the pipe, which takes the bytes and cannot have them on a disk: not counted.
+    int reader = open(aloneRecord.c_str(), O_RDONLY | O_NONBLOCK);
+    CHECK(reader >= 0);
+    o = heard.waitFor(4);
+    CHECK_IN(o.line, o.decision == kNotCounted && has(o.line, "NOT started: this start cannot be put on record"));
+    CHECK(close(reader) == 0);
+    alarm(0);
 
     CHECK_IN(why, fs::removeTree(work, &why));
     printf("test_agent_start: ok\n");
