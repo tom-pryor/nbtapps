@@ -35,7 +35,11 @@
 // it.
 // An agent that does not answer within kScreenAnswerTicks of them is taken for not running.
 //
-// A screen is driven from the app's one thread. open() of a link is not called from inside a link's callback.
+// A screen is driven from the app's one thread, which is the HMI's thread that drives the iDrive screen as well:
+// a call of a screen's that waited would stop all of iDrive. MenuScreens, at the end of this file, is the five
+// together as the app drives them, and it has a press of a row do its work in a tick of its own, posted at once, so
+// that the HMI's handler of the press returns at once. open() of a link is not called from inside a link's
+// callback.
 // QNX 6.5 / GCC 4.4: no lambdas, nullptr or NSDMI.
 
 #include <string>
@@ -593,6 +597,169 @@ private:
     unsigned answerWait_;   // ticks since it was sent
     unsigned waited_;       // ticks since the start
     StartStatus status_;
+};
+
+// ---- the menu's screens together -----------------------------------------------------------------------------------
+
+// The app's timer, as the screens see it: one tick, `ms` from now. MenuScreens has one on its way at most.
+class TickTimer {
+public:
+    virtual ~TickTimer() {}
+    virtual void post(unsigned ms) = 0;
+};
+
+// The five screens as the app drives them: what it hears from the HMI, and its timer.
+//
+// A press of a row that does something (Forget them now, Start, Reset now, Stop it now) only records itself, and
+// asks for a tick at once (0 ms); that tick does what the press asks, and nothing else. So the HMI's handler of a
+// press returns at once, whatever the press leads to: the HMI runs it on the thread that drives the iDrive screen.
+// A second press of a row while its first waits for that tick is the same press, and one that comes while a tick
+// is on its way is done by that tick. A press whose screen is left before its tick has come is dropped: it was
+// a press on that showing.
+class MenuScreens {
+public:
+    MenuScreens(const std::string& socketPath, PairView* pairView, ForgetView* forgetView, StartView* startView,
+                ResetView* resetView, StopView* stopView, AgentStarter* starter, TickTimer* timer)
+        : timer_(timer), pair_(socketPath, pairView), forget_(socketPath, forgetView),
+          start_(socketPath, startView, starter), reset_(socketPath, resetView), stop_(socketPath, stopView),
+          queued_(false), forgetPress_(false), startPress_(false), resetPress_(false), stopPress_(false) {}
+
+    // A state of ours is shown (or has the focus), or was left.
+    void pairShown() {
+        // Told twice, as visible and as focused, it is one showing: the code on the screen stays.
+        if (!pair_.wantsTick() || (pair_.status() != kPairAsking && pair_.status() != kPairCode)) pair_.shown();
+        arm();
+    }
+    void pairHidden() { pair_.hidden(); }
+    void forgetShown() {
+        if (forget_.status() != kForgetWorking) forget_.shown();
+    }
+    void forgetHidden() {
+        forgetPress_ = false;
+        forget_.hidden();
+    }
+    void startShown() {
+        start_.shown();
+        arm();
+    }
+    void startHidden() {
+        startPress_ = false;
+        start_.hidden();
+    }
+    void resetShown() {
+        if (reset_.status() != kResetWorking) reset_.shown();
+    }
+    void resetHidden() {
+        resetPress_ = false;
+        reset_.hidden();
+    }
+    void stopShown() {
+        // Told twice while it waits for the agent, it is one showing.
+        if (stop_.status() != kStopWorking && stop_.status() != kStopStopping) stop_.shown();
+    }
+    void stopHidden() {
+        stopPress_ = false;
+        stop_.hidden();
+    }
+    // The app is being taken down: no link to the agent outlasts it, and no press is done after it.
+    void closeLinks() {
+        forgetPress_ = startPress_ = resetPress_ = stopPress_ = false;
+        pair_.hidden();
+        forget_.hidden();
+        start_.hidden();
+        reset_.hidden();
+        stop_.hidden();
+    }
+
+    // A row was pressed: recorded, for the next tick.
+    void forgetPressed() {
+        forgetPress_ = true;
+        arm();
+    }
+    void startPressed() {
+        startPress_ = true;
+        arm();
+    }
+    void resetPressed() {
+        resetPress_ = true;
+        arm();
+    }
+    void stopPressed() {
+        stopPress_ = true;
+        arm();
+    }
+
+    // The tick the app was asked for has come. One that has presses to do does those and no screen's tick, so that a
+    // screen's first tick after a press comes kScreenTickMs after it, as its waits count on.
+    void tick() {
+        queued_ = false;
+        if (!press()) {
+            pair_.tick();
+            forget_.tick();
+            start_.tick();
+            reset_.tick();
+            stop_.tick();
+        }
+        arm();
+    }
+
+    const PairScreen& pair() const { return pair_; }
+    const ForgetScreen& forget() const { return forget_; }
+    const StartScreen& start() const { return start_; }
+    const ResetScreen& reset() const { return reset_; }
+    const StopScreen& stop() const { return stop_; }
+
+private:
+    MenuScreens(const MenuScreens&);
+    MenuScreens& operator=(const MenuScreens&);
+
+    // Does the presses that are recorded; whether there were any. A screen's own status check is what ignores a
+    // press that has nothing to do, as it did when the press was done in the HMI's handler.
+    bool press() {
+        bool any = forgetPress_ || startPress_ || resetPress_ || stopPress_;
+        if (forgetPress_) {
+            forgetPress_ = false;
+            forget_.confirmed();
+        }
+        if (startPress_) {
+            startPress_ = false;
+            start_.pressed();
+        }
+        if (resetPress_) {
+            resetPress_ = false;
+            reset_.pressed();
+        }
+        if (stopPress_) {
+            stopPress_ = false;
+            stop_.pressed();
+        }
+        return any;
+    }
+
+    // Keeps the timer running for as long as a screen has a link to the agent, or a press waits, and not a tick
+    // longer. A press is done at once; a screen is ticked every kScreenTickMs.
+    void arm() {
+        if (queued_) return;
+        bool pressed = forgetPress_ || startPress_ || resetPress_ || stopPress_;
+        if (!pressed &&
+            !(pair_.wantsTick() || forget_.wantsTick() || start_.wantsTick() || reset_.wantsTick() || stop_.wantsTick())) {
+            return;
+        }
+        queued_ = true;
+        timer_->post(pressed ? 0 : kScreenTickMs);
+    }
+
+    TickTimer* timer_;
+    PairScreen pair_;
+    ForgetScreen forget_;
+    StartScreen start_;
+    ResetScreen reset_;
+    StopScreen stop_;
+    bool queued_;          // a tick is on its way
+    bool forgetPress_;     // presses that wait for it
+    bool startPress_;
+    bool resetPress_;
+    bool stopPress_;
 };
 
 }  // namespace nbt
