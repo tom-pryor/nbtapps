@@ -9,6 +9,6 @@
 // It is the plugin's own. The agent has another, in agent/version.hpp, and the two are released apart: the
 // plugin's package names the oldest agent it runs with (plugin/package/manifest.json.in, requires.agent), and
 // an agent runs with any plugin that is older than it would like, without what the newer one brings.
-#define NBT_PLUGIN_VERSION "1.3.0"
+#define NBT_PLUGIN_VERSION "1.3.1"
 
 #endif
