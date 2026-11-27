@@ -12,7 +12,8 @@
 //   - Nothing waits. The socket is non-blocking from before its connect, and poll() reads and writes what there is
 //     and returns. The app calls poll() from a timer for as long as isOpen(). A connect that is not made at once
 //     is taken for no agent, whatever the reason: nobody listening, a listener with no room for another link, or
-//     one that would take time. With no socket at the path, no socket is made and nothing is connected.
+//     one that would take time. With no socket at the path, no socket is made and nothing is connected. On a head
+//     unit the calls that make the link have a time limit in the kernel as well (call_limit.hpp).
 //   - Nothing raises a signal. A write to a socket whose agent has gone would be SIGPIPE, and the HMI's process is
 //     not ours to change the handling of signals in: bytes go out with send() and MSG_NOSIGNAL.
 //   - Nothing is kept open that is not in use. A screen opens the link when it is shown and closes it when it is
@@ -35,6 +36,7 @@
 
 #include "../agent/link.hpp"
 #include "../agent/peer.hpp"
+#include "call_limit.hpp"
 
 namespace nbt {
 
@@ -52,8 +54,10 @@ public:
             return 0;
         }
         memcpy(address.sun_path, path.c_str(), path.size() + 1);
-        // With no agent's socket there, the socket layer is asked nothing.
+        // With no agent's socket there, the socket layer is asked nothing. Each call here that can wait in the kernel
+        // has a time limit, and one that runs out of it fails as the call fails otherwise (call_limit.hpp).
         struct stat st;
+        limitNextCall();
         if (stat(path.c_str(), &st) != 0) {
             if (error != 0) *error = "no socket at " + path + ": " + strerror(errno);
             return 0;
@@ -62,6 +66,7 @@ public:
             if (error != 0) *error = path + " is not a socket";
             return 0;
         }
+        limitNextCall();
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0) {
             if (error != 0) *error = std::string("cannot make a socket: ") + strerror(errno);
@@ -69,12 +74,16 @@ public:
         }
         // Before the connect, so that the connect cannot wait either. A new socket has no other status flag to keep.
         // Not handed on to a program the HMI starts.
-        if (fcntl(fd, F_SETFL, O_NONBLOCK) != 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        limitNextCall();
+        bool nonBlocking = fcntl(fd, F_SETFL, O_NONBLOCK) == 0;
+        if (!nonBlocking || fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
             if (error != 0) *error = std::string("cannot set up a socket: ") + strerror(errno);
             ::close(fd);
             return 0;
         }
-        // Anything but a link made at once is no agent: EINPROGRESS and EAGAIN as much as ECONNREFUSED or ENOENT.
+        // Anything but a link made at once is no agent: EINPROGRESS and EAGAIN as much as ECONNREFUSED or ENOENT,
+        // and ETIMEDOUT from the time limit.
+        limitNextCall();
         if (connect(fd, (struct sockaddr*)&address, sizeof address) != 0) {
             if (error != 0) *error = "cannot connect to " + path + " at once: " + strerror(errno);
             ::close(fd);

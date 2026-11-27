@@ -96,6 +96,7 @@
 #include <vector>
 
 #include "../agent/agent_home.hpp"
+#include "call_limit.hpp"
 
 namespace nbt {
 namespace agentstart {
@@ -179,16 +180,24 @@ inline std::vector<std::string> headUnitEnvironment(int delayS) {
     return vars;
 }
 
-inline bool isFile(const std::string& path) {
+// `limited` below: the call is made on the HMI's thread, and each of its calls that can wait in the kernel has a
+// time limit (call_limit.hpp). One that runs out of time fails, and is taken as the same call is when it fails
+// otherwise. The start by hand is made on the HMI's thread, and the start with the head unit on a thread of its own,
+// with no limit: there a read of the record that ran out of time would be taken for a record with no starts.
+
+inline bool isFile(const std::string& path, bool limited = false) {
     struct stat st;
+    if (limited) limitNextCall();
     return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
 // The start of a small file; empty if it cannot be read.
-inline std::string readSmall(const std::string& path) {
+inline std::string readSmall(const std::string& path, bool limited = false) {
+    if (limited) limitNextCall();
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) return std::string();
     char buffer[512];
+    if (limited) limitNextCall();
     ssize_t n = read(fd, buffer, sizeof buffer);
     close(fd);
     return n > 0 ? std::string(buffer, (size_t)n) : std::string();
@@ -210,8 +219,8 @@ inline bool writeWhole(const std::string& path, const std::string& text) {
 }
 
 // The process id that the launcher's file holds; 0 if there is no file or it holds none.
-inline long holderOf(const std::string& lock) {
-    std::string text = readSmall(lock);
+inline long holderOf(const std::string& lock, bool limited = false) {
+    std::string text = readSmall(lock, limited);
     long pid = 0;
     size_t i = 0;
     for (; i < text.size() && text[i] >= '0' && text[i] <= '9' && i < 10; ++i) pid = pid * 10 + (text[i] - '0');
@@ -222,13 +231,15 @@ inline long holderOf(const std::string& lock) {
 inline bool isRunning(long pid) { return pid > 0 && (kill((pid_t)pid, 0) == 0 || errno == EPERM); }
 
 // Starts the launcher as the top of this file says. Its process id; -1, with *error, if it could not be started.
-inline long spawnLauncher(const Paths& paths, const std::vector<std::string>& environment, std::string* error) {
+inline long spawnLauncher(const Paths& paths, const std::vector<std::string>& environment, std::string* error,
+                          bool limited = false) {
     const std::string launcher = paths.home + "/launcher";
     std::vector<char*> vars;
     for (size_t i = 0; i < environment.size(); ++i) vars.push_back(const_cast<char*>(environment[i].c_str()));
     vars.push_back(0);
     char* args[] = { const_cast<char*>(paths.shell.c_str()), const_cast<char*>(launcher.c_str()), 0 };
 
+    if (limited) limitNextCall();
     int null = open("/dev/null", O_RDWR);
     if (null < 0) {
         *error = std::string("cannot open /dev/null: ") + strerror(errno);
@@ -253,6 +264,10 @@ inline long spawnLauncher(const Paths& paths, const std::vector<std::string>& en
     inherit.sigdefault = defaults;
     // The child gets the files of this list, at these numbers, and no others.
     int files[3] = { null, null, null };
+    // No time limit here, even on the HMI's thread. spawn() is one message to the process manager, which makes the
+    // process while the caller waits; a limit that ran out while it did so could leave a process running that the
+    // caller is told was not started: Start the agent would say that the start failed while a launcher runs, and a
+    // start with the head unit, were it limited, would be taken off the record.
     pid = spawn(args[0], 3, files, &inherit, args, &vars[0]);
     if (pid < 0) e = errno;
 #else
@@ -323,8 +338,8 @@ inline std::string numberText(long long n) {
 }
 
 // What a running launcher is, as a line for the log; empty if none is running.
-inline std::string runningLauncher(const Paths& paths) {
-    long holder = holderOf(paths.lock);
+inline std::string runningLauncher(const Paths& paths, bool limited = false) {
+    long holder = holderOf(paths.lock, limited);
     if (!isRunning(holder)) return std::string();
     return "a launcher is running (process " + numberText(holder) + ", says " + paths.lock + "): left as it is";
 }
@@ -375,14 +390,15 @@ inline Outcome startWithHeadUnit(const Paths& paths, int64_t now, const std::vec
 }
 
 // Starts the launcher because a person asked for it in the plugin's menu: with no autostart file asked for, and
-// the record of starts neither read nor written (the top of this file says why).
+// the record of starts neither read nor written (the top of this file says why). On the HMI's thread, so with the
+// time limits above.
 inline Outcome startByHand(const Paths& paths, const std::vector<std::string>& environment) {
     const std::string launcher = paths.home + "/launcher";
-    if (!isFile(launcher)) return outcome(kNoLauncher, launcher + " is not there: nothing to start");
-    const std::string running = runningLauncher(paths);
+    if (!isFile(launcher, true)) return outcome(kNoLauncher, launcher + " is not there: nothing to start");
+    const std::string running = runningLauncher(paths, true);
     if (!running.empty()) return outcome(kRunning, running);
     std::string why;
-    long pid = spawnLauncher(paths, environment, &why);
+    long pid = spawnLauncher(paths, environment, &why, true);
     if (pid < 0) return outcome(kNotStarted, "NOT started by hand: " + why);
     return outcome(kStarted, "started the launcher by hand (process " + numberText(pid) + ")", pid);
 }
