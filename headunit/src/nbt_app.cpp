@@ -40,9 +40,11 @@
 // texts "000" to "999".
 //
 // create() also starts the agent's launcher, on a head unit that is to start the agent by itself: when, with
-// what, and what keeps it from doing so is in agent_start.hpp. It is one line in the log each time the HMI
-// starts, and a start from the Start the agent screen is one line more. After a stop from the Stop the agent screen
-// (or `nbtctl stop`), that line says that nothing was started, and why.
+// what, and what keeps it from doing so is in agent_start.hpp. It does so on a thread of its own, which it does not
+// wait for, so that the HMI's thread writes nothing to flash; destroy() waits for that thread kStartFinishMs at
+// most. It is one line in the log each time the HMI starts, said from that thread, and a start from the Start the
+// agent screen is one line more. After a stop from the Stop the agent screen (or `nbtctl stop`), that line says that
+// nothing was started, and why.
 //
 // The app asks the HMI to tell it when one of its states is shown and left (addHandler with type 11, visible) and
 // when it has the focus (type 1), and each one that comes is a line in the log. A state that is never reported as
@@ -242,6 +244,19 @@ public:
         }
     }
 };
+
+// ---- the start with the head unit ---------------------------------------------------------------------------------
+// How it came out, in the log, from its own thread. Static: it outlives the start.
+class StartLog : public nbt::agentstart::StartReport {
+public:
+    virtual void startedWithHeadUnit(const nbt::agentstart::Outcome& start) { alog("agent: %s", start.line.c_str()); }
+};
+StartLog g_startLog;
+nbt::agentstart::StartThread* g_start = NULL;
+
+// How long destroy() waits for the start's thread: a library that the HMI unloads must not have a thread of ours
+// still running in it, and the HMI's thread must not wait for long.
+const int kStartFinishMs = 1000;
 
 // ---- the screens ---------------------------------------------------------------------------------------------------
 // The views of the screens, which turn what a screen says into texts of the text DB. What the screens do, and when,
@@ -524,12 +539,14 @@ bmw::PluginApp* createApp(bmw::IDispatcher& dispatcher, const char* name, const 
     alog("create: app %p (PluginApp vtable %p)", (void*)app, (void*)base);
 
     // After the app is made: whatever becomes of this, the menu entry is there. Behind the kill switch above, so
-    // that file also keeps a head unit from starting the agent.
+    // that file also keeps a head unit from starting the agent. On a thread of its own, which says in the log how it
+    // came out; with no thread, nothing is started, as the HMI's thread is not to do it.
     try {
-        nbt::agentstart::Outcome start =
-            nbt::agentstart::startWithHeadUnit(nbt::agentstart::Paths(), (int64_t)time(NULL),
-                                               nbt::agentstart::headUnitEnvironment(nbt::agentstart::kDelayS));
-        alog("agent: %s", start.line.c_str());
+        std::string why;
+        g_start = nbt::agentstart::StartThread::begin(nbt::agentstart::Paths(), (int64_t)time(NULL),
+                                                      nbt::agentstart::headUnitEnvironment(nbt::agentstart::kDelayS),
+                                                      &g_startLog, &why);
+        if (g_start == NULL) alog("agent: NOT started: no thread to start it on: %s", why.c_str());
     } catch (...) {
         alog("agent: the start with the head unit failed");
     }
@@ -538,6 +555,10 @@ bmw::PluginApp* createApp(bmw::IDispatcher& dispatcher, const char* name, const 
 
 void destroyApp(void* app) {
     alog("destroy(%p)", app);
+    if (g_start != NULL && !g_start->finish(kStartFinishMs)) {
+        alog("destroy: the start with the head unit has not ended after %d ms, and ends by itself", kStartFinishMs);
+    }
+    g_start = NULL;
     if (!app) return;
     delete g_screens;
     g_screens = NULL;

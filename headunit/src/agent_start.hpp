@@ -9,7 +9,10 @@
 // each time it starts, so the plugin is what starts the agent's launcher: the starter, agent/nbtstart.sh, which
 // is in the agent's folder as `launcher` and runs the launcher of the version it chooses (agent/nbtlaunch.sh).
 // The plugin starts it from create(), as a process of its own that the HMI does not wait for and hears nothing
-// more of.
+// more of. create() runs on the HMI's thread that drives the iDrive screen, so all of the start with the head unit,
+// the looks at files, the record written to flash and the start of the process, is done on a thread of its own
+// that create() starts and does not wait for (StartThread, at the end of this file). That thread says how it came
+// out in the log, and ends.
 //
 // It starts the launcher only if all of this holds, asked in this order:
 //
@@ -37,7 +40,8 @@
 // the agent running for five minutes.
 //
 // That is one small file written to flash for each start with the head unit, and removed five minutes later. A
-// head unit with no `autostart` file is written to by none of this.
+// head unit with no `autostart` file is written to by none of this. The write, and the wait for it to be on the
+// disk, are on the start's own thread, never on the HMI's.
 //
 // The stop. The plugin's menu has a row that stops the agent (src/phone_screens.hpp, StopScreen), as `nbtctl stop`
 // does: both ask the agent for agent.stop, and the agent ends with its launcher and leaves the mark agent.stopped
@@ -77,6 +81,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
@@ -84,6 +89,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <string>
@@ -380,6 +386,120 @@ inline Outcome startByHand(const Paths& paths, const std::vector<std::string>& e
     if (pid < 0) return outcome(kNotStarted, "NOT started by hand: " + why);
     return outcome(kStarted, "started the launcher by hand (process " + numberText(pid) + ")", pid);
 }
+
+// ---- the start with the head unit, on a thread of its own ---------------------------------------------------------
+
+// What hears how a start on a thread of its own came out, on that thread. It outlives the start: a start whose owner
+// stopped waiting for it still says how it came out when it ends.
+class StartReport {
+public:
+    virtual ~StartReport() {}
+    virtual void startedWithHeadUnit(const Outcome& outcome) = 0;
+};
+
+// startWithHeadUnit() on a thread of its own, which ends when that has returned and told its report. create() runs
+// on the HMI's thread that drives the iDrive screen, and the start writes its record to flash and waits for that
+// write to be on the disk: on this thread, the HMI waits for none of it. The thread asks the same things in the
+// same order as startWithHeadUnit() does anywhere, and calls nothing of the HU Framework's.
+class StartThread {
+public:
+    // The thread is started; 0, with *error, if it could not be.
+    static StartThread* begin(const Paths& paths, int64_t now, const std::vector<std::string>& environment,
+                              StartReport* report, std::string* error) {
+        StartThread* start = new StartThread(paths, now, environment, report);
+        int e = pthread_create(&start->thread_, NULL, &StartThread::threadMain, start);
+        if (e != 0) {
+            *error = strerror(e);
+            delete start;
+            return 0;
+        }
+        return start;
+    }
+
+    // Waits for the thread to end, `ms` at most. True if it has, and the object is gone with it. False if it has
+    // not: the thread goes on, and the object goes when it ends.
+    bool finish(int ms) {
+        pthread_mutex_lock(&mu_);
+        struct timespec until = deadlineIn(ms);
+        while (!done_) {
+            if (pthread_cond_timedwait(&cv_, &mu_, &until) == ETIMEDOUT) break;
+        }
+        if (done_) {
+            pthread_mutex_unlock(&mu_);
+            pthread_join(thread_, NULL);
+            delete this;
+            return true;
+        }
+        released_ = true;
+        pthread_t thread = thread_;
+        pthread_mutex_unlock(&mu_);
+        // From here the thread may free the object at any moment: only the copy is used.
+        pthread_detach(thread);
+        return false;
+    }
+
+private:
+    StartThread(const Paths& paths, int64_t now, const std::vector<std::string>& environment, StartReport* report)
+        : paths_(paths), now_(now), environment_(environment), report_(report), done_(false), released_(false) {
+        pthread_mutex_init(&mu_, NULL);
+        pthread_cond_init(&cv_, NULL);
+    }
+    ~StartThread() {
+        pthread_cond_destroy(&cv_);
+        pthread_mutex_destroy(&mu_);
+    }
+    StartThread(const StartThread&);
+    StartThread& operator=(const StartThread&);
+
+    // `ms` from now, as pthread_cond_timedwait takes it.
+    static struct timespec deadlineIn(int ms) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += ms / 1000;
+        ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ++ts.tv_sec;
+            ts.tv_nsec -= 1000000000L;
+        }
+        return ts;
+    }
+
+    static void* threadMain(void* self) {
+        static_cast<StartThread*>(self)->run();
+        return NULL;
+    }
+
+    void run() {
+        // Nothing thrown here gets out of the thread, which would end the HMI's process.
+        try {
+            Outcome o;
+            try {
+                o = startWithHeadUnit(paths_, now_, environment_);
+            } catch (...) {
+                o = outcome(kNotStarted, "NOT started: the start with the head unit failed");
+            }
+            report_->startedWithHeadUnit(o);
+        } catch (...) {
+        }
+        pthread_mutex_lock(&mu_);
+        done_ = true;
+        bool released = released_;
+        pthread_cond_broadcast(&cv_);
+        pthread_mutex_unlock(&mu_);
+        // Its owner has gone, and left the object to the thread.
+        if (released) delete this;
+    }
+
+    const Paths paths_;
+    const int64_t now_;
+    const std::vector<std::string> environment_;
+    StartReport* report_;
+    pthread_t thread_;
+    pthread_mutex_t mu_;
+    pthread_cond_t cv_;
+    bool done_;       // the thread has done all but end
+    bool released_;   // its owner stopped waiting for it
+};
 
 }  // namespace agentstart
 }  // namespace nbt
